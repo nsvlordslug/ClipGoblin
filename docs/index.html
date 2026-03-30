@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ClipGoblin — Turn your Twitch streams into viral clips</title>
+  <meta name="description" content="ClipGoblin analyzes your Twitch VODs, detects highlights, generates AI captions and titles, and uploads directly to YouTube, TikTok, and Instagram.">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg: #0c0a13;
+      --surface: #16121f;
+      --surface-light: #1e1a2a;
+      --border: #2a2440;
+      --text: #e2dff0;
+      --text-muted: #9992b0;
+      --purple: #863bff;
+      --purple-dim: rgba(134, 59, 255, 0.15);
+      --blue: #47bfff;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    a { color: var(--purple); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Hero */
+    .hero {
+      text-align: center;
+      padding: 80px 24px 60px;
+      background: radial-gradient(ellipse at 50% 0%, var(--purple-dim) 0%, transparent 70%);
+    }
+
+    .hero-logo {
+      width: 72px;
+      height: 72px;
+      margin-bottom: 24px;
+      filter: drop-shadow(0 0 24px rgba(134, 59, 255, 0.4));
+    }
+
+    .hero h1 {
+      font-size: 3rem;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      margin-bottom: 12px;
+    }
+
+    .hero h1 span { color: var(--purple); }
+
+    .hero .tagline {
+      font-size: 1.25rem;
+      color: var(--text-muted);
+      max-width: 520px;
+      margin: 0 auto 32px;
+    }
+
+    .hero .desc {
+      font-size: 1rem;
+      color: var(--text-muted);
+      max-width: 600px;
+      margin: 0 auto;
+      line-height: 1.7;
+    }
+
+    /* Features */
+    .features {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 24px;
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 40px 24px 80px;
+    }
+
+    .feature {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 28px 24px;
+    }
+
+    .feature-icon {
+      font-size: 1.5rem;
+      margin-bottom: 12px;
+      display: block;
+      color: var(--purple);
+    }
+
+    .feature h3 {
+      font-size: 1.05rem;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .feature p {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      line-height: 1.6;
+    }
+
+    /* How it works */
+    .how-section {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 0 24px 80px;
+      text-align: center;
+    }
+
+    .how-section h2 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      margin-bottom: 32px;
+      letter-spacing: -0.02em;
+    }
+
+    .steps {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      text-align: left;
+    }
+
+    .step {
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+    }
+
+    .step-num {
+      flex-shrink: 0;
+      width: 32px;
+      height: 32px;
+      background: var(--purple-dim);
+      border: 1px solid var(--purple);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: var(--purple);
+    }
+
+    .step-text strong {
+      display: block;
+      margin-bottom: 2px;
+    }
+
+    .step-text span {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+    }
+
+    /* CTA */
+    .cta {
+      text-align: center;
+      padding: 0 24px 80px;
+    }
+
+    .cta p {
+      color: var(--text-muted);
+      font-size: 0.95rem;
+      margin-bottom: 20px;
+    }
+
+    .btn {
+      display: inline-block;
+      padding: 12px 28px;
+      background: var(--purple);
+      color: #fff;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.95rem;
+      transition: opacity 0.15s;
+    }
+
+    .btn:hover { opacity: 0.85; text-decoration: none; }
+
+    /* Footer */
+    footer {
+      margin-top: auto;
+      border-top: 1px solid var(--border);
+      padding: 24px;
+      text-align: center;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+
+    footer a { color: var(--text-muted); }
+    footer a:hover { color: var(--text); }
+
+    .footer-links {
+      display: flex;
+      gap: 24px;
+      justify-content: center;
+      margin-bottom: 8px;
+    }
+
+    /* Responsive */
+    @media (max-width: 600px) {
+      .hero { padding: 56px 20px 40px; }
+      .hero h1 { font-size: 2.2rem; }
+      .hero .tagline { font-size: 1.05rem; }
+      .features { padding: 24px 20px 56px; }
+    }
+  </style>
+</head>
+<body>
+
+  <section class="hero">
+    <svg class="hero-logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 46" fill="none">
+      <path fill="#863bff" d="M25.946 44.938c-.664.845-2.021.375-2.021-.698V33.937a2.26 2.26 0 0 0-2.262-2.262H10.287c-.92 0-1.456-1.04-.92-1.788l7.48-10.471c1.07-1.497 0-3.578-1.842-3.578H1.237c-.92 0-1.456-1.04-.92-1.788L10.013.474c.214-.297.556-.474.92-.474h28.894c.92 0 1.456 1.04.92 1.788l-7.48 10.471c-1.07 1.498 0 3.579 1.842 3.579h11.377c.943 0 1.473 1.088.89 1.83L25.947 44.94z"/>
+    </svg>
+    <h1>Clip<span>Goblin</span></h1>
+    <p class="tagline">Turn your Twitch streams into viral clips</p>
+    <p class="desc">
+      ClipGoblin watches your Twitch VODs, automatically detects the best moments,
+      generates AI-powered captions and titles, and uploads directly to YouTube, TikTok, and Instagram.
+    </p>
+  </section>
+
+  <section class="features">
+    <div class="feature">
+      <span class="feature-icon">&#9889;</span>
+      <h3>Smart Highlight Detection</h3>
+      <p>Analyzes audio spikes, chat activity, and visual changes to find your best moments automatically. No manual scrubbing required.</p>
+    </div>
+    <div class="feature">
+      <span class="feature-icon">&#9998;</span>
+      <h3>AI Captions &amp; Titles</h3>
+      <p>Generate scroll-stopping captions in multiple tones: hype, punchy, observation, or direct quote. Titles that sound like a real creator wrote them.</p>
+    </div>
+    <div class="feature">
+      <span class="feature-icon">&#127916;</span>
+      <h3>Multi-Platform Upload</h3>
+      <p>Connect your YouTube, TikTok, and Instagram accounts. Upload clips directly from the app with one click.</p>
+    </div>
+    <div class="feature">
+      <span class="feature-icon">&#127912;</span>
+      <h3>Subtitle Styles</h3>
+      <p>Speech-to-text subtitles with multiple visual styles. Position them where they look best for vertical or horizontal formats.</p>
+    </div>
+    <div class="feature">
+      <span class="feature-icon">&#9731;</span>
+      <h3>Vertical Crop &amp; Facecam</h3>
+      <p>Auto-crop to 9:16 for Shorts and Reels. Smart facecam detection keeps you in frame.</p>
+    </div>
+    <div class="feature">
+      <span class="feature-icon">&#128274;</span>
+      <h3>Your Keys, Your Data</h3>
+      <p>Bring your own API key for AI features. Everything runs locally on your machine. No cloud, no subscriptions, no data collection.</p>
+    </div>
+  </section>
+
+  <section class="how-section">
+    <h2>How it works</h2>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-text">
+          <strong>Paste a VOD link</strong>
+          <span>Drop in a Twitch VOD URL. ClipGoblin downloads it and starts analyzing.</span>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-text">
+          <strong>Review detected highlights</strong>
+          <span>See a ranked list of the best moments with timestamps, intensity scores, and event tags.</span>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-text">
+          <strong>Edit and polish</strong>
+          <span>Trim timing, add subtitles, pick a caption tone, adjust the crop. Preview everything before export.</span>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-text">
+          <strong>Export and upload</strong>
+          <span>Render your clip and upload to YouTube, TikTok, or Instagram directly from the app.</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="cta">
+    <p>ClipGoblin is a desktop app for Windows. Currently in development.</p>
+    <a href="https://github.com/clipgoblin/clipgoblin" class="btn">View on GitHub</a>
+  </section>
+
+  <footer>
+    <div class="footer-links">
+      <a href="terms.html">Terms of Service</a>
+      <a href="privacy.html">Privacy Policy</a>
+      <a href="https://github.com/clipgoblin/clipgoblin">GitHub</a>
+    </div>
+    <p>&copy; 2025 ClipGoblin</p>
+  </footer>
+
+</body>
+</html>

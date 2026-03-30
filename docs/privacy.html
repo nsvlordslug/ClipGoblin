@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy Policy — ClipGoblin</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0c0a13;
+      color: #e2dff0;
+      line-height: 1.7;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    a { color: #863bff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    header { padding: 24px; border-bottom: 1px solid #2a2440; }
+    header a { color: #9992b0; font-size: 0.9rem; }
+    main {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 48px 24px 80px;
+    }
+    h1 { font-size: 2rem; font-weight: 700; margin-bottom: 8px; letter-spacing: -0.02em; }
+    .updated { color: #9992b0; font-size: 0.85rem; margin-bottom: 32px; }
+    h2 { font-size: 1.15rem; font-weight: 600; margin: 28px 0 8px; }
+    p { color: #c5c0d8; margin-bottom: 16px; font-size: 0.95rem; }
+    footer {
+      margin-top: auto;
+      border-top: 1px solid #2a2440;
+      padding: 24px;
+      text-align: center;
+      font-size: 0.8rem;
+      color: #9992b0;
+    }
+  </style>
+</head>
+<body>
+  <header><a href="index.html">&larr; Back to ClipGoblin</a></header>
+  <main>
+    <h1>Privacy Policy</h1>
+    <p class="updated">Last updated: March 2025</p>
+
+    <h2>1. Data Collection</h2>
+    <p>ClipGoblin runs entirely on your local machine. We do not collect, store, or transmit any personal data to our servers. There are no analytics, tracking pixels, or telemetry of any kind.</p>
+
+    <h2>2. Third-Party API Calls</h2>
+    <p>When you use AI-powered features (caption and title generation), your clip transcript data is sent directly to the AI provider you configured (e.g., Anthropic Claude) using your own API key. ClipGoblin does not proxy, log, or intercept these requests.</p>
+
+    <h2>3. Platform Authentication</h2>
+    <p>When you connect social accounts (YouTube, TikTok, Instagram), ClipGoblin uses OAuth to obtain access tokens. These tokens are stored locally on your machine in an encrypted database and are only used to upload content on your behalf. Tokens are never sent to ClipGoblin servers.</p>
+
+    <h2>4. Local Storage</h2>
+    <p>All app data (clips, settings, API keys, OAuth tokens) is stored in a local SQLite database on your computer. This data never leaves your machine except when explicitly uploading to platforms you have connected.</p>
+
+    <h2>5. Twitch Data</h2>
+    <p>ClipGoblin downloads Twitch VODs using publicly available URLs. Chat replay data and stream metadata are fetched from Twitch's public APIs. No Twitch login is required and no Twitch credentials are stored.</p>
+
+    <h2>6. Children's Privacy</h2>
+    <p>ClipGoblin is not directed at children under 13. We do not knowingly collect any information from children.</p>
+
+    <h2>7. Changes to This Policy</h2>
+    <p>We may update this policy as the app evolves. Changes will be posted on this page with an updated date.</p>
+
+    <h2>8. Contact</h2>
+    <p>For privacy questions, open an issue on our <a href="https://github.com/clipgoblin/clipgoblin">GitHub repository</a>.</p>
+  </main>
+  <footer>&copy; 2025 ClipGoblin</footer>
+</body>
+</html>
