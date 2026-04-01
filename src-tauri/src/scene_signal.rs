@@ -312,7 +312,9 @@ pub fn extract_motion_energy(
         .map_err(|e| AppError::Ffmpeg(format!("Motion analysis launch failed: {e}")))?;
 
     if !status.success() {
-        std::fs::remove_file(&temp_file).ok();
+        if let Err(e) = std::fs::remove_file(&temp_file) {
+            log::warn!("Failed to clean up temp file {:?}: {}", temp_file, e);
+        }
         return Err(AppError::Ffmpeg(
             "Motion analysis exited with an error".into(),
         ));
@@ -320,7 +322,9 @@ pub fn extract_motion_energy(
 
     let content = std::fs::read_to_string(&temp_file)
         .map_err(|e| AppError::Ffmpeg(format!("Failed to read motion data: {e}")))?;
-    std::fs::remove_file(&temp_file).ok();
+    if let Err(e) = std::fs::remove_file(&temp_file) {
+        log::warn!("Failed to clean up temp file {:?}: {}", temp_file, e);
+    }
 
     let profile = parse_motion_output(&content);
 

@@ -35,6 +35,18 @@ use crate::pipeline::CandidateClip;
 use crate::scene_signal::SceneDetection;
 
 // ═══════════════════════════════════════════════════════════════════
+//  Constants
+// ═══════════════════════════════════════════════════════════════════
+
+/// Default thumbnail width in pixels (height auto-scaled by ffmpeg).
+const DEFAULT_THUMB_WIDTH: u32 = 640;
+/// Default JPEG quality for ffmpeg thumbnail extraction (1 = worst, 31 = best).
+const DEFAULT_THUMB_QUALITY: u32 = 5;
+/// Minimum thumbnail file size in bytes — frames smaller than this are
+/// assumed to be black/corrupt and retried with the next candidate timestamp.
+const DEFAULT_MIN_THUMB_BYTES: u64 = 3_000;
+
+// ═══════════════════════════════════════════════════════════════════
 //  Configuration
 // ═══════════════════════════════════════════════════════════════════
 
@@ -59,9 +71,9 @@ pub struct OutputConfig {
 impl OutputConfig {
     pub fn new(thumb_dir: PathBuf) -> Self {
         Self {
-            thumb_width: 640,
-            thumb_quality: 5,
-            min_thumb_bytes: 3_000,
+            thumb_width: DEFAULT_THUMB_WIDTH,
+            thumb_quality: DEFAULT_THUMB_QUALITY,
+            min_thumb_bytes: DEFAULT_MIN_THUMB_BYTES,
             thumb_dir,
         }
     }

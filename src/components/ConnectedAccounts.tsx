@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { usePlatformStore, PLATFORM_INFO } from '../stores/platformStore'
 import { Link2, Unlink, Loader2 } from 'lucide-react'
@@ -8,6 +8,7 @@ export default function ConnectedAccounts() {
   const { accounts, loading, load, connect, disconnect } = usePlatformStore()
   const [tiktokHandle, setTiktokHandle] = useState('')
   const [handleSaved, setHandleSaved] = useState(false)
+  const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Load the stored TikTok handle
   useEffect(() => {
@@ -22,13 +23,17 @@ export default function ConnectedAccounts() {
     try {
       await invoke('save_setting', { key: 'tiktok_handle', value: clean })
       setHandleSaved(true)
-      setTimeout(() => setHandleSaved(false), 2000)
+      if (savedTimerRef.current) clearTimeout(savedTimerRef.current)
+      savedTimerRef.current = setTimeout(() => setHandleSaved(false), 2000)
     } catch (e) {
       console.error('Failed to save TikTok handle:', e)
     }
   }
 
   useEffect(() => { load() }, [load])
+
+  // Clean up pending timer on unmount
+  useEffect(() => () => { if (savedTimerRef.current) clearTimeout(savedTimerRef.current) }, [])
 
   const platforms = Object.keys(PLATFORM_INFO) as string[]
 

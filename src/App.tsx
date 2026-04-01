@@ -6,7 +6,6 @@ import { useUiStore } from './stores/uiStore'
 import { useTemplateStore } from './stores/templateStore'
 import {
   LayoutDashboard,
-  Tv,
   Video,
   Scissors,
   Settings,
@@ -19,7 +18,6 @@ import {
 import Tooltip from './components/Tooltip'
 import logoImg from './assets/logo.png'
 import Dashboard from './pages/Dashboard'
-import Channels from './pages/Channels'
 import Vods from './pages/Vods'
 import Clips from './pages/Clips'
 import SettingsPage from './pages/Settings'
@@ -33,7 +31,6 @@ import { useScheduleStore } from './stores/scheduleStore'
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
-  { to: '/channels', label: 'My Channel', icon: Tv },
   { to: '/vods', label: 'VODs', icon: Video },
   { to: '/clips', label: 'Clips', icon: Scissors },
   { to: '/scheduled', label: 'Scheduled', icon: Clock },
@@ -158,7 +155,6 @@ export default function App() {
           <div className="py-8 pl-8 pr-16 max-w-6xl">
             <Routes>
               <Route path="/" element={<Dashboard />} />
-              <Route path="/channels" element={<Channels />} />
               <Route path="/vods" element={<Vods />} />
               <Route path="/clips" element={<Clips />} />
               <Route path="/editor/:clipId" element={<Editor />} />

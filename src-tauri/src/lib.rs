@@ -9,7 +9,6 @@ mod engine;
 mod integration_test;
 mod clip_selector;
 mod error;
-// mod frame_sampler;  // Removed: vision pipeline no longer used in analysis
 mod hardware;
 mod job_queue;
 mod pipeline;
@@ -19,7 +18,6 @@ mod transcript_signal;
 mod twitch;
 mod social;
 mod vertical_crop;
-// mod vision_signal;  // Removed: vision pipeline no longer used in analysis
 
 use std::sync::Mutex;
 use std::io::{BufRead, BufReader};
@@ -338,26 +336,37 @@ struct AudioProfile {
 /// their channel as the only channel.
 #[tauri::command]
 async fn twitch_login(app: AppHandle, db: State<'_, DbConn>) -> Result<db::ChannelRow, String> {
+    log::info!("[twitch_login] === Starting Twitch login flow ===");
+
     // 1. Bind callback server BEFORE opening the browser (avoids race condition)
     let listener = twitch::bind_callback_server()?;
+    log::info!("[twitch_login] Step 1: Callback server bound on port 17385");
 
     // 2. Open the auth URL in the user's browser (uses embedded client_id + PKCE)
     let auth_url = twitch::get_auth_url();
+    log::info!("[twitch_login] Step 2: Opening browser for OAuth");
     app.opener().open_url(&auth_url, None::<&str>)
         .map_err(|e| format!("Failed to open browser: {}", e))?;
 
     // 3. Wait for the OAuth callback on the already-listening server
+    log::info!("[twitch_login] Step 3: Waiting for OAuth callback...");
     let code = tokio::task::spawn_blocking(move || twitch::wait_for_auth_code(listener))
         .await
         .map_err(|e| format!("Task error: {}", e))??;
+    log::info!("[twitch_login] Step 3: Auth code received (len={})", code.len());
 
     // Exchange the code for an access token (PKCE — no client_secret needed)
+    log::info!("[twitch_login] Step 4: Exchanging code for token...");
     let token_resp = twitch::exchange_code(&code).await?;
+    log::info!("[twitch_login] Step 4: Token exchange succeeded");
 
     // Fetch the authenticated user's identity
+    log::info!("[twitch_login] Step 5: Fetching user info...");
     let user = twitch::get_authenticated_user(&token_resp.access_token).await?;
+    log::info!("[twitch_login] Step 5: Got user: {} ({})", user.display_name, user.login);
 
     // Save the user token for future API calls
+    log::info!("[twitch_login] Step 6: Saving tokens and user info to DB...");
     {
         let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
         db::save_setting(&conn, "twitch_user_access_token", &token_resp.access_token)
@@ -371,6 +380,7 @@ async fn twitch_login(app: AppHandle, db: State<'_, DbConn>) -> Result<db::Chann
         db::save_setting(&conn, "twitch_login", &user.login)
             .map_err(|e| format!("DB error: {}", e))?;
     }
+    log::info!("[twitch_login] Step 6: Tokens saved to DB");
 
     // Clear any existing channels and add only this user's channel
     let channel_id = uuid::Uuid::new_v4().to_string();
@@ -385,6 +395,7 @@ async fn twitch_login(app: AppHandle, db: State<'_, DbConn>) -> Result<db::Chann
         created_at: now,
     };
 
+    log::info!("[twitch_login] Step 7: Saving channel to DB...");
     {
         let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
         // Remove all existing channels — user can only have their own
@@ -399,6 +410,9 @@ async fn twitch_login(app: AppHandle, db: State<'_, DbConn>) -> Result<db::Chann
         )
         .map_err(|e| format!("DB error: {}", e))?;
     }
+
+    log::info!("[twitch_login] === Login complete: {} ({}) — returning ChannelRow to frontend ===",
+        channel.display_name, channel.twitch_login);
 
     Ok(channel)
 }

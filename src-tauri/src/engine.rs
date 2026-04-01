@@ -452,7 +452,9 @@ fn convert_transcript(r: TranscriptResultCompat) -> TranscriptInput {
     }
 }
 
-/// Simple path hasher for cache keys (not cryptographic — just unique).
+/// Simple FNV-1a path hasher for cache keys (not cryptographic).
+/// Collision risk is acceptable here — keys are short file paths and
+/// a collision only causes a redundant cache miss, not data corruption.
 fn md5_of_path(path: &str) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
     for byte in path.bytes() {

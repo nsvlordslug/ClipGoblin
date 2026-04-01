@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, useEffect } from 'react'
+import { useCallback, useMemo, useRef, useState, useEffect } from 'react'
 import type { CaptionToken } from '../lib/captionEmphasis'
 import { EMPHASIS_STYLES } from '../lib/captionEmphasis'
 import type { CaptionStyle } from '../lib/editTypes'
@@ -99,7 +99,7 @@ export default function CaptionPreview({
   const emphasisStyle = EMPHASIS_STYLES[cs.id] || EMPHASIS_STYLES.clean
   const words = activeSegment.text.split(/\s+/).filter(Boolean)
 
-  const getWordEmphasis = (word: string, wordIndex: number): CaptionToken | null => {
+  const getWordEmphasis = useCallback((word: string, wordIndex: number): CaptionToken | null => {
     if (!emphasisEnabled || emphasisTokens.length === 0) return null
     const segDuration = activeSegment.endTime - activeSegment.startTime
     const wordTime = activeSegment.startTime + (wordIndex / words.length) * segDuration
@@ -109,7 +109,7 @@ export default function CaptionPreview({
       }
     }
     return null
-  }
+  }, [emphasisEnabled, emphasisTokens, activeSegment, words.length])
 
   return (
     <div ref={containerRef}

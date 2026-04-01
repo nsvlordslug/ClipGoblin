@@ -106,6 +106,7 @@ struct TokenResponse {
     /// open_id is returned on initial auth but NOT on token refresh
     #[serde(default)]
     open_id: String,
+    /// Returned by TikTok API but unused — kept to avoid deserialization errors.
     #[allow(dead_code)]
     token_type: Option<String>,
 }

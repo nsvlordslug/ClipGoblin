@@ -308,7 +308,7 @@ export default function Vods() {
             Log in with Twitch to view and analyze your VODs.
           </p>
           <button
-            onClick={() => navigate('/channels')}
+            onClick={() => navigate('/settings')}
             className="inline-flex items-center gap-2 px-5 py-2.5 bg-[#9146FF] hover:bg-[#7c3aed] text-white text-sm font-semibold rounded-lg transition-colors cursor-pointer"
           >
             <LogIn className="w-4 h-4" />

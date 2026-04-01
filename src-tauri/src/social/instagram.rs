@@ -1,3 +1,5 @@
+// TODO(v2): Instagram adapter — pending Meta developer app review
+
 use crate::error::AppError;
 use crate::social::{ConnectedAccount, PlatformAdapter, UploadMeta, UploadResult};
 use rusqlite::Connection;

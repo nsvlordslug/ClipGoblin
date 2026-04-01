@@ -1,5 +1,4 @@
 use serde::Deserialize;
-use sha2::{Sha256, Digest};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::time::{Duration, Instant};
@@ -8,7 +7,7 @@ use once_cell::sync::Lazy;
 
 /// Embedded Twitch Client ID — compiled into the binary.
 /// Override with TWITCH_CLIENT_ID env var for development.
-const DEFAULT_TWITCH_CLIENT_ID: &str = "dfrhbco4fxvwh6gs09cbyz22of685t";
+const DEFAULT_TWITCH_CLIENT_ID: &str = "i734ser5qcdf8grvlllx6yzprwegfr";
 
 static CLIENT_ID: Lazy<String> = Lazy::new(|| {
     match std::env::var("TWITCH_CLIENT_ID") {
@@ -28,11 +27,30 @@ pub fn client_id() -> &'static str {
     &CLIENT_ID
 }
 
+/// Embedded Twitch Client Secret — compiled into the binary.
+/// Override with TWITCH_CLIENT_SECRET env var for development.
+const DEFAULT_TWITCH_CLIENT_SECRET: &str = "9vkblt95slzrfinmdplo1y1lmu54i8";
+
+static CLIENT_SECRET: Lazy<String> = Lazy::new(|| {
+    match std::env::var("TWITCH_CLIENT_SECRET") {
+        Ok(val) if !val.is_empty() => {
+            log::info!("Twitch CLIENT_SECRET loaded from env (len={})", val.len());
+            val
+        }
+        _ => {
+            log::info!("Using embedded Twitch CLIENT_SECRET");
+            DEFAULT_TWITCH_CLIENT_SECRET.to_string()
+        }
+    }
+});
+
+/// Returns the Twitch Client Secret (embedded default or .env override).
+pub fn client_secret() -> &'static str {
+    &CLIENT_SECRET
+}
+
 /// Stores the expected OAuth state to verify on callback.
 static OAUTH_STATE: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
-
-/// PKCE code_verifier — stored between get_auth_url and exchange_code.
-static PKCE_VERIFIER: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
 
 const TWITCH_TOKEN_URL: &str = "https://id.twitch.tv/oauth2/token";
 const TWITCH_API_URL: &str = "https://api.twitch.tv/helix";
@@ -83,8 +101,8 @@ struct VideosResponse {
     pagination: Option<Pagination>,
 }
 
-/// Build the Twitch OAuth authorization URL with CSRF state + PKCE challenge.
-/// Uses the embedded client_id — no user-supplied credentials needed.
+/// Build the Twitch OAuth authorization URL with CSRF state.
+/// Uses the embedded client_id (confidential client with client_secret).
 pub fn get_auth_url() -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -100,37 +118,16 @@ pub fn get_auth_url() -> String {
         *guard = state.clone();
     }
 
-    // Generate PKCE code_verifier (two UUIDs concatenated = 64 hex chars)
-    let code_verifier = format!(
-        "{}{}",
-        uuid::Uuid::new_v4().to_string().replace('-', ""),
-        uuid::Uuid::new_v4().to_string().replace('-', ""),
-    );
-
-    // Store verifier for use in token exchange
-    if let Ok(mut guard) = PKCE_VERIFIER.lock() {
-        *guard = code_verifier.clone();
-    }
-
-    // PKCE S256: code_challenge = base64url(SHA256(code_verifier))
-    let mut sha = Sha256::new();
-    sha.update(code_verifier.as_bytes());
-    let hash = sha.finalize();
-    let code_challenge = base64_url_encode(&hash);
-
-    format!(
-        "https://id.twitch.tv/oauth2/authorize?client_id={}&redirect_uri={}&response_type=code&scope=user:read:email&force_verify=true&state={}&code_challenge={}&code_challenge_method=S256",
+    let url = format!(
+        "https://id.twitch.tv/oauth2/authorize?client_id={}&redirect_uri={}&response_type=code&scope=user:read:email&force_verify=true&state={}",
         client_id(),
         urlencoding::encode(REDIRECT_URI),
         state,
-        urlencoding::encode(&code_challenge),
-    )
-}
+    );
 
-/// Base64url encode (no padding) per RFC 7636.
-fn base64_url_encode(data: &[u8]) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(data)
+    log::info!("[Twitch Auth] Auth URL built: client_id={}, redirect_uri={}", client_id(), REDIRECT_URI);
+
+    url
 }
 
 /// Bind the callback server on port 17385 (matches http://localhost:17385 redirect URI).
@@ -270,77 +267,102 @@ fn send_html_response(stream: &std::net::TcpStream, body_content: &str) {
 }
 
 /// Refresh an expired access token using a refresh token.
-/// PKCE public clients don't send client_secret — only client_id + refresh_token.
+/// Confidential clients send client_secret along with client_id + refresh_token.
 pub async fn refresh_access_token(
     refresh_token: &str,
 ) -> Result<TokenResponse, String> {
+    log::info!("[Twitch Refresh] Refreshing token with client_id={}", client_id());
+
     let client = reqwest::Client::new();
     let resp = client
         .post(TWITCH_TOKEN_URL)
         .form(&[
             ("client_id", client_id()),
+            ("client_secret", client_secret()),
             ("refresh_token", refresh_token),
             ("grant_type", "refresh_token"),
         ])
         .send()
         .await
-        .map_err(|e| format!("Failed to refresh token: {}", e))?;
+        .map_err(|e| {
+            log::error!("[Twitch Refresh] HTTP request failed: {}", e);
+            format!("Failed to refresh token: {}", e)
+        })?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
+    let status = resp.status();
+    if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        log::error!("[Twitch Refresh] FAILED ({}): {}", status, body);
         return Err(format!("Token refresh failed ({}): {}", status, body));
     }
 
-    resp.json::<TokenResponse>()
+    let token = resp.json::<TokenResponse>()
         .await
-        .map_err(|e| format!("Failed to parse refreshed token: {}", e))
+        .map_err(|e| {
+            log::error!("[Twitch Refresh] JSON parse failed: {}", e);
+            format!("Failed to parse refreshed token: {}", e)
+        })?;
+
+    log::info!("[Twitch Refresh] Success — new token len={}", token.access_token.len());
+    Ok(token)
 }
 
-/// Exchange an authorization code for an access token (Authorization Code + PKCE flow).
-/// Uses the PKCE code_verifier generated during get_auth_url instead of client_secret.
+/// Exchange an authorization code for an access token (Confidential Client flow).
+/// Uses client_secret instead of PKCE code_verifier.
 pub async fn exchange_code(
     code: &str,
 ) -> Result<TokenResponse, String> {
-    // Retrieve the PKCE code_verifier generated during get_auth_url
-    let code_verifier = PKCE_VERIFIER
-        .lock()
-        .map(|g| g.clone())
-        .unwrap_or_default();
-
-    if code_verifier.is_empty() {
-        return Err("PKCE code_verifier missing — please restart the Twitch login flow.".into());
-    }
+    log::info!("[Twitch Token] POST {} — body: client_id={}&client_secret=***&code={}...&grant_type=authorization_code&redirect_uri={}",
+        TWITCH_TOKEN_URL, client_id(), &code[..code.len().min(8)], REDIRECT_URI);
 
     let client = reqwest::Client::new();
     let resp = client
         .post(TWITCH_TOKEN_URL)
         .form(&[
             ("client_id", client_id()),
+            ("client_secret", client_secret()),
             ("code", code),
             ("grant_type", "authorization_code"),
             ("redirect_uri", REDIRECT_URI),
-            ("code_verifier", &code_verifier),
         ])
         .send()
         .await
-        .map_err(|e| format!("Failed to exchange code: {}", e))?;
+        .map_err(|e| {
+            log::error!("[Twitch Token] HTTP request failed: {}", e);
+            format!("Failed to exchange code: {}", e)
+        })?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
+    let status = resp.status();
+    log::info!("[Twitch Token] Response status: {}", status);
+
+    if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        log::error!("[Twitch Token] Exchange FAILED ({}): {}", status, body);
         return Err(format!("Token exchange failed ({}): {}", status, body));
     }
 
-    resp.json::<TokenResponse>()
-        .await
-        .map_err(|e| format!("Failed to parse token: {}", e))
+    let body_text = resp.text().await.map_err(|e| {
+        log::error!("[Twitch Token] Failed to read response body: {}", e);
+        format!("Failed to read token response: {}", e)
+    })?;
+
+    log::info!("[Twitch Token] Exchange succeeded, parsing JSON (len={})", body_text.len());
+
+    let token: TokenResponse = serde_json::from_str(&body_text).map_err(|e| {
+        log::error!("[Twitch Token] JSON parse failed: {} — body: {}", e, &body_text[..body_text.len().min(500)]);
+        format!("Failed to parse token: {}", e)
+    })?;
+
+    log::info!("[Twitch Token] Got access_token (len={}), refresh_token={}",
+        token.access_token.len(),
+        if token.refresh_token.is_some() { "present" } else { "MISSING" });
+
+    Ok(token)
 }
 
 /// Get an app access token using the client credentials flow.
-/// Note: client_credentials requires a confidential client — this is only used for
-/// server-side operations during development. In production PKCE flow, user tokens
-/// are obtained via exchange_code() instead.
+/// Note: client_credentials is for server-side app tokens (no user context).
+/// User tokens are obtained via exchange_code() instead.
 #[allow(dead_code)]
 pub async fn get_app_access_token(client_secret: &str) -> Result<String, String> {
     let client = reqwest::Client::new();
@@ -373,6 +395,8 @@ pub async fn get_app_access_token(client_secret: &str) -> Result<String, String>
 pub async fn get_authenticated_user(
     access_token: &str,
 ) -> Result<TwitchUser, String> {
+    log::info!("[Twitch User] Fetching user info with token (len={}), client_id={}", access_token.len(), client_id());
+
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("{}/users", TWITCH_API_URL))
@@ -380,24 +404,38 @@ pub async fn get_authenticated_user(
         .header("Authorization", format!("Bearer {}", access_token))
         .send()
         .await
-        .map_err(|e| format!("Failed to fetch user: {}", e))?;
+        .map_err(|e| {
+            log::error!("[Twitch User] HTTP request failed: {}", e);
+            format!("Failed to fetch user: {}", e)
+        })?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
+    let status = resp.status();
+    log::info!("[Twitch User] Response status: {}", status);
+
+    if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        log::error!("[Twitch User] Fetch FAILED ({}): {}", status, body);
         return Err(format!("User lookup failed ({}): {}", status, body));
     }
 
     let users_resp: UsersResponse = resp
         .json()
         .await
-        .map_err(|e| format!("Failed to parse user response: {}", e))?;
+        .map_err(|e| {
+            log::error!("[Twitch User] JSON parse failed: {}", e);
+            format!("Failed to parse user response: {}", e)
+        })?;
 
-    users_resp
-        .data
-        .into_iter()
-        .next()
-        .ok_or_else(|| "No user returned".to_string())
+    match users_resp.data.into_iter().next() {
+        Some(user) => {
+            log::info!("[Twitch User] Success: id={}, login={}, display_name={}", user.id, user.login, user.display_name);
+            Ok(user)
+        }
+        None => {
+            log::error!("[Twitch User] API returned empty data array — no user found");
+            Err("No user returned".to_string())
+        }
+    }
 }
 
 /// Get VODs (archive videos) for a user. Paginates to fetch all available VODs.

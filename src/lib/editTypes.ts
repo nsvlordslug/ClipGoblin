@@ -206,9 +206,9 @@ export const LAYOUT_OPTIONS: LayoutOption[] = [
       { label: 'CAM', x: 65, y: 65, w: 30, h: 30, fill: '#3b1e5f' },
     ],
   },
-  // TODO: { id: 'blur-bg', name: 'Blurred Background', description: 'Gameplay centered with blurred fill', ... }
-  // TODO: { id: 'facecam-focus', name: 'Facecam Focus', description: 'Large facecam, small gameplay', ... }
-  // TODO: { id: 'dynamic', name: 'AI Reframe', description: 'Follows the action automatically', ... }
+  // TODO(v2): { id: 'blur-bg', name: 'Blurred Background', description: 'Gameplay centered with blurred fill', ... }
+  // TODO(v2): { id: 'facecam-focus', name: 'Facecam Focus', description: 'Large facecam, small gameplay', ... }
+  // TODO(v2): { id: 'dynamic', name: 'AI Reframe', description: 'Follows the action automatically', ... }
 ]
 
 // ── Full Editable Clip State ──
@@ -226,17 +226,17 @@ export interface EditableClipSettings {
   aspectRatio: '9:16' | '16:9'
   textOverlays: TextOverlay[]
   exportPreset: string         // ExportPreset.id
-  // TODO Phase 2: zoomEffects: ZoomEffect[]
-  // TODO Phase 2: hookSuggestion: { suggestedStart: number; reason: string } | null
-  // TODO Phase 2: creatorTemplateId: string | null
-  // TODO Phase 3: editVariants: EditVariant[]
-  // TODO Phase 3: editScore: number
-  // TODO Phase 3: editMode: 'safe' | 'aggressive'
+  // TODO(v2): zoomEffects: ZoomEffect[]
+  // TODO(v2): hookSuggestion: { suggestedStart: number; reason: string } | null
+  // TODO(v2): creatorTemplateId: string | null
+  // TODO(v3): editVariants: EditVariant[]
+  // TODO(v3): editScore: number
+  // TODO(v3): editMode: 'safe' | 'aggressive'
 }
 
 // ── Creator Templates (Phase 2 scaffold) ──
 
-// TODO: implement saved creator templates
+// TODO(v2): implement saved creator templates
 export interface CreatorTemplate {
   id: string
   name: string
@@ -244,5 +244,5 @@ export interface CreatorTemplate {
   layoutMode: LayoutMode
   exportPreset: string
   aspectRatio: string
-  // TODO: zoom presets, emphasis settings, platform-specific tweaks
+  // TODO(v2): zoom presets, emphasis settings, platform-specific tweaks
 }

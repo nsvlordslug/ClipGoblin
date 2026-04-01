@@ -316,6 +316,8 @@ export default function TrimTimeline({
           {/* Start handle */}
           <div className={`absolute top-0 bottom-0 w-4 cursor-col-resize z-[20] group/handle ${dragging === 'start' ? 'bg-violet-500/20' : ''}`}
             style={{ left: `calc(${toPercent(startTime)}% - 8px)` }}
+            aria-label="Drag to adjust trim start"
+            role="slider"
             onMouseDown={onHandleDown('start')}>
             <div className="absolute inset-y-0.5 left-1/2 -translate-x-1/2 w-[3px] bg-violet-400 rounded-full group-hover/handle:bg-violet-300 transition-colors" />
             <div className="absolute top-1/2 -translate-y-1/2 left-1/2 -translate-x-1/2 w-3.5 h-6 bg-violet-500/90 rounded border border-violet-300/70 opacity-0 group-hover/handle:opacity-100 transition-opacity"
@@ -324,6 +326,8 @@ export default function TrimTimeline({
           {/* End handle */}
           <div className={`absolute top-0 bottom-0 w-4 cursor-col-resize z-[20] group/handle ${dragging === 'end' ? 'bg-violet-500/20' : ''}`}
             style={{ left: `calc(${toPercent(endTime)}% - 8px)` }}
+            aria-label="Drag to adjust trim end"
+            role="slider"
             onMouseDown={onHandleDown('end')}>
             <div className="absolute inset-y-0.5 left-1/2 -translate-x-1/2 w-[3px] bg-violet-400 rounded-full group-hover/handle:bg-violet-300 transition-colors" />
             <div className="absolute top-1/2 -translate-y-1/2 left-1/2 -translate-x-1/2 w-3.5 h-6 bg-violet-500/90 rounded border border-violet-300/70 opacity-0 group-hover/handle:opacity-100 transition-opacity"

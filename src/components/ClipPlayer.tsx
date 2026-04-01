@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, useCallback, useId } from 'react'
 import { Play, Pause, Volume2, VolumeX, RotateCcw } from 'lucide-react'
 import { usePlaybackStore } from '../stores/playbackStore'
 
+const PLAYBACK_FAILED_MSG = 'Playback failed'
+
 function fmt(seconds: number) {
   const m = Math.floor(seconds / 60)
   const s = Math.floor(seconds % 60)
@@ -173,7 +175,7 @@ export default function ClipPlayer({
       // First click — wait for metadata
       const onReady = () => {
         video.currentTime = clipStart
-        video.play().then(() => setPlayingState(true)).catch(() => setError('Playback failed'))
+        video.play().then(() => setPlayingState(true)).catch(() => setError(PLAYBACK_FAILED_MSG))
       }
       if (video.readyState >= 1) onReady()
       else video.addEventListener('loadedmetadata', onReady, { once: true })
@@ -187,7 +189,7 @@ export default function ClipPlayer({
       if (video.currentTime >= clipEnd - 0.5 || video.currentTime < clipStart) {
         video.currentTime = clipStart
       }
-      video.play().then(() => setPlayingState(true)).catch(() => setError('Playback failed'))
+      video.play().then(() => setPlayingState(true)).catch(() => setError(PLAYBACK_FAILED_MSG))
     }
   }, [loaded, playing, error, clipStart, clipEnd])
 

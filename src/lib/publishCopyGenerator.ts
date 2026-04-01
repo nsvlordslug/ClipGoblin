@@ -1,7 +1,7 @@
 // ── Publish copy generator ──
 // Generates platform-ready titles, captions, and hashtags from clip context.
 // Deep differentiation by platform, tone, and content type.
-// TODO: Plug in Claude API for truly creative generation when API key is available.
+// TODO(v2): Plug in Claude API for truly creative generation when API key is available.
 
 export interface ClipContext {
   title: string

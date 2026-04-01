@@ -303,7 +303,7 @@ pub fn analyze_hook_strength(m: &FusedMoment, audio: Option<&AudioContext>) -> f
     let before = a.intensity_in_range((hook_start - 5.0).max(0.0), hook_start);
     let delta_boost = if before < a.avg_rms * 0.7 && hook_audio > a.avg_rms * 1.5 { 0.25 } else { 0.0 };
     ((ratio * 0.35) + delta_boost).min(1.0)
-    // TODO: visual first-frame saliency model
+    // TODO(v2): visual first-frame saliency model
 }
 
 pub fn analyze_emotional_spike(m: &FusedMoment, audio: Option<&AudioContext>) -> f64 {
@@ -315,7 +315,7 @@ pub fn analyze_emotional_spike(m: &FusedMoment, audio: Option<&AudioContext>) ->
     if let Some(a) = audio { if a.intensity_in_range(m.center - 1.0, m.center + 2.0) > a.avg_rms * 2.0 { score += 0.10; } }
     if m.transcript_snippet.is_some() { score += 0.08; }
     score.min(1.0)
-    // TODO: facial expression recognition
+    // TODO(v2): facial expression recognition
 }
 
 pub fn analyze_payoff_clarity(m: &FusedMoment) -> f64 {
@@ -326,7 +326,7 @@ pub fn analyze_payoff_clarity(m: &FusedMoment) -> f64 {
     if has("jumpscare") || has("scream") { score += 0.12; }
     if has("shock") || has("panic") { score += 0.08; }
     score.min(1.0)
-    // TODO: game state detection (kill feeds, objectives)
+    // TODO(v2): game state detection (kill feeds, objectives)
 }
 
 pub fn analyze_event_reaction_alignment(m: &FusedMoment) -> f64 {
@@ -335,7 +335,7 @@ pub fn analyze_event_reaction_alignment(m: &FusedMoment) -> f64 {
         2 => if m.signal_sources.contains(&SignalSource::Transcript) { 0.82 } else { 0.72 },
         _ => if m.spike_delta > 0.0 { 0.35 + (m.spike_delta * 0.5).min(0.25) } else { 0.30 + m.best_intensity * 0.2 },
     }
-    // TODO: temporal alignment model
+    // TODO(v2): temporal alignment model
 }
 
 pub fn analyze_context_simplicity(m: &FusedMoment) -> f64 {
@@ -344,7 +344,7 @@ pub fn analyze_context_simplicity(m: &FusedMoment) -> f64 {
     else if has("hype") || has("excitement") || has("panic") { 0.68 }
     else if has("frustration") || has("chat-peak") { 0.55 }
     else { 0.45 }
-    // TODO: game identification for context requirements
+    // TODO(v2): game identification for context requirements
 }
 
 pub fn analyze_replay_value(m: &FusedMoment) -> f64 {
@@ -355,7 +355,7 @@ pub fn analyze_replay_value(m: &FusedMoment) -> f64 {
     if m.transcript_snippet.is_some() { score += 0.12; }
     if m.signal_sources.len() >= 2 { score += 0.10; }
     score.min(1.0)
-    // TODO: audio loop analysis
+    // TODO(v2): audio loop analysis
 }
 
 pub fn score_clip_candidate(c: &mut ClipCandidate) {
@@ -462,7 +462,7 @@ pub fn optimize_clip_boundaries(c: &mut ClipCandidate, audio: Option<&AudioConte
     }
 
     // Re-score hook after boundary changes
-    // TODO: re-run full scoring after boundary optimization for accuracy
+    // TODO(v2): re-run full scoring after boundary optimization for accuracy
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -542,7 +542,7 @@ fn compute_clip_similarity(a: &ClipCandidate, b: &ClipCandidate) -> f64 {
     }
 
     sim.min(1.0)
-    // TODO: ML-based semantic similarity via sentence embeddings
+    // TODO(v2): ML-based semantic similarity via sentence embeddings
 }
 
 /// Two clips are near-duplicates if they're detections of the same stream moment.
