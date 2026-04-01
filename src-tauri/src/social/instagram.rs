@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 pub struct InstagramAdapter;
 
-#[async_trait::async_trait]
+#[async_trait::async_trait(?Send)]
 impl PlatformAdapter for InstagramAdapter {
     fn platform_id(&self) -> &'static str { "instagram" }
 

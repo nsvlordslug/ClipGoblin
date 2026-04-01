@@ -1,6 +1,6 @@
 [package]
 name = "clipviral"
-version = "0.1.0"
+version = "1.0.0"
 description = "AI-powered Twitch stream clip generator"
 authors = ["ClipViral"]
 license = "MIT"
@@ -35,6 +35,8 @@ base64 = "0.22"
 once_cell = "1"
 which = "7"
 async-trait = "0.1"
+dotenvy = "0.15"
+sha2 = "0.10"
 
 [features]
 default = ["asset-protocol"]

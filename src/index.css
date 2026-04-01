@@ -1,0 +1,326 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand-50: oklch(0.97 0.02 285);
+  --color-brand-100: oklch(0.93 0.04 285);
+  --color-brand-200: oklch(0.87 0.08 285);
+  --color-brand-300: oklch(0.78 0.12 285);
+  --color-brand-400: oklch(0.68 0.17 285);
+  --color-brand-500: oklch(0.58 0.22 285);
+  --color-brand-600: oklch(0.50 0.22 285);
+  --color-brand-700: oklch(0.43 0.20 285);
+  --color-brand-800: oklch(0.36 0.16 285);
+  --color-brand-900: oklch(0.30 0.12 285);
+
+  --color-surface-50: oklch(0.98 0.00 0);
+  --color-surface-100: oklch(0.93 0.00 0);
+  --color-surface-200: oklch(0.85 0.01 260);
+  --color-surface-300: oklch(0.72 0.01 260);
+  --color-surface-400: oklch(0.55 0.01 260);
+  --color-surface-500: oklch(0.45 0.01 260);
+  --color-surface-600: oklch(0.35 0.02 260);
+  --color-surface-700: oklch(0.28 0.02 260);
+  --color-surface-800: oklch(0.22 0.02 260);
+  --color-surface-850: oklch(0.18 0.02 260);
+  --color-surface-900: oklch(0.15 0.02 260);
+  --color-surface-950: oklch(0.12 0.02 260);
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-surface-950 text-slate-200 antialiased;
+  font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  margin: 0;
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+/* ─── Light theme variable overrides ─── */
+.theme-light {
+  color-scheme: light;
+
+  /* Surface scale: flip dark → light */
+  --color-surface-950: oklch(0.96 0.003 260);
+  --color-surface-900: oklch(0.94 0.005 260);
+  --color-surface-850: oklch(0.92 0.005 260);
+  --color-surface-800: oklch(0.99 0.002 260);
+  --color-surface-700: oklch(0.88 0.008 260);
+  --color-surface-600: oklch(0.83 0.010 260);
+  --color-surface-500: oklch(0.75 0.010 260);
+  --color-surface-400: oklch(0.62 0.010 260);
+  --color-surface-300: oklch(0.50 0.012 260);
+  --color-surface-200: oklch(0.38 0.012 260);
+  --color-surface-100: oklch(0.28 0.012 260);
+  --color-surface-50:  oklch(0.20 0.012 260);
+
+  /* Slate text: flip so low numbers = dark text */
+  --color-slate-50:  oklch(0.13 0.02 260);
+  --color-slate-100: oklch(0.18 0.02 260);
+  --color-slate-200: oklch(0.23 0.02 260);
+  --color-slate-300: oklch(0.33 0.02 260);
+  --color-slate-400: oklch(0.43 0.02 260);
+  --color-slate-500: oklch(0.53 0.02 260);
+  --color-slate-600: oklch(0.60 0.02 260);
+  --color-slate-700: oklch(0.70 0.015 260);
+  --color-slate-800: oklch(0.80 0.01 260);
+  --color-slate-900: oklch(0.90 0.005 260);
+  --color-slate-950: oklch(0.96 0.003 260);
+
+  /* Brand/violet: deepen for light-bg contrast */
+  --color-brand-400: oklch(0.55 0.20 285);
+  --color-brand-500: oklch(0.48 0.22 285);
+  --color-brand-600: oklch(0.42 0.22 285);
+  --color-violet-400: oklch(0.52 0.20 285);
+  --color-violet-500: oklch(0.47 0.22 285);
+  --color-violet-600: oklch(0.42 0.22 285);
+}
+
+/* Light mode: text-white → dark on non-colored backgrounds */
+.theme-light .text-white:not([class*="bg-violet"]):not([class*="bg-brand-5"]):not([class*="bg-brand-6"]):not([class*="bg-green"]):not([class*="bg-red"]):not([class*="bg-emerald"]):not([class*="bg-blue"]):not([class*="bg-amber"]):not([class*="bg-orange"]) {
+  color: oklch(0.13 0.02 260);
+}
+.theme-light .hover\:text-white:hover:not([class*="bg-violet"]):not([class*="bg-green"]):not([class*="bg-red"]):not([class*="bg-emerald"]) {
+  color: oklch(0.13 0.02 260);
+}
+/* Preserve white on colored backgrounds (parent or self) */
+.theme-light [class*="bg-violet"] .text-white,
+.theme-light [class*="bg-brand-5"] .text-white,
+.theme-light [class*="bg-brand-6"] .text-white,
+.theme-light [class*="bg-green"] .text-white,
+.theme-light [class*="bg-red"] .text-white,
+.theme-light [class*="bg-emerald"] .text-white {
+  color: #fff !important;
+}
+
+/* Light mode: glass card */
+.theme-light .glass-card {
+  background: rgba(255, 255, 255, 0.75);
+  border-color: rgba(0, 0, 0, 0.08);
+  box-shadow:
+    0 10px 40px rgba(0, 0, 0, 0.06),
+    inset 0 0 20px rgba(168, 85, 247, 0.02);
+}
+
+/* Light mode: scrollbar */
+.theme-light ::-webkit-scrollbar-thumb {
+  background: oklch(0.82 0.01 260);
+}
+.theme-light ::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.74 0.01 260);
+}
+
+/* Light mode: brand glow softened */
+.theme-light .brand-glow {
+  filter:
+    drop-shadow(0 0 4px rgba(139, 92, 246, 0.20))
+    drop-shadow(0 0 10px rgba(139, 92, 246, 0.06));
+}
+.theme-light .brand-glow-lg {
+  filter:
+    drop-shadow(0 0 6px rgba(139, 92, 246, 0.16))
+    drop-shadow(0 0 16px rgba(139, 92, 246, 0.05));
+}
+
+/* Light mode: sidebar branding */
+.theme-light .sidebar-brand {
+  border-bottom-color: rgba(139, 92, 246, 0.10);
+}
+.theme-light .sidebar-logo {
+  box-shadow:
+    0 0 20px rgba(168, 85, 247, 0.20),
+    0 0 40px rgba(139, 92, 246, 0.08);
+}
+.theme-light .text-clip {
+  color: #9333ea;
+  text-shadow: none;
+}
+.theme-light .text-goblin {
+  color: #16a34a;
+  text-shadow: none;
+}
+.theme-light .sidebar-subtitle {
+  color: rgba(109, 62, 196, 0.55);
+}
+
+/* Light mode: dashboard glow */
+.theme-light .dashboard-top::before {
+  background: radial-gradient(circle, rgba(139, 92, 246, 0.03) 0%, rgba(88, 28, 135, 0.015) 35%, transparent 65%);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: oklch(0.35 0.02 260);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.42 0.02 260);
+}
+
+/* ── Brand glow effects ── */
+.brand-glow {
+  filter:
+    drop-shadow(0 0 6px rgba(139, 92, 246, 0.50))
+    drop-shadow(0 0 16px rgba(139, 92, 246, 0.18));
+}
+
+.brand-glow-lg {
+  filter:
+    drop-shadow(0 0 10px rgba(139, 92, 246, 0.45))
+    drop-shadow(0 0 24px rgba(139, 92, 246, 0.15));
+}
+
+@keyframes glow-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.7; }
+}
+
+.brand-glow-pulse {
+  animation: glow-pulse 4s ease-in-out infinite;
+}
+
+@keyframes goblinFloat {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
+@keyframes goblinGlow {
+  0%, 100% {
+    filter: drop-shadow(0 0 40px rgba(168, 85, 247, 0.4));
+  }
+  50% {
+    filter: drop-shadow(0 0 80px rgba(168, 85, 247, 0.9));
+  }
+}
+
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
+}
+
+.animate-shimmer {
+  animation: shimmer 1.5s infinite;
+}
+
+.glass-card {
+  background: rgba(20, 18, 38, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
+
+  box-shadow:
+    0 10px 40px rgba(0, 0, 0, 0.4),
+    inset 0 0 20px rgba(168, 85, 247, 0.05);
+}
+
+/* ── Sidebar branding ── */
+.sidebar-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  padding: 32px 16px 24px;
+  border-bottom: 1px solid rgba(139, 92, 246, 0.15);
+}
+
+.sidebar-logo {
+  width: 136px;
+  height: 136px;
+  flex-shrink: 0;
+  border-radius: 26px;
+  overflow: hidden;
+  box-shadow:
+    0 0 30px rgba(168, 85, 247, 0.65),
+    0 0 60px rgba(139, 92, 246, 0.35),
+    0 0 90px rgba(139, 92, 246, 0.15);
+}
+
+.sidebar-logo img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scale(1.5);
+}
+
+.sidebar-wordmark {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+
+.sidebar-title {
+  font-size: 26px;
+  font-weight: 900;
+  letter-spacing: -0.01em;
+  line-height: 1;
+}
+
+.text-clip {
+  color: #c084fc;
+  text-shadow: 0 0 8px rgba(168, 85, 247, 0.4);
+}
+
+.text-goblin {
+  color: #4ade80;
+  text-shadow: 0 0 8px rgba(74, 222, 128, 0.35);
+}
+
+.sidebar-subtitle {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  color: rgba(139, 92, 246, 0.55);
+}
+
+/* ── Dashboard layout ── */
+.dashboard-top {
+  position: relative;
+  overflow: visible;
+  min-height: 300px;
+  padding-bottom: 16px;
+}
+
+.dashboard-top::before {
+  content: '';
+  position: absolute;
+  right: -150px;
+  top: -120px;
+  width: 800px;
+  height: 800px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(139, 92, 246, 0.07) 0%, rgba(88, 28, 135, 0.04) 35%, transparent 65%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.hero-goblin-bg {
+  position: absolute;
+  right: 36px;
+  top: 0;
+  height: 360px;
+  object-fit: contain;
+  pointer-events: none;
+  z-index: 0;
+  animation: goblinFloat 6s ease-in-out infinite,
+             goblinGlow 4s ease-in-out infinite;
+}

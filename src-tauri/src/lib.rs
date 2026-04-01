@@ -338,26 +338,11 @@ struct AudioProfile {
 /// their channel as the only channel.
 #[tauri::command]
 async fn twitch_login(app: AppHandle, db: State<'_, DbConn>) -> Result<db::ChannelRow, String> {
-    let (client_id, client_secret) = {
-        let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
-        let cid = db::get_setting(&conn, "twitch_client_id")
-            .map_err(|e| format!("DB error: {}", e))?
-            .unwrap_or_default();
-        let csec = db::get_setting(&conn, "twitch_client_secret")
-            .map_err(|e| format!("DB error: {}", e))?
-            .unwrap_or_default();
-        (cid, csec)
-    };
-
-    if client_id.is_empty() || client_secret.is_empty() {
-        return Err("Please configure your Twitch Client ID and Client Secret in Settings first.".into());
-    }
-
     // 1. Bind callback server BEFORE opening the browser (avoids race condition)
     let listener = twitch::bind_callback_server()?;
 
-    // 2. Open the auth URL in the user's browser
-    let auth_url = twitch::get_auth_url(&client_id);
+    // 2. Open the auth URL in the user's browser (uses embedded client_id + PKCE)
+    let auth_url = twitch::get_auth_url();
     app.opener().open_url(&auth_url, None::<&str>)
         .map_err(|e| format!("Failed to open browser: {}", e))?;
 
@@ -366,11 +351,11 @@ async fn twitch_login(app: AppHandle, db: State<'_, DbConn>) -> Result<db::Chann
         .await
         .map_err(|e| format!("Task error: {}", e))??;
 
-    // Exchange the code for an access token
-    let token_resp = twitch::exchange_code(&client_id, &client_secret, &code).await?;
+    // Exchange the code for an access token (PKCE — no client_secret needed)
+    let token_resp = twitch::exchange_code(&code).await?;
 
     // Fetch the authenticated user's identity
-    let user = twitch::get_authenticated_user(&client_id, &token_resp.access_token).await?;
+    let user = twitch::get_authenticated_user(&token_resp.access_token).await?;
 
     // Save the user token for future API calls
     {
@@ -604,7 +589,7 @@ async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>) -> 
         let vod_id_status = vod_id_bg;
 
         let result = tokio::task::spawn_blocking(move || {
-            let progress_conn = rusqlite::Connection::open(db::db_path()).ok();
+            let progress_conn = db::db_path().ok().and_then(|p| rusqlite::Connection::open(p).ok());
 
             let mut cmd = std::process::Command::new(&ytdlp);
             cmd.arg("--force-overwrites")
@@ -739,7 +724,7 @@ fn analyze_audio_intensity(
 
     // Escape the path for ffmpeg filter syntax — colons in Windows drive letters
     // (e.g. C:\...) conflict with ffmpeg's filter parameter separator (:)
-    let escaped_path = temp_file.to_str().unwrap()
+    let escaped_path = temp_file.to_string_lossy()
         .replace('\\', "/")
         .replace(':', "\\:");
 
@@ -865,7 +850,7 @@ fn generate_thumbnail(
        .arg("-vf").arg("scale=640:-1")
        .arg("-q:v").arg("5")
        .arg("-y")
-       .arg(output_path.to_str().unwrap())
+       .arg(output_path.to_string_lossy().as_ref())
        .stdout(Stdio::null())
        .stderr(Stdio::null());
 
@@ -943,7 +928,7 @@ fn find_python() -> Result<std::path::PathBuf, AppError> {
 
 /// Run faster-whisper transcription on a video file.
 /// Returns transcript JSON and saves to disk.
-fn run_transcription(vod_path: &str, output_path: &str, hw: &HardwareInfo) -> Result<TranscriptResult, AppError> {
+fn run_transcription(vod_path: &str, output_path: &str, hw: &HardwareInfo, vod_id: Option<&str>) -> Result<TranscriptResult, AppError> {
     let python = find_python()?;
     let device = if hw.use_cuda { "cuda" } else { "cpu" };
 
@@ -972,11 +957,11 @@ fn run_transcription(vod_path: &str, output_path: &str, hw: &HardwareInfo) -> Re
     }
 
     // Attempt transcription. If CUDA was requested and fails, retry on CPU.
-    match run_transcription_with_script(&python, &script, vod_path, output_path, device) {
+    match run_transcription_with_script(&python, &script, vod_path, output_path, device, vod_id) {
         Ok(result) => Ok(result),
         Err(first_err) if device == "cuda" => {
             log::warn!("CUDA transcription failed ({}), retrying on CPU...", first_err.detail());
-            run_transcription_with_script(&python, &script, vod_path, output_path, "cpu")
+            run_transcription_with_script(&python, &script, vod_path, output_path, "cpu", vod_id)
                 .map_err(|cpu_err| {
                     AppError::Transcription(format!(
                         "Failed on both CUDA and CPU. CUDA: {} | CPU: {}",
@@ -1026,6 +1011,7 @@ fn run_transcription_with_script(
     vod_path: &str,
     output_path: &str,
     device: &str,
+    vod_id: Option<&str>,
 ) -> Result<TranscriptResult, AppError> {
     log::info!("Running transcription: {} {} --device {} --output {}", script.display(), vod_path, device, output_path);
 
@@ -1052,19 +1038,106 @@ fn run_transcription_with_script(
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
 
-    let output = cmd.output()
+    // Spawn as a child process so we can read heartbeats from stderr
+    // and enforce a timeout if the process truly hangs.
+    let mut child = cmd.spawn()
         .map_err(|e| AppError::Transcription(format!("Failed to launch Python: {e}")))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+    // Read stderr in a background thread to capture heartbeats + error output.
+    // Heartbeats are JSON lines like {"heartbeat":true,"approx_pct":42,...}
+    // emitted every ~15s by transcribe.py so we know it's still alive.
+    let stderr_handle = child.stderr.take();
+    let vod_id_for_thread = vod_id.map(|s| s.to_string());
+    let (heartbeat_tx, heartbeat_rx) = std::sync::mpsc::channel::<()>();
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut err) = stderr_handle {
+            use std::io::{BufRead, BufReader};
+            let reader = BufReader::new(&mut err);
+            for line in reader.lines() {
+                match line {
+                    Ok(line) => {
+                        // Try to parse heartbeat JSON
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+                            if json.get("heartbeat").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                let pct = json.get("approx_pct").and_then(|v| v.as_i64()).unwrap_or(0);
+                                let segs = json.get("segments_so_far").and_then(|v| v.as_i64()).unwrap_or(0);
+                                log::info!("Transcription heartbeat: ~{}% done, {} segments", pct, segs);
+                                // Signal the main thread that we're still alive
+                                heartbeat_tx.send(()).ok();
+                                // Update analysis progress (20-38% range maps to transcription)
+                                if let Some(ref vid) = vod_id_for_thread {
+                                    let mapped = 20 + (pct as i64 * 18 / 100).min(17);
+                                    set_analysis_progress(vid, mapped);
+                                }
+                                continue;
+                            }
+                        }
+                        // Not a heartbeat — collect as regular stderr
+                        buf.extend_from_slice(line.as_bytes());
+                        buf.push(b'\n');
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+        buf
+    });
+
+    // Wait for the process with a generous timeout.
+    // The base timeout is 30 minutes, but resets on each heartbeat.
+    // If we get no heartbeat AND no process exit for 5 minutes, assume hung.
+    let no_heartbeat_timeout = std::time::Duration::from_secs(300); // 5 min with no heartbeat = stuck
+    let mut last_activity = std::time::Instant::now();
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                // Drain any heartbeat signals (non-blocking)
+                while heartbeat_rx.try_recv().is_ok() {
+                    last_activity = std::time::Instant::now();
+                }
+                if last_activity.elapsed() > no_heartbeat_timeout {
+                    log::error!("Transcription stalled — no heartbeat for {}s, killing process",
+                        no_heartbeat_timeout.as_secs());
+                    child.kill().ok();
+                    child.wait().ok();
+                    return Err(AppError::Transcription(
+                        format!("Transcription stalled after {} minutes with no progress on {}. \
+                            The process may have hung or run out of memory.",
+                            no_heartbeat_timeout.as_secs() / 60, device)
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            Err(e) => {
+                return Err(AppError::Transcription(format!("Failed to wait for transcription process: {e}")));
+            }
+        }
+    };
+
+    // Collect remaining output
+    let stderr_buf = stderr_thread.join().unwrap_or_default();
+    let mut stdout_buf = Vec::new();
+    if let Some(mut out) = child.stdout.take() {
+        use std::io::Read;
+        out.read_to_end(&mut stdout_buf).ok();
+    }
+
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr_buf);
+        let stdout = String::from_utf8_lossy(&stdout_buf);
         log::error!("Transcription script failed (exit {}). stderr: {} stdout: {}",
-            output.status.code().unwrap_or(-1), stderr.trim(), stdout.trim());
+            status.code().unwrap_or(-1), stderr.trim(), stdout.trim());
 
         // Parse structured error from stdout if the script managed to output JSON
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
-            if let Some(err_msg) = json.get("error").and_then(|e| e.as_str()) {
-                return Err(AppError::Transcription(err_msg.to_string()));
+        // (stdout may contain multiple JSON lines — check each)
+        for line in stdout.lines() {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                if let Some(err_msg) = json.get("error").and_then(|e| e.as_str()) {
+                    return Err(AppError::Transcription(err_msg.to_string()));
+                }
             }
         }
 
@@ -1157,6 +1230,20 @@ fn format_srt_time(seconds: f64) -> String {
     format!("{:02}:{:02}:{:02},{:03}", h, m, s, ms)
 }
 
+/// Extract the full dialogue text from transcript segments that overlap a clip's time range.
+/// Concatenates all segment text into a single string — used to save a richer
+/// `transcript_snippet` in the highlights table so Claude gets more context.
+fn extract_transcript_for_range(transcript: &TranscriptResult, start: f64, end: f64) -> Option<String> {
+    let texts: Vec<&str> = transcript.segments.iter()
+        .filter(|seg| seg.end >= start && seg.start <= end)
+        .map(|seg| seg.text.as_str())
+        .collect();
+    if texts.is_empty() {
+        return None;
+    }
+    Some(texts.join(" ").trim().to_string())
+}
+
 /// Find keywords in transcript near a given timestamp range
 fn keyword_boost_for_range(transcript: &TranscriptResult, start: f64, end: f64) -> f64 {
     let mut boost: f64 = 0.0;
@@ -1203,6 +1290,15 @@ async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, hw: 
         (vod, has_ffmpeg)
     };
 
+    // Read sensitivity setting before moving into background task
+    let sensitivity = {
+        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+        db::get_setting(&conn, "detection_sensitivity")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "medium".to_string())
+    };
+
     let vod_id_bg = vod_id.clone();
     let vod_clone = vod.clone();
     let hw_info = hw.inner().clone();
@@ -1211,13 +1307,13 @@ async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, hw: 
     tokio::task::spawn(async move {
         let db: State<'_, DbConn> = app.state();
 
-        // Update progress: analyzing content
+        // Progress updates: run_analysis_signals handles 5-82% internally
+        // via direct DB connection. We handle 0-5% and 82-100% here.
         if let Ok(conn) = db.lock() {
-            db::update_vod_analysis_progress(&conn, &vod_id_bg, 10).ok();
+            db::update_vod_analysis_progress(&conn, &vod_id_bg, 2).ok();
         }
 
         // Cascading analysis: signal-driven (local) → position heuristic.
-        // All analysis is fully local — no API calls, no API keys.
         let has_local_file = vod_clone.local_path.is_some();
 
         let mut result: Result<Vec<db::HighlightRow>, String> = Err("No analysis method available".into());
@@ -1227,7 +1323,8 @@ async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, hw: 
             log::info!("Running signal-driven analysis for VOD {}", vod_id_bg);
             let vod_for_sync = vod_clone.clone();
             let hw_for_sync = hw_info.clone();
-            match tokio::task::spawn_blocking(move || run_analysis_signals(&vod_for_sync, &hw_for_sync)).await {
+            let sens = sensitivity.clone();
+            match tokio::task::spawn_blocking(move || run_analysis_signals(&vod_for_sync, &hw_for_sync, &sens)).await {
                 Ok(Ok(highlights)) => { result = Ok(highlights); }
                 Ok(Err(e)) => {
                     log::warn!("Signal analysis failed, falling back to position heuristic: {e}");
@@ -1242,6 +1339,9 @@ async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, hw: 
         if result.is_err() {
             log::info!("Running position fallback for VOD {} (ffmpeg={}, downloaded={})",
                 vod_id_bg, has_ffmpeg, has_local_file);
+            if let Ok(conn) = db.lock() {
+                db::update_vod_analysis_progress(&conn, &vod_id_bg, 10).ok();
+            }
             let vod_for_sync = vod_clone.clone();
             match tokio::task::spawn_blocking(move || run_analysis(&vod_for_sync)).await {
                 Ok(r) => { result = r; }
@@ -1249,9 +1349,9 @@ async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, hw: 
             }
         };
 
-        // Update progress: creating clips
+        // Creating clips from highlights (82-88%)
         if let Ok(conn) = db.lock() {
-            db::update_vod_analysis_progress(&conn, &vod_id_bg, 60).ok();
+            db::update_vod_analysis_progress(&conn, &vod_id_bg, 83).ok();
         }
 
         match result {
@@ -1299,11 +1399,15 @@ async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, hw: 
                             captions_enabled: 1,
                             captions_text: auto_captions,
                             captions_position: "bottom".to_string(),
+                            caption_style: "clean".to_string(),
                             facecam_layout: "none".to_string(),
                             render_status: "pending".to_string(),
                             output_path: None,
                             thumbnail_path: None,
                             created_at: now.clone(),
+                            game: vod_clone.game_name.clone(),
+                            publish_description: None,
+                            publish_hashtags: None,
                         };
                         db::insert_clip(&conn, &clip).ok();
 
@@ -1315,12 +1419,11 @@ async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, hw: 
                         clip_thumb_info.push((clip_id, h.start_seconds));
                     }
 
-                    db::update_vod_analysis_status(&conn, &vod_id_bg, "completed").ok();
-                    db::update_vod_analysis_progress(&conn, &vod_id_bg, 80).ok();
+                    db::update_vod_analysis_progress(&conn, &vod_id_bg, 88).ok();
                 }
                 // conn lock dropped here
 
-                // Generate thumbnails outside DB lock (ffmpeg is slow)
+                // Generate thumbnails outside DB lock (88-98%)
                 if let Ok(ffmpeg_path) = find_ffmpeg() {
                     if let Some(ref vod_path) = vod_clone.local_path {
                         let thumb_dir = dirs::data_dir()
@@ -1329,11 +1432,11 @@ async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, hw: 
                             .join("thumbnails");
                         std::fs::create_dir_all(&thumb_dir).ok();
 
-                        if let Ok(thumb_conn) = rusqlite::Connection::open(db::db_path()) {
-                            for (clip_id, start_secs) in &clip_thumb_info {
+                        if let Ok(thumb_conn) = db::db_path().and_then(|p| rusqlite::Connection::open(p).map_err(|e| e.to_string())) {
+                            let total_thumbs = clip_thumb_info.len();
+                            for (idx, (clip_id, start_secs)) in clip_thumb_info.iter().enumerate() {
                                 let thumb_path = thumb_dir.join(format!("{}.jpg", clip_id));
                                 let dur = vod_clone.duration_seconds as f64;
-                                // Try multiple timestamps to avoid black/corrupt frames
                                 let candidates = [
                                     (start_secs + 2.0).min(dur),
                                     (start_secs + 10.0).min(dur),
@@ -1356,7 +1459,6 @@ async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, hw: 
                                     }
                                 }
                                 if !saved {
-                                    // Use whatever we got even if small
                                     if thumb_path.exists() {
                                         db::update_clip_thumbnail(
                                             &thumb_conn, clip_id,
@@ -1364,9 +1466,20 @@ async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, hw: 
                                         ).ok();
                                     }
                                 }
+                                // Update progress per thumbnail
+                                if total_thumbs > 0 {
+                                    let thumb_progress = 88 + ((idx + 1) as i64 * 10 / total_thumbs as i64);
+                                    db::update_vod_analysis_progress(&thumb_conn, &vod_id_bg, thumb_progress).ok();
+                                }
                             }
                         }
                     }
+                }
+
+                // Mark complete
+                if let Ok(conn) = db.lock() {
+                    db::update_vod_analysis_status(&conn, &vod_id_bg, "completed").ok();
+                    db::update_vod_analysis_progress(&conn, &vod_id_bg, 100).ok();
                 }
             }
             Err(e) => {
@@ -1381,9 +1494,19 @@ async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, hw: 
     Ok(())
 }
 
+/// Helper: update analysis progress directly (opens its own DB connection).
+/// Used inside `spawn_blocking` where the Tauri State DB isn't available.
+fn set_analysis_progress(vod_id: &str, progress: i64) {
+    if let Ok(path) = db::db_path() {
+        if let Ok(conn) = rusqlite::Connection::open(path) {
+            db::update_vod_analysis_progress(&conn, vod_id, progress).ok();
+        }
+    }
+}
+
 /// Signal-driven analysis using the clip_selector module.
 /// Finds clips via audio spikes, transcript keywords, and chat peaks.
-fn run_analysis_signals(vod: &db::VodRow, hw: &HardwareInfo) -> Result<Vec<db::HighlightRow>, String> {
+fn run_analysis_signals(vod: &db::VodRow, hw: &HardwareInfo, sensitivity: &str) -> Result<Vec<db::HighlightRow>, String> {
     let ffmpeg = find_ffmpeg()?;
     let vod_path = vod.local_path.clone()
         .ok_or("VOD not downloaded")?;
@@ -1391,14 +1514,18 @@ fn run_analysis_signals(vod: &db::VodRow, hw: &HardwareInfo) -> Result<Vec<db::H
     let vod_id = &vod.id;
     let now = chrono::Utc::now().to_rfc3339();
 
-    // ── Extract signals ──
+    // ── Stage 1: Audio analysis (5-15%) ──
     log::info!("Signal analysis: extracting audio profile...");
+    set_analysis_progress(vod_id, 5);
     let audio_profile = analyze_audio_intensity(&vod_path, &ffmpeg).ok();
     let audio_ctx = audio_profile.as_ref().map(|a| {
         clip_selector::AudioContext::new(a.rms_per_second.clone(), a.spike_seconds.clone())
     });
+    set_analysis_progress(vod_id, 15);
 
+    // ── Stage 2: Transcription (15-40%) ──
     log::info!("Signal analysis: attempting transcription...");
+    set_analysis_progress(vod_id, 18);
     let transcript_dir = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("clipviral")
@@ -1406,34 +1533,60 @@ fn run_analysis_signals(vod: &db::VodRow, hw: &HardwareInfo) -> Result<Vec<db::H
     std::fs::create_dir_all(&transcript_dir).ok();
     let transcript_path = transcript_dir.join(format!("{}.json", vod_id));
     let transcript: Option<TranscriptResult> = if transcript_path.exists() {
+        log::info!("Signal analysis: loading cached transcript");
+        set_analysis_progress(vod_id, 25);
         std::fs::read_to_string(&transcript_path).ok()
             .and_then(|s| serde_json::from_str(&s).ok())
     } else if let Ok(_python) = find_python() {
+        set_analysis_progress(vod_id, 20);
         let out = transcript_path.to_string_lossy().to_string();
-        run_transcription(&vod_path, &out, hw).ok()
+        let result = run_transcription(&vod_path, &out, hw, Some(vod_id)).ok();
+        set_analysis_progress(vod_id, 38);
+        result
     } else {
         None
     };
+    set_analysis_progress(vod_id, 40);
 
+    // ── Stage 3: Chat analysis (40-50%) ──
+    log::info!("Signal analysis: analyzing chat activity...");
+    set_analysis_progress(vod_id, 42);
     let chat_peaks: Vec<db::HighlightRow> = analyze_via_chat(vod).unwrap_or_default();
+    set_analysis_progress(vod_id, 50);
 
-    // ── Run the clip selector pipeline ──
-    let selected = clip_selector::select_clips(
+    // ── Stage 4: Clip selection pipeline (50-65%) ──
+    log::info!("Signal analysis: running clip selector pipeline...");
+    set_analysis_progress(vod_id, 52);
+    let (selected, detection_stats) = clip_selector::select_clips(
         audio_ctx.as_ref(),
         transcript.as_ref(),
         &chat_peaks,
         duration,
+        sensitivity,
     );
+    set_analysis_progress(vod_id, 60);
+
+    // Persist detection stats for the VOD page to display
+    if let Ok(db_path) = db::db_path() {
+        if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+            let stats_json = serde_json::to_string(&detection_stats).unwrap_or_default();
+            db::save_setting(&conn, &format!("detection_stats_{}", vod_id), &stats_json).ok();
+        }
+    }
 
     if selected.is_empty() {
         log::warn!("Signal analysis: selector returned no clips, falling back to position heuristic");
+        set_analysis_progress(vod_id, 55);
         return run_analysis(vod);
     }
 
-    // ── Convert ClipCandidates to HighlightRows ──
+    // ── Stage 5: Scoring and ranking (60-75%) ──
+    log::info!("Signal analysis: scoring {} candidates...", selected.len());
+    set_analysis_progress(vod_id, 62);
     let mut highlights: Vec<db::HighlightRow> = Vec::new();
+    let total_candidates = selected.len();
 
-    for c in &selected {
+    for (i, c) in selected.iter().enumerate() {
         let all_tags: Vec<String> = [&c.event_tags[..], &c.emotion_tags[..]].concat();
         let tag_str = if all_tags.is_empty() { "auto".to_string() } else { all_tags.join(",") };
 
@@ -1464,6 +1617,12 @@ fn run_analysis_signals(vod: &db::VodRow, hw: &HardwareInfo) -> Result<Vec<db::H
             audio, visual, 0.0, c.start_time,
         );
 
+        // Use full transcript for the clip range if available; fall back to
+        // the single-sentence excerpt from signal fusion.
+        let full_range_transcript = transcript.as_ref()
+            .and_then(|t| extract_transcript_for_range(t, c.start_time, c.end_time))
+            .or_else(|| c.transcript_excerpt.clone());
+
         highlights.push(db::HighlightRow {
             id: uuid::Uuid::new_v4().to_string(),
             vod_id: vod_id.clone(),
@@ -1473,7 +1632,7 @@ fn run_analysis_signals(vod: &db::VodRow, hw: &HardwareInfo) -> Result<Vec<db::H
             audio_score: audio,
             visual_score: visual,
             chat_score: chat,
-            transcript_snippet: c.transcript_excerpt.clone(),
+            transcript_snippet: full_range_transcript,
             description: Some(title),
             tags: Some(tag_str),
             thumbnail_path: None,
@@ -1482,9 +1641,16 @@ fn run_analysis_signals(vod: &db::VodRow, hw: &HardwareInfo) -> Result<Vec<db::H
             explanation: Some(build_highlight_explanation(audio, visual, chat, has_transcript)),
             event_summary: Some(event_summary),
         });
-    }
 
-    // ── Generate SRT caption files from transcript for each highlight ──
+        // Update progress within scoring loop
+        let scoring_progress = 62 + ((i + 1) as i64 * 13 / total_candidates as i64);
+        set_analysis_progress(vod_id, scoring_progress);
+    }
+    set_analysis_progress(vod_id, 75);
+
+    // ── Stage 6: Generate captions (75-82%) ──
+    log::info!("Signal analysis: generating captions...");
+    set_analysis_progress(vod_id, 76);
     if let Some(ref t) = transcript {
         let captions_dir = dirs::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -1503,6 +1669,7 @@ fn run_analysis_signals(vod: &db::VodRow, hw: &HardwareInfo) -> Result<Vec<db::H
             log::info!("Signal analysis: generated {} SRT caption files", srt_count);
         }
     }
+    set_analysis_progress(vod_id, 82);
 
     log::info!("Signal analysis: produced {} final clips", highlights.len());
     Ok(highlights)
@@ -1841,7 +2008,7 @@ fn render_clip_with_ffmpeg(
        .arg("-b:a").arg("128k")
        .arg("-movflags").arg("+faststart")
        .arg("-y")
-       .arg(output_path.to_str().unwrap())
+       .arg(output_path.to_string_lossy().as_ref())
        .stdout(Stdio::null())
        .stderr(Stdio::null());
 
@@ -1899,7 +2066,7 @@ async fn generate_clip_captions(
         let out = transcript_path.to_string_lossy().to_string();
         let hw_clone = hw.inner().clone();
         tokio::task::spawn_blocking(move || {
-            run_transcription(&vp, &out, &hw_clone)
+            run_transcription(&vp, &out, &hw_clone, None)
         }).await.map_err(|e| format!("Task error: {}", e))??
     };
 
@@ -1993,17 +2160,19 @@ async fn export_clip(
         (clip, path)
     };
 
-    // Mark rendering in DB (persists across restarts)
-    {
-        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-        db::update_clip_render_status(&conn, &clip_id, "rendering", None)
-            .map_err(|e| format!("DB error: {}", e))?;
-    }
-
     let job_id = format!("export-{}", clip_id);
     let clip_id_bg = clip_id.clone();
 
     queue.add_job(job_id, move |handle| async move {
+        // Mark rendering in DB inside the job, so status is only set once
+        // the job is actually running (not stuck if app crashes before queuing).
+        {
+            let db_path = db::db_path().map_err(|e| format!("DB path error: {e}"))?;
+            let conn = rusqlite::Connection::open(db_path)
+                .map_err(|e| format!("DB error: {e}"))?;
+            db::update_clip_render_status(&conn, &clip_id_bg, "rendering", None)
+                .map_err(|e| format!("DB error: {}", e))?;
+        }
         // ── Preparing ──
         handle.set_progress(5);
 
@@ -2033,7 +2202,8 @@ async fn export_clip(
         .map_err(|e| format!("Export task panicked: {e}"))?;
 
         // ── Update DB with result ──
-        let conn = rusqlite::Connection::open(db::db_path())
+        let db_path = db::db_path().map_err(|e| format!("DB path error: {e}"))?;
+        let conn = rusqlite::Connection::open(db_path)
             .map_err(|e| format!("DB error: {e}"))?;
 
         if result.success {
@@ -2071,7 +2241,7 @@ fn clip_to_export_request(
     let layout = vertical_crop::LayoutMode::from_db(&clip.facecam_layout);
 
     // Build caption filter if captions are enabled
-    let caption_filter = build_caption_filter(clip, target.height as i32);
+    let caption_filter = build_caption_filter(clip, target.width as i32, target.height as i32);
 
     vertical_crop::ExportRequest {
         source_path: std::path::PathBuf::from(vod_path),
@@ -2085,9 +2255,126 @@ fn clip_to_export_request(
     }
 }
 
+/// Per-style parameters for FFmpeg subtitle rendering.
+/// Maps the frontend CaptionStyle definitions in editTypes.ts to FFmpeg filter params.
+/// `font_size` matches the editTypes.ts values (designed for 1080px-wide output).
+struct SubStyle {
+    font_name: &'static str,
+    /// Font size in pixels at 1080px-wide reference (matches editTypes.ts fontSize).
+    /// Used for both SRT (via original_size) and drawtext paths.
+    font_size: i32,
+    /// CSS font-weight (100–900).  Mapped to ASS Bold flag (-1 for ≥700, 0 otherwise)
+    /// AND injected as `\b<weight>` override for sub-bold granularity (e.g. 800).
+    font_weight: i32,
+    /// ASS primary colour in &HBBGGRR format (text fill).
+    primary_colour: &'static str,
+    /// ASS outline colour.
+    outline_colour: &'static str,
+    /// ASS back colour in &HAABBGGRR (used when border_style=3 for opaque box).
+    back_colour: &'static str,
+    outline: i32,
+    shadow: i32,
+    /// 1 = outline + drop shadow, 3 = opaque background box.
+    border_style: i32,
+    /// Letter spacing in ASS units.
+    spacing: f32,
+    /// ASS \blur value for the glow layer — gaussian blur radius.
+    /// Only used when glow_colour is set.  0 = no glow layer.
+    glow_blur: i32,
+    /// Glow colour in &HAABBGGRR ASS format.  When non-empty a second "Glow"
+    /// ASS style is emitted: same text, larger outline in this colour, blurred,
+    /// rendered on a lower layer beneath the crisp foreground.
+    glow_colour: &'static str,
+    uppercase: bool,
+    /// Hex colour for drawtext fontcolor (CSS-order #RRGGBB or named).
+    dt_fontcolor: &'static str,
+    /// drawtext border width.
+    dt_borderw: i32,
+    /// Optional drawtext box=1 background colour (empty = no box).
+    dt_boxcolor: &'static str,
+}
+
+fn get_sub_style(id: &str) -> SubStyle {
+    match id {
+        // font_size values match editTypes.ts fontSize (px at 1080px-wide reference)
+        // font_weight values match editTypes.ts fontWeight
+        "bold-white" => SubStyle {
+            font_name: "Impact", font_size: 58, font_weight: 900,
+            primary_colour: "&HFFFFFF", outline_colour: "&H000000",
+            back_colour: "&H00000000", outline: 3, shadow: 1, border_style: 1,
+            spacing: 1.5, glow_blur: 0, glow_colour: "", uppercase: true,
+            dt_fontcolor: "white", dt_borderw: 4, dt_boxcolor: "",
+        },
+        "boxed" => SubStyle {
+            font_name: "Arial", font_size: 46, font_weight: 600,
+            primary_colour: "&HFFFFFF", outline_colour: "&H000000",
+            back_colour: "&H38000000", outline: 0, shadow: 0, border_style: 3,
+            spacing: 0.8, glow_blur: 0, glow_colour: "", uppercase: false,
+            dt_fontcolor: "white", dt_borderw: 0, dt_boxcolor: "black@0.78",
+        },
+        "neon" => SubStyle {
+            // Segoe UI is the frontend font on Windows; fall back to Arial
+            font_name: "Segoe UI", font_size: 54, font_weight: 800,
+            // #00FF88 → R=00 G=FF B=88 → ASS &HBBGGRR = &H88FF00
+            primary_colour: "&H88FF00", outline_colour: "&H000000",
+            back_colour: "&H00000000",
+            // CSS uses 4 stacked black shadows → thick outline.  Outline=4 matches.
+            outline: 4, shadow: 0, border_style: 1,
+            spacing: 1.2,
+            // Glow layer: bright green, gaussian-blurred behind text
+            // CSS: '0 0 8px #00ff8880' (#80 hex ≈ 50% opacity)
+            // ASS alpha: 00=opaque FF=transparent → &H80 = 50% transparent = 50% opaque
+            glow_blur: 8, glow_colour: "&H8088FF00",
+            uppercase: true,
+            dt_fontcolor: "#00FF88", dt_borderw: 3, dt_boxcolor: "",
+        },
+        "minimal" => SubStyle {
+            font_name: "Arial", font_size: 40, font_weight: 500,
+            primary_colour: "&HFFFFFF", outline_colour: "&H000000",
+            back_colour: "&H00000000", outline: 1, shadow: 1, border_style: 1,
+            spacing: 0.8, glow_blur: 0, glow_colour: "", uppercase: false,
+            dt_fontcolor: "white@0.92", dt_borderw: 1, dt_boxcolor: "",
+        },
+        "fire" => SubStyle {
+            font_name: "Impact", font_size: 56, font_weight: 900,
+            // #FF4444 → R=FF G=44 B=44 → ASS &H4444FF
+            primary_colour: "&H4444FF", outline_colour: "&H000000",
+            back_colour: "&H00000000", outline: 3, shadow: 1, border_style: 1,
+            spacing: 1.2, glow_blur: 0, glow_colour: "", uppercase: true,
+            dt_fontcolor: "#FF4444", dt_borderw: 4, dt_boxcolor: "",
+        },
+        // "clean" and any unknown style
+        _ => SubStyle {
+            font_name: "Arial", font_size: 52, font_weight: 700,
+            primary_colour: "&HFFFFFF", outline_colour: "&H000000",
+            back_colour: "&H00000000", outline: 2, shadow: 1, border_style: 1,
+            spacing: 0.4, glow_blur: 0, glow_colour: "", uppercase: false,
+            dt_fontcolor: "white", dt_borderw: 3, dt_boxcolor: "",
+        },
+    }
+}
+
+/// Convert SRT timestamp "HH:MM:SS,mmm" to ASS timestamp "H:MM:SS.cc".
+fn srt_time_to_ass(srt: &str) -> String {
+    // SRT: "00:01:23,456" → ASS: "0:01:23.46"
+    let s = srt.replace(',', ".");
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() == 3 {
+        let h: u32 = parts[0].parse().unwrap_or(0);
+        // ASS uses centiseconds (2 digits), SRT uses milliseconds (3 digits)
+        let sec_parts: Vec<&str> = parts[2].split('.').collect();
+        let secs = sec_parts[0];
+        let ms: u32 = sec_parts.get(1).unwrap_or(&"0").parse().unwrap_or(0);
+        let cs = ms / 10; // milliseconds → centiseconds
+        format!("{}:{}:{}.{:02}", h, parts[1], secs, cs)
+    } else {
+        "0:00:00.00".to_string()
+    }
+}
+
 /// Build the caption filter string from clip settings.
 /// Returns None if captions are disabled or empty.
-fn build_caption_filter(clip: &db::ClipRow, target_height: i32) -> Option<String> {
+fn build_caption_filter(clip: &db::ClipRow, target_width: i32, target_height: i32) -> Option<String> {
     if clip.captions_enabled != 1 {
         return None;
     }
@@ -2096,30 +2383,136 @@ fn build_caption_filter(clip: &db::ClipRow, target_height: i32) -> Option<String
         return None;
     }
 
+    let style = get_sub_style(&clip.caption_style);
     let is_srt = text.contains("-->") && text.lines().count() > 2;
 
+    // MarginV = distance from the BOTTOM edge for Alignment=2 (bottom-center).
+    // Bottom position: ~18% from bottom clears YouTube Shorts UI (likes/comments)
+    // and regular player controls (progress bar).  Target: text baseline at ~82% height.
+    let margin_v = match clip.captions_position.as_str() {
+        "top" => target_height - (target_height * 18 / 100),
+        "center" => target_height / 2 - 30,
+        _ => target_height * 18 / 100, // ~346px on 1920-tall → bottom of text at 82%
+    };
+
     if is_srt {
-        let srt_temp = std::env::temp_dir().join(format!("clip_{}.srt", clip.id));
-        std::fs::write(&srt_temp, text).ok();
-        let srt_path = srt_temp.to_string_lossy().to_string()
+        // ── Convert SRT → ASS with explicit PlayRes ──
+        // Writing a full ASS file with PlayResX/PlayResY matching the export
+        // resolution gives us pixel-accurate FontSize control.  The default
+        // SRT→ASS path in libass uses an unpredictable internal PlayRes which
+        // causes wild font-size scaling.
+
+        // ASS Bold field: -1 = bold (≥700), 0 = normal
+        let bold_flag: i32 = if style.font_weight >= 700 { -1 } else { 0 };
+
+        let has_glow = !style.glow_colour.is_empty();
+
+        // ASS header — PlayRes matches export resolution so FontSize = pixels
+        let mut ass = format!("\
+[Script Info]\r\n\
+ScriptType: v4.00+\r\n\
+PlayResX: {tw}\r\n\
+PlayResY: {th}\r\n\
+WrapStyle: 0\r\n\
+ScaledBorderAndShadow: yes\r\n\
+\r\n\
+[V4+ Styles]\r\n\
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\r\n\
+Style: Default,{fn_},{fs},&H00{pc},&H00FFFFFF,&H00{oc},{bc},{bold},0,0,0,100,100,{sp:.1},0,{bs},{ol},{sh},2,10,10,{mv},1\r\n",
+            tw = target_width,
+            th = target_height,
+            fn_ = style.font_name,
+            fs = style.font_size,
+            pc = &style.primary_colour[2..],  // strip "&H" prefix — ASS V4+ uses &HAABBGGRR
+            oc = &style.outline_colour[2..],
+            bc = style.back_colour,
+            bold = bold_flag,
+            sp = style.spacing,
+            bs = style.border_style,
+            ol = style.outline,
+            sh = style.shadow,
+            mv = margin_v,
+        );
+
+        // Optional glow layer style: creates a luminous halo behind the crisp text.
+        // - PrimaryColour: fully opaque glow colour (bright centre)
+        // - OutlineColour: semi-transparent glow colour (fading edges)
+        // - Large outline (8px) provides the glow spread area
+        // - The \blur override in each Dialogue line gaussian-blurs everything
+        if has_glow {
+            // Fully opaque version of glow colour (replace alpha byte with 00)
+            let glow_opaque = format!("&H00{}", &style.glow_colour[4..]);
+            ass.push_str(&format!("\
+Style: Glow,{fn_},{fs},{go},{go},{gc},&H00000000,{bold},0,0,0,100,100,{sp:.1},0,1,8,0,2,10,10,{mv},1\r\n",
+                fn_ = style.font_name,
+                fs = style.font_size,
+                go = glow_opaque,      // fully opaque green for primary/secondary
+                gc = style.glow_colour, // semi-transparent green for outline
+                bold = bold_flag,
+                sp = style.spacing,
+                mv = margin_v,
+            ));
+        }
+
+        ass.push_str("\r\n\
+[Events]\r\n\
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\r\n");
+
+        // Parse SRT cues and append as Dialogue lines
+        // SRT format: index\n HH:MM:SS,mmm --> HH:MM:SS,mmm \n text \n\n
+        let blocks: Vec<&str> = text.split("\n\n").filter(|b| !b.trim().is_empty()).collect();
+        for block in &blocks {
+            let lines: Vec<&str> = block.lines().collect();
+            // Find the timing line (contains "-->")
+            let timing_idx = lines.iter().position(|l| l.contains("-->"));
+            if let Some(ti) = timing_idx {
+                let timing = lines[ti];
+                let parts: Vec<&str> = timing.split("-->").collect();
+                if parts.len() == 2 {
+                    let start_ass = srt_time_to_ass(parts[0].trim());
+                    let end_ass = srt_time_to_ass(parts[1].trim());
+                    // Remaining lines after timing are the subtitle text
+                    let sub_text: String = lines[ti + 1..].iter()
+                        .map(|l| l.trim())
+                        .filter(|l| !l.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\\N"); // ASS line break
+                    let sub_text = if style.uppercase { sub_text.to_uppercase() } else { sub_text };
+
+                    // \b<weight> override for precise font weight (e.g. \b800 for extra-bold)
+                    let weight_tag = format!("\\b{}", style.font_weight);
+
+                    // If glow style exists, emit a blurred glow layer on Layer 0
+                    if has_glow {
+                        ass.push_str(&format!(
+                            "Dialogue: 0,{},{},Glow,,0,0,0,,{{{wt}\\blur{blur}}}{txt}\r\n",
+                            start_ass, end_ass,
+                            wt = weight_tag, blur = style.glow_blur, txt = sub_text
+                        ));
+                    }
+                    // Crisp foreground text on Layer 1 (renders on top of glow)
+                    ass.push_str(&format!(
+                        "Dialogue: 1,{},{},Default,,0,0,0,,{{{wt}}}{txt}\r\n",
+                        start_ass, end_ass, wt = weight_tag, txt = sub_text
+                    ));
+                }
+            }
+        }
+
+        let ass_temp = std::env::temp_dir().join(format!("clip_{}.ass", clip.id));
+        if let Err(e) = std::fs::write(&ass_temp, &ass) {
+            log::warn!("Failed to write temp ASS for subtitles filter: {}", e);
+            return None;
+        }
+        let ass_path = ass_temp.to_string_lossy().to_string()
             .replace('\\', "/")
             .replace(':', "\\:");
 
-        let ypos = match clip.captions_position.as_str() {
-            "top" => 30,
-            "center" => target_height / 2 - 30,
-            _ => target_height - 120,
-        };
-
-        Some(format!(
-            "subtitles='{}':\
-             force_style='FontSize=24,FontName=Arial,PrimaryColour=&HFFFFFF,\
-             OutlineColour=&H000000,Outline=2,Shadow=1,\
-             Alignment=2,MarginV={}'",
-            srt_path, ypos
-        ))
+        // Use the ass filter (not subtitles) to avoid any SRT re-parsing
+        Some(format!("ass='{}'", ass_path))
     } else {
-        let esc = text
+        let display_text = if style.uppercase { text.to_uppercase() } else { text.clone() };
+        let esc = display_text
             .replace('\\', "\\\\")
             .replace('\'', "'\\''")
             .replace(':', "\\:")
@@ -2130,12 +2523,17 @@ fn build_caption_filter(clip: &db::ClipRow, target_height: i32) -> Option<String
         let ypos = match clip.captions_position.as_str() {
             "top" => "h*0.08",
             "center" => "(h-text_h)/2",
-            _ => "h*0.85",
+            _ => "h*0.78",  // ~78% → clears YouTube Shorts/player UI at bottom
         };
-        Some(format!(
-            "drawtext=text='{}':fontsize=48:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y={}",
-            esc, ypos
-        ))
+
+        let mut filter = format!(
+            "drawtext=text='{text}':fontsize={fs}:fontcolor={fc}:borderw={bw}:bordercolor=black:x=(w-text_w)/2:y={y}",
+            text = esc, fs = style.font_size, fc = style.dt_fontcolor, bw = style.dt_borderw, y = ypos,
+        );
+        if !style.dt_boxcolor.is_empty() {
+            filter.push_str(&format!(":box=1:boxcolor={}:boxborderw=8", style.dt_boxcolor));
+        }
+        Some(filter)
     }
 }
 
@@ -2150,14 +2548,17 @@ fn update_clip_settings(
     captions_enabled: i32,
     captions_text: Option<String>,
     captions_position: String,
+    caption_style: String,
     facecam_layout: String,
+    game: Option<String>,
     db: State<'_, DbConn>,
 ) -> Result<(), String> {
     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
     db::update_clip_settings(
         &conn, &clip_id, &title, start_seconds, end_seconds,
         &aspect_ratio, captions_enabled, captions_text.as_deref(),
-        &captions_position, &facecam_layout,
+        &captions_position, &caption_style, &facecam_layout,
+        game.as_deref(),
     ).map_err(|e| format!("DB error: {}", e))
 }
 
@@ -2178,6 +2579,10 @@ fn get_clip_detail(clip_id: String, db: State<'_, DbConn>) -> Result<db::ClipRow
 async fn generate_post_captions(
     clip_id: String,
     seed: Option<u32>,
+    transcript_text: Option<String>,
+    current_title: Option<String>,
+    current_game: Option<String>,
+    selected_mode: Option<String>,
     db: State<'_, DbConn>,
 ) -> Result<post_captions::PostCaptions, String> {
     let (clip, tags, transcript, highlight_scores, resolved) = {
@@ -2196,7 +2601,10 @@ async fn generate_post_captions(
             .map(|t| t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
             .unwrap_or_default();
 
-        let transcript = highlight.and_then(|h| h.transcript_snippet.clone());
+        // Prefer full subtitle transcript from frontend; fall back to highlight snippet
+        let transcript = transcript_text
+            .filter(|t| !t.trim().is_empty())
+            .or_else(|| highlight.and_then(|h| h.transcript_snippet.clone()));
         let scores = (
             highlight.map(|h| h.audio_score).unwrap_or(0.0),
             highlight.map(|h| h.visual_score).unwrap_or(0.0),
@@ -2209,7 +2617,13 @@ async fn generate_post_captions(
         (clip, tags, transcript, scores, resolved)
     };
 
+    // Use frontend title if provided, otherwise fall back to clip title
+    let title = current_title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| clip.title.clone());
+
     let (audio, visual, chat) = highlight_scores;
+
+    // Default to direct_quote if no mode specified
+    let mode = selected_mode.unwrap_or_else(|| "direct_quote".into());
 
     // ── Try LLM generation if provider is configured ──
     if resolved.is_llm() {
@@ -2223,12 +2637,21 @@ async fn generate_post_captions(
         let tone_label = tone.label();
         let quote = post_captions::strong_quote_pub(transcript.as_deref());
 
-        log::info!("Caption generation: using {:?} (model: {})", resolved.provider, resolved.model);
+        // Prefer live game value from frontend; fall back to DB value
+        let game_name = current_game.as_deref()
+            .filter(|s| !s.is_empty())
+            .or(clip.game.as_deref());
 
-        // Currently only Claude is implemented; OpenAI/Gemini will use the same pattern
-        match post_captions::generate_llm(&resolved.api_key, &event_summary, quote.as_deref(), tone_label, &tags).await {
+        log::info!("Caption generation: using {:?} (model: {})", resolved.provider, resolved.model);
+        log::info!("Caption generation: mode = {}, game = {:?}", mode, game_name);
+
+        match post_captions::generate_llm(
+            &resolved.api_key, &resolved.model, &mode,
+            &event_summary, quote.as_deref(), tone_label,
+            &tags, transcript.as_deref(), &title, game_name,
+        ).await {
             Ok(llm_captions) => {
-                log::info!("LLM generated {} captions for clip {}", llm_captions.len(), clip_id);
+                log::info!("LLM generated {} caption(s) for clip {} (mode: {})", llm_captions.len(), clip_id, mode);
                 let hashtags = post_captions::build_hashtags_pub(&tags, tone);
                 let casual = llm_captions.first().map(|c| c.text.clone()).unwrap_or_default();
                 let funny  = llm_captions.get(1).map(|c| c.text.clone()).unwrap_or_default();
@@ -2254,11 +2677,91 @@ async fn generate_post_captions(
     Ok(post_captions::generate_from_parts(
         &tags,
         transcript.as_deref(),
-        &clip.title,
+        &title,
         clip.start_seconds,
         audio, visual, chat,
         seed.unwrap_or(0),
     ))
+}
+
+/// Generate an AI-powered clip title.
+///
+/// Uses the configured BYOK provider (Titles scope) to generate a short,
+/// punchy title for the clip.  Returns the local heuristic title as fallback.
+#[tauri::command]
+async fn generate_ai_title(
+    clip_id: String,
+    transcript_text: Option<String>,
+    current_game: Option<String>,
+    db: State<'_, DbConn>,
+) -> Result<String, String> {
+    let (clip, tags, transcript, highlight_scores, resolved) = {
+        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+
+        let clip = db::get_clip_by_id(&conn, &clip_id)
+            .map_err(|e| format!("DB error: {}", e))?
+            .ok_or("Clip not found")?;
+
+        let highlights = db::get_highlights_by_vod(&conn, &clip.vod_id)
+            .map_err(|e| format!("DB error: {}", e))?;
+        let highlight = highlights.iter().find(|h| h.id == clip.highlight_id);
+
+        let tags: Vec<String> = highlight
+            .and_then(|h| h.tags.as_ref())
+            .map(|t| t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+            .unwrap_or_default();
+
+        let transcript = transcript_text
+            .filter(|t| !t.trim().is_empty())
+            .or_else(|| highlight.and_then(|h| h.transcript_snippet.clone()));
+        let scores = (
+            highlight.map(|h| h.audio_score).unwrap_or(0.0),
+            highlight.map(|h| h.visual_score).unwrap_or(0.0),
+            highlight.map(|h| h.chat_score).unwrap_or(0.0),
+        );
+
+        let resolved = ai_provider::resolve(&conn, ai_provider::Scope::Titles);
+
+        (clip, tags, transcript, scores, resolved)
+    };
+
+    let (audio, visual, chat) = highlight_scores;
+
+    if resolved.is_llm() {
+        let tone = post_captions::classify_tone_pub(
+            &tags, transcript.as_deref(), audio, visual, chat,
+        );
+        let event = post_captions::primary_event_pub(&tags);
+        let event_summary = post_captions::synthesize_event_pub(
+            event, tone, &tags, 0,
+        );
+
+        let game_name = current_game.as_deref()
+            .filter(|s| !s.is_empty())
+            .or(clip.game.as_deref());
+
+        log::info!("AI title generation: using {:?} (model: {})", resolved.provider, resolved.model);
+
+        match post_captions::generate_llm_title(
+            &resolved.api_key, &resolved.model,
+            &event_summary, transcript.as_deref(),
+            &tags, game_name,
+        ).await {
+            Ok(title) => {
+                log::info!("AI generated title for clip {}: {}", clip_id, title);
+                return Ok(title);
+            }
+            Err(e) => {
+                log::warn!("AI title generation failed: {}", e);
+                if !resolved.fallback_to_free {
+                    return Err(format!("Title generation failed: {}", e));
+                }
+            }
+        }
+    }
+
+    // Fallback: return the existing clip title
+    Ok(clip.title)
 }
 
 /// Test an AI provider connection with a minimal API call.
@@ -2335,8 +2838,8 @@ async fn test_ai_connection(
 
         "gemini" => {
             let url = format!(
-                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-                model, api_key
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+                model
             );
             let body = serde_json::json!({
                 "contents": [{"parts": [{"text": "Say ok"}]}],
@@ -2344,6 +2847,7 @@ async fn test_ai_connection(
             });
             let resp = client
                 .post(&url)
+                .header("x-goog-api-key", api_key)
                 .json(&body)
                 .send()
                 .await
@@ -2398,12 +2902,42 @@ fn get_channels(db: State<'_, DbConn>) -> Result<Vec<db::ChannelRow>, String> {
     db::get_all_channels(&conn).map_err(|e| format!("DB error: {}", e))
 }
 
+/// Try to refresh the Twitch user access token using the stored refresh token.
+/// On success, saves the new tokens to the DB and returns the new access token.
+async fn try_refresh_twitch_token(db: &std::sync::Mutex<rusqlite::Connection>) -> Result<String, String> {
+    let refresh_token = {
+        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+        db::get_setting(&conn, "twitch_refresh_token")
+            .map_err(|e| format!("DB error: {}", e))?
+            .unwrap_or_default()
+    };
+
+    if refresh_token.is_empty() {
+        return Err("No refresh token available. Please log out and log in again.".into());
+    }
+
+    let token_resp = twitch::refresh_access_token(&refresh_token).await?;
+
+    // Save the new tokens
+    {
+        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+        db::save_setting(&conn, "twitch_user_access_token", &token_resp.access_token)
+            .map_err(|e| format!("DB error: {}", e))?;
+        if let Some(ref rt) = token_resp.refresh_token {
+            db::save_setting(&conn, "twitch_refresh_token", rt)
+                .map_err(|e| format!("DB error: {}", e))?;
+        }
+    }
+
+    Ok(token_resp.access_token)
+}
+
 #[tauri::command]
 async fn get_vods(
     channel_id: String,
     db: State<'_, DbConn>,
 ) -> Result<Vec<db::VodRow>, String> {
-    let (twitch_user_id, client_id, access_token) = {
+    let (twitch_user_id, mut access_token) = {
         let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
         let channels = db::get_all_channels(&conn).map_err(|e| format!("DB error: {}", e))?;
         let channel = channels
@@ -2411,20 +2945,30 @@ async fn get_vods(
             .find(|c| c.id == channel_id)
             .ok_or_else(|| "Channel not found".to_string())?
             .clone();
-        let cid = db::get_setting(&conn, "twitch_client_id")
-            .map_err(|e| format!("DB error: {}", e))?
-            .unwrap_or_default();
         let token = db::get_setting(&conn, "twitch_user_access_token")
             .map_err(|e| format!("DB error: {}", e))?
             .unwrap_or_default();
-        (channel.twitch_user_id, cid, token)
+        (channel.twitch_user_id, token)
     };
 
     if access_token.is_empty() {
         return Err("Not logged in. Please log in with Twitch first.".into());
     }
 
-    let videos = twitch::get_vods(&client_id, &access_token, &twitch_user_id).await?;
+    // Try fetching VODs; if 401, refresh token and retry
+    let videos = match twitch::get_vods(&access_token, &twitch_user_id).await {
+        Ok(v) => v,
+        Err(e) if e.contains("401") => {
+            access_token = try_refresh_twitch_token(&db).await?;
+            twitch::get_vods(&access_token, &twitch_user_id).await?
+        }
+        Err(e) => return Err(e),
+    };
+
+    // NOTE: The Twitch /videos endpoint does NOT return game_id/game_name, and the
+    // /channels endpoint only returns the CURRENT game (not the game played during a specific VOD).
+    // Game detection is handled at the clip level via subtitle keyword inference (detectGame()),
+    // or manually by the user via the "Set game" button on VOD cards.
 
     let vod_rows: Vec<db::VodRow> = videos
         .iter()
@@ -2447,8 +2991,9 @@ async fn get_vods(
                 file_size_bytes: None,
                 analysis_status: "pending".to_string(),
                 created_at: now,
-                download_progress: 0,
+                download_progress: Some(0),
                 analysis_progress: 0,
+                game_name: None,
             }
         })
         .collect();
@@ -2517,8 +3062,6 @@ fn delete_clip(clip_id: String, db: State<'_, DbConn>) -> Result<(), String> {
 /// Settings keys the frontend is allowed to read/write.
 /// Secrets (tokens, API keys) are accessed only through dedicated commands.
 const ALLOWED_SETTING_KEYS: &[&str] = &[
-    "twitch_client_id",
-    "twitch_client_secret",
     "claude_api_key",
     "openai_api_key",
     "gemini_api_key",
@@ -2527,6 +3070,9 @@ const ALLOWED_SETTING_KEYS: &[&str] = &[
     "download_dir",
     "theme",
     "auto_analyze",
+    "tiktok_handle",
+    "ui_settings",
+    "clip_templates",
 ];
 
 #[tauri::command]
@@ -2554,9 +3100,39 @@ fn get_setting(
     db::get_setting(&conn, &key).map_err(|e| format!("DB error: {}", e))
 }
 
+/// Open a URL in the user's default system browser (with their logged-in profile).
+/// Uses explorer.exe on Windows to avoid session/profile issues that cmd /c start causes.
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        // explorer.exe properly delegates to the default browser using the
+        // user's existing session — doesn't create new profiles or log them out.
+        std::process::Command::new("explorer")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("Failed to open URL: {}", e))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("Failed to open URL: {}", e))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("Failed to open URL: {}", e))?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn get_app_info() -> Result<AppInfo, String> {
-    let db_path = db::db_path();
+    let db_path = db::db_path().map_err(|e| format!("Data dir error: {e}"))?;
     let data_dir = db_path
         .parent()
         .map(|p| p.to_string_lossy().to_string())
@@ -2613,6 +3189,362 @@ fn pick_download_folder(app: AppHandle, db: State<'_, DbConn>) -> Result<Option<
     }
 }
 
+/// Save an already-exported clip to the configured download folder.
+///
+/// If a download folder is set in Settings, saves directly with no dialog.
+/// If no folder is configured, opens a folder picker, saves the selection to
+/// Settings for future use, then saves the file.
+/// Returns the saved file path, or None if the user cancelled the picker.
+#[tauri::command]
+fn save_clip_to_disk(
+    clip_id: String,
+    app: AppHandle,
+    db: State<'_, DbConn>,
+) -> Result<Option<String>, String> {
+    let (output_path, clip_title, aspect_ratio) = {
+        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+        let clip = db::get_clip_by_id(&conn, &clip_id)
+            .map_err(|e| format!("DB error: {}", e))?
+            .ok_or("Clip not found")?;
+        if clip.render_status != "completed" {
+            return Err("Clip has not been exported yet — export it first".into());
+        }
+        let path = clip.output_path.ok_or("No export file found for this clip")?;
+        (path, clip.title, clip.aspect_ratio)
+    };
+
+    let src = std::path::Path::new(&output_path);
+    if !src.exists() || std::fs::metadata(src).map(|m| m.len() == 0).unwrap_or(true) {
+        return Err("Export file is missing or empty — re-export the clip".into());
+    }
+
+    // Build descriptive filename: [title]_[format].mp4
+    let safe_title: String = clip_title.chars()
+        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let safe_title = safe_title.trim().to_string();
+    let format_tag = aspect_ratio.replace(':', "x"); // "9:16" → "9x16"
+    let filename = if safe_title.is_empty() {
+        format!("{}_{}.mp4", clip_id, format_tag)
+    } else {
+        format!("{}_{}.mp4", safe_title, format_tag)
+    };
+
+    // Resolve destination folder: use saved setting, or prompt user to pick one
+    let dest_folder = {
+        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+        match db::get_setting(&conn, "download_dir") {
+            Ok(Some(dir)) if !dir.is_empty() && std::path::Path::new(&dir).is_dir() => dir,
+            _ => {
+                // No folder configured — open picker
+                drop(conn); // release lock before blocking dialog
+                let picked = app.dialog()
+                    .file()
+                    .set_title("Choose a folder to save clips to")
+                    .blocking_pick_folder();
+                match picked {
+                    Some(folder) => {
+                        let folder_str = folder.to_string();
+                        // Save for future use
+                        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                        db::save_setting(&conn, "download_dir", &folder_str)
+                            .map_err(|e| format!("DB error: {}", e))?;
+                        log::info!("[save_clip_to_disk] Saved download folder: {}", folder_str);
+                        folder_str
+                    }
+                    None => return Ok(None), // User cancelled
+                }
+            }
+        }
+    };
+
+    // Ensure folder exists
+    std::fs::create_dir_all(&dest_folder)
+        .map_err(|e| format!("Failed to create download folder: {}", e))?;
+
+    // Avoid overwriting — append (2), (3), etc. if file exists
+    let dest_dir = std::path::Path::new(&dest_folder);
+    let stem = filename.trim_end_matches(".mp4");
+    let mut dest_path = dest_dir.join(&filename);
+    let mut counter = 2u32;
+    while dest_path.exists() {
+        dest_path = dest_dir.join(format!("{} ({}).mp4", stem, counter));
+        counter += 1;
+    }
+
+    std::fs::copy(src, &dest_path)
+        .map_err(|e| format!("Failed to save clip: {}", e))?;
+
+    let dest_str = dest_path.to_string_lossy().to_string();
+    log::info!("[save_clip_to_disk] Saved clip {} to: {}", clip_id, dest_str);
+    Ok(Some(dest_str))
+}
+
+/// Refresh VOD metadata from Twitch API (title, thumbnail, game) without re-downloading.
+/// Also backfills game_name to existing clips that don't have one.
+#[tauri::command]
+async fn refresh_vod_metadata(
+    vod_id: String,
+    db: State<'_, DbConn>,
+) -> Result<db::VodRow, String> {
+    let (twitch_video_id, mut access_token) = {
+        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+        let vod = db::get_vod_by_id(&conn, &vod_id)
+            .map_err(|e| format!("DB error: {}", e))?
+            .ok_or("VOD not found")?;
+        let token = db::get_setting(&conn, "twitch_user_access_token")
+            .map_err(|e| format!("DB error: {}", e))?
+            .unwrap_or_default();
+        (vod.twitch_video_id, token)
+    };
+
+    if access_token.is_empty() {
+        return Err("Not logged in. Please log in with Twitch first.".into());
+    }
+
+    // Fetch fresh video data from Twitch — retry with refreshed token on 401
+    let client = reqwest::Client::new();
+    let url = format!("https://api.twitch.tv/helix/videos?id={}", twitch_video_id);
+    let resp = client
+        .get(&url)
+        .header("Client-Id", twitch::client_id())
+        .header("Authorization", format!("Bearer {}", &access_token))
+        .send()
+        .await
+        .map_err(|e| format!("Twitch API error: {}", e))?;
+
+    let resp = if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        // Token expired — try refreshing
+        access_token = try_refresh_twitch_token(&db).await?;
+        client
+            .get(&url)
+            .header("Client-Id", twitch::client_id())
+            .header("Authorization", format!("Bearer {}", &access_token))
+            .send()
+            .await
+            .map_err(|e| format!("Twitch API error: {}", e))?
+    } else {
+        resp
+    };
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Twitch API {}: {}", status, body));
+    }
+
+    let resp_json: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Parse error: {}", e))?;
+
+    let video = resp_json["data"].as_array()
+        .and_then(|arr| arr.first())
+        .ok_or("Video not found on Twitch")?;
+
+    let title = video["title"].as_str().unwrap_or("").to_string();
+    let thumbnail_url = video["thumbnail_url"].as_str().unwrap_or("")
+        .replace("%{width}", "640")
+        .replace("%{height}", "360");
+
+    // Update VOD title and thumbnail in database.
+    // Preserve game_name — it's user-set and should not be cleared on metadata refresh.
+    {
+        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+        conn.execute(
+            "UPDATE vods SET title = ?1, thumbnail_url = ?2 WHERE id = ?3",
+            rusqlite::params![title, thumbnail_url, vod_id],
+        ).map_err(|e| format!("DB error: {}", e))?;
+
+        log::info!("[refresh_vod_metadata] Updated title/thumbnail for VOD {}", vod_id);
+    }
+
+    let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+    db::get_vod_by_id(&conn, &vod_id)
+        .map_err(|e| format!("DB error: {}", e))?
+        .ok_or_else(|| "VOD not found after update".to_string())
+}
+
+/// Set the game on a single clip (lightweight — used for auto-save after subtitle inference).
+#[tauri::command]
+fn set_clip_game(clip_id: String, game: Option<String>, db: State<'_, DbConn>) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+    let g = game.as_deref().filter(|s| !s.is_empty());
+    log::info!("[set_clip_game] Setting clip {} game to: {:?}", clip_id, g);
+    db::update_clip_game(&conn, &clip_id, g)
+        .map_err(|e| format!("DB error: {}", e))
+}
+
+/// Set the title on a single clip (lightweight — used for auto-save on blur).
+#[tauri::command]
+fn set_clip_title(clip_id: String, title: Option<String>, db: State<'_, DbConn>) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+    let t = title.as_deref().filter(|s| !s.is_empty());
+    log::info!("[set_clip_title] Setting clip {} title to: {:?}", clip_id, t);
+    db::update_clip_title(&conn, &clip_id, t)
+        .map_err(|e| format!("DB error: {}", e))
+}
+
+/// Save publish description and hashtags on a clip (auto-save on blur / after generation).
+#[tauri::command]
+fn set_clip_publish_meta(
+    clip_id: String,
+    description: Option<String>,
+    hashtags: Option<String>,
+    db: State<'_, DbConn>,
+) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+    let desc = description.as_deref().filter(|s| !s.is_empty());
+    let tags = hashtags.as_deref().filter(|s| !s.is_empty());
+    log::info!("[set_clip_publish_meta] clip {} desc_len={:?} tags={:?}", clip_id, desc.map(|d| d.len()), tags);
+    if let Some(d) = desc {
+        println!("[CLIPGOBLIN DEBUG] Publish description saved: \"{}\"", d);
+    }
+    db::update_clip_publish_meta(&conn, &clip_id, desc, tags)
+        .map_err(|e| format!("DB error: {}", e))
+}
+
+/// Manually set the game name on a VOD and propagate to all its clips.
+/// Used as a manual fallback when auto-detection doesn't work.
+#[tauri::command]
+fn set_vod_game(vod_id: String, game_name: Option<String>, db: State<'_, DbConn>) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+    let gn = game_name.as_deref().filter(|s| !s.is_empty());
+    log::info!("[set_vod_game] Setting VOD {} game to: {:?}", vod_id, gn);
+    db::update_vod_game_name(&conn, &vod_id, gn)
+        .map_err(|e| format!("DB error: {}", e))?;
+    // Propagate to all clips from this VOD (overwrite all, since user explicitly set it)
+    if let Some(name) = gn {
+        conn.execute(
+            "UPDATE clips SET game = ?1 WHERE vod_id = ?2",
+            rusqlite::params![name, vod_id],
+        ).map_err(|e| format!("DB error: {}", e))?;
+        log::info!("[set_vod_game] Propagated game to all clips for VOD {}", vod_id);
+    } else {
+        conn.execute(
+            "UPDATE clips SET game = NULL WHERE vod_id = ?1",
+            rusqlite::params![vod_id],
+        ).map_err(|e| format!("DB error: {}", e))?;
+    }
+    Ok(())
+}
+
+/// Delete a VOD's video file only (keeps clips and metadata).
+/// Returns how many bytes were freed.
+#[tauri::command]
+fn delete_vod_file(vod_id: String, db: State<'_, DbConn>) -> Result<u64, String> {
+    let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+    let vod = db::get_vod_by_id(&conn, &vod_id)
+        .map_err(|e| format!("DB error: {}", e))?
+        .ok_or("VOD not found")?;
+
+    let mut freed: u64 = 0;
+    if let Some(ref path) = vod.local_path {
+        let p = std::path::Path::new(path);
+        if p.exists() {
+            freed = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            std::fs::remove_file(p).map_err(|e| format!("Failed to delete file: {}", e))?;
+        }
+    }
+
+    // Update VOD status back to pending
+    conn.execute(
+        "UPDATE vods SET download_status = 'pending', local_path = NULL, file_size_bytes = NULL, download_progress = 0 WHERE id = ?1",
+        rusqlite::params![vod_id],
+    ).map_err(|e| format!("DB error: {}", e))?;
+
+    Ok(freed)
+}
+
+/// Delete a VOD and ALL its associated clips, highlights, and files.
+/// Returns how many bytes were freed.
+#[tauri::command]
+fn delete_vod_and_clips(vod_id: String, db: State<'_, DbConn>) -> Result<u64, String> {
+    println!("[delete_vod_and_clips] START vod_id={}", vod_id);
+    let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+    let vod = db::get_vod_by_id(&conn, &vod_id)
+        .map_err(|e| format!("DB error: {}", e))?
+        .ok_or("VOD not found")?;
+    println!("[delete_vod_and_clips] Found VOD: twitch_video_id={}", vod.twitch_video_id);
+
+    let mut freed: u64 = 0;
+
+    // Delete VOD video file
+    if let Some(ref path) = vod.local_path {
+        let p = std::path::Path::new(path);
+        if p.exists() {
+            freed += std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            std::fs::remove_file(p).ok();
+        }
+    }
+
+    // Delete exported clip files
+    let clips = db::get_clips_by_vod(&conn, &vod_id).unwrap_or_default();
+    for clip in &clips {
+        if let Some(ref path) = clip.output_path {
+            let p = std::path::Path::new(path);
+            if p.exists() {
+                freed += std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                std::fs::remove_file(p).ok();
+            }
+        }
+        if let Some(ref path) = clip.thumbnail_path {
+            let p = std::path::Path::new(path);
+            if p.exists() {
+                freed += std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                std::fs::remove_file(p).ok();
+            }
+        }
+    }
+
+    // Delete DB records: clips, highlights, then vod
+    db::delete_clips_for_vod(&conn, &vod_id).ok();
+    conn.execute(
+        "DELETE FROM highlights WHERE vod_id = ?1",
+        rusqlite::params![vod_id],
+    ).ok();
+    db::delete_vod(&conn, &vod_id)
+        .map_err(|e| format!("DB error deleting vod: {}", e))?;
+
+    // Verify the VOD is gone and the twitch_video_id is in deleted_vods
+    let still_exists = db::get_vod_by_id(&conn, &vod_id).ok().flatten().is_some();
+    println!("[delete_vod_and_clips] DONE vod_id={} freed={} still_in_db={}", vod_id, freed, still_exists);
+
+    Ok(freed)
+}
+
+/// Get VOD disk usage info (for delete confirmation dialog).
+#[tauri::command]
+fn get_vod_disk_usage(vod_id: String, db: State<'_, DbConn>) -> Result<serde_json::Value, String> {
+    let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+    let vod = db::get_vod_by_id(&conn, &vod_id)
+        .map_err(|e| format!("DB error: {}", e))?
+        .ok_or("VOD not found")?;
+
+    let vod_size: u64 = vod.local_path.as_ref()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    let clips = db::get_clips_by_vod(&conn, &vod_id).unwrap_or_default();
+    let clip_count = clips.len();
+    let mut clips_size: u64 = 0;
+    for clip in &clips {
+        if let Some(ref p) = clip.output_path {
+            clips_size += std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        }
+        if let Some(ref p) = clip.thumbnail_path {
+            clips_size += std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        }
+    }
+
+    Ok(serde_json::json!({
+        "vod_size": vod_size,
+        "clip_count": clip_count,
+        "clips_size": clips_size,
+        "total_size": vod_size + clips_size,
+        "has_file": vod.local_path.is_some(),
+    }))
+}
+
 /// Get a single VOD's details by ID.
 #[tauri::command]
 fn get_vod_detail(vod_id: String, db: State<'_, DbConn>) -> Result<db::VodRow, String> {
@@ -2620,6 +3552,14 @@ fn get_vod_detail(vod_id: String, db: State<'_, DbConn>) -> Result<db::VodRow, S
     db::get_vod_by_id(&conn, &vod_id)
         .map_err(|e| format!("DB error: {}", e))?
         .ok_or_else(|| "VOD not found".to_string())
+}
+
+/// Set a VOD's analysis status (used by frontend to mark stale analyses as failed).
+#[tauri::command]
+fn set_vod_analysis_status(vod_id: String, status: String, db: State<'_, DbConn>) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+    db::update_vod_analysis_status(&conn, &vod_id, &status)
+        .map_err(|e| format!("DB error: {}", e))
 }
 
 /// Get the current download directory (from settings or default).
@@ -2635,6 +3575,90 @@ fn get_download_dir(db: State<'_, DbConn>) -> Result<String, String> {
                 .join("downloads");
             Ok(default.to_string_lossy().to_string())
         }
+    }
+}
+
+// ── Storage location commands ──
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoragePaths {
+    exports_dir: String,
+    downloads_dir: String,
+    data_dir: String,
+}
+
+/// Return the three key storage directories, creating them if needed.
+#[tauri::command]
+fn get_storage_paths(db: State<'_, DbConn>) -> Result<StoragePaths, String> {
+    let base = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("clipviral");
+
+    let exports_dir = base.join("exports");
+    let data_dir = base.clone();
+
+    // Downloads dir may be user-configured
+    let downloads_dir = {
+        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+        match db::get_setting(&conn, "download_dir") {
+            Ok(Some(dir)) if !dir.is_empty() => std::path::PathBuf::from(dir),
+            _ => base.join("downloads"),
+        }
+    };
+
+    Ok(StoragePaths {
+        exports_dir: exports_dir.to_string_lossy().to_string(),
+        downloads_dir: downloads_dir.to_string_lossy().to_string(),
+        data_dir: data_dir.to_string_lossy().to_string(),
+    })
+}
+
+/// Open a folder in the system file manager, creating it first if it doesn't exist.
+#[tauri::command]
+fn open_folder(path: String) -> Result<(), String> {
+    let dir = std::path::Path::new(&path);
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("Failed to create directory: {e}"))?;
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open folder: {e}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open folder: {e}"))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open folder: {e}"))?;
+    }
+    Ok(())
+}
+
+// ── Detection stats command ──
+
+/// Get detection stats for a VOD (stored after analysis completes).
+#[tauri::command]
+fn get_detection_stats(vod_id: String, db: State<'_, DbConn>) -> Result<Option<serde_json::Value>, String> {
+    let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+    let key = format!("detection_stats_{}", vod_id);
+    match db::get_setting(&conn, &key) {
+        Ok(Some(json_str)) => {
+            let val: serde_json::Value = serde_json::from_str(&json_str)
+                .map_err(|e| format!("Failed to parse detection stats: {e}"))?;
+            Ok(Some(val))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -2806,7 +3830,7 @@ async fn get_transcript(vod_id: String, db: State<'_, DbConn>, hw: State<'_, Har
     let vod_path_clone = vod_path.clone();
     let hw_clone = hw.inner().clone();
     let result = tokio::task::spawn_blocking(move || {
-        run_transcription(&vod_path_clone, &output_str, &hw_clone)
+        run_transcription(&vod_path_clone, &output_str, &hw_clone, None)
     }).await.map_err(|e| format!("Task error: {}", e))??;
 
     // Save path to VOD record
@@ -2842,7 +3866,12 @@ async fn connect_platform(
     .map_err(|e| e.to_string())?;
 
     // 2. Bind callback server (sync, before opening browser to avoid race)
-    let listener = social::youtube::bind_callback_server().map_err(|e| e.to_string())?;
+    //    Each platform listens on its own port.
+    let listener = match platform.as_str() {
+        "youtube" => social::youtube::bind_callback_server().map_err(|e| e.to_string())?,
+        "tiktok" => social::tiktok::bind_callback_server().map_err(|e| e.to_string())?,
+        _ => return Err(format!("No callback server for platform: {}", platform)),
+    };
 
     // 3. Open browser
     app.opener()
@@ -2850,8 +3879,13 @@ async fn connect_platform(
         .map_err(|e| format!("Failed to open browser: {}", e))?;
 
     // 4. Wait for OAuth callback (blocking — runs on a threadpool thread)
+    let plat = platform.clone();
     let code = tokio::task::spawn_blocking(move || {
-        social::youtube::wait_for_auth_code(listener)
+        match plat.as_str() {
+            "youtube" => social::youtube::wait_for_auth_code(listener),
+            "tiktok" => social::tiktok::wait_for_auth_code(listener),
+            _ => Err(crate::error::AppError::NotSupported(format!("{} callback", plat))),
+        }
     })
     .await
     .map_err(|e| format!("Task error: {}", e))?
@@ -2906,7 +3940,7 @@ fn get_all_connected_accounts(
 /// Uses `block_in_place` + `block_on` for the `!Send` adapter future (see
 /// `connect_platform` for the full explanation of the `?Send` workaround).
 #[tauri::command]
-fn upload_to_platform(
+async fn upload_to_platform(
     platform: String,
     meta: social::UploadMeta,
     db: State<'_, DbConn>,
@@ -2926,6 +3960,8 @@ fn upload_to_platform(
 
     // Upload: adapter.upload_video is async(?Send), needs &Connection for
     // duplicate checks, token refresh, and recording upload history.
+    // Must use block_in_place because the trait future is !Send (same
+    // pattern as connect_platform — see that command for details).
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
     let result = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current()
@@ -2949,11 +3985,268 @@ fn get_upload_status(
         .map_err(|e| format!("DB error: {}", e))
 }
 
+/// Get ALL upload history entries for a clip (all platforms).
+#[tauri::command]
+fn get_clip_upload_history(
+    clip_id: String,
+    db: State<'_, DbConn>,
+) -> Result<Vec<db::UploadHistoryRow>, String> {
+    let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
+    db::get_uploads_for_clip(&conn, &clip_id)
+        .map_err(|e| format!("DB error: {}", e))
+}
+
+/// Clear the deleted_vods table so Twitch API re-fetch can re-insert all VODs.
+#[tauri::command]
+fn restore_deleted_vods(db: State<'_, DbConn>) -> Result<u64, String> {
+    let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
+    let count = conn.execute("DELETE FROM deleted_vods", [])
+        .map_err(|e| format!("DB error: {}", e))?;
+    println!("[restore_deleted_vods] Cleared {} entries from deleted_vods", count);
+    Ok(count as u64)
+}
+
+// ── Scheduled upload commands ──
+
+#[tauri::command]
+fn schedule_upload(
+    clip_id: String,
+    platform: String,
+    scheduled_time: String,
+    meta_json: String,
+    db: State<'_, DbConn>,
+) -> Result<String, String> {
+    let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let row = db::ScheduledUploadRow {
+        id: id.clone(),
+        clip_id,
+        platform,
+        scheduled_time,
+        status: "pending".to_string(),
+        retry_count: 0,
+        error_message: None,
+        video_url: None,
+        upload_meta_json: Some(meta_json),
+        created_at: now,
+    };
+    db::insert_scheduled_upload(&conn, &row).map_err(|e| format!("DB error: {}", e))?;
+    Ok(id)
+}
+
+#[tauri::command]
+fn list_scheduled_uploads(db: State<'_, DbConn>) -> Result<Vec<db::ScheduledUploadRow>, String> {
+    let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
+    db::get_all_scheduled_uploads(&conn).map_err(|e| format!("DB error: {}", e))
+}
+
+#[tauri::command]
+fn get_scheduled_uploads_for_clip(
+    clip_id: String,
+    db: State<'_, DbConn>,
+) -> Result<Vec<db::ScheduledUploadRow>, String> {
+    let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
+    db::get_scheduled_uploads_for_clip(&conn, &clip_id).map_err(|e| format!("DB error: {}", e))
+}
+
+#[tauri::command]
+fn cancel_scheduled_upload(id: String, db: State<'_, DbConn>) -> Result<bool, String> {
+    let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
+    db::cancel_scheduled_upload(&conn, &id).map_err(|e| format!("DB error: {}", e))
+}
+
+#[tauri::command]
+fn reschedule_upload(id: String, new_time: String, db: State<'_, DbConn>) -> Result<bool, String> {
+    let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
+    db::reschedule_upload(&conn, &id, &new_time).map_err(|e| format!("DB error: {}", e))
+}
+
+// ── Background upload scheduler ──
+
+/// Background scheduler: checks for due scheduled uploads every 60 seconds.
+fn start_upload_scheduler(handle: tauri::AppHandle) {
+    use std::time::Duration;
+
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create scheduler runtime");
+        rt.block_on(async move {
+            // Wait 10 seconds after startup before first check
+            tokio::time::sleep(Duration::from_secs(10)).await;
+
+            loop {
+                // Process due uploads
+                if let Err(e) = process_due_uploads(&handle) {
+                    log::error!("[Scheduler] Error processing scheduled uploads: {}", e);
+                }
+
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        });
+    });
+}
+
+fn process_due_uploads(handle: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    use tauri::Emitter;
+
+    let db: tauri::State<'_, DbConn> = handle.state();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let due_uploads = {
+        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+        db::get_due_scheduled_uploads(&conn, &now).map_err(|e| format!("DB error: {}", e))?
+    };
+
+    if due_uploads.is_empty() {
+        return Ok(());
+    }
+
+    log::info!("[Scheduler] Found {} due scheduled upload(s)", due_uploads.len());
+
+    for upload in due_uploads {
+        // Mark as uploading
+        {
+            let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+            db::update_scheduled_upload_status(&conn, &upload.id, "uploading", None, None, None)
+                .map_err(|e| format!("DB error: {}", e))?;
+        }
+
+        let _ = handle.emit("scheduled-upload-status", serde_json::json!({
+            "id": upload.id, "status": "uploading", "clip_id": upload.clip_id, "platform": upload.platform,
+        }));
+
+        // Parse upload meta from stored JSON
+        let meta: social::UploadMeta = match &upload.upload_meta_json {
+            Some(json) => match serde_json::from_str(json) {
+                Ok(m) => m,
+                Err(e) => {
+                    let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                    db::update_scheduled_upload_status(&conn, &upload.id, "failed", Some(&format!("Invalid meta: {}", e)), None, None).ok();
+                    continue;
+                }
+            },
+            None => {
+                let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                db::update_scheduled_upload_status(&conn, &upload.id, "failed", Some("Missing upload metadata"), None, None).ok();
+                continue;
+            }
+        };
+
+        // Get clip output path
+        let output_path = {
+            let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+            let clip = match db::get_clip_by_id(&conn, &upload.clip_id) {
+                Ok(Some(c)) => c,
+                _ => {
+                    db::update_scheduled_upload_status(&conn, &upload.id, "failed", Some("Clip not found"), None, None).ok();
+                    continue;
+                }
+            };
+            match social::validate_export_file(clip.output_path.as_deref()) {
+                Ok(p) => p.to_string(),
+                Err(e) => {
+                    db::update_scheduled_upload_status(&conn, &upload.id, "failed", Some(&format!("Export file: {}", e)), None, None).ok();
+                    continue;
+                }
+            }
+        };
+
+        // Perform the upload (synchronous, same pattern as upload_to_platform command)
+        let adapter = match social::get_adapter(&upload.platform) {
+            Ok(a) => a,
+            Err(e) => {
+                let conn = db.lock().map_err(|e2| format!("DB lock: {}", e2))?;
+                db::update_scheduled_upload_status(&conn, &upload.id, "failed", Some(&format!("No adapter: {}", e)), None, None).ok();
+                continue;
+            }
+        };
+
+        let result = {
+            let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(adapter.upload_video(&conn, &output_path, &meta))
+            })
+        };
+
+        match result {
+            Ok(ref upload_result) => {
+                match &upload_result.status {
+                    social::UploadResultStatus::Complete { video_url } => {
+                        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                        db::update_scheduled_upload_status(&conn, &upload.id, "completed", None, Some(video_url), None).ok();
+                        db::upsert_upload(&conn, &upload.clip_id, &upload.platform, video_url).ok();
+                        log::info!("[Scheduler] Upload completed: {} -> {}", upload.id, video_url);
+                        let _ = handle.emit("scheduled-upload-status", serde_json::json!({
+                            "id": upload.id, "status": "completed", "clip_id": upload.clip_id,
+                            "platform": upload.platform, "video_url": video_url,
+                        }));
+                    }
+                    social::UploadResultStatus::Duplicate { existing_url } => {
+                        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                        db::update_scheduled_upload_status(&conn, &upload.id, "completed", None, Some(existing_url), None).ok();
+                        let _ = handle.emit("scheduled-upload-status", serde_json::json!({
+                            "id": upload.id, "status": "completed", "clip_id": upload.clip_id,
+                            "platform": upload.platform, "video_url": existing_url,
+                        }));
+                    }
+                    social::UploadResultStatus::Failed { error } => {
+                        handle_scheduled_failure(handle, &db, &upload, error);
+                    }
+                    _ => {
+                        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                        db::update_scheduled_upload_status(&conn, &upload.id, "completed", None, None, None).ok();
+                    }
+                }
+            }
+            Err(e) => {
+                handle_scheduled_failure(handle, &db, &upload, &e.to_string());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_scheduled_failure(
+    handle: &tauri::AppHandle,
+    db: &std::sync::Mutex<rusqlite::Connection>,
+    upload: &db::ScheduledUploadRow,
+    error: &str,
+) {
+    use tauri::Emitter;
+    let conn = match db.lock() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    if upload.retry_count < 1 {
+        log::warn!("[Scheduler] Upload {} failed (will retry): {}", upload.id, error);
+        db::update_scheduled_upload_status(&conn, &upload.id, "pending", Some(error), None, Some(upload.retry_count + 1)).ok();
+        let _ = handle.emit("scheduled-upload-status", serde_json::json!({
+            "id": upload.id, "status": "retrying", "clip_id": upload.clip_id,
+            "platform": upload.platform, "error": error,
+        }));
+    } else {
+        log::error!("[Scheduler] Upload {} permanently failed: {}", upload.id, error);
+        db::update_scheduled_upload_status(&conn, &upload.id, "failed", Some(error), None, None).ok();
+        let _ = handle.emit("scheduled-upload-status", serde_json::json!({
+            "id": upload.id, "status": "failed", "clip_id": upload.clip_id,
+            "platform": upload.platform, "error": error,
+        }));
+    }
+}
+
 // ── App entry point ──
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let conn = db::init_db().expect("Failed to initialize database");
+
+    // Recover any clips that were stuck mid-render when the app last closed
+    db::recover_stale_rendering(&conn).ok();
+
     let hw = hardware::detect_hardware();
 
     tauri::Builder::default()
@@ -2994,6 +4287,7 @@ pub fn run() {
             get_clip_detail,
             get_all_highlights,
             generate_post_captions,
+            generate_ai_title,
             test_ai_connection,
             save_clip_performance,
             get_clip_performance,
@@ -3006,6 +4300,27 @@ pub fn run() {
             get_all_connected_accounts,
             upload_to_platform,
             get_upload_status,
+            get_clip_upload_history,
+            restore_deleted_vods,
+            schedule_upload,
+            list_scheduled_uploads,
+            get_scheduled_uploads_for_clip,
+            cancel_scheduled_upload,
+            reschedule_upload,
+            open_url,
+            save_clip_to_disk,
+            refresh_vod_metadata,
+            set_clip_game,
+            set_clip_title,
+            set_clip_publish_meta,
+            set_vod_game,
+            delete_vod_file,
+            delete_vod_and_clips,
+            get_vod_disk_usage,
+            set_vod_analysis_status,
+            get_storage_paths,
+            open_folder,
+            get_detection_stats,
         ])
         .setup(|app| {
             // Wire job queue events into Tauri's frontend event system.
@@ -3015,6 +4330,13 @@ pub fn run() {
                 use tauri::Emitter;
                 let _ = handle.emit("job-progress", &event);
             });
+
+            // Start background upload scheduler
+            let scheduler_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                start_upload_scheduler(scheduler_handle);
+            });
+
             Ok(())
         })
         .run(tauri::generate_context!())

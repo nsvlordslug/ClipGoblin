@@ -59,7 +59,7 @@ pub struct UploadResult {
 //  Platform adapter trait
 // ═══════════════════════════════════════════════════════════════════
 
-#[async_trait::async_trait]
+#[async_trait::async_trait(?Send)]
 pub trait PlatformAdapter: Send + Sync {
     fn platform_id(&self) -> &'static str;
     fn is_ready(&self, db: &Connection) -> Result<bool, AppError>;

@@ -2,17 +2,21 @@ use rusqlite::{Connection, Result as SqliteResult, params};
 use std::path::PathBuf;
 
 /// Get the path to the database file.
-pub fn db_path() -> PathBuf {
+///
+/// Returns an error instead of panicking if the data directory cannot be
+/// determined or created (e.g. sandboxed environment, permission issue).
+pub fn db_path() -> std::result::Result<PathBuf, String> {
     let data_dir = dirs::data_dir()
-        .expect("Failed to get data directory")
+        .ok_or_else(|| "Could not determine your system data directory. Ensure your OS user profile is set up correctly.".to_string())?
         .join("clipviral");
-    std::fs::create_dir_all(&data_dir).expect("Failed to create data directory");
-    data_dir.join("clipviral.db")
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|e| format!("Failed to create data directory at {}: {}", data_dir.display(), e))?;
+    Ok(data_dir.join("clipviral.db"))
 }
 
 /// Initialize the database, creating tables if they don't exist.
 pub fn init_db() -> SqliteResult<Connection> {
-    let path = db_path();
+    let path = db_path().map_err(|e| rusqlite::Error::InvalidParameterName(e))?;
     let conn = Connection::open(&path)?;
 
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
@@ -110,6 +114,17 @@ pub fn init_db() -> SqliteResult<Connection> {
     // Event summary: one-sentence description of what happened
     conn.execute("ALTER TABLE highlights ADD COLUMN event_summary TEXT", []).ok();
 
+    // Caption style: which visual style is selected for subtitle rendering
+    conn.execute("ALTER TABLE clips ADD COLUMN caption_style TEXT DEFAULT 'clean'", []).ok();
+
+    // Game metadata: captured from Twitch API or set manually
+    conn.execute("ALTER TABLE vods ADD COLUMN game_name TEXT", []).ok();
+    conn.execute("ALTER TABLE clips ADD COLUMN game TEXT", []).ok();
+
+    // Publish metadata: caption description and hashtags persisted per clip
+    conn.execute("ALTER TABLE clips ADD COLUMN publish_description TEXT", []).ok();
+    conn.execute("ALTER TABLE clips ADD COLUMN publish_hashtags TEXT", []).ok();
+
     // Performance tracking for feedback loop
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS clip_performance (
@@ -153,7 +168,120 @@ pub fn init_db() -> SqliteResult<Connection> {
         )"
     )?;
 
+    // Track explicitly deleted VODs so Twitch API re-fetch doesn't re-insert them
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS deleted_vods (
+            twitch_video_id TEXT PRIMARY KEY,
+            deleted_at TEXT NOT NULL
+        )"
+    )?;
+
+    // Scheduled uploads: queue clips for future upload to social platforms
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS scheduled_uploads (
+            id TEXT PRIMARY KEY,
+            clip_id TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            scheduled_time TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            retry_count INTEGER DEFAULT 0,
+            error_message TEXT,
+            video_url TEXT,
+            upload_meta_json TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (clip_id) REFERENCES clips(id) ON DELETE CASCADE
+        )"
+    )?;
+
     Ok(conn)
+}
+
+// ── Row types ──
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChannelRow {
+    pub id: String,
+    pub twitch_user_id: String,
+    pub twitch_login: String,
+    pub display_name: String,
+    pub profile_image_url: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct VodRow {
+    pub id: String,
+    pub channel_id: String,
+    pub twitch_video_id: String,
+    pub title: String,
+    pub duration_seconds: i64,
+    pub stream_date: String,
+    pub thumbnail_url: String,
+    pub vod_url: String,
+    pub download_status: String,
+    pub local_path: Option<String>,
+    pub file_size_bytes: Option<i64>,
+    pub analysis_status: String,
+    pub created_at: String,
+    pub download_progress: Option<i64>,
+    pub analysis_progress: i64,
+    pub game_name: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HighlightRow {
+    pub id: String,
+    pub vod_id: String,
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    pub virality_score: f64,
+    pub audio_score: f64,
+    pub visual_score: f64,
+    pub chat_score: f64,
+    pub transcript_snippet: Option<String>,
+    pub description: Option<String>,
+    pub tags: Option<String>,
+    pub thumbnail_path: Option<String>,
+    pub created_at: String,
+    pub confidence_score: Option<f64>,
+    pub explanation: Option<String>,
+    pub event_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ClipRow {
+    pub id: String,
+    pub highlight_id: String,
+    pub vod_id: String,
+    pub title: String,
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    pub aspect_ratio: String,
+    pub crop_x: Option<i32>,
+    pub crop_y: Option<i32>,
+    pub crop_width: Option<i32>,
+    pub crop_height: Option<i32>,
+    pub captions_enabled: i32,
+    pub captions_text: Option<String>,
+    pub captions_position: String,
+    pub caption_style: String,
+    pub facecam_layout: String,
+    pub render_status: String,
+    pub output_path: Option<String>,
+    pub thumbnail_path: Option<String>,
+    pub created_at: String,
+    pub game: Option<String>,
+    pub publish_description: Option<String>,
+    pub publish_hashtags: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UploadHistoryRow {
+    pub id: String,
+    pub clip_id: String,
+    pub platform: String,
+    pub video_url: Option<String>,
+    pub uploaded_at: Option<String>,
 }
 
 // ── Settings helpers ──
@@ -188,8 +316,13 @@ pub fn insert_channel(
 ) -> SqliteResult<()> {
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT OR REPLACE INTO twitch_channels (id, twitch_user_id, twitch_login, display_name, profile_image_url, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO twitch_channels (id, twitch_user_id, twitch_login, display_name, profile_image_url, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(id) DO UPDATE SET
+           twitch_user_id = excluded.twitch_user_id,
+           twitch_login = excluded.twitch_login,
+           display_name = excluded.display_name,
+           profile_image_url = excluded.profile_image_url",
         params![id, twitch_user_id, twitch_login, display_name, profile_image_url, now],
     )?;
     Ok(())
@@ -225,19 +358,33 @@ pub fn delete_all_channels(conn: &Connection) -> SqliteResult<()> {
 // ── VOD helpers ──
 
 pub fn upsert_vod(conn: &Connection, vod: &VodRow) -> SqliteResult<()> {
+    // Skip VODs that were explicitly deleted by the user
+    let deleted_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM deleted_vods WHERE twitch_video_id = ?1",
+            params![vod.twitch_video_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    if deleted_count > 0 {
+        println!("[upsert_vod] SKIPPING twitch_video_id={} — found in deleted_vods table", vod.twitch_video_id);
+        return Ok(());
+    }
+
     conn.execute(
-        "INSERT INTO vods (id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        "INSERT INTO vods (id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress, game_name)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
          ON CONFLICT(twitch_video_id) DO UPDATE SET
             title = excluded.title,
             duration_seconds = excluded.duration_seconds,
             thumbnail_url = excluded.thumbnail_url,
-            vod_url = excluded.vod_url",
+            vod_url = excluded.vod_url,
+            game_name = COALESCE(vods.game_name, excluded.game_name)",
         params![
             vod.id, vod.channel_id, vod.twitch_video_id, vod.title,
             vod.duration_seconds, vod.stream_date, vod.thumbnail_url, vod.vod_url,
             vod.download_status, vod.local_path, vod.file_size_bytes, vod.analysis_status,
-            vod.created_at, vod.download_progress, vod.analysis_progress,
+            vod.created_at, vod.download_progress, vod.analysis_progress, vod.game_name,
         ],
     )?;
     Ok(())
@@ -245,7 +392,7 @@ pub fn upsert_vod(conn: &Connection, vod: &VodRow) -> SqliteResult<()> {
 
 pub fn get_vods_by_channel(conn: &Connection, channel_id: &str) -> SqliteResult<Vec<VodRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress
+        "SELECT id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress, game_name
          FROM vods WHERE channel_id = ?1 ORDER BY stream_date DESC"
     )?;
     let rows = stmt.query_map(params![channel_id], |row| {
@@ -265,6 +412,7 @@ pub fn get_vods_by_channel(conn: &Connection, channel_id: &str) -> SqliteResult<
             created_at: row.get(12)?,
             download_progress: row.get(13)?,
             analysis_progress: row.get::<_, Option<i64>>(14)?.unwrap_or(0),
+            game_name: row.get(15)?,
         })
     })?;
     rows.collect()
@@ -272,7 +420,7 @@ pub fn get_vods_by_channel(conn: &Connection, channel_id: &str) -> SqliteResult<
 
 pub fn get_vod_by_id(conn: &Connection, id: &str) -> SqliteResult<Option<VodRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress
+        "SELECT id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress, game_name
          FROM vods WHERE id = ?1"
     )?;
     let mut rows = stmt.query_map(params![id], |row| {
@@ -292,6 +440,7 @@ pub fn get_vod_by_id(conn: &Connection, id: &str) -> SqliteResult<Option<VodRow>
             created_at: row.get(12)?,
             download_progress: row.get(13)?,
             analysis_progress: row.get::<_, Option<i64>>(14)?.unwrap_or(0),
+            game_name: row.get(15)?,
         })
     })?;
     match rows.next() {
@@ -370,8 +519,23 @@ pub fn get_highlights_by_vod(conn: &Connection, vod_id: &str) -> SqliteResult<Ve
 
 pub fn insert_highlight(conn: &Connection, h: &HighlightRow) -> SqliteResult<()> {
     conn.execute(
-        "INSERT OR REPLACE INTO highlights (id, vod_id, start_seconds, end_seconds, virality_score, audio_score, visual_score, chat_score, transcript_snippet, description, tags, thumbnail_path, created_at, confidence_score, explanation, event_summary)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        "INSERT INTO highlights (id, vod_id, start_seconds, end_seconds, virality_score, audio_score, visual_score, chat_score, transcript_snippet, description, tags, thumbnail_path, created_at, confidence_score, explanation, event_summary)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+         ON CONFLICT(id) DO UPDATE SET
+           vod_id = excluded.vod_id,
+           start_seconds = excluded.start_seconds,
+           end_seconds = excluded.end_seconds,
+           virality_score = excluded.virality_score,
+           audio_score = excluded.audio_score,
+           visual_score = excluded.visual_score,
+           chat_score = excluded.chat_score,
+           transcript_snippet = excluded.transcript_snippet,
+           description = excluded.description,
+           tags = excluded.tags,
+           thumbnail_path = excluded.thumbnail_path,
+           confidence_score = excluded.confidence_score,
+           explanation = excluded.explanation,
+           event_summary = excluded.event_summary",
         params![h.id, h.vod_id, h.start_seconds, h.end_seconds, h.virality_score, h.audio_score, h.visual_score, h.chat_score, h.transcript_snippet, h.description, h.tags, h.thumbnail_path, h.created_at, h.confidence_score, h.explanation, h.event_summary],
     )?;
     Ok(())
@@ -386,9 +550,29 @@ pub fn delete_highlights_for_vod(conn: &Connection, vod_id: &str) -> SqliteResul
 
 pub fn insert_clip(conn: &Connection, c: &ClipRow) -> SqliteResult<()> {
     conn.execute(
-        "INSERT OR REPLACE INTO clips (id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, facecam_layout, render_status, output_path, thumbnail_path, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
-        params![c.id, c.highlight_id, c.vod_id, c.title, c.start_seconds, c.end_seconds, c.aspect_ratio, c.crop_x, c.crop_y, c.crop_width, c.crop_height, c.captions_enabled, c.captions_text, c.captions_position, c.facecam_layout, c.render_status, c.output_path, c.thumbnail_path, c.created_at],
+        "INSERT INTO clips (id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, render_status, output_path, thumbnail_path, created_at, game)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+         ON CONFLICT(id) DO UPDATE SET
+           highlight_id = excluded.highlight_id,
+           vod_id = excluded.vod_id,
+           title = excluded.title,
+           start_seconds = excluded.start_seconds,
+           end_seconds = excluded.end_seconds,
+           aspect_ratio = excluded.aspect_ratio,
+           crop_x = excluded.crop_x,
+           crop_y = excluded.crop_y,
+           crop_width = excluded.crop_width,
+           crop_height = excluded.crop_height,
+           captions_enabled = excluded.captions_enabled,
+           captions_text = excluded.captions_text,
+           captions_position = excluded.captions_position,
+           caption_style = excluded.caption_style,
+           facecam_layout = excluded.facecam_layout,
+           render_status = excluded.render_status,
+           output_path = excluded.output_path,
+           thumbnail_path = excluded.thumbnail_path,
+           game = excluded.game",
+        params![c.id, c.highlight_id, c.vod_id, c.title, c.start_seconds, c.end_seconds, c.aspect_ratio, c.crop_x, c.crop_y, c.crop_width, c.crop_height, c.captions_enabled, c.captions_text, c.captions_position, c.caption_style, c.facecam_layout, c.render_status, c.output_path, c.thumbnail_path, c.created_at, c.game],
     )?;
     Ok(())
 }
@@ -424,18 +608,22 @@ fn read_clip_row(row: &rusqlite::Row) -> rusqlite::Result<ClipRow> {
         captions_enabled: row.get(11)?,
         captions_text: row.get(12)?,
         captions_position: row.get::<_, Option<String>>(13)?.unwrap_or_else(|| "bottom".to_string()),
-        facecam_layout: row.get::<_, Option<String>>(14)?.unwrap_or_else(|| "none".to_string()),
-        render_status: row.get(15)?,
-        output_path: row.get(16)?,
-        thumbnail_path: row.get(17)?,
-        created_at: row.get(18)?,
+        caption_style: row.get::<_, Option<String>>(14)?.unwrap_or_else(|| "clean".to_string()),
+        facecam_layout: row.get::<_, Option<String>>(15)?.unwrap_or_else(|| "none".to_string()),
+        render_status: row.get(16)?,
+        output_path: row.get(17)?,
+        thumbnail_path: row.get(18)?,
+        created_at: row.get(19)?,
+        game: row.get(20)?,
+        publish_description: row.get(21)?,
+        publish_hashtags: row.get(22)?,
     })
 }
 
-const CLIP_SELECT: &str = "SELECT id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, facecam_layout, render_status, output_path, thumbnail_path, created_at FROM clips";
+const CLIP_SELECT: &str = "SELECT id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, render_status, output_path, thumbnail_path, created_at, game, publish_description, publish_hashtags FROM clips";
 
 pub fn get_all_clips(conn: &Connection) -> SqliteResult<Vec<ClipRow>> {
-    let mut stmt = conn.prepare(&format!("{} ORDER BY vod_id, start_seconds ASC", CLIP_SELECT))?;
+    let mut stmt = conn.prepare(&format!("{} ORDER BY created_at DESC, start_seconds ASC", CLIP_SELECT))?;
     let rows = stmt.query_map([], |row| read_clip_row(row))?;
     rows.collect()
 }
@@ -459,13 +647,28 @@ pub fn update_clip_settings(
     captions_enabled: i32,
     captions_text: Option<&str>,
     captions_position: &str,
+    caption_style: &str,
     facecam_layout: &str,
+    game: Option<&str>,
 ) -> SqliteResult<()> {
     conn.execute(
-        "UPDATE clips SET title = ?1, start_seconds = ?2, end_seconds = ?3, aspect_ratio = ?4, captions_enabled = ?5, captions_text = ?6, captions_position = ?7, facecam_layout = ?8, render_status = 'pending' WHERE id = ?9",
-        params![title, start_seconds, end_seconds, aspect_ratio, captions_enabled, captions_text, captions_position, facecam_layout, clip_id],
+        "UPDATE clips SET title = ?1, start_seconds = ?2, end_seconds = ?3, aspect_ratio = ?4, captions_enabled = ?5, captions_text = ?6, captions_position = ?7, caption_style = ?8, facecam_layout = ?9, game = ?10, render_status = 'pending' WHERE id = ?11",
+        params![title, start_seconds, end_seconds, aspect_ratio, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, game, clip_id],
     )?;
     Ok(())
+}
+
+/// Reset any clips stuck in "rendering" status back to "pending".
+/// Called once at startup to recover from crashes during export.
+pub fn recover_stale_rendering(conn: &Connection) -> SqliteResult<usize> {
+    let count = conn.execute(
+        "UPDATE clips SET render_status = 'pending' WHERE render_status = 'rendering'",
+        [],
+    )?;
+    if count > 0 {
+        log::warn!("Recovered {} clip(s) stuck in 'rendering' status", count);
+    }
+    Ok(count)
 }
 
 pub fn update_clip_render_status(
@@ -487,6 +690,62 @@ pub fn update_clip_thumbnail(conn: &Connection, clip_id: &str, thumbnail_path: O
         params![thumbnail_path, clip_id],
     )?;
     Ok(())
+}
+
+/// Update just the game_name on a VOD.
+pub fn update_vod_game_name(conn: &Connection, vod_id: &str, game_name: Option<&str>) -> SqliteResult<()> {
+    conn.execute(
+        "UPDATE vods SET game_name = ?1 WHERE id = ?2",
+        params![game_name, vod_id],
+    )?;
+    Ok(())
+}
+
+/// Backfill the game field on all clips for a given VOD that don't already have a game set.
+pub fn backfill_clips_game(conn: &Connection, vod_id: &str, game_name: &str) -> SqliteResult<usize> {
+    let updated = conn.execute(
+        "UPDATE clips SET game = ?1 WHERE vod_id = ?2 AND (game IS NULL OR game = '')",
+        params![game_name, vod_id],
+    )?;
+    Ok(updated)
+}
+
+/// Delete a VOD from the database and remember its twitch_video_id
+/// so that future Twitch API fetches don't re-insert it.
+pub fn delete_vod(conn: &Connection, vod_id: &str) -> SqliteResult<()> {
+    // First, capture the twitch_video_id before deleting
+    let twitch_vid_id: Option<String> = conn
+        .query_row(
+            "SELECT twitch_video_id FROM vods WHERE id = ?1",
+            params![vod_id],
+            |row| row.get(0),
+        )
+        .ok();
+
+    println!("[delete_vod] vod_id={} twitch_video_id={:?}", vod_id, twitch_vid_id);
+
+    let rows_deleted = conn.execute("DELETE FROM vods WHERE id = ?1", params![vod_id])?;
+    println!("[delete_vod] rows deleted from vods table: {}", rows_deleted);
+
+    // Record the deletion so upsert_vod won't re-insert this VOD
+    if let Some(ref tvid) = twitch_vid_id {
+        let now = chrono::Utc::now().to_rfc3339();
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO deleted_vods (twitch_video_id, deleted_at) VALUES (?1, ?2)",
+            params![tvid, now],
+        )?;
+        println!("[delete_vod] recorded in deleted_vods: twitch_video_id={} rows_inserted={}", tvid, inserted);
+    } else {
+        println!("[delete_vod] WARNING: no twitch_video_id found for vod_id={}, cannot prevent re-insertion", vod_id);
+    }
+    Ok(())
+}
+
+/// Get all clips for a given VOD.
+pub fn get_clips_by_vod(conn: &Connection, vod_id: &str) -> SqliteResult<Vec<ClipRow>> {
+    let mut stmt = conn.prepare(&format!("{} WHERE vod_id = ?1 ORDER BY start_seconds ASC", CLIP_SELECT))?;
+    let rows = stmt.query_map(params![vod_id], |row| read_clip_row(row))?;
+    rows.collect()
 }
 
 // ── Transcript helpers ──
@@ -511,6 +770,39 @@ pub fn update_clip_keyword_boost(conn: &Connection, clip_id: &str, boost: f64) -
     conn.execute(
         "UPDATE clips SET keyword_boost = ?1 WHERE id = ?2",
         params![boost, clip_id],
+    )?;
+    Ok(())
+}
+
+/// Update just the game field on a single clip (lightweight — no full settings save needed).
+pub fn update_clip_game(conn: &Connection, clip_id: &str, game: Option<&str>) -> SqliteResult<()> {
+    conn.execute(
+        "UPDATE clips SET game = ?1 WHERE id = ?2",
+        params![game, clip_id],
+    )?;
+    Ok(())
+}
+
+/// Update just the title field on a single clip (lightweight — used for auto-save on blur).
+pub fn update_clip_title(conn: &Connection, clip_id: &str, title: Option<&str>) -> SqliteResult<()> {
+    conn.execute(
+        "UPDATE clips SET title = ?1 WHERE id = ?2",
+        params![title, clip_id],
+    )?;
+    Ok(())
+}
+
+/// Update publish description and hashtags on a clip (lightweight — used for auto-save).
+/// Hashtags are stored as a comma-separated string.
+pub fn update_clip_publish_meta(
+    conn: &Connection,
+    clip_id: &str,
+    description: Option<&str>,
+    hashtags: Option<&str>,
+) -> SqliteResult<()> {
+    conn.execute(
+        "UPDATE clips SET publish_description = ?1, publish_hashtags = ?2 WHERE id = ?3",
+        params![description, hashtags, clip_id],
     )?;
     Ok(())
 }
@@ -700,6 +992,22 @@ pub fn get_upload_for_clip(conn: &Connection, clip_id: &str, platform: &str) -> 
     }
 }
 
+pub fn get_uploads_for_clip(conn: &Connection, clip_id: &str) -> SqliteResult<Vec<UploadHistoryRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, clip_id, platform, video_url, uploaded_at FROM upload_history WHERE clip_id = ?1"
+    )?;
+    let rows = stmt.query_map(params![clip_id], |row| {
+        Ok(UploadHistoryRow {
+            id: row.get(0)?,
+            clip_id: row.get(1)?,
+            platform: row.get(2)?,
+            video_url: row.get(3)?,
+            uploaded_at: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
 pub fn upsert_upload(conn: &Connection, clip_id: &str, platform: &str, video_url: &str) -> SqliteResult<()> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
@@ -713,104 +1021,137 @@ pub fn upsert_upload(conn: &Connection, clip_id: &str, platform: &str, video_url
 }
 
 pub fn delete_settings_for_platform(conn: &Connection, platform: &str) -> SqliteResult<()> {
-    let prefixes = [
-        format!("{}_access_token", platform),
-        format!("{}_refresh_token", platform),
-        format!("{}_token_expiry", platform),
-        format!("{}_channel_name", platform),
-        format!("{}_channel_id", platform),
-    ];
-    for key in &prefixes {
-        conn.execute("DELETE FROM settings WHERE key = ?1", params![key])?;
-    }
+    // Delete all settings that start with "{platform}_"
+    // This covers YouTube (channel_name, channel_id) and
+    // TikTok (open_id, display_name, refresh_expiry) without
+    // needing to enumerate every key per platform.
+    conn.execute(
+        "DELETE FROM settings WHERE key LIKE ?1",
+        params![format!("{}_%", platform)],
+    )?;
     Ok(())
 }
 
-// ── Row structs ──
+// ── Scheduled upload types ──
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ChannelRow {
-    pub id: String,
-    pub twitch_user_id: String,
-    pub twitch_login: String,
-    pub display_name: String,
-    pub profile_image_url: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct VodRow {
-    pub id: String,
-    pub channel_id: String,
-    pub twitch_video_id: String,
-    pub title: String,
-    pub duration_seconds: i64,
-    pub stream_date: String,
-    pub thumbnail_url: String,
-    pub vod_url: String,
-    pub download_status: String,
-    pub local_path: Option<String>,
-    pub file_size_bytes: Option<i64>,
-    pub analysis_status: String,
-    pub created_at: String,
-    pub download_progress: i64,
-    pub analysis_progress: i64,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct HighlightRow {
-    pub id: String,
-    pub vod_id: String,
-    pub start_seconds: f64,
-    pub end_seconds: f64,
-    pub virality_score: f64,
-    pub audio_score: f64,
-    pub visual_score: f64,
-    pub chat_score: f64,
-    pub transcript_snippet: Option<String>,
-    pub description: Option<String>,
-    pub tags: Option<String>,
-    pub thumbnail_path: Option<String>,
-    pub created_at: String,
-    /// Calibrated user-facing confidence (0.0–0.98).  NULL for pre-migration rows.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub confidence_score: Option<f64>,
-    /// Factual explanation of why this highlight was selected.  NULL for pre-migration rows.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub explanation: Option<String>,
-    /// One-sentence event summary (what happened).  NULL for pre-migration rows.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub event_summary: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ClipRow {
-    pub id: String,
-    pub highlight_id: String,
-    pub vod_id: String,
-    pub title: String,
-    pub start_seconds: f64,
-    pub end_seconds: f64,
-    pub aspect_ratio: String,
-    pub crop_x: Option<i32>,
-    pub crop_y: Option<i32>,
-    pub crop_width: Option<i32>,
-    pub crop_height: Option<i32>,
-    pub captions_enabled: i32,
-    pub captions_text: Option<String>,
-    pub captions_position: String,
-    pub facecam_layout: String,
-    pub render_status: String,
-    pub output_path: Option<String>,
-    pub thumbnail_path: Option<String>,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct UploadHistoryRow {
+pub struct ScheduledUploadRow {
     pub id: String,
     pub clip_id: String,
     pub platform: String,
+    pub scheduled_time: String,
+    pub status: String,
+    pub retry_count: i64,
+    pub error_message: Option<String>,
     pub video_url: Option<String>,
-    pub uploaded_at: String,
+    pub upload_meta_json: Option<String>,
+    pub created_at: String,
+}
+
+// ── Scheduled upload helpers ──
+
+pub fn insert_scheduled_upload(conn: &Connection, row: &ScheduledUploadRow) -> SqliteResult<()> {
+    conn.execute(
+        "INSERT INTO scheduled_uploads (id, clip_id, platform, scheduled_time, status, retry_count, error_message, video_url, upload_meta_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![row.id, row.clip_id, row.platform, row.scheduled_time, row.status, row.retry_count, row.error_message, row.video_url, row.upload_meta_json, row.created_at],
+    )?;
+    Ok(())
+}
+
+pub fn get_all_scheduled_uploads(conn: &Connection) -> SqliteResult<Vec<ScheduledUploadRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, clip_id, platform, scheduled_time, status, retry_count, error_message, video_url, upload_meta_json, created_at
+         FROM scheduled_uploads ORDER BY scheduled_time ASC"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ScheduledUploadRow {
+            id: row.get(0)?,
+            clip_id: row.get(1)?,
+            platform: row.get(2)?,
+            scheduled_time: row.get(3)?,
+            status: row.get(4)?,
+            retry_count: row.get(5)?,
+            error_message: row.get(6)?,
+            video_url: row.get(7)?,
+            upload_meta_json: row.get(8)?,
+            created_at: row.get(9)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn get_scheduled_uploads_for_clip(conn: &Connection, clip_id: &str) -> SqliteResult<Vec<ScheduledUploadRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, clip_id, platform, scheduled_time, status, retry_count, error_message, video_url, upload_meta_json, created_at
+         FROM scheduled_uploads WHERE clip_id = ?1 ORDER BY scheduled_time ASC"
+    )?;
+    let rows = stmt.query_map(params![clip_id], |row| {
+        Ok(ScheduledUploadRow {
+            id: row.get(0)?,
+            clip_id: row.get(1)?,
+            platform: row.get(2)?,
+            scheduled_time: row.get(3)?,
+            status: row.get(4)?,
+            retry_count: row.get(5)?,
+            error_message: row.get(6)?,
+            video_url: row.get(7)?,
+            upload_meta_json: row.get(8)?,
+            created_at: row.get(9)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn get_due_scheduled_uploads(conn: &Connection, now: &str) -> SqliteResult<Vec<ScheduledUploadRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, clip_id, platform, scheduled_time, status, retry_count, error_message, video_url, upload_meta_json, created_at
+         FROM scheduled_uploads WHERE status = 'pending' AND scheduled_time <= ?1 ORDER BY scheduled_time ASC"
+    )?;
+    let rows = stmt.query_map(params![now], |row| {
+        Ok(ScheduledUploadRow {
+            id: row.get(0)?,
+            clip_id: row.get(1)?,
+            platform: row.get(2)?,
+            scheduled_time: row.get(3)?,
+            status: row.get(4)?,
+            retry_count: row.get(5)?,
+            error_message: row.get(6)?,
+            video_url: row.get(7)?,
+            upload_meta_json: row.get(8)?,
+            created_at: row.get(9)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn update_scheduled_upload_status(
+    conn: &Connection,
+    id: &str,
+    status: &str,
+    error_message: Option<&str>,
+    video_url: Option<&str>,
+    retry_count: Option<i64>,
+) -> SqliteResult<()> {
+    conn.execute(
+        "UPDATE scheduled_uploads SET status = ?1, error_message = ?2, video_url = ?3, retry_count = COALESCE(?4, retry_count) WHERE id = ?5",
+        params![status, error_message, video_url, retry_count, id],
+    )?;
+    Ok(())
+}
+
+pub fn cancel_scheduled_upload(conn: &Connection, id: &str) -> SqliteResult<bool> {
+    let changed = conn.execute(
+        "UPDATE scheduled_uploads SET status = 'cancelled' WHERE id = ?1 AND status = 'pending'",
+        params![id],
+    )?;
+    Ok(changed > 0)
+}
+
+pub fn reschedule_upload(conn: &Connection, id: &str, new_time: &str) -> SqliteResult<bool> {
+    let changed = conn.execute(
+        "UPDATE scheduled_uploads SET scheduled_time = ?1, status = 'pending', error_message = NULL WHERE id = ?2",
+        params![new_time, id],
+    )?;
+    Ok(changed > 0)
 }

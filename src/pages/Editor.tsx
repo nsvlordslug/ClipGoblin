@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Save, Download, Check, Loader2, Type, MessageSquare, Upload, Film, Link2 } from 'lucide-react'
+import { ArrowLeft, Save, Download, Check, Loader2, Type, MessageSquare, Upload, Film, Link2, Undo2, Redo2, RotateCcw, RefreshCw, Bookmark, ChevronDown, X, Plus, Clock, CalendarClock } from 'lucide-react'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+// Use our own Tauri command to open URLs in the system default browser
+const openUrl = (url: string) => invoke('open_url', { url })
 import type { Clip, Vod } from '../types'
 import type { UploadResult } from '../stores/platformStore'
 import { CAPTION_STYLES, EXPORT_PRESETS, LAYOUT_OPTIONS } from '../lib/editTypes'
@@ -24,8 +26,20 @@ import type { SubtitleSegment } from '../lib/subtitleUtils'
 import { usePlaybackStore } from '../stores/playbackStore'
 import { usePlatformStore, PLATFORM_INFO } from '../stores/platformStore'
 import { useMontageStore } from '../stores/montageStore'
+import Tooltip from '../components/Tooltip'
 import PublishComposer from '../components/PublishComposer'
 import type { PublishMetadata } from '../components/PublishComposer'
+import { useScheduleStore } from '../stores/scheduleStore'
+import PlatformUploadSelector, { getPresetForPlatform, getDefaultVisibility, getDefaultYouTubeSubFormat, expandYouTubeSubFormat } from '../components/PlatformUploadSelector'
+import type { PlatformUploadState, YouTubeSubFormat } from '../components/PlatformUploadSelector'
+import { useEditorHistory } from '../hooks/useEditorHistory'
+import type { EditorSnapshot } from '../hooks/useEditorHistory'
+import ExportProgressBar from '../components/ExportProgressBar'
+import { useTemplateStore } from '../stores/templateStore'
+import { useAiStore } from '../stores/aiStore'
+import type { ClipTemplate } from '../stores/templateStore'
+import { generateStandaloneTitle } from '../lib/publishCopyGenerator'
+import type { ClipContext } from '../lib/publishCopyGenerator'
 
 function formatTime(seconds: number) {
   const m = Math.floor(seconds / 60)
@@ -46,92 +60,268 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 // ── Pill selector ──
 function PillGroup<T extends string>({ value, options, onChange }: {
   value: T
-  options: { value: T; label: string; desc?: string }[]
+  options: { value: T; label: string; desc?: string; tooltip?: string }[]
   onChange: (v: T) => void
 }) {
   return (
     <div className="flex gap-2">
-      {options.map(opt => (
-        <button
-          key={opt.value}
-          onClick={() => onChange(opt.value)}
-          className={`flex-1 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer border ${
-            value === opt.value
-              ? 'bg-violet-600/20 text-violet-400 border-violet-500/40'
-              : 'bg-surface-900 text-slate-400 border-surface-600 hover:bg-surface-700'
-          }`}
-        >
-          <div>{opt.label}</div>
-          {opt.desc && <div className="text-xs opacity-60">{opt.desc}</div>}
-        </button>
-      ))}
+      {options.map(opt => {
+        const btn = (
+          <button
+            key={opt.value}
+            onClick={() => onChange(opt.value)}
+            className={`flex-1 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer border ${
+              value === opt.value
+                ? 'bg-violet-600/20 text-violet-400 border-violet-500/40'
+                : 'bg-surface-900 text-slate-400 border-surface-600 hover:bg-surface-700'
+            }`}
+          >
+            <div>{opt.label}</div>
+            {opt.desc && <div className="text-xs opacity-60">{opt.desc}</div>}
+          </button>
+        )
+        return opt.tooltip
+          ? <Tooltip key={opt.value} text={opt.tooltip} position="bottom">{btn}</Tooltip>
+          : <span key={opt.value}>{btn}</span>
+      })}
     </div>
   )
 }
 
 /** Action buttons — extracted so platform hooks are called at component level */
-function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, exportDone, exportError, vodPath, exportPreset, onSave, onExport, publishMeta }: {
+function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, exportDone, exportError, vodPath, exportPreset, onSave, onExportForFormat, publishMeta, clipTitle, uploadHistory, onUploadHistoryChange }: {
   clipId: string; clip: Clip | null; saving: boolean; saved: boolean
   exporting: boolean; exportProgress: number; exportDone: boolean; exportError: string | null
   vodPath: boolean
   exportPreset: { id: string; aspectRatio: string; name: string }
-  onSave: () => void; onExport: () => void
+  onSave: () => void
+  /** Export with a specific aspect ratio override (for multi-platform re-export) */
+  onExportForFormat: (aspectRatio: string) => Promise<void>
   publishMeta?: { title: string; description: string; hashtags: string[]; visibility: string }
+  /** The main clip title from the editor (single source of truth for upload title) */
+  clipTitle: string
+  /** Previously uploaded platform URLs (persisted in DB) */
+  uploadHistory: Record<string, string>
+  /** Callback to update upload history after a new upload */
+  onUploadHistoryChange: (platform: string, url: string) => void
 }) {
   const { connect, isConnected } = usePlatformStore()
   const { projects, addClip, createProject } = useMontageStore()
   const navigate = useNavigate()
+  const [downloading, setDownloading] = useState(false)
+  const [downloadResult, setDownloadResult] = useState<string | null>(null)
 
-  const platformKey = exportPreset.id === 'tiktok' ? 'tiktok'
-    : exportPreset.id === 'reels' ? 'instagram'
-    : exportPreset.id === 'shorts' || exportPreset.id === 'youtube' ? 'youtube'
-    : null
+  // Multi-platform upload state
+  const [platformSelections, setPlatformSelections] = useState<Record<string, boolean>>({})
+  const [platformStates, setPlatformStates] = useState<Record<string, PlatformUploadState>>({})
+  const [platformVisibilities, setPlatformVisibilities] = useState<Record<string, string>>({})
+  const [multiUploading, setMultiUploading] = useState(false)
 
-  const info = platformKey ? PLATFORM_INFO[platformKey] : null
-  const connected = platformKey ? isConnected(platformKey) : false
+  // Schedule state
+  const { schedule: scheduleUpload, getForClip: getScheduledForClip } = useScheduleStore()
+  const [scheduleMode, setScheduleMode] = useState(false)
+  const [scheduleTime, setScheduleTime] = useState('')
+  const [scheduledUploads, setScheduledUploads] = useState<Array<{ id: string; platform: string; scheduled_time: string }>>([])
+  const [scheduling, setScheduling] = useState(false)
 
-  const [uploading, setUploading] = useState(false)
-  const [uploadDone, setUploadDone] = useState(false)
-  const [uploadError, setUploadError] = useState<string | null>(null)
-  const [uploadUrl, setUploadUrl] = useState<string | null>(null)
-  const [duplicateUrl, setDuplicateUrl] = useState<string | null>(null)
-
-  const handleUpload = async (force = false) => {
-    if (!clipId || !platformKey) return
-    setUploading(true)
-    setUploadError(null)
-    setUploadDone(false)
-    setDuplicateUrl(null)
-
-    try {
-      // If not connected, connect first (seamless connect-then-upload)
-      if (!isConnected(platformKey)) {
-        await connect(platformKey)
-      }
-
-      const result = await invoke<UploadResult>('upload_to_platform', {
-        platform: platformKey,
-        clipId,
-        title: publishMeta?.title || clip?.title || 'Untitled Clip',
-        description: publishMeta?.description || '',
-        tags: publishMeta?.hashtags || [],
-        visibility: publishMeta?.visibility || 'unlisted',
-        force,
-      })
-
-      if (result.status.status === 'complete') {
-        setUploadDone(true)
-        setUploadUrl(result.status.video_url)
-      } else if (result.status.status === 'duplicate') {
-        setDuplicateUrl(result.status.existing_url)
-      } else if (result.status.status === 'failed') {
-        setUploadError(result.status.error)
-      }
-    } catch (e: any) {
-      setUploadError(typeof e === 'string' ? e : e?.message || 'Upload failed')
-    } finally {
-      setUploading(false)
+  // Load existing scheduled uploads for this clip
+  useEffect(() => {
+    if (clipId) {
+      getScheduledForClip(clipId).then(uploads => {
+        setScheduledUploads(uploads.filter(u => u.status === 'pending').map(u => ({
+          id: u.id, platform: u.platform, scheduled_time: u.scheduled_time,
+        })))
+      }).catch(() => {})
     }
+  }, [clipId, getScheduledForClip])
+
+  // YouTube sub-format state
+  const clipDuration = clip ? Math.max(0, clip.end_seconds - clip.start_seconds) : 0
+  const [youtubeSubFormat, setYoutubeSubFormat] = useState<YouTubeSubFormat>(() =>
+    getDefaultYouTubeSubFormat(clipDuration, exportPreset.aspectRatio)
+  )
+  const [ytSubManuallySet, setYtSubManuallySet] = useState(false)
+  useEffect(() => {
+    if (ytSubManuallySet || !clip) return
+    const newDefault = getDefaultYouTubeSubFormat(clipDuration, exportPreset.aspectRatio)
+    setYoutubeSubFormat(newDefault)
+  }, [clipDuration, exportPreset.aspectRatio, clip, ytSubManuallySet])
+
+  const handleYouTubeSubFormatChange = (sub: YouTubeSubFormat) => {
+    setYtSubManuallySet(true)
+    setYoutubeSubFormat(sub)
+    for (const key of expandYouTubeSubFormat(sub)) {
+      if (!platformVisibilities[key]) {
+        setPlatformVisibilities(prev => ({ ...prev, [key]: getDefaultVisibility(key) }))
+      }
+    }
+  }
+
+  const togglePlatform = (platform: string) => {
+    setPlatformSelections(prev => ({ ...prev, [platform]: !prev[platform] }))
+    if (platform === 'youtube') {
+      for (const key of expandYouTubeSubFormat(youtubeSubFormat)) {
+        if (!platformVisibilities[key]) {
+          setPlatformVisibilities(prev => ({ ...prev, [key]: getDefaultVisibility(key) }))
+        }
+      }
+    } else if (!platformVisibilities[platform]) {
+      setPlatformVisibilities(prev => ({ ...prev, [platform]: getDefaultVisibility(platform) }))
+    }
+  }
+
+  const selectedPlatforms = Object.entries(platformSelections)
+    .filter(([_, checked]) => checked)
+    .flatMap(([platform]) =>
+      platform === 'youtube' ? expandYouTubeSubFormat(youtubeSubFormat) : [platform]
+    )
+
+  const anyUploading = multiUploading
+  const allDone = selectedPlatforms.length > 0 &&
+    selectedPlatforms.every(p => platformStates[p]?.status === 'done')
+
+  // Build upload metadata — includes title from main field, caption, and hashtags
+  const buildUploadMeta = (platform: string, force = false) => {
+    const baseDesc = publishMeta?.description || ''
+    const tags = publishMeta?.hashtags || []
+    const hashtagSuffix = tags.length > 0 ? tags.map(t => `#${t}`).join(' ') : ''
+    // For YouTube: hashtags go in both tags array AND appended to description
+    // For TikTok: hashtags appended to description
+    const description = hashtagSuffix
+      ? (baseDesc ? baseDesc + '\n\n' + hashtagSuffix : hashtagSuffix)
+      : baseDesc
+    return {
+      clip_id: clipId,
+      title: clipTitle || clip?.title || 'Untitled Clip',
+      description,
+      tags,
+      visibility: platformVisibilities[platform] || getDefaultVisibility(platform),
+      force,
+    }
+  }
+
+  // Upload to a single platform
+  const uploadToPlatform = async (platform: string, force = false): Promise<PlatformUploadState> => {
+    const adapterPlatform = platform === 'youtube_shorts' ? 'youtube' : platform
+    try {
+      if (!isConnected(adapterPlatform)) {
+        await connect(adapterPlatform)
+      }
+      const result = await invoke<UploadResult>('upload_to_platform', {
+        platform: adapterPlatform,
+        meta: buildUploadMeta(platform, force),
+      })
+      if (result.status.status === 'complete') {
+        const url = result.status.video_url
+        onUploadHistoryChange(platform, url)
+        return { status: 'done', progress: 100, videoUrl: url }
+      } else if (result.status.status === 'duplicate') {
+        return { status: 'done', progress: 100, duplicateUrl: result.status.existing_url }
+      } else if (result.status.status === 'failed') {
+        return { status: 'error', progress: 0, error: result.status.error }
+      }
+      return { status: 'done', progress: 100 }
+    } catch (e: any) {
+      return { status: 'error', progress: 0, error: typeof e === 'string' ? e : e?.message || 'Upload failed' }
+    }
+  }
+
+  // Multi-platform upload orchestrator — always saves + exports first, then uploads
+  const handleMultiUpload = async () => {
+    if (!clipId || selectedPlatforms.length === 0) return
+    setMultiUploading(true)
+
+    // Save first
+    onSave()
+
+    // Group platforms by required aspect ratio
+    const groups: Record<string, string[]> = {}
+    for (const platform of selectedPlatforms) {
+      const preset = getPresetForPlatform(platform)
+      const ar = preset.aspectRatio
+      if (!groups[ar]) groups[ar] = []
+      groups[ar].push(platform)
+    }
+
+    const initStates: Record<string, PlatformUploadState> = {}
+    for (const p of selectedPlatforms) initStates[p] = { status: 'waiting', progress: 0 }
+    setPlatformStates(prev => ({ ...prev, ...initStates }))
+
+    for (const [aspectRatio, platforms] of Object.entries(groups)) {
+      // Always export before uploading (ensures latest settings are baked in)
+      for (const p of platforms) {
+        setPlatformStates(prev => ({ ...prev, [p]: { status: 'exporting', progress: 0 } }))
+      }
+      try {
+        await onExportForFormat(aspectRatio)
+        await new Promise(r => setTimeout(r, 500))
+      } catch (e: any) {
+        for (const p of platforms) {
+          setPlatformStates(prev => ({
+            ...prev,
+            [p]: { status: 'error', progress: 0, error: `Export failed: ${e}` },
+          }))
+        }
+        continue
+      }
+
+      for (const platform of platforms) {
+        setPlatformStates(prev => ({
+          ...prev,
+          [platform]: { status: 'uploading', progress: 50 },
+        }))
+        const result = await uploadToPlatform(platform)
+        setPlatformStates(prev => ({ ...prev, [platform]: result }))
+      }
+    }
+
+    setMultiUploading(false)
+  }
+
+  // Schedule upload for later
+  const handleScheduleUpload = async () => {
+    if (!clipId || selectedPlatforms.length === 0 || !scheduleTime) return
+    setScheduling(true)
+
+    // Save first
+    onSave()
+
+    // Export before scheduling (so the file is ready when the schedule fires)
+    const groups: Record<string, string[]> = {}
+    for (const platform of selectedPlatforms) {
+      const preset = getPresetForPlatform(platform)
+      const ar = preset.aspectRatio
+      if (!groups[ar]) groups[ar] = []
+      groups[ar].push(platform)
+    }
+
+    for (const [aspectRatio, platforms] of Object.entries(groups)) {
+      try {
+        await onExportForFormat(aspectRatio)
+        await new Promise(r => setTimeout(r, 500))
+      } catch (e: any) {
+        console.error('[Schedule] Export failed:', e)
+        setScheduling(false)
+        return
+      }
+
+      const isoTime = new Date(scheduleTime).toISOString()
+      for (const platform of platforms) {
+        const adapterPlatform = platform === 'youtube_shorts' ? 'youtube' : platform
+        const meta = buildUploadMeta(platform, false)
+        const metaJson = JSON.stringify(meta)
+        try {
+          const id = await scheduleUpload(clipId, adapterPlatform, isoTime, metaJson)
+          setScheduledUploads(prev => [...prev, { id, platform: adapterPlatform, scheduled_time: isoTime }])
+        } catch (e: any) {
+          console.error(`[Schedule] Failed to schedule ${platform}:`, e)
+        }
+      }
+    }
+
+    setScheduling(false)
+    setScheduleMode(false)
+    setScheduleTime('')
   }
 
   const handleAddToMontage = () => {
@@ -146,87 +336,234 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
     navigate('/montage')
   }
 
+  // Combine persisted upload history with current session states for "View on" links
+  const allUploadUrls: Record<string, string> = { ...uploadHistory }
+  for (const [platform, state] of Object.entries(platformStates)) {
+    if (state.status === 'done' && state.videoUrl) {
+      allUploadUrls[platform] = state.videoUrl
+    } else if (state.status === 'done' && state.duplicateUrl) {
+      allUploadUrls[platform] = state.duplicateUrl
+    }
+  }
+
+  const PLATFORM_LABELS: Record<string, string> = {
+    youtube: 'YouTube',
+    youtube_shorts: 'YouTube Shorts',
+    tiktok: 'TikTok',
+    instagram: 'Instagram',
+  }
+
   return (
     <div className="sticky bottom-0 bg-surface-900/80 backdrop-blur-sm p-2 -mx-1 rounded-lg space-y-2">
+      {/* Save button */}
       <div className="flex gap-2">
-        <button onClick={onSave} disabled={saving}
-          className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-surface-700 hover:bg-surface-600 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors cursor-pointer">
-          {saved ? <Check className="w-4 h-4" /> : <Save className="w-4 h-4" />}
-          {saved ? 'Saved!' : saving ? 'Saving...' : 'Save'}
-        </button>
-        <button onClick={onExport} disabled={exporting || !vodPath}
-          className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-white text-sm font-medium rounded-lg transition-colors cursor-pointer ${
-            exportDone ? 'bg-green-600 hover:bg-green-500' : exportError ? 'bg-red-600 hover:bg-red-500' : 'bg-violet-600 hover:bg-violet-500'
-          } disabled:opacity-50`}>
-          {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> :
-           exportDone ? <Check className="w-4 h-4" /> :
-           <Download className="w-4 h-4" />}
-          {exporting ? `Exporting... ${exportProgress}%` :
-           exportDone ? 'Exported' :
-           exportError ? 'Retry Export' :
-           `Export for ${exportPreset.name}`}
-        </button>
+        {/* Save button */}
+        <Tooltip text="Save changes without exporting" position="top">
+          <button onClick={onSave} disabled={saving}
+            className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-surface-700 hover:bg-surface-600 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors cursor-pointer">
+            {saved ? <Check className="w-4 h-4" /> : <Save className="w-4 h-4" />}
+            {saved ? 'Saved!' : saving ? 'Saving...' : 'Save'}
+          </button>
+        </Tooltip>
+
+        {/* Download button */}
+        <Tooltip text="Export clip and save video file to your download folder" position="top">
+          <button
+            disabled={downloading || exporting || !vodPath}
+            onClick={async () => {
+              if (!clipId) return
+              setDownloading(true)
+              setDownloadResult(null)
+              try {
+                // Save settings first
+                onSave()
+                // Export if not already exported
+                const fresh = await invoke<Clip>('get_clip_detail', { clipId })
+                if (fresh.render_status !== 'completed') {
+                  await onExportForFormat(exportPreset.aspectRatio)
+                }
+                // Save to configured folder (or prompt to pick one)
+                const savedPath = await invoke<string | null>('save_clip_to_disk', { clipId })
+                if (savedPath) {
+                  setDownloadResult(savedPath)
+                  setTimeout(() => setDownloadResult(null), 5000)
+                }
+              } catch (err) {
+                console.error('[Download] Failed:', err)
+              } finally {
+                setDownloading(false)
+              }
+            }}
+            className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-600/20 border border-emerald-500/40 hover:bg-emerald-600/30 disabled:opacity-50 text-emerald-400 text-sm font-medium rounded-lg transition-colors cursor-pointer">
+            {downloadResult
+              ? <><Check className="w-4 h-4" /> Saved!</>
+              : downloading
+                ? <><Loader2 className="w-4 h-4 animate-spin" /> {exporting ? 'Exporting...' : 'Saving...'}</>
+                : <><Download className="w-4 h-4" /> Download</>
+            }
+          </button>
+        </Tooltip>
       </div>
 
-      <div className="flex gap-2">
-        {/* Upload / Connect button */}
-        {platformKey && info && exportDone && (
-          <>
-            {duplicateUrl ? (
-              <div className="flex-1 flex flex-col gap-1">
-                <p className="text-[10px] text-amber-400 px-1">Already uploaded to {info.name}</p>
-                <div className="flex gap-1">
-                  <button onClick={() => window.open(duplicateUrl, '_blank')}
-                    className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 text-xs text-slate-300 bg-surface-800 border border-surface-600 rounded hover:text-white transition-colors cursor-pointer">
-                    View existing
-                  </button>
-                  <button onClick={() => { setDuplicateUrl(null); handleUpload(true) }}
-                    className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/30 rounded hover:bg-amber-500/20 transition-colors cursor-pointer">
-                    Upload again
-                  </button>
-                </div>
-              </div>
-            ) : uploadDone && uploadUrl ? (
-              <button onClick={() => window.open(uploadUrl, '_blank')}
-                className="flex-1 flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg bg-green-600/20 text-green-400 border border-green-500/30 hover:bg-green-600/30 transition-colors cursor-pointer">
-                <Check className="w-3.5 h-3.5" />
-                Uploaded — View on {info.name}
+      {/* Download success banner */}
+      {downloadResult && (
+        <div className="flex items-center gap-2 px-3 py-2 bg-emerald-600/10 border border-emerald-500/30 rounded-lg">
+          <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+          <span className="text-[11px] text-emerald-300 truncate" title={downloadResult}>
+            Saved to {downloadResult.replace(/^.*[/\\]/, '')}
+          </span>
+          <button onClick={() => {
+            const sep = downloadResult.includes('\\') ? '\\' : '/'
+            const folder = downloadResult.substring(0, downloadResult.lastIndexOf(sep))
+            invoke('open_url', { url: folder }).catch(() => {})
+          }}
+            className="ml-auto text-[10px] text-emerald-400 hover:text-emerald-300 underline shrink-0 cursor-pointer">
+            Open folder
+          </button>
+        </div>
+      )}
+
+      {/* Export progress bar — shown during checkbox upload export phase */}
+      {(exporting || exportError) && (
+        <ExportProgressBar
+          progress={exportProgress}
+          done={exportDone}
+          error={exportError}
+          active={exporting}
+        />
+      )}
+
+      {/* Platform upload section */}
+      <div className="space-y-1.5">
+        <PlatformUploadSelector
+          selected={platformSelections}
+          onToggle={togglePlatform}
+          visibilities={platformVisibilities}
+          onVisibilityChange={(platform, vis) =>
+            setPlatformVisibilities(prev => ({ ...prev, [platform]: vis }))
+          }
+          states={platformStates}
+          currentPresetId={exportPreset.id}
+          disabled={anyUploading}
+          onViewUrl={(url) => openUrl(url)}
+          onConnect={async (platform) => {
+            try { await connect(platform) } catch {}
+          }}
+          youtubeSubFormat={youtubeSubFormat}
+          onYouTubeSubFormatChange={handleYouTubeSubFormatChange}
+          clipDuration={clipDuration}
+        />
+
+        {/* Schedule toggle + Upload/Schedule buttons */}
+        {selectedPlatforms.length > 0 && (
+          <div className="space-y-1.5">
+            {/* Schedule toggle */}
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={scheduleMode}
+                onChange={(e) => setScheduleMode(e.target.checked)}
+                disabled={anyUploading || scheduling}
+                className="w-3.5 h-3.5 rounded border-surface-600 bg-surface-700 text-violet-500 focus:ring-violet-500"
+              />
+              <Clock className="w-3.5 h-3.5 text-slate-400" />
+              <span className="text-xs text-slate-300">Schedule for later</span>
+            </label>
+
+            {/* Date/time picker (shown when schedule mode is on) */}
+            {scheduleMode && (
+              <input
+                type="datetime-local"
+                value={scheduleTime}
+                onChange={(e) => setScheduleTime(e.target.value)}
+                min={new Date(Date.now() + 60000).toISOString().slice(0, 16)}
+                className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-1.5 text-sm text-white focus:border-violet-500 focus:outline-none"
+              />
+            )}
+
+            {/* Action button: Upload Now or Schedule */}
+            {scheduleMode ? (
+              <button
+                onClick={handleScheduleUpload}
+                disabled={scheduling || !scheduleTime || !vodPath}
+                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors cursor-pointer border bg-amber-600/80 text-white border-amber-500 hover:bg-amber-500 disabled:opacity-60"
+              >
+                {scheduling ? (
+                  <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Scheduling...</>
+                ) : (
+                  <><CalendarClock className="w-3.5 h-3.5" />
+                    Schedule for {scheduleTime ? new Date(scheduleTime).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '...'}
+                  </>
+                )}
               </button>
             ) : (
               <button
-                onClick={() => handleUpload(false)}
-                disabled={uploading}
-                className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors cursor-pointer border ${
-                  uploadError
-                    ? 'bg-red-600/10 text-red-400 border-red-500/30 hover:bg-red-600/20'
-                    : isConnected(platformKey)
-                    ? 'text-white border-transparent hover:opacity-90'
-                    : 'bg-surface-800 text-slate-400 border-surface-600 hover:text-white'
-                }`}
-                style={isConnected(platformKey) && !uploadError ? { backgroundColor: `${info.color}cc` } : undefined}
-                title={uploadError || undefined}
+                onClick={handleMultiUpload}
+                disabled={anyUploading || !vodPath || allDone}
+                className={`w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors cursor-pointer border ${
+                  allDone
+                    ? 'bg-green-600/20 text-green-400 border-green-500/30'
+                    : anyUploading
+                    ? 'bg-violet-600/20 text-violet-400 border-violet-500/30'
+                    : 'bg-violet-600 text-white border-violet-500 hover:bg-violet-500'
+                } disabled:opacity-60`}
               >
-                {uploading ? (
-                  <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Uploading...</>
-                ) : uploadError ? (
-                  <><Upload className="w-3.5 h-3.5" /> Retry Upload</>
-                ) : isConnected(platformKey) ? (
-                  <><Upload className="w-3.5 h-3.5" /> Upload to {info.name}</>
+                {anyUploading ? (
+                  <><Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    {exporting ? 'Exporting...' : 'Uploading...'}
+                  </>
+                ) : allDone ? (
+                  <><Check className="w-3.5 h-3.5" /> All uploads complete</>
                 ) : (
-                  <><Link2 className="w-3.5 h-3.5" /> Connect {info.name}</>
+                  <><Upload className="w-3.5 h-3.5" />
+                    Export & Upload to {selectedPlatforms.length === 1
+                      ? (selectedPlatforms[0] === 'youtube_shorts' ? 'YouTube Shorts' : PLATFORM_INFO[selectedPlatforms[0]]?.name || selectedPlatforms[0])
+                      : `${selectedPlatforms.length} platforms`}
+                  </>
                 )}
               </button>
             )}
-          </>
+          </div>
         )}
 
-        {/* Add to Montage */}
-        <button onClick={handleAddToMontage}
-          className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs text-slate-400 bg-surface-800 border border-surface-600 rounded-lg hover:text-white hover:border-violet-500/40 transition-colors cursor-pointer">
-          <Film className="w-3.5 h-3.5" />
-          Add to Montage
-        </button>
+        {/* Scheduled uploads for this clip */}
+        {scheduledUploads.length > 0 && (
+          <div className="space-y-1">
+            {scheduledUploads.map(su => (
+              <div key={su.id} className="flex items-center gap-2 px-3 py-1.5 text-xs bg-amber-500/10 border border-amber-500/20 rounded-lg">
+                <Clock className="w-3 h-3 text-amber-400 shrink-0" />
+                <span className="text-amber-300 truncate">
+                  Scheduled for {new Date(su.scheduled_time).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                  {' '}on {PLATFORM_INFO[su.platform]?.name || su.platform}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
+
+      {/* "View on [Platform]" links — persisted from DB + current session */}
+      {Object.keys(allUploadUrls).length > 0 && (
+        <div className="space-y-1">
+          {Object.entries(allUploadUrls).map(([platform, url]) => (
+            <button
+              key={platform}
+              onClick={() => openUrl(url)}
+              className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 rounded-lg hover:bg-emerald-500/20 transition-colors cursor-pointer"
+            >
+              <Link2 className="w-3 h-3" />
+              View on {PLATFORM_LABELS[platform] || platform}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Add to Montage */}
+      <button onClick={handleAddToMontage}
+        className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs text-slate-400 bg-surface-800 border border-surface-600 rounded-lg hover:text-white hover:border-violet-500/40 transition-colors cursor-pointer">
+        <Film className="w-3.5 h-3.5" />
+        Add to Montage
+      </button>
     </div>
   )
 }
@@ -249,6 +586,8 @@ export default function Editor() {
   const [exportDone, setExportDone] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
+  // Persisted upload history: { platform: videoUrl } loaded from DB
+  const [uploadHistory, setUploadHistory] = useState<Record<string, string>>({})
   const [originalStart, setOriginalStart] = useState(0)
   const [originalEnd, setOriginalEnd] = useState(0)
   const [thumbnailPath, setThumbnailPath] = useState<string | null>(null)
@@ -271,6 +610,7 @@ export default function Editor() {
   const [layoutPickerOpen, setLayoutPickerOpen] = useState(false)
   const [exportPresetId, setExportPresetId] = useState('tiktok')
   const [textOverlays, setTextOverlays] = useState<TextOverlay[]>([])
+  const [game, setGame] = useState<string>('')
   const [publishMeta, setPublishMeta] = useState<PublishMetadata>({
     title: '', description: '', hashtags: [], visibility: 'public',
   })
@@ -278,6 +618,145 @@ export default function Editor() {
   const clipDuration = Math.max(0, endSeconds - startSeconds)
   const captionStyle = CAPTION_STYLES.find(s => s.id === captionStyleId) || CAPTION_STYLES[0]
   const exportPreset = EXPORT_PRESETS.find(p => p.id === exportPresetId) || EXPORT_PRESETS[0]
+
+  // ── Templates ──
+  const templateStore = useTemplateStore()
+  const aiStore = useAiStore()
+  const [templateDropdownOpen, setTemplateDropdownOpen] = useState(false)
+  const [templateSaveOpen, setTemplateSaveOpen] = useState(false)
+  const [templateSaveName, setTemplateSaveName] = useState('')
+  const [templateSaved, setTemplateSaved] = useState(false)
+  const templateDropdownRef = useRef<HTMLDivElement>(null)
+
+  // Close template dropdown on outside click
+  useEffect(() => {
+    if (!templateDropdownOpen) return
+    const handler = (e: MouseEvent) => {
+      if (templateDropdownRef.current && !templateDropdownRef.current.contains(e.target as Node)) {
+        setTemplateDropdownOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [templateDropdownOpen])
+
+  const handleLoadTemplate = useCallback((tmpl: ClipTemplate) => {
+    setCaptionStyleId(tmpl.captionStyleId)
+    setCaptionsPosition(tmpl.captionPosition)
+    setExportPresetId(tmpl.exportPresetId)
+    setPublishMeta(prev => ({
+      ...prev,
+      hashtags: [...tmpl.hashtags],
+    }))
+    setTemplateDropdownOpen(false)
+  }, [])
+
+  const handleSaveTemplate = useCallback(() => {
+    const name = templateSaveName.trim()
+    if (!name) return
+    templateStore.create(name, {
+      captionStyleId,
+      captionPosition: captionsPosition as 'top' | 'center' | 'bottom',
+      captionTone: 'punchy', // default — user can change later
+      hashtags: publishMeta.hashtags,
+      exportPresetId,
+    })
+    setTemplateSaveName('')
+    setTemplateSaveOpen(false)
+    setTemplateSaved(true)
+    setTimeout(() => setTemplateSaved(false), 2000)
+  }, [templateSaveName, captionStyleId, captionsPosition, publishMeta.hashtags, exportPresetId, templateStore])
+
+  // ── Undo / Redo history ──
+  const history = useEditorHistory()
+  const [historyTick, setHistoryTick] = useState(0) // bumped on undo/redo to re-render buttons
+  const historyRestoringRef = useRef(false)          // true while applying a snapshot
+
+  const takeSnapshot = useCallback((): EditorSnapshot => ({
+    title, startSeconds, endSeconds, captionsText,
+    captionsPosition, captionStyleId, captionYOffset,
+    publishTitle: publishMeta.title,
+    publishDescription: publishMeta.description,
+    publishHashtags: publishMeta.hashtags,
+  }), [title, startSeconds, endSeconds, captionsText, captionsPosition, captionStyleId, captionYOffset, publishMeta])
+
+  const applySnapshot = useCallback((snap: EditorSnapshot) => {
+    historyRestoringRef.current = true
+    setTitle(snap.title)
+    setStartSeconds(snap.startSeconds)
+    setEndSeconds(snap.endSeconds)
+    setCaptionsText(snap.captionsText)
+    setCaptionsPosition(snap.captionsPosition)
+    setCaptionStyleId(snap.captionStyleId)
+    setCaptionYOffset(snap.captionYOffset)
+    setPublishMeta(prev => ({
+      ...prev,
+      title: snap.publishTitle,
+      description: snap.publishDescription,
+      hashtags: snap.publishHashtags,
+    }))
+    // Allow next snapshot push after React processes the state updates
+    requestAnimationFrame(() => { historyRestoringRef.current = false })
+  }, [])
+
+  const handleUndo = useCallback(() => {
+    const snap = history.undo()
+    if (snap) { applySnapshot(snap); setHistoryTick(t => t + 1) }
+  }, [history, applySnapshot])
+
+  const handleRedo = useCallback(() => {
+    const snap = history.redo()
+    if (snap) { applySnapshot(snap); setHistoryTick(t => t + 1) }
+  }, [history, applySnapshot])
+
+  // Push snapshot on tracked state changes (debounced to batch rapid edits)
+  useEffect(() => {
+    if (historyRestoringRef.current) return // don't push while restoring
+    const timer = setTimeout(() => {
+      if (!historyRestoringRef.current) {
+        history.push(takeSnapshot())
+        setHistoryTick(t => t + 1)
+      }
+    }, 400)
+    return () => clearTimeout(timer)
+  }, [title, startSeconds, endSeconds, captionsText, captionsPosition, captionStyleId, captionYOffset, publishMeta, history, takeSnapshot])
+
+  // Keyboard shortcuts: Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey
+      if (!mod) return
+      if (e.key === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        handleUndo()
+      } else if (e.key === 'y' || (e.key === 'z' && e.shiftKey) || (e.key === 'Z' && e.shiftKey)) {
+        e.preventDefault()
+        handleRedo()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [handleUndo, handleRedo])
+
+  // ── Auto-save publish metadata (description + hashtags) to DB ──
+  const publishMetaInitRef = useRef(false) // skip initial load write-back
+  useEffect(() => {
+    if (!clipId) return
+    // Skip the first update (initial load from DB)
+    if (!publishMetaInitRef.current) {
+      publishMetaInitRef.current = true
+      return
+    }
+    const timer = setTimeout(() => {
+      const hashtagStr = publishMeta.hashtags.length > 0 ? publishMeta.hashtags.join(',') : null
+      invoke('set_clip_publish_meta', {
+        clipId,
+        description: publishMeta.description || null,
+        hashtags: hashtagStr,
+      }).catch(err => console.warn('[Editor] Failed to auto-save publish meta:', err))
+    }, 500) // debounce 500ms
+    return () => clearTimeout(timer)
+  }, [clipId, publishMeta.description, publishMeta.hashtags])
 
   // ── Player state (declared before subtitle/marker code that depends on it) ──
   const playerSeekRef = useRef<((time: number) => void) | null>(null)
@@ -349,6 +828,8 @@ export default function Editor() {
     try {
       const srt = await invoke<string>('generate_clip_captions', { clipId })
       setCaptionsText(srt)
+
+      // Game detection is manual — no auto-inference after subtitle generation
     } catch (err) {
       const raw = String(err)
       console.error('Caption generation error:', raw)
@@ -418,6 +899,7 @@ export default function Editor() {
   // ── Load clip data ──
   useEffect(() => {
     if (!clipId) return
+    publishMetaInitRef.current = false // reset so next publishMeta update from load is skipped
     ;(async () => {
       try {
         const c = await invoke<Clip>('get_clip_detail', { clipId })
@@ -425,28 +907,92 @@ export default function Editor() {
         setTitle(c.title)
         setStartSeconds(c.start_seconds)
         setEndSeconds(c.end_seconds)
-        setAspectRatio(c.aspect_ratio)
+        setAspectRatio(c.aspect_ratio || '9:16')
+        // Sync export preset to match the clip's saved aspect ratio
+        const matchingPreset = EXPORT_PRESETS.find(p => p.aspectRatio === c.aspect_ratio)
+        if (matchingPreset) setExportPresetId(matchingPreset.id)
         setCaptionsEnabled(c.captions_enabled === 1)
         setCaptionsText(c.captions_text || '')
         setCaptionsPosition(c.captions_position || 'bottom')
+        setCaptionStyleId(c.caption_style || 'clean')
         setFacecamLayout(c.facecam_layout || 'none')
         setExportDone(c.render_status === 'completed')
         setOriginalStart(c.start_seconds)
         setOriginalEnd(c.end_seconds)
         setThumbnailPath(c.thumbnail_path)
         setPlaybackTime(c.start_seconds)
-        setPublishMeta(prev => ({ ...prev, title: c.title }))
+        console.log('[Editor] Clip loaded — clip.game:', JSON.stringify(c.game), '| captions_text length:', c.captions_text?.length ?? 0)
+        setPublishMeta(prev => ({
+          ...prev,
+          title: c.title,
+          description: c.publish_description || '',
+          hashtags: c.publish_hashtags ? c.publish_hashtags.split(',').filter(Boolean) : [],
+        }))
+
+        // Load persisted upload history (View on YouTube/TikTok links)
+        invoke<Array<{ platform: string; video_url: string | null }>>('get_clip_upload_history', { clipId })
+          .then(rows => {
+            const hist: Record<string, string> = {}
+            for (const r of rows) {
+              if (r.video_url) hist[r.platform] = r.video_url
+            }
+            setUploadHistory(hist)
+          })
+          .catch(() => {})
+
+        // Initialize undo/redo history with the loaded clip state
+        history.reset({
+          title: c.title,
+          startSeconds: c.start_seconds,
+          endSeconds: c.end_seconds,
+          captionsText: c.captions_text || '',
+          captionsPosition: c.captions_position || 'bottom',
+          captionStyleId: c.caption_style || 'clean',
+          captionYOffset: 0,
+          publishTitle: c.title,
+          publishDescription: '',
+          publishHashtags: [],
+        })
+        setHistoryTick(0)
 
         // Fetch linked highlight for marker data
+        let loadedHighlight: Highlight | undefined
         try {
           const highlights = await invoke<Highlight[]>('get_all_highlights')
-          const hl = highlights.find(h => h.id === c.highlight_id)
-          if (hl) setHighlight(hl)
+          loadedHighlight = highlights.find(h => h.id === c.highlight_id)
+          if (loadedHighlight) setHighlight(loadedHighlight)
         } catch { /* non-critical */ }
 
         const v = await invoke<Vod>('get_vod_detail', { vodId: c.vod_id })
         setVod(v)
+
+        // Load game from stored values — clip.game takes priority, then VOD.game_name
+        const storedGame = c.game || v.game_name || ''
+        console.log('[Editor] Game loaded — clip.game:', JSON.stringify(c.game), '| vod.game_name:', JSON.stringify(v.game_name), '→', JSON.stringify(storedGame))
+        setGame(storedGame)
+
         if (v.local_path) setVideoSrc(convertFileSrc(v.local_path))
+
+        // Auto-generate publish description via AI when BYOK is active and no saved description
+        if (!c.publish_description && aiStore.isByok() && clipId) {
+          console.log('[Editor] No saved publish_description + BYOK active — auto-generating via AI')
+          invoke<{ captions: Array<{ mode: string; text: string }>; source: string }>('generate_post_captions', {
+            clipId,
+            seed: (Date.now() % 1_000_000) >>> 0,
+            transcriptText: null,
+            currentTitle: c.title || null,
+            currentGame: c.game || storedGame || null,
+            selectedMode: 'punchy',
+          }).then(bc => {
+            if (bc.source === 'llm' && bc.captions.length > 0) {
+              const aiDesc = bc.captions[0].text
+              console.log('[Editor] AI auto-generated publish description:', aiDesc.substring(0, 80))
+              setPublishMeta(prev => prev.description ? prev : { ...prev, description: aiDesc })
+            }
+          }).catch(err => {
+            console.warn('[Editor] AI publish description auto-gen failed:', err)
+          })
+        }
       } catch (err) {
         console.error('Failed to load clip:', err)
       }
@@ -471,7 +1017,9 @@ export default function Editor() {
         captionsEnabled: captionsEnabled ? 1 : 0,
         captionsText: captionsText || null,
         captionsPosition,
+        captionStyle: captionStyleId,
         facecamLayout,
+        game: game || null,
       })
       setSaved(true)
       setExportDone(false)
@@ -486,40 +1034,64 @@ export default function Editor() {
   const exportUnlistenRef = useRef<(() => void) | null>(null)
   useEffect(() => () => { exportUnlistenRef.current?.() }, [])
 
-  const handleExport = async () => {
-    if (!clipId) return
-    await handleSave()
-    setExporting(true)
-    setExportDone(false)
-    setExportError(null)
-    setExportProgress(0)
-    try {
-      // Listen for job progress events from the backend
+  /**
+   * Export with a specific aspect ratio (for multi-platform auto-re-export).
+   * Saves clip with the target aspect ratio, exports, waits for completion, then restores.
+   */
+  const handleExportForFormat = async (targetAspectRatio: string) => {
+    if (!clipId) throw new Error('No clip')
+    const originalAR = aspectRatio
+
+    // Save with target aspect ratio
+    await invoke('update_clip_settings', {
+      clipId, title, startSeconds, endSeconds,
+      aspectRatio: targetAspectRatio,
+      captionsEnabled: captionsEnabled ? 1 : 0,
+      captionsText: captionsText || null,
+      captionsPosition, captionStyle: captionStyleId, facecamLayout,
+      game: game || null,
+    })
+
+    // Export and wait for completion
+    return new Promise<void>((resolve, reject) => {
+      setExporting(true)
+      setExportDone(false)
+      setExportError(null)
+      setExportProgress(0)
+
       const jobId = `export-${clipId}`
-      const unlisten = await listen<{ jobId: string; progress: number; status: string; error?: string }>('job-progress', (event) => {
+      let unlistenFn: (() => void) | null = null
+
+      listen<{ jobId: string; progress: number; status: string; error?: string }>('job-progress', (event) => {
         if (event.payload.jobId !== jobId) return
         const { progress, status, error } = event.payload
         setExportProgress(progress)
+
         if (status === 'completed') {
           setExporting(false)
           setExportDone(true)
-          exportUnlistenRef.current?.()
-          // Refresh clip data to get output_path
+          unlistenFn?.()
           invoke<Clip>('get_clip_detail', { clipId }).then(c => setClip(c)).catch(() => {})
+          // Restore original aspect ratio in state (DB was changed, but UI stays consistent)
+          setAspectRatio(originalAR)
+          resolve()
         } else if (status === 'failed') {
           setExporting(false)
           setExportError(error || 'Export failed')
-          exportUnlistenRef.current?.()
+          unlistenFn?.()
+          setAspectRatio(originalAR)
+          reject(new Error(error || 'Export failed'))
         }
+      }).then(fn => {
+        unlistenFn = fn
+        invoke('export_clip', { clipId }).catch(err => {
+          setExporting(false)
+          unlistenFn?.()
+          setAspectRatio(originalAR)
+          reject(err)
+        })
       })
-      exportUnlistenRef.current = unlisten
-
-      await invoke('export_clip', { clipId })
-    } catch (err) {
-      setExporting(false)
-      setExportError(`Export failed: ${err}`)
-      exportUnlistenRef.current?.()
-    }
+    })
   }
 
   // ── Text overlay management ──
@@ -545,20 +1117,16 @@ export default function Editor() {
   }
 
   // ── Preview frame sizing (single source of truth for frame dimensions) ──
-  const FRAME_WIDTHS: Record<string, number> = { '9:16': 270, '1:1': 360, '16:9': 0 } // 0 = w-full
+  const FRAME_WIDTHS: Record<string, number> = { '9:16': 270, '16:9': 0 } // 0 = w-full
   const frameWidth = FRAME_WIDTHS[aspectRatio] || 0
 
-  const previewAspect = aspectRatio === '9:16' ? 'aspect-[9/16]'
-    : aspectRatio === '1:1' ? 'aspect-square'
-    : 'aspect-video'
+  const previewAspect = aspectRatio === '9:16' ? 'aspect-[9/16]' : 'aspect-video'
 
   // Tailwind needs static class names — can't use dynamic `w-[${n}px]`
-  const previewWidth = aspectRatio === '9:16' ? 'w-[270px]'
-    : aspectRatio === '1:1' ? 'w-[360px]'
-    : 'w-full'
+  const previewWidth = aspectRatio === '9:16' ? 'w-[270px]' : 'w-full'
 
   // Compute actual frame pixel dimensions for facecam overlays
-  const frameHeightPx = aspectRatio === '9:16' ? 480 : aspectRatio === '1:1' ? 360 : 249
+  const frameHeightPx = aspectRatio === '9:16' ? 480 : 249
   const frameWidthPx = frameWidth > 0 ? frameWidth : 442
 
   // Caption Y position — respects facecam regions
@@ -606,6 +1174,22 @@ export default function Editor() {
           <ArrowLeft className="w-5 h-5" />
         </button>
         <h1 className="text-2xl font-bold text-white truncate flex-1">Edit Clip</h1>
+        <div className="flex items-center gap-1.5">
+          <Tooltip text={history.canUndo() ? `Undo (${history.undoCount()} step${history.undoCount() === 1 ? '' : 's'})` : 'Nothing to undo'} position="bottom">
+            <button onClick={handleUndo} disabled={!history.canUndo()}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-surface-800 border border-surface-600 text-slate-400 hover:text-white hover:bg-surface-700 hover:border-surface-500 transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed">
+              <Undo2 className="w-4 h-4" />
+              <span className="text-xs font-medium">Undo</span>
+            </button>
+          </Tooltip>
+          <Tooltip text={history.canRedo() ? `Redo (${history.redoCount()} step${history.redoCount() === 1 ? '' : 's'})` : 'Nothing to redo'} position="bottom">
+            <button onClick={handleRedo} disabled={!history.canRedo()}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-surface-800 border border-surface-600 text-slate-400 hover:text-white hover:bg-surface-700 hover:border-surface-500 transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed">
+              <Redo2 className="w-4 h-4" />
+              <span className="text-xs font-medium">Redo</span>
+            </button>
+          </Tooltip>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -695,7 +1279,13 @@ export default function Editor() {
                       ) : captionsText ? (
                         <div className="absolute left-0 right-0 flex justify-center pointer-events-none z-10"
                           style={captionPositionStyle}>
-                          <span className="text-center max-w-[80%]" style={captionPreviewStyle}>
+                          <span className="text-center max-w-[80%]" style={{
+                            ...captionPreviewStyle,
+                            wordBreak: 'normal',
+                            overflowWrap: 'break-word',
+                            whiteSpace: 'normal',
+                            display: 'inline-block',
+                          }}>
                             {captionsText}
                           </span>
                         </div>
@@ -793,8 +1383,73 @@ export default function Editor() {
         <div className="space-y-4 overflow-y-auto max-h-[calc(100vh-10rem)] pr-1">
           {/* Title */}
           <Section title="Title">
-            <input type="text" value={title} onChange={e => setTitle(e.target.value)}
-              className="w-full px-3 py-2 bg-surface-900 border border-surface-600 rounded-lg text-white text-sm focus:outline-none focus:border-violet-500" />
+            <div className="flex gap-1.5">
+              <input type="text" value={title} onChange={e => setTitle(e.target.value)}
+                onBlur={() => {
+                  if (clipId) {
+                    invoke('set_clip_title', { clipId, title: title || null }).catch(err =>
+                      console.warn('[Editor] Failed to save title on blur:', err)
+                    )
+                  }
+                }}
+                className="flex-1 px-3 py-2 bg-surface-900 border border-surface-600 rounded-lg text-white text-sm focus:outline-none focus:border-violet-500" />
+              <Tooltip text={game ? `Generate new title with ${game} context` : 'Generate new title (set a game for game-specific titles)'} position="left">
+                <button
+                  onClick={async () => {
+                    const ctx: ClipContext = {
+                      title: '', // don't seed from current title — generate fresh
+                      eventTags: highlight ? (highlight.tags || []) as string[] : [],
+                      emotionTags: [],
+                      transcriptExcerpt: highlight?.transcript_snippet || undefined,
+                      eventSummary: highlight?.event_summary || undefined,
+                      transcript: subtitleSegments.length > 0
+                        ? subtitleSegments.map(s => s.text).join(' ')
+                        : undefined,
+                      vodTitle: vod?.title || undefined,
+                      game: game || undefined,
+                      duration: clipDuration,
+                    }
+
+                    let newTitle: string | null = null
+
+                    // Try AI title generation first (uses BYOK provider if configured)
+                    if (clipId) {
+                      try {
+                        const transcriptText = subtitleSegments.length > 0
+                          ? subtitleSegments.map(s => s.text).join(' ')
+                          : null
+                        const aiTitle = await invoke<string>('generate_ai_title', {
+                          clipId,
+                          transcriptText,
+                          currentGame: game || null,
+                        })
+                        // If AI returned something different from the current title, use it
+                        if (aiTitle && aiTitle !== title) {
+                          newTitle = aiTitle
+                        }
+                      } catch (err) {
+                        console.warn('[Editor] AI title generation failed, using local patterns:', err)
+                      }
+                    }
+
+                    // Fallback to local pattern generator
+                    if (!newTitle) {
+                      newTitle = generateStandaloneTitle(ctx)
+                    }
+
+                    setTitle(newTitle)
+                    if (clipId) {
+                      invoke('set_clip_title', { clipId, title: newTitle }).catch(err =>
+                        console.warn('[Editor] Failed to save regenerated title:', err)
+                      )
+                    }
+                  }}
+                  className="px-2 py-2 bg-surface-900 border border-surface-600 rounded-lg text-slate-400 hover:text-violet-400 hover:border-violet-500/40 transition-colors cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                </button>
+              </Tooltip>
+            </div>
           </Section>
 
           {/* Timing */}
@@ -835,31 +1490,145 @@ export default function Editor() {
 
           {/* Export Preset */}
           <Section title="Export For">
-            <div className="grid grid-cols-3 gap-2">
-              {EXPORT_PRESETS.filter(p => ['tiktok', 'reels', 'shorts'].includes(p.id)).map(p => (
-                <button key={p.id} onClick={() => setExportPresetId(p.id)}
-                  className={`px-3 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer border ${
-                    exportPresetId === p.id
-                      ? 'bg-violet-600/20 text-violet-400 border-violet-500/40'
-                      : 'bg-surface-900 text-slate-400 border-surface-600 hover:bg-surface-700'
-                  }`}>
-                  <div>{p.name}</div>
-                  <div className="text-xs opacity-60">{p.description}</div>
-                </button>
+            <div className="grid grid-cols-2 gap-2">
+              {EXPORT_PRESETS.map(p => (
+                <Tooltip key={p.id} text={`Export in ${p.name} format (${p.aspectRatio})`} position="bottom">
+                  <button onClick={() => setExportPresetId(p.id)}
+                    className={`w-full px-3 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer border ${
+                      exportPresetId === p.id
+                        ? 'bg-violet-600/20 text-violet-400 border-violet-500/40'
+                        : 'bg-surface-900 text-slate-400 border-surface-600 hover:bg-surface-700'
+                    }`}>
+                    <div>{p.name}</div>
+                    <div className="text-xs opacity-60">{p.description}</div>
+                  </button>
+                </Tooltip>
               ))}
             </div>
-            <div className="flex gap-2 mt-2">
-              {EXPORT_PRESETS.filter(p => !['tiktok', 'reels', 'shorts'].includes(p.id)).map(p => (
-                <button key={p.id} onClick={() => setExportPresetId(p.id)}
-                  className={`flex-1 px-2 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer border ${
-                    exportPresetId === p.id
-                      ? 'bg-violet-600/20 text-violet-400 border-violet-500/40'
-                      : 'bg-surface-900 text-slate-400 border-surface-600 hover:bg-surface-700'
-                  }`}>
-                  {p.name}
+          </Section>
+
+          {/* Templates */}
+          <Section title="Templates">
+            <div className="flex gap-2">
+              {/* Load Template dropdown */}
+              <div className="relative flex-1" ref={templateDropdownRef}>
+                <button
+                  onClick={() => setTemplateDropdownOpen(!templateDropdownOpen)}
+                  className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-surface-900 border border-surface-600 text-sm text-slate-400 hover:text-white hover:border-surface-500 transition-colors cursor-pointer"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <Bookmark className="w-3.5 h-3.5" />
+                    Load Template
+                  </span>
+                  <ChevronDown className={`w-3.5 h-3.5 transition-transform ${templateDropdownOpen ? 'rotate-180' : ''}`} />
                 </button>
-              ))}
+                {templateDropdownOpen && (
+                  <div className="absolute z-40 top-full left-0 right-0 mt-1 bg-surface-800 border border-surface-600 rounded-lg shadow-xl overflow-hidden max-h-64 overflow-y-auto">
+                    {templateStore.templates.length === 0 ? (
+                      <p className="px-3 py-2 text-xs text-slate-500 italic">No templates yet</p>
+                    ) : (
+                      <>
+                        {/* Built-in templates */}
+                        {templateStore.templates.filter(t => t.builtIn).length > 0 && (
+                          <div className="px-3 pt-2 pb-1">
+                            <p className="text-[9px] text-slate-500 uppercase tracking-wider font-semibold">Starter Templates</p>
+                          </div>
+                        )}
+                        {templateStore.templates.filter(t => t.builtIn).map(tmpl => {
+                          const presetMatch = EXPORT_PRESETS.find(p => p.id === tmpl.exportPresetId)
+                          const styleMatch = CAPTION_STYLES.find(s => s.id === tmpl.captionStyleId)
+                          return (
+                            <button key={tmpl.id} onClick={() => handleLoadTemplate(tmpl)}
+                              className="w-full text-left px-3 py-2 hover:bg-surface-700 transition-colors cursor-pointer">
+                              <div className="text-sm text-white">{tmpl.name}</div>
+                              <div className="text-[10px] text-slate-500">
+                                {styleMatch?.name || tmpl.captionStyleId} &middot; {presetMatch?.aspectRatio || ''} &middot; {tmpl.hashtags.slice(0, 3).map(h => `#${h}`).join(' ')}
+                              </div>
+                            </button>
+                          )
+                        })}
+                        {/* Custom templates */}
+                        {templateStore.templates.filter(t => !t.builtIn).length > 0 && (
+                          <div className="px-3 pt-2 pb-1 border-t border-surface-600">
+                            <p className="text-[9px] text-slate-500 uppercase tracking-wider font-semibold">My Templates</p>
+                          </div>
+                        )}
+                        {templateStore.templates.filter(t => !t.builtIn).map(tmpl => {
+                          const presetMatch = EXPORT_PRESETS.find(p => p.id === tmpl.exportPresetId)
+                          const styleMatch = CAPTION_STYLES.find(s => s.id === tmpl.captionStyleId)
+                          return (
+                            <button key={tmpl.id} onClick={() => handleLoadTemplate(tmpl)}
+                              className="w-full text-left px-3 py-2 hover:bg-surface-700 transition-colors cursor-pointer">
+                              <div className="text-sm text-white">{tmpl.name}</div>
+                              <div className="text-[10px] text-slate-500">
+                                {styleMatch?.name || tmpl.captionStyleId} &middot; {presetMatch?.aspectRatio || ''} &middot; {tmpl.hashtags.slice(0, 3).map(h => `#${h}`).join(' ')}
+                              </div>
+                            </button>
+                          )
+                        })}
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Save as Template */}
+              {!templateSaveOpen ? (
+                <Tooltip text="Save current settings as a reusable template" position="bottom">
+                  <button onClick={() => { setTemplateSaveOpen(true); setTemplateSaveName('') }}
+                    className={`flex items-center gap-1.5 px-3 py-2 rounded-lg border text-sm font-medium transition-colors cursor-pointer ${
+                      templateSaved
+                        ? 'bg-emerald-600/20 text-emerald-400 border-emerald-500/40'
+                        : 'bg-surface-900 border-surface-600 text-slate-400 hover:text-white hover:border-surface-500'
+                    }`}>
+                    {templateSaved ? <Check className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
+                    {templateSaved ? 'Saved!' : 'Save'}
+                  </button>
+                </Tooltip>
+              ) : (
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="text"
+                    value={templateSaveName}
+                    onChange={e => setTemplateSaveName(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') handleSaveTemplate(); if (e.key === 'Escape') setTemplateSaveOpen(false) }}
+                    placeholder="Template name..."
+                    autoFocus
+                    className="w-32 px-2 py-1.5 bg-surface-900 border border-surface-600 rounded-lg text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-violet-500"
+                  />
+                  <button onClick={handleSaveTemplate} disabled={!templateSaveName.trim()}
+                    className="p-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white disabled:opacity-30 transition-colors cursor-pointer">
+                    <Check className="w-3.5 h-3.5" />
+                  </button>
+                  <button onClick={() => setTemplateSaveOpen(false)}
+                    className="p-1.5 rounded-lg bg-surface-900 border border-surface-600 text-slate-400 hover:text-white transition-colors cursor-pointer">
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
             </div>
+          </Section>
+
+          {/* Game / Category */}
+          <Section title="Game">
+            <Tooltip text="Enter the game name to improve hashtags, titles, and captions for this clip.">
+              <input
+                type="text"
+                value={game}
+                onChange={e => setGame(e.target.value)}
+                onBlur={() => {
+                  // Persist game to clip DB on blur so it survives navigation
+                  if (clipId) {
+                    invoke('set_clip_game', { clipId, game: game || null }).catch(err =>
+                      console.warn('[Editor] Failed to save game on blur:', err)
+                    )
+                  }
+                }}
+                placeholder="e.g. Dead by Daylight, Valorant"
+                className="w-full px-3 py-2 rounded-lg bg-surface-900 border border-surface-600 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-violet-500 transition-colors"
+              />
+            </Tooltip>
+            <p className="text-[10px] text-slate-500 mt-1">Used for hashtags, titles, and captions. Set once per VOD on the VODs page to apply to all clips.</p>
           </Section>
 
           {/* Layout */}
@@ -869,7 +1638,7 @@ export default function Editor() {
               const platformKey = exportPreset.id === 'tiktok' ? 'tiktok'
                 : exportPreset.id === 'reels' ? 'instagram'
                 : exportPreset.id === 'shorts' || exportPreset.id === 'youtube' ? 'youtube'
-                : exportPreset.id === 'square' ? 'twitter' : 'tiktok'
+                : 'tiktok'
               return (
                 <PublishComposer
                   platform={platformKey}
@@ -882,6 +1651,11 @@ export default function Editor() {
                     emotionTags: [],
                     transcriptExcerpt: highlight?.transcript_snippet || undefined,
                     eventSummary: highlight?.event_summary || undefined,
+                    transcript: subtitleSegments.length > 0
+                      ? subtitleSegments.map(s => s.text).join(' ')
+                      : undefined,
+                    vodTitle: vod?.title || undefined,
+                    game: game || undefined,
                     duration: clipDuration,
                   }}
                 />
@@ -894,7 +1668,7 @@ export default function Editor() {
             <div className="flex items-center gap-3">
               {/* Mini diagram of current layout */}
               <div className={`rounded border border-surface-600 bg-surface-900 relative overflow-hidden shrink-0 ${
-                aspectRatio === '9:16' ? 'w-8 aspect-[9/16]' : aspectRatio === '1:1' ? 'w-10 aspect-square' : 'w-14 aspect-video'
+                aspectRatio === '9:16' ? 'w-8 aspect-[9/16]' : 'w-14 aspect-video'
               }`}>
                 {LAYOUT_OPTIONS.find(l => l.id === facecamLayout)?.regions.map((r, i) => (
                   <div key={i} className="absolute flex items-center justify-center"
@@ -1006,7 +1780,11 @@ export default function Editor() {
                 <div>
                   <label className="block text-xs text-slate-400 mb-1">Position</label>
                   <PillGroup value={captionsPosition} onChange={v => { setCaptionsPosition(v); setCaptionYOffset(0) }}
-                    options={[{ value: 'top', label: 'Top' }, { value: 'center', label: 'Center' }, { value: 'bottom', label: 'Bottom' }]} />
+                    options={[
+                      { value: 'top', label: 'Top', tooltip: 'Position subtitles at the top of the frame' },
+                      { value: 'center', label: 'Center', tooltip: 'Position subtitles at the center of the frame' },
+                      { value: 'bottom', label: 'Bottom', tooltip: 'Position subtitles at the bottom of the frame' },
+                    ]} />
 
                   {/* Fine offset slider */}
                   <div className="mt-2 flex items-center gap-2">
@@ -1042,23 +1820,56 @@ export default function Editor() {
                 <div>
                   <label className="block text-xs text-slate-400 mb-1">Style</label>
                   <div className="grid grid-cols-3 gap-2">
-                    {CAPTION_STYLES.map(s => (
-                      <button key={s.id} onClick={() => setCaptionStyleId(s.id)}
-                        className={`px-2 py-2 rounded-lg text-xs font-medium transition-colors cursor-pointer border ${
-                          captionStyleId === s.id
-                            ? 'bg-violet-600/20 text-violet-400 border-violet-500/40'
-                            : 'bg-surface-900 text-slate-400 border-surface-600 hover:bg-surface-700'
-                        }`}>
-                        <span style={{
-                          fontFamily: s.fontFamily,
-                          fontWeight: s.fontWeight,
-                          color: s.fontColor,
-                          textTransform: s.uppercase ? 'uppercase' : 'none',
-                          fontSize: '11px',
-                          textShadow: s.shadow !== 'none' ? '1px 1px 2px #000' : undefined,
-                        }}>{s.name}</span>
-                      </button>
-                    ))}
+                    {CAPTION_STYLES.map(s => {
+                      const isActive = captionStyleId === s.id
+                      // Per-style button backgrounds and border accents
+                      const styleHints: Record<string, { bg: string; border: string; textShadow: string }> = {
+                        clean:       { bg: 'bg-surface-900', border: 'border-slate-500/50', textShadow: '0 1px 4px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,0.8)' },
+                        'bold-white': { bg: 'bg-surface-900', border: 'border-slate-400/60', textShadow: '2px 2px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000' },
+                        boxed:       { bg: 'bg-surface-900', border: 'border-slate-500/40', textShadow: 'none' },
+                        neon:        { bg: 'bg-surface-900', border: 'border-emerald-500/40', textShadow: '0 0 6px #00ff8880, 0 0 2px #000' },
+                        minimal:     { bg: 'bg-surface-900', border: 'border-slate-600/40', textShadow: '0 1px 3px rgba(0,0,0,0.6)' },
+                        fire:        { bg: 'bg-surface-900', border: 'border-orange-500/40', textShadow: '0 0 6px #FF450088, 0 0 2px #000, 1px 1px 0 #000' },
+                      }
+                      const hint = styleHints[s.id] || styleHints.clean
+                      return (
+                        <Tooltip key={s.id} text={`Apply ${s.name} subtitle style`} position="bottom">
+                          <button onClick={() => setCaptionStyleId(s.id)}
+                            className={`w-full px-2 py-2.5 rounded-lg text-xs font-medium transition-all cursor-pointer border ${
+                              isActive
+                                ? 'ring-1 ring-violet-500/60 border-violet-500/50 bg-violet-950/40'
+                                : `${hint.bg} ${hint.border} hover:bg-surface-800`
+                            }`}
+                            style={s.id === 'boxed' ? {
+                              background: isActive ? undefined : 'linear-gradient(135deg, rgba(30,30,50,0.9) 0%, rgba(15,15,30,0.95) 100%)',
+                            } : undefined}>
+                            {/* Boxed style: show mini box behind text */}
+                            {s.id === 'boxed' ? (
+                              <span style={{
+                                fontFamily: s.fontFamily,
+                                fontWeight: s.fontWeight,
+                                color: s.fontColor,
+                                fontSize: '11px',
+                                background: 'rgba(10,10,20,0.8)',
+                                padding: '2px 6px',
+                                borderRadius: '4px',
+                                textShadow: hint.textShadow,
+                              }}>{s.name}</span>
+                            ) : (
+                              <span style={{
+                                fontFamily: s.fontFamily,
+                                fontWeight: s.fontWeight,
+                                color: s.fontColor,
+                                textTransform: s.uppercase ? 'uppercase' : 'none',
+                                fontSize: '11px',
+                                letterSpacing: s.letterSpacing > 0.03 ? `${s.letterSpacing}em` : undefined,
+                                textShadow: hint.textShadow,
+                              }}>{s.name}</span>
+                            )}
+                          </button>
+                        </Tooltip>
+                      )
+                    })}
                   </div>
                 </div>
                 {/* AI Emphasis */}
@@ -1066,106 +1877,22 @@ export default function Editor() {
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
                       <label className="text-xs text-slate-400">AI Word Emphasis</label>
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input type="checkbox" checked={aiEmphasisEnabled} onChange={e => setAiEmphasisEnabled(e.target.checked)}
-                          className="rounded border-surface-600 bg-surface-900 text-violet-500 focus:ring-violet-500" />
-                        <span className="text-xs text-slate-400">{aiEmphasisEnabled ? 'On' : 'Off'}</span>
-                      </label>
+                      <Tooltip text="Automatically bold or highlight key words in subtitles" position="left">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input type="checkbox" checked={aiEmphasisEnabled} onChange={e => setAiEmphasisEnabled(e.target.checked)}
+                            className="rounded border-surface-600 bg-surface-900 text-violet-500 focus:ring-violet-500" />
+                          <span className="text-xs text-slate-400">{aiEmphasisEnabled ? 'On' : 'Off'}</span>
+                        </label>
+                      </Tooltip>
                     </div>
-
-                    {aiEmphasisEnabled && emphasisSummary.length > 0 && (
-                      <div className="bg-surface-900 rounded-lg p-2 space-y-1 max-h-24 overflow-y-auto">
-                        <p className="text-[10px] text-slate-500 mb-1">{emphasisSummary.length} emphasized phrases</p>
-                        {emphasisSummary.map((e, i) => (
-                          <div key={i} className="flex items-center gap-1.5 text-[10px]">
-                            <span className={`px-1 py-0.5 rounded text-[9px] font-medium ${
-                              e.type === 'reaction' ? 'bg-amber-500/20 text-amber-400' :
-                              e.type === 'urgency' ? 'bg-red-500/20 text-red-400' :
-                              e.type === 'payoff' ? 'bg-emerald-500/20 text-emerald-400' :
-                              e.type === 'punchline' ? 'bg-violet-500/20 text-violet-400' :
-                              'bg-blue-500/20 text-blue-400'
-                            }`}>{e.type}</span>
-                            <span className="text-white font-medium truncate">"{e.text}"</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {aiEmphasisEnabled && emphasisSummary.length === 0 && (
-                      <p className="text-[10px] text-slate-500 italic">No emphasis phrases detected in captions</p>
-                    )}
                   </div>
                 )}
               </div>
             )}
           </Section>
-
-          {/* Text Overlays */}
-          <Section title="Text Overlays">
-            {textOverlays.map(o => (
-              <div key={o.id} className="mb-3 p-3 bg-surface-900 rounded-lg border border-surface-600 space-y-2">
-                <div className="flex gap-2">
-                  <input type="text" value={o.text} onChange={e => updateOverlay(o.id, { text: e.target.value })}
-                    className="flex-1 px-2 py-1.5 bg-surface-800 border border-surface-600 rounded text-white text-xs focus:outline-none focus:border-violet-500" />
-                  <button onClick={() => removeOverlay(o.id)} className="text-red-400 hover:text-red-300 text-xs cursor-pointer px-2">Remove</button>
-                </div>
-                <div className="grid grid-cols-3 gap-2">
-                  <div>
-                    <label className="block text-[10px] text-slate-500">Start (s)</label>
-                    <input type="number" value={o.startTime} step="0.5" min="0" max={clipDuration}
-                      onChange={e => updateOverlay(o.id, { startTime: parseFloat(e.target.value) || 0 })}
-                      className="w-full px-2 py-1 bg-surface-800 border border-surface-600 rounded text-white text-xs" />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] text-slate-500">End (s)</label>
-                    <input type="number" value={o.endTime} step="0.5" min="0" max={clipDuration}
-                      onChange={e => updateOverlay(o.id, { endTime: parseFloat(e.target.value) || 0 })}
-                      className="w-full px-2 py-1 bg-surface-800 border border-surface-600 rounded text-white text-xs" />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] text-slate-500">Position</label>
-                    <select value={o.position} onChange={e => updateOverlay(o.id, { position: e.target.value as TextOverlay['position'] })}
-                      className="w-full px-2 py-1 bg-surface-800 border border-surface-600 rounded text-white text-xs">
-                      <option value="top">Top</option>
-                      <option value="center">Center</option>
-                      <option value="bottom">Bottom</option>
-                    </select>
-                  </div>
-                </div>
-              </div>
-            ))}
-            <button onClick={addOverlay}
-              className="w-full flex items-center justify-center gap-1.5 px-3 py-2 bg-surface-900 border border-dashed border-surface-600 rounded-lg text-slate-400 hover:text-violet-400 hover:border-violet-500/40 text-xs transition-colors cursor-pointer">
-              <Type className="w-3.5 h-3.5" />
-              Add Text Overlay
-            </button>
-          </Section>
-
-          {/* Actions */}
-          <ActionsBar
-            clipId={clipId!}
-            clip={clip}
-            saving={saving} saved={saved}
-            exporting={exporting} exportProgress={exportProgress}
-            exportDone={exportDone} exportError={exportError}
-            vodPath={!!vod?.local_path}
-            exportPreset={exportPreset}
-            onSave={handleSave} onExport={handleExport}
-            publishMeta={publishMeta}
-          />
         </div>
       </div>
-
-      {/* Layout picker modal */}
-      {layoutPickerOpen && (
-        <LayoutPicker
-          current={facecamLayout as any}
-          aspectRatio={aspectRatio as '9:16' | '16:9' | '1:1'}
-          platformName={exportPreset.name}
-          onSelect={setFacecamLayout as any}
-          onClose={() => setLayoutPickerOpen(false)}
-        />
-      )}
     </div>
   )
 }
+   

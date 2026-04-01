@@ -26,7 +26,7 @@ export type UploadResultStatus =
 
 export const PLATFORM_INFO: Record<string, { name: string; color: string; icon: string; available: boolean }> = {
   youtube:   { name: 'YouTube',   color: '#ff0000', icon: 'YT', available: true },
-  tiktok:    { name: 'TikTok',    color: '#00f2ea', icon: 'TT', available: false },
+  tiktok:    { name: 'TikTok',    color: '#00f2ea', icon: 'TT', available: true },
   instagram: { name: 'Instagram', color: '#e1306c', icon: 'IG', available: false },
 }
 
