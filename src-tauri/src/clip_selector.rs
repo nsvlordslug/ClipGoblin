@@ -10,6 +10,7 @@
 //!   7. Diversity-aware final selection (curate a varied, non-repetitive set)
 
 use crate::db;
+use crate::commands::vod::{TranscriptKeyword, TranscriptResult};
 
 // ═══════════════════════════════════════════════════════════════════════
 // Data structures
@@ -236,7 +237,7 @@ pub fn generate_audio_candidates(audio: &AudioContext, _duration: f64) -> Vec<Ra
     signals
 }
 
-pub fn generate_transcript_candidates(keywords: &[crate::TranscriptKeyword]) -> Vec<RawSignal> {
+pub fn generate_transcript_candidates(keywords: &[TranscriptKeyword]) -> Vec<RawSignal> {
     keywords.iter().map(|kw| {
         let lower = kw.keyword.to_lowercase();
         let intensity = if lower.contains("no way") || lower.contains("oh my god") || lower.contains("what the") || lower.contains("holy") { 0.85 }
@@ -822,7 +823,7 @@ pub struct DetectionStats {
 
 pub fn select_clips(
     audio: Option<&AudioContext>,
-    transcript: Option<&crate::TranscriptResult>,
+    transcript: Option<&TranscriptResult>,
     chat_peaks: &[db::HighlightRow],
     duration: f64,
     sensitivity: &str,

@@ -49,6 +49,7 @@ use crate::hardware::HardwareInfo;
 use crate::pipeline::{AnalysisMode, CandidateClip, SignalSegment};
 use crate::scene_signal::{self, SceneDetection};
 use crate::transcript_signal::{self, InputKeyword, InputSegment, TranscriptInput};
+use crate::commands::vod::{run_transcription, find_ffmpeg};
 
 // ═══════════════════════════════════════════════════════════════════
 //  Configuration
@@ -393,7 +394,7 @@ fn run_and_convert_transcript(
     }
 
     // Run fresh transcription
-    crate::run_transcription(vod_path, &cache_str, hw, None)
+    run_transcription(vod_path, &cache_str, hw, None)
         .map(|r| convert_transcript(TranscriptResultCompat {
             segments: r.segments.iter().map(|s| SegCompat {
                 start: s.start,
@@ -469,7 +470,7 @@ fn md5_of_path(path: &str) -> u64 {
 // ═══════════════════════════════════════════════════════════════════
 /// Resolve the ffmpeg binary path (hard requirement).
 fn find_ffmpeg_path() -> Result<PathBuf, AppError> {
-    crate::find_ffmpeg()
+    find_ffmpeg()
 }
 
 // ═══════════════════════════════════════════════════════════════════
