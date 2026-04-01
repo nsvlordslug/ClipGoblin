@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ClipGoblin</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0c0a13;
+      color: #e2dff0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      text-align: center;
+      padding: 24px;
+    }
+    .card {
+      background: #16121f;
+      border: 1px solid #2a2440;
+      border-radius: 16px;
+      padding: 48px 36px;
+      max-width: 420px;
+    }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 12px; }
+    p { font-size: 0.95rem; color: #9992b0; line-height: 1.6; }
+    .spinner {
+      width: 32px; height: 32px;
+      border: 3px solid #2a2440;
+      border-top-color: #863bff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin: 0 auto 20px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .error { color: #ff6b6b; margin-top: 16px; font-size: 0.85rem; }
+    a { color: #863bff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="spinner" id="spinner"></div>
+    <h1>Connecting to ClipGoblin...</h1>
+    <p id="message">Redirecting to the desktop app. This window will close automatically.</p>
+    <p class="error" id="error" style="display:none"></p>
+  </div>
+
+  <script>
+    (function () {
+      var params = window.location.search;
+
+      // Also check the hash fragment — some OAuth flows put params there
+      if (!params && window.location.hash) {
+        params = '?' + window.location.hash.substring(1);
+      }
+
+      if (!params || params === '?') {
+        document.getElementById('spinner').style.display = 'none';
+        document.getElementById('message').textContent = 'No authorization data received.';
+        document.getElementById('error').textContent = 'Missing OAuth callback parameters. Please try connecting again from ClipGoblin.';
+        document.getElementById('error').style.display = 'block';
+        return;
+      }
+
+      // Redirect to the local ClipGoblin callback server with the same parameters
+      var localUrl = 'http://localhost:17387/callback/' + params;
+      window.location.replace(localUrl);
+
+      // If redirect didn't work after 3 seconds, show a manual link
+      setTimeout(function () {
+        document.getElementById('spinner').style.display = 'none';
+        document.getElementById('message').innerHTML =
+          'Automatic redirect failed. <a href="' + localUrl + '">Click here</a> to complete the connection, or return to ClipGoblin and try again.';
+      }, 3000);
+    })();
+  </script>
+</body>
+</html>
