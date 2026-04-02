@@ -31,5 +31,8 @@ dist-ssr
 # Tauri signing keys
 .tauri/
 
+# Bundled binaries (FFmpeg ~90MB)
+src-tauri/binaries/*.exe
+
 # Worker dependencies
 worker/node_modules/
