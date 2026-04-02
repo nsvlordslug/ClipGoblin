@@ -88,6 +88,8 @@ fn init_steam() -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let _ = dotenvy::dotenv();
+
     let conn = db::init_db().expect("Failed to initialize database");
 
     // Recover any clips that were stuck mid-render when the app last closed
