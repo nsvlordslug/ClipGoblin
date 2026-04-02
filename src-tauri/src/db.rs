@@ -367,7 +367,7 @@ pub fn upsert_vod(conn: &Connection, vod: &VodRow) -> SqliteResult<()> {
         )
         .unwrap_or(0);
     if deleted_count > 0 {
-        println!("[upsert_vod] SKIPPING twitch_video_id={} — found in deleted_vods table", vod.twitch_video_id);
+        log::warn!("[upsert_vod] SKIPPING twitch_video_id={} — found in deleted_vods table", vod.twitch_video_id);
         return Ok(());
     }
 
@@ -375,6 +375,7 @@ pub fn upsert_vod(conn: &Connection, vod: &VodRow) -> SqliteResult<()> {
         "INSERT INTO vods (id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress, game_name)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
          ON CONFLICT(twitch_video_id) DO UPDATE SET
+            channel_id = excluded.channel_id,
             title = excluded.title,
             duration_seconds = excluded.duration_seconds,
             thumbnail_url = excluded.thumbnail_url,

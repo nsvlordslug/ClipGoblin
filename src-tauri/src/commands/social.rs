@@ -165,6 +165,6 @@ pub fn restore_deleted_vods(db: State<'_, DbConn>) -> Result<u64, String> {
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
     let count = conn.execute("DELETE FROM deleted_vods", [])
         .map_err(|e| format!("DB error: {}", e))?;
-    println!("[restore_deleted_vods] Cleared {} entries from deleted_vods", count);
+    log::info!("[restore_deleted_vods] Cleared {} entries from deleted_vods table", count);
     Ok(count as u64)
 }

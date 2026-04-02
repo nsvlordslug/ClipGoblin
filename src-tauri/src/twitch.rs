@@ -119,7 +119,7 @@ pub fn get_auth_url() -> String {
     }
 
     let url = format!(
-        "https://id.twitch.tv/oauth2/authorize?client_id={}&redirect_uri={}&response_type=code&scope=user:read:email&force_verify=true&state={}",
+        "https://id.twitch.tv/oauth2/authorize?client_id={}&redirect_uri={}&response_type=code&scope=user:read:email+user:read:broadcast&force_verify=true&state={}",
         client_id(),
         urlencoding::encode(REDIRECT_URI),
         state,

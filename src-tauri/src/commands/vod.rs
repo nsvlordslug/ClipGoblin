@@ -1492,6 +1492,7 @@ pub async fn get_vods(
     channel_id: String,
     db: State<'_, DbConn>,
 ) -> Result<Vec<db::VodRow>, String> {
+    log::info!("[get_vods] called for channel_id={}", channel_id);
     let (twitch_user_id, mut access_token) = {
         let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
         let channels = db::get_all_channels(&conn).map_err(|e| format!("DB error: {}", e))?;
@@ -1507,17 +1508,27 @@ pub async fn get_vods(
     };
 
     if access_token.is_empty() {
+        log::warn!("[get_vods] No access token found — user not logged in");
         return Err("Not logged in. Please log in with Twitch first.".into());
     }
 
+    log::info!("[get_vods] Fetching VODs for twitch_user_id={}, token_len={}", twitch_user_id, access_token.len());
+
     // Try fetching VODs; if 401, refresh token and retry
     let videos = match twitch::get_vods(&access_token, &twitch_user_id).await {
-        Ok(v) => v,
+        Ok(v) => {
+            log::info!("[get_vods] Twitch API returned {} videos", v.len());
+            v
+        }
         Err(e) if e.contains("401") => {
+            log::warn!("[get_vods] Got 401, refreshing token and retrying");
             access_token = try_refresh_twitch_token(&db).await?;
             twitch::get_vods(&access_token, &twitch_user_id).await?
         }
-        Err(e) => return Err(e),
+        Err(e) => {
+            log::error!("[get_vods] Twitch API error: {}", e);
+            return Err(e);
+        }
     };
 
     // NOTE: The Twitch /videos endpoint does NOT return game_id/game_name, and the
@@ -1555,13 +1566,18 @@ pub async fn get_vods(
 
     {
         let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
+        let mut upsert_count = 0;
         for vod in &vod_rows {
             db::upsert_vod(&conn, vod).map_err(|e| format!("DB error: {}", e))?;
+            upsert_count += 1;
         }
+        log::info!("[get_vods] Upserted {} VODs to database for channel_id={}", upsert_count, channel_id);
     }
 
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
-    db::get_vods_by_channel(&conn, &channel_id).map_err(|e| format!("DB error: {}", e))
+    let result = db::get_vods_by_channel(&conn, &channel_id).map_err(|e| format!("DB error: {}", e))?;
+    log::info!("[get_vods] get_vods_by_channel returned {} VODs", result.len());
+    Ok(result)
 }
 
 #[tauri::command]

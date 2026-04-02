@@ -99,7 +99,12 @@ export default function Vods() {
 
   useEffect(() => {
     if (loggedInUser) {
-      fetchVods(loggedInUser.id)
+      console.log('[Vods] Restoring deleted VODs then fetching, channelId=', loggedInUser.id)
+      invoke('restore_deleted_vods')
+        .then(() => fetchVods(loggedInUser.id))
+        .then(() => {
+          console.log('[Vods] fetchVods resolved, vods in store:', useAppStore.getState().vods.length)
+        })
     }
   }, [loggedInUser, fetchVods])
 
