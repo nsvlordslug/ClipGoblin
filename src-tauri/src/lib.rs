@@ -22,6 +22,7 @@ mod twitch;
 mod log_scrubber;
 mod social;
 mod vertical_crop;
+mod whisper;
 
 use std::sync::Mutex;
 use rusqlite::Connection;
