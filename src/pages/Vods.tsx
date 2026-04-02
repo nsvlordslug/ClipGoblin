@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Video, Download, Search, Eye, Tv, LogIn, Check, RotateCcw, RefreshCw, Trash2, X, Gamepad2, Plus } from 'lucide-react'
+import { Video, Download, Search, Eye, Tv, LogIn, Check, RotateCcw, RefreshCw, Trash2, X, Gamepad2, Plus, Play } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
 import { invoke } from '@tauri-apps/api/core'
 
@@ -386,6 +386,32 @@ export default function Vods() {
                 <span className="absolute bottom-2 right-2 bg-black/80 text-white text-xs px-1.5 py-0.5 rounded">
                   {formatDuration(vod.duration_seconds)}
                 </span>
+                {/* Play/Download overlay on thumbnail */}
+                {vod.download_status === 'downloaded' ? (
+                  <button
+                    onClick={() => navigate(`/player/${vod.id}`)}
+                    className="absolute inset-0 flex items-center justify-center bg-black/40 hover:bg-black/30 transition-colors cursor-pointer group/play"
+                  >
+                    <Play className="w-10 h-10 text-white/90 drop-shadow group-hover/play:scale-110 transition-transform" />
+                  </button>
+                ) : vod.download_status === 'downloading' ? (
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/50">
+                    <div className="flex flex-col items-center gap-1">
+                      <Download className="w-8 h-8 text-blue-400 animate-bounce" />
+                      <span className="text-xs text-blue-300 font-medium">{vod.download_progress}%</span>
+                    </div>
+                  </div>
+                ) : vod.download_status !== 'downloading' && (
+                  <button
+                    onClick={() => handleDownload(vod.id)}
+                    className="absolute inset-0 flex items-center justify-center bg-black/40 hover:bg-black/30 transition-colors cursor-pointer group/play"
+                  >
+                    <div className="flex flex-col items-center gap-1">
+                      <Download className="w-8 h-8 text-white/80 drop-shadow group-hover/play:scale-110 transition-transform" />
+                      <span className="text-[10px] text-white/70 font-medium">Download to play</span>
+                    </div>
+                  </button>
+                )}
               </div>
 
               {/* Info */}

@@ -1,0 +1,9 @@
+name = "clipgoblin-auth-proxy"
+main = "src/index.js"
+compatibility_date = "2024-12-01"
+
+[vars]
+ALLOWED_ORIGIN = "http://localhost:1420"
+TWITCH_CLIENT_ID = "i734ser5qcdf8grvlllx6yzprwegfr"
+YOUTUBE_CLIENT_ID = "963785158873-iuutl54610isuch1mcaqnbsoc90acrnb.apps.googleusercontent.com"
+TIKTOK_CLIENT_KEY = "sbaw6sgw2tazmhoq4t"

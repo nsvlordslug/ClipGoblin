@@ -1,6 +1,8 @@
 use rusqlite::{Connection, Result as SqliteResult, params};
 use std::path::PathBuf;
 
+use crate::crypto;
+
 /// Get the path to the database file.
 ///
 /// Returns an error instead of panicking if the data directory cannot be
@@ -284,13 +286,56 @@ pub struct UploadHistoryRow {
     pub uploaded_at: Option<String>,
 }
 
+// ── Sensitive field encryption ──
+
+/// Keys whose values must be encrypted at rest via DPAPI (Windows) or base64 (other).
+const SENSITIVE_KEYS: &[&str] = &[
+    "twitch_user_access_token",
+    "twitch_refresh_token",
+    "youtube_access_token",
+    "youtube_refresh_token",
+    "tiktok_access_token",
+    "tiktok_refresh_token",
+    "claude_api_key",
+    "openai_api_key",
+    "gemini_api_key",
+    "ai_settings", // JSON blob containing API keys
+];
+
+fn is_sensitive_key(key: &str) -> bool {
+    SENSITIVE_KEYS.contains(&key)
+}
+
+/// Encrypt value before storage if the key is sensitive.
+fn encrypt_for_storage(key: &str, value: &str) -> String {
+    if !is_sensitive_key(key) || value.is_empty() {
+        return value.to_string();
+    }
+    crypto::encrypt_sensitive(value).unwrap_or_else(|e| {
+        log::warn!("Failed to encrypt setting '{}': {} — storing plaintext", key, e);
+        value.to_string()
+    })
+}
+
+/// Decrypt value after reading if the key is sensitive.
+fn decrypt_from_storage(key: &str, value: &str) -> String {
+    if !is_sensitive_key(key) || value.is_empty() {
+        return value.to_string();
+    }
+    crypto::decrypt_sensitive(value).unwrap_or_else(|e| {
+        log::warn!("Failed to decrypt setting '{}': {} — returning raw value", key, e);
+        value.to_string()
+    })
+}
+
 // ── Settings helpers ──
 
 pub fn save_setting(conn: &Connection, key: &str, value: &str) -> SqliteResult<()> {
+    let stored = encrypt_for_storage(key, value);
     conn.execute(
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![key, value],
+        params![key, stored],
     )?;
     Ok(())
 }
@@ -299,7 +344,7 @@ pub fn get_setting(conn: &Connection, key: &str) -> SqliteResult<Option<String>>
     let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
     let mut rows = stmt.query_map(params![key], |row| row.get::<_, String>(0))?;
     match rows.next() {
-        Some(val) => Ok(Some(val?)),
+        Some(val) => Ok(Some(decrypt_from_storage(key, &val?))),
         None => Ok(None),
     }
 }

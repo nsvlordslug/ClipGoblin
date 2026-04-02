@@ -1,4 +1,6 @@
 mod ai_provider;
+mod auth_proxy;
+mod crypto;
 mod audio_signal;
 mod clip_fusion;
 mod clip_labeler;
@@ -17,6 +19,7 @@ mod post_captions;
 mod scene_signal;
 mod transcript_signal;
 mod twitch;
+mod log_scrubber;
 mod social;
 mod vertical_crop;
 
@@ -70,6 +73,16 @@ use commands::vod::{
     get_transcript,
 };
 
+// ── Steam init (only compiled with `steam` feature) ──
+
+#[cfg(feature = "steam")]
+fn init_steam() -> Result<(), String> {
+    let (client, _single) = steamworks::Client::init_app(480)
+        .map_err(|e| format!("Steam init failed: {}", e))?;
+    log::info!("Steamworks SDK initialized");
+    Ok(())
+}
+
 // ── App entry point ──
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -81,11 +94,29 @@ pub fn run() {
 
     let hw = hardware::detect_hardware();
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_log::Builder::default().level(log::LevelFilter::Info).build())
+    #[cfg(feature = "steam")]
+    {
+        if let Err(e) = init_steam() {
+            log::warn!("Steam not available: {}", e);
+        }
+    }
+
+    let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_log::Builder::default().level(if cfg!(debug_assertions) {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Info
+        }).build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_opener::init());
+
+    #[cfg(feature = "standalone")]
+    {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+
+    builder
         .manage(Mutex::new(conn))
         .manage(hw)
         .manage(JobQueue::new())

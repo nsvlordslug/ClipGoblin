@@ -10,6 +10,7 @@
 //! `!Sync`, preventing `&Connection` from being held across `.await` points
 //! in a `Send` future.
 
+use crate::auth_proxy::AuthProxy;
 use crate::db;
 use crate::error::AppError;
 use crate::social::{
@@ -29,7 +30,6 @@ use std::time::{Duration, Instant};
 // ═══════════════════════════════════════════════════════════════════
 
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
-const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const YOUTUBE_API_URL: &str = "https://www.googleapis.com/youtube/v3";
 const YOUTUBE_UPLOAD_URL: &str = "https://www.googleapis.com/upload/youtube/v3/videos";
 
@@ -50,19 +50,8 @@ static CLIENT_ID: Lazy<String> = Lazy::new(|| {
     })
 });
 
-static CLIENT_SECRET: Lazy<String> = Lazy::new(|| {
-    std::env::var("YOUTUBE_CLIENT_SECRET").unwrap_or_else(|_| {
-        log::warn!("YOUTUBE_CLIENT_SECRET environment variable is not set — YouTube OAuth will fail");
-        String::new()
-    })
-});
-
 fn client_id() -> &'static str {
     &CLIENT_ID
-}
-
-fn client_secret() -> &'static str {
-    &CLIENT_SECRET
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -450,31 +439,31 @@ async fn do_handle_callback_net(
     Ok((tokens, channel))
 }
 
-/// POST to Google token endpoint with refresh_token grant type.
+/// Refresh YouTube tokens via auth proxy.
 async fn do_refresh_token_net(refresh_tok: &str) -> Result<TokenResponse, AppError> {
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(GOOGLE_TOKEN_URL)
-        .form(&[
-            ("client_id", client_id()),
-            ("client_secret", client_secret()),
-            ("refresh_token", refresh_tok),
-            ("grant_type", "refresh_token"),
-        ])
-        .send()
-        .await?;
+    log::info!("[YouTube Refresh] Refreshing token via auth proxy");
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+    let proxy = AuthProxy::new()
+        .map_err(|e| AppError::Api(format!("Auth proxy init failed: {}", e)))?;
+    let proxy_resp = proxy.youtube_refresh(refresh_tok).await
+        .map_err(|e| AppError::Api(e))?;
+
+    if let Some(err) = proxy_resp.error {
+        let desc = proxy_resp.error_description.unwrap_or_default();
         return Err(AppError::Api(format!(
-            "YouTube token refresh failed ({}): {}",
-            status, body
+            "YouTube token refresh failed: {} — {}",
+            err, desc
         )));
     }
 
-    let tokens: TokenResponse = resp.json().await?;
-    Ok(tokens)
+    let access_token = proxy_resp.access_token
+        .ok_or_else(|| AppError::Api("Proxy response missing access_token".into()))?;
+
+    Ok(TokenResponse {
+        access_token,
+        expires_in: proxy_resp.expires_in.unwrap_or(0),
+        refresh_token: proxy_resp.refresh_token,
+    })
 }
 
 /// Initiate a resumable upload and send file bytes in chunks.
@@ -589,32 +578,31 @@ async fn do_upload_net(
 //  Private helpers
 // ═══════════════════════════════════════════════════════════════════
 
-/// Exchange an authorization code for access + refresh tokens.
+/// Exchange an authorization code for access + refresh tokens via auth proxy.
 async fn exchange_code(code: &str) -> Result<TokenResponse, AppError> {
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(GOOGLE_TOKEN_URL)
-        .form(&[
-            ("client_id", client_id()),
-            ("client_secret", client_secret()),
-            ("code", code),
-            ("grant_type", "authorization_code"),
-            ("redirect_uri", REDIRECT_URI),
-        ])
-        .send()
-        .await?;
+    log::info!("[YouTube Token] Exchanging code via auth proxy");
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+    let proxy = AuthProxy::new()
+        .map_err(|e| AppError::Api(format!("Auth proxy init failed: {}", e)))?;
+    let proxy_resp = proxy.youtube_token_exchange(code, REDIRECT_URI).await
+        .map_err(|e| AppError::Api(e))?;
+
+    if let Some(err) = proxy_resp.error {
+        let desc = proxy_resp.error_description.unwrap_or_default();
         return Err(AppError::Api(format!(
-            "YouTube token exchange failed ({}): {}",
-            status, body
+            "YouTube token exchange failed: {} — {}",
+            err, desc
         )));
     }
 
-    let tokens: TokenResponse = resp.json().await?;
-    Ok(tokens)
+    let access_token = proxy_resp.access_token
+        .ok_or_else(|| AppError::Api("Proxy response missing access_token".into()))?;
+
+    Ok(TokenResponse {
+        access_token,
+        expires_in: proxy_resp.expires_in.unwrap_or(0),
+        refresh_token: proxy_resp.refresh_token,
+    })
 }
 
 /// Fetch the authenticated user's YouTube channel name and ID.

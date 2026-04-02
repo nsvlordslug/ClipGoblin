@@ -4,6 +4,7 @@ use std::net::TcpListener;
 use std::time::{Duration, Instant};
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
+use crate::auth_proxy::AuthProxy;
 
 /// Embedded Twitch Client ID — compiled into the binary.
 /// Override with TWITCH_CLIENT_ID env var for development.
@@ -27,32 +28,9 @@ pub fn client_id() -> &'static str {
     &CLIENT_ID
 }
 
-/// Embedded Twitch Client Secret — compiled into the binary.
-/// Override with TWITCH_CLIENT_SECRET env var for development.
-const DEFAULT_TWITCH_CLIENT_SECRET: &str = "9vkblt95slzrfinmdplo1y1lmu54i8";
-
-static CLIENT_SECRET: Lazy<String> = Lazy::new(|| {
-    match std::env::var("TWITCH_CLIENT_SECRET") {
-        Ok(val) if !val.is_empty() => {
-            log::info!("Twitch CLIENT_SECRET loaded from env (len={})", val.len());
-            val
-        }
-        _ => {
-            log::info!("Using embedded Twitch CLIENT_SECRET");
-            DEFAULT_TWITCH_CLIENT_SECRET.to_string()
-        }
-    }
-});
-
-/// Returns the Twitch Client Secret (embedded default or .env override).
-pub fn client_secret() -> &'static str {
-    &CLIENT_SECRET
-}
-
 /// Stores the expected OAuth state to verify on callback.
 static OAUTH_STATE: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
 
-const TWITCH_TOKEN_URL: &str = "https://id.twitch.tv/oauth2/token";
 const TWITCH_API_URL: &str = "https://api.twitch.tv/helix";
 const REDIRECT_URI: &str = "http://localhost:17385";
 
@@ -266,129 +244,73 @@ fn send_html_response(stream: &std::net::TcpStream, body_content: &str) {
     }
 }
 
-/// Refresh an expired access token using a refresh token.
-/// Confidential clients send client_secret along with client_id + refresh_token.
+/// Refresh an expired access token using the auth proxy.
 pub async fn refresh_access_token(
     refresh_token: &str,
 ) -> Result<TokenResponse, String> {
-    log::info!("[Twitch Refresh] Refreshing token with client_id={}", client_id());
+    log::info!("[Twitch Refresh] Refreshing token via auth proxy");
 
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(TWITCH_TOKEN_URL)
-        .form(&[
-            ("client_id", client_id()),
-            ("client_secret", client_secret()),
-            ("refresh_token", refresh_token),
-            ("grant_type", "refresh_token"),
-        ])
-        .send()
-        .await
-        .map_err(|e| {
-            log::error!("[Twitch Refresh] HTTP request failed: {}", e);
-            format!("Failed to refresh token: {}", e)
-        })?;
+    let proxy = AuthProxy::new()?;
+    let proxy_resp = proxy.twitch_refresh(refresh_token).await?;
 
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        log::error!("[Twitch Refresh] FAILED ({}): {}", status, body);
-        return Err(format!("Token refresh failed ({}): {}", status, body));
+    // Check for error in proxy response
+    if let Some(err) = proxy_resp.error {
+        let desc = proxy_resp.error_description.unwrap_or_default();
+        log::error!("[Twitch Refresh] Proxy returned error: {} — {}", err, desc);
+        return Err(format!("Token refresh failed: {} — {}", err, desc));
     }
 
-    let token = resp.json::<TokenResponse>()
-        .await
-        .map_err(|e| {
-            log::error!("[Twitch Refresh] JSON parse failed: {}", e);
-            format!("Failed to parse refreshed token: {}", e)
-        })?;
+    let access_token = proxy_resp.access_token
+        .ok_or_else(|| "Proxy response missing access_token".to_string())?;
 
-    log::info!("[Twitch Refresh] Success — new token len={}", token.access_token.len());
-    Ok(token)
+    log::info!("[Twitch Refresh] Success — new token len={}", access_token.len());
+
+    Ok(TokenResponse {
+        access_token,
+        expires_in: proxy_resp.expires_in.unwrap_or(0),
+        token_type: proxy_resp.token_type.unwrap_or_else(|| "bearer".to_string()),
+        refresh_token: proxy_resp.refresh_token,
+    })
 }
 
-/// Exchange an authorization code for an access token (Confidential Client flow).
-/// Uses client_secret instead of PKCE code_verifier.
+/// Exchange an authorization code for an access token via the auth proxy.
 pub async fn exchange_code(
     code: &str,
 ) -> Result<TokenResponse, String> {
-    log::info!("[Twitch Token] POST {} — body: client_id={}&client_secret=***&code={}...&grant_type=authorization_code&redirect_uri={}",
-        TWITCH_TOKEN_URL, client_id(), &code[..code.len().min(8)], REDIRECT_URI);
+    log::info!("[Twitch Token] Exchanging code via auth proxy (code={}..., redirect_uri={})",
+        &code[..code.len().min(8)], REDIRECT_URI);
 
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(TWITCH_TOKEN_URL)
-        .form(&[
-            ("client_id", client_id()),
-            ("client_secret", client_secret()),
-            ("code", code),
-            ("grant_type", "authorization_code"),
-            ("redirect_uri", REDIRECT_URI),
-        ])
-        .send()
-        .await
-        .map_err(|e| {
-            log::error!("[Twitch Token] HTTP request failed: {}", e);
-            format!("Failed to exchange code: {}", e)
-        })?;
+    let proxy = AuthProxy::new()?;
+    let proxy_resp = proxy.twitch_token_exchange(code, REDIRECT_URI).await?;
 
-    let status = resp.status();
-    log::info!("[Twitch Token] Response status: {}", status);
-
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        log::error!("[Twitch Token] Exchange FAILED ({}): {}", status, body);
-        return Err(format!("Token exchange failed ({}): {}", status, body));
+    // Check for error in proxy response
+    if let Some(err) = proxy_resp.error {
+        let desc = proxy_resp.error_description.unwrap_or_default();
+        log::error!("[Twitch Token] Proxy returned error: {} — {}", err, desc);
+        return Err(format!("Token exchange failed: {} — {}", err, desc));
     }
 
-    let body_text = resp.text().await.map_err(|e| {
-        log::error!("[Twitch Token] Failed to read response body: {}", e);
-        format!("Failed to read token response: {}", e)
-    })?;
-
-    log::info!("[Twitch Token] Exchange succeeded, parsing JSON (len={})", body_text.len());
-
-    let token: TokenResponse = serde_json::from_str(&body_text).map_err(|e| {
-        log::error!("[Twitch Token] JSON parse failed: {} — body: {}", e, &body_text[..body_text.len().min(500)]);
-        format!("Failed to parse token: {}", e)
-    })?;
+    let access_token = proxy_resp.access_token
+        .ok_or_else(|| "Proxy response missing access_token".to_string())?;
 
     log::info!("[Twitch Token] Got access_token (len={}), refresh_token={}",
-        token.access_token.len(),
-        if token.refresh_token.is_some() { "present" } else { "MISSING" });
+        access_token.len(),
+        if proxy_resp.refresh_token.is_some() { "present" } else { "MISSING" });
 
-    Ok(token)
+    Ok(TokenResponse {
+        access_token,
+        expires_in: proxy_resp.expires_in.unwrap_or(0),
+        token_type: proxy_resp.token_type.unwrap_or_else(|| "bearer".to_string()),
+        refresh_token: proxy_resp.refresh_token,
+    })
 }
 
 /// Get an app access token using the client credentials flow.
 /// Note: client_credentials is for server-side app tokens (no user context).
-/// User tokens are obtained via exchange_code() instead.
+/// This flow is not supported through the auth proxy — kept as a stub.
 #[allow(dead_code)]
-pub async fn get_app_access_token(client_secret: &str) -> Result<String, String> {
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(TWITCH_TOKEN_URL)
-        .form(&[
-            ("client_id", client_id()),
-            ("client_secret", client_secret),
-            ("grant_type", "client_credentials"),
-        ])
-        .send()
-        .await
-        .map_err(|e| format!("Failed to request token: {}", e))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Token request failed ({}): {}", status, body));
-    }
-
-    let token_resp: TokenResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse token response: {}", e))?;
-
-    Ok(token_resp.access_token)
+pub async fn get_app_access_token(_client_secret: &str) -> Result<String, String> {
+    Err("App access tokens (client_credentials) are not supported via the auth proxy. Use exchange_code() for user tokens.".to_string())
 }
 
 /// Get the authenticated user's info using their user access token.

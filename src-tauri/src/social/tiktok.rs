@@ -8,6 +8,7 @@
 //!
 //! Uses Sandbox mode by default — suitable for testing before production approval.
 
+use crate::auth_proxy::AuthProxy;
 use crate::db;
 use crate::error::AppError;
 use crate::social::{
@@ -27,7 +28,6 @@ use std::time::{Duration, Instant};
 // ═══════════════════════════════════════════════════════════════════
 
 const TIKTOK_AUTH_URL: &str = "https://www.tiktok.com/v2/auth/authorize/";
-const TIKTOK_TOKEN_URL: &str = "https://open.tiktokapis.com/v2/oauth/token/";
 const TIKTOK_USERINFO_URL: &str = "https://open.tiktokapis.com/v2/user/info/";
 const TIKTOK_PUBLISH_INIT_URL: &str =
     "https://open.tiktokapis.com/v2/post/publish/video/init/";
@@ -62,25 +62,8 @@ static CLIENT_KEY: Lazy<String> = Lazy::new(|| {
     }
 });
 
-static CLIENT_SECRET: Lazy<String> = Lazy::new(|| {
-    match std::env::var("TIKTOK_CLIENT_SECRET") {
-        Ok(val) => {
-            log::info!("TikTok CLIENT_SECRET loaded (len={})", val.len());
-            val
-        }
-        Err(_) => {
-            log::warn!("TIKTOK_CLIENT_SECRET environment variable is not set — TikTok OAuth will fail");
-            String::new()
-        }
-    }
-});
-
 fn client_key() -> &'static str {
     &CLIENT_KEY
-}
-
-fn client_secret() -> &'static str {
-    &CLIENT_SECRET
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -326,8 +309,8 @@ impl PlatformAdapter for TikTokAdapter {
             .collect::<String>();
 
         log::info!(
-            "TikTok PKCE: verifier={} (len={}), challenge={} (len={})",
-            &code_verifier, code_verifier.len(), &code_challenge, code_challenge.len()
+            "TikTok PKCE: verifier_len={}, challenge_len={}",
+            code_verifier.len(), code_challenge.len()
         );
 
         // TikTok Login Kit OAuth URL with PKCE
@@ -491,7 +474,7 @@ impl PlatformAdapter for TikTokAdapter {
                 AppError::Api("No TikTok access token — please reconnect.".into())
             })?;
 
-        log::info!("TikTok upload: access token present ({}...)", &access_token[..8.min(access_token.len())]);
+        log::info!("TikTok upload: access token present (len={})", access_token.len());
 
         // Read file bytes (sync)
         let file_bytes = std::fs::read(file_path)
@@ -562,50 +545,37 @@ async fn do_handle_callback_net(
 }
 
 async fn do_refresh_token_net(refresh_tok: &str) -> Result<TokenResponse, AppError> {
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(TIKTOK_TOKEN_URL)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .form(&[
-            ("client_key", client_key()),
-            ("client_secret", client_secret()),
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_tok),
-        ])
-        .send()
-        .await?;
+    log::info!("TikTok token refresh via auth proxy");
 
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
+    let proxy = AuthProxy::new()
+        .map_err(|e| AppError::Api(format!("Auth proxy init failed: {}", e)))?;
+    let proxy_resp = proxy.tiktok_refresh(refresh_tok).await
+        .map_err(|e| AppError::Api(e))?;
 
-    log::info!("TikTok token refresh response ({}): {}", status, body);
-
-    if !status.is_success() {
-        return Err(AppError::Api(format!(
-            "TikTok token refresh failed ({}): {}",
-            status, body
-        )));
-    }
-
-    // Check for error-in-200 (same pattern as token exchange)
-    let maybe_err: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-    if let Some(err_code) = maybe_err.get("error").and_then(|v| v.as_str()) {
-        let err_desc = maybe_err
-            .get("error_description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
+    // Check for error in proxy response
+    if let Some(err) = proxy_resp.error {
+        let desc = proxy_resp.error_description.unwrap_or_default();
         return Err(AppError::Api(format!(
             "TikTok token refresh error: {} — {}",
-            err_code, err_desc
+            err, desc
         )));
     }
 
-    let tokens: TokenResponse = serde_json::from_str(&body)
-        .map_err(|e| AppError::Api(format!(
-            "TikTok token refresh: failed to parse response: {} — body: {}",
-            e, body
-        )))?;
-    Ok(tokens)
+    let access_token = proxy_resp.access_token
+        .ok_or_else(|| AppError::Api("Proxy response missing access_token".into()))?;
+    let refresh_token = proxy_resp.refresh_token
+        .ok_or_else(|| AppError::Api("Proxy response missing refresh_token".into()))?;
+
+    log::info!("TikTok token refresh succeeded via proxy");
+
+    Ok(TokenResponse {
+        access_token,
+        expires_in: proxy_resp.expires_in.unwrap_or(0),
+        refresh_token,
+        refresh_expires_in: 0,
+        open_id: proxy_resp.open_id.unwrap_or_default(),
+        token_type: proxy_resp.token_type,
+    })
 }
 
 /// Query creator info — recommended by TikTok before initiating a Direct Post.
@@ -635,7 +605,8 @@ async fn query_creator_info(
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
 
-    log::info!("TikTok creator_info response ({}): {}", status, body);
+    log::info!("TikTok creator_info response ({})", status);
+    log::debug!("TikTok creator_info body: {}", body);
 
     if !status.is_success() {
         log::warn!("TikTok creator_info returned {} — continuing with SELF_ONLY", status);
@@ -768,7 +739,7 @@ async fn do_upload_net(
         }
     });
 
-    log::info!("TikTok upload init body: {}", init_body);
+    log::debug!("TikTok upload init body: {}", init_body);
 
     let init_resp = client
         .post(TIKTOK_PUBLISH_INIT_URL)
@@ -781,7 +752,8 @@ async fn do_upload_net(
     let init_status = init_resp.status();
     let init_body_text = init_resp.text().await.unwrap_or_default();
 
-    log::info!("TikTok upload init response ({}): {}", init_status, init_body_text);
+    log::info!("TikTok upload init response ({})", init_status);
+    log::debug!("TikTok upload init response body: {}", init_body_text);
 
     if !init_status.is_success() {
         return Err(AppError::Api(format!(
@@ -915,13 +887,13 @@ async fn poll_publish_status(
         };
 
         let body_text = resp.text().await.unwrap_or_default();
-        log::info!("TikTok status poll response: {}", body_text);
+        log::debug!("TikTok status poll response: {}", body_text);
 
         // Parse as raw JSON first so we can inspect whatever TikTok returns
         let json: serde_json::Value = match serde_json::from_str(&body_text) {
             Ok(v) => v,
             Err(e) => {
-                log::warn!("TikTok status poll parse error: {} — body: {}", e, body_text);
+                log::warn!("TikTok status poll parse error: {} — body_len={}", e, body_text.len());
                 continue;
             }
         };
@@ -992,7 +964,7 @@ async fn poll_publish_status(
 //  Private helpers
 // ═══════════════════════════════════════════════════════════════════
 
-/// Exchange an authorization code for access + refresh tokens.
+/// Exchange an authorization code for access + refresh tokens via auth proxy.
 async fn exchange_code(code: &str) -> Result<TokenResponse, AppError> {
     // Retrieve the PKCE code_verifier generated during start_auth
     let code_verifier = PKCE_VERIFIER
@@ -1006,68 +978,43 @@ async fn exchange_code(code: &str) -> Result<TokenResponse, AppError> {
         ));
     }
 
-    let ck = client_key();
-    let cs = client_secret();
-    let ck_preview = if ck.len() > 6 { &ck[..6] } else { ck };
-    let cs_preview = if cs.len() > 4 { &cs[..4] } else { cs };
-
-    // Build the form body manually so we can log it exactly
-    let form_body = format!(
-        "client_key={}&client_secret={}&code={}&grant_type=authorization_code&redirect_uri={}&code_verifier={}",
-        urlencoding::encode(ck),
-        urlencoding::encode(cs),
-        urlencoding::encode(code),
-        urlencoding::encode(REDIRECT_URI),
-        urlencoding::encode(&code_verifier),
+    log::info!(
+        "TikTok token exchange via auth proxy (code={}..., verifier={} chars)",
+        &code[..code.len().min(10)],
+        code_verifier.len()
     );
 
-    // Log the exact request (mask secrets)
-    let log_body = format!(
-        "client_key={}&client_secret={}***&code={}...&grant_type=authorization_code&redirect_uri={}&code_verifier=({} chars)",
-        ck, cs_preview, &code[..code.len().min(10)], REDIRECT_URI, code_verifier.len()
-    );
-    log::info!("TikTok token exchange POST {} body: {}", TIKTOK_TOKEN_URL, log_body);
+    let proxy = AuthProxy::new()
+        .map_err(|e| AppError::Api(format!("Auth proxy init failed: {}", e)))?;
+    let proxy_resp = proxy
+        .tiktok_token_exchange(code, REDIRECT_URI, &code_verifier)
+        .await
+        .map_err(|e| AppError::Api(e))?;
 
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(TIKTOK_TOKEN_URL)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(form_body)
-        .send()
-        .await?;
-
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-
-    log::info!("TikTok token exchange response ({}): {}", status, body);
-
-    if !status.is_success() {
-        return Err(AppError::Api(format!(
-            "TikTok token exchange failed ({}): {}",
-            status, body
-        )));
-    }
-
-    // TikTok may return HTTP 200 with an error body like {"error":"invalid_request",...}
-    // Check for error field BEFORE attempting TokenResponse deserialization
-    let maybe_err: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-    if let Some(err_code) = maybe_err.get("error").and_then(|v| v.as_str()) {
-        let err_desc = maybe_err
-            .get("error_description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
+    // Check for error in proxy response
+    if let Some(err) = proxy_resp.error {
+        let desc = proxy_resp.error_description.unwrap_or_default();
         return Err(AppError::Api(format!(
             "TikTok OAuth error: {} — {}",
-            err_code, err_desc
+            err, desc
         )));
     }
 
-    let tokens: TokenResponse = serde_json::from_str(&body)
-        .map_err(|e| AppError::Api(format!(
-            "TikTok token exchange: failed to parse response: {} — body: {}",
-            e, body
-        )))?;
-    Ok(tokens)
+    let access_token = proxy_resp.access_token
+        .ok_or_else(|| AppError::Api("Proxy response missing access_token".into()))?;
+    let refresh_token = proxy_resp.refresh_token
+        .ok_or_else(|| AppError::Api("Proxy response missing refresh_token".into()))?;
+
+    log::info!("TikTok token exchange succeeded via proxy");
+
+    Ok(TokenResponse {
+        access_token,
+        expires_in: proxy_resp.expires_in.unwrap_or(0),
+        refresh_token,
+        refresh_expires_in: 0, // proxy doesn't return this; TikTok refresh tokens last ~365 days
+        open_id: proxy_resp.open_id.unwrap_or_default(),
+        token_type: proxy_resp.token_type,
+    })
 }
 
 /// Fetch the authenticated user's TikTok display name and open_id.
@@ -1086,7 +1033,8 @@ async fn fetch_user_info(
     let status = resp.status();
     let body_text = resp.text().await.unwrap_or_default();
 
-    log::info!("TikTok user info response ({}): {}", status, body_text);
+    log::info!("TikTok user info response ({})", status);
+    log::debug!("TikTok user info body: {}", body_text);
 
     if !status.is_success() {
         return Err(AppError::Api(format!(
@@ -1135,7 +1083,7 @@ async fn fetch_username_best_effort(
         .ok()?;
 
     let body_text = resp.text().await.ok()?;
-    log::info!("TikTok username fetch response: {}", body_text);
+    log::debug!("TikTok username fetch response: {}", body_text);
 
     let body: serde_json::Value = serde_json::from_str(&body_text).ok()?;
 

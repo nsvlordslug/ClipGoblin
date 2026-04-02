@@ -27,3 +27,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Tauri signing keys
+.tauri/
+
+# Worker dependencies
+worker/node_modules/
