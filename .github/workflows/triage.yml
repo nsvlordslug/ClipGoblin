@@ -59,7 +59,8 @@ jobs:
 
             let classification;
             try {
-              classification = JSON.parse(text);
+              const cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+              classification = JSON.parse(cleanText);
             } catch {
               core.warning(`Failed to parse Claude response: ${text}`);
               return;

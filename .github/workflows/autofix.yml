@@ -160,7 +160,8 @@ jobs:
 
             let fix;
             try {
-              fix = JSON.parse(text);
+              const cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+              fix = JSON.parse(cleanText);
             } catch {
               core.setFailed(`Failed to parse Claude response: ${text.substring(0, 500)}`);
               return;
