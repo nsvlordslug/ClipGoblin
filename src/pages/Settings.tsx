@@ -208,11 +208,11 @@ export default function SettingsPage() {
   // Listen for model download progress
   useEffect(() => {
     if (!modelDownloading) return
-    const unlisten = listen<{ model: string; percent: number; downloaded_bytes: number; total_bytes: number }>(
+    const unlisten = listen<{ model: string; percent: number; downloadedMb: number; totalMb: number }>(
       'model-download-progress',
       (event) => {
         setModelProgress(event.payload.percent)
-        setModelDownloadedMb(Math.round(event.payload.downloaded_bytes / 1024 / 1024))
+        setModelDownloadedMb(Math.round(event.payload.downloadedMb))
         if (event.payload.percent >= 100) {
           setModelDownloading(null)
           setModelProgress(0)

@@ -40,11 +40,11 @@ export default function FirstRunSetup({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (state !== 'downloading') return
-    const unlisten = listen<{ model: string; percent: number; downloaded_bytes: number; total_bytes: number }>(
+    const unlisten = listen<{ model: string; percent: number; downloadedMb: number; totalMb: number }>(
       'model-download-progress',
       (event) => {
         setProgress(event.payload.percent)
-        setDownloadedMb(Math.round(event.payload.downloaded_bytes / 1024 / 1024))
+        setDownloadedMb(Math.round(event.payload.downloadedMb))
         if (event.payload.percent >= 100) {
           setState('done')
         }
