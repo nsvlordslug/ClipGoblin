@@ -4,6 +4,7 @@
 //! directly in `tauri::generate_handler![]`.
 
 pub mod auth;
+pub mod bug_report;
 pub mod captions;
 pub mod clip;
 pub mod export;

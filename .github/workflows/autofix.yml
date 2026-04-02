@@ -1,0 +1,268 @@
+name: Auto-Fix Bug
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  autofix:
+    if: github.event.label.name == 'fix-requested'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate fix with Claude Sonnet
+        uses: actions/github-script@v7
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const { execSync } = require('child_process');
+
+            const issue = context.payload.issue;
+            const branchName = `fix/issue-${issue.number}`;
+
+            // ── Scope definitions ──
+            const ALLOWED_DIRS = [
+              'src-tauri/src/commands/',
+              'src-tauri/src/social/',
+              'src-tauri/src/db.rs',
+              'src-tauri/src/clip_selector.rs',
+              'src-tauri/src/hardware.rs',
+              'src-tauri/src/error.rs',
+              'src-tauri/src/job_queue.rs',
+              'src-tauri/src/vertical_crop.rs',
+              'src-tauri/src/log_scrubber.rs',
+              'src/',
+            ];
+
+            const FORBIDDEN_PATHS = [
+              'src-tauri/src/post_captions.rs',
+              'src-tauri/src/auth_proxy.rs',
+              'src-tauri/src/crypto.rs',
+              'src-tauri/src/twitch.rs',
+              'worker/',
+              '.github/',
+              '.tauri/',
+              'src-tauri/tauri.conf.json',
+            ];
+
+            function isAllowed(filePath) {
+              if (FORBIDDEN_PATHS.some(f => filePath.startsWith(f))) return false;
+              return ALLOWED_DIRS.some(d => filePath.startsWith(d));
+            }
+
+            // ── Read source files ──
+            function readDir(dir, collected = []) {
+              if (!fs.existsSync(dir)) return collected;
+              const entries = fs.readdirSync(dir, { withFileTypes: true });
+              for (const entry of entries) {
+                const full = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                  readDir(full, collected);
+                } else if (/\.(rs|tsx?|css)$/.test(entry.name)) {
+                  if (isAllowed(full)) {
+                    try {
+                      const content = fs.readFileSync(full, 'utf-8');
+                      // Only include files under 500 lines to fit context
+                      if (content.split('\n').length <= 500) {
+                        collected.push({ path: full, content });
+                      }
+                    } catch {}
+                  }
+                }
+              }
+              return collected;
+            }
+
+            const sourceFiles = [];
+            readDir('src-tauri/src/commands', sourceFiles);
+            readDir('src-tauri/src/social', sourceFiles);
+            readDir('src', sourceFiles);
+
+            // Also add individual allowed files
+            for (const f of ALLOWED_DIRS.filter(d => !d.endsWith('/'))) {
+              if (fs.existsSync(f) && isAllowed(f)) {
+                try {
+                  const content = fs.readFileSync(f, 'utf-8');
+                  if (content.split('\n').length <= 500) {
+                    sourceFiles.push({ path: f, content });
+                  }
+                } catch {}
+              }
+            }
+
+            const sourceContext = sourceFiles
+              .map(f => `=== ${f.path} ===\n${f.content}`)
+              .join('\n\n');
+
+            // Truncate to ~80k chars to stay within limits
+            const truncated = sourceContext.substring(0, 80000);
+
+            // ── Call Claude Sonnet ──
+            const prompt = `You are a senior Rust/TypeScript developer fixing a bug in ClipGoblin, a Tauri 2 + React desktop app.
+
+            RULES:
+            - ONLY modify files within the allowed scope (commands/, social/, db.rs, clip_selector.rs, src/ frontend)
+            - NEVER modify: post_captions.rs, auth_proxy.rs, crypto.rs, twitch.rs, tauri.conf.json, worker/, .github/
+            - Make MINIMAL, SURGICAL fixes. Do not refactor unrelated code.
+            - Use exact string search/replace — the "search" field must match the file contents exactly.
+
+            Respond with ONLY a JSON object (no markdown, no code fences):
+            {
+              "analysis": "Brief explanation of the root cause",
+              "edits": [
+                {"file": "path/to/file", "search": "exact old code", "replace": "exact new code"}
+              ],
+              "test_notes": "How to verify the fix"
+            }
+
+            If you cannot fix the bug or it requires changes outside scope, return:
+            {"analysis": "explanation", "edits": [], "test_notes": "Manual fix required"}
+
+            BUG REPORT:
+            Title: ${issue.title}
+            Body:
+            ${issue.body?.substring(0, 4000) || '(empty)'}
+
+            SOURCE CODE:
+            ${truncated}`;
+
+            const response = await fetch('https://api.anthropic.com/v1/messages', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': process.env.ANTHROPIC_API_KEY,
+                'anthropic-version': '2023-06-01',
+              },
+              body: JSON.stringify({
+                model: 'claude-sonnet-4-20250514',
+                max_tokens: 4096,
+                messages: [{ role: 'user', content: prompt }],
+              }),
+            });
+
+            if (!response.ok) {
+              const errText = await response.text();
+              core.setFailed(`Claude API error (${response.status}): ${errText}`);
+              return;
+            }
+
+            const data = await response.json();
+            const text = data.content?.[0]?.text || '';
+
+            let fix;
+            try {
+              fix = JSON.parse(text);
+            } catch {
+              core.setFailed(`Failed to parse Claude response: ${text.substring(0, 500)}`);
+              return;
+            }
+
+            core.info(`Analysis: ${fix.analysis}`);
+
+            if (!fix.edits || fix.edits.length === 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `**Auto-fix analysis:** ${fix.analysis}\n\n_No automated fix could be generated. Manual intervention required._\n\n**Test notes:** ${fix.test_notes || 'N/A'}`,
+              });
+              return;
+            }
+
+            // ── Validate and apply edits ──
+            let appliedCount = 0;
+
+            for (const edit of fix.edits) {
+              if (!isAllowed(edit.file)) {
+                core.warning(`Skipping forbidden file: ${edit.file}`);
+                continue;
+              }
+
+              if (!fs.existsSync(edit.file)) {
+                core.warning(`File not found: ${edit.file}`);
+                continue;
+              }
+
+              let content = fs.readFileSync(edit.file, 'utf-8');
+              if (!content.includes(edit.search)) {
+                core.warning(`Search string not found in ${edit.file}`);
+                continue;
+              }
+
+              content = content.replace(edit.search, edit.replace);
+              fs.writeFileSync(edit.file, content, 'utf-8');
+              appliedCount++;
+              core.info(`Applied edit to ${edit.file}`);
+            }
+
+            if (appliedCount === 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `**Auto-fix analysis:** ${fix.analysis}\n\n_Edits were generated but none could be applied (search strings didn't match). Manual fix required._`,
+              });
+              return;
+            }
+
+            // ── Create branch, commit, push, PR ──
+            execSync(`git config user.name "ClipGoblin Bot"`);
+            execSync(`git config user.email "bot@clipgoblin.app"`);
+            execSync(`git checkout -b ${branchName}`);
+            execSync(`git add -A`);
+            execSync(`git commit -m "fix: auto-fix for #${issue.number} — ${issue.title.substring(0, 50)}"`);
+            execSync(`git push origin ${branchName}`);
+
+            const pr = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `fix: auto-fix for #${issue.number} — ${issue.title.substring(0, 50)}`,
+              body: `## Auto-generated fix for #${issue.number}\n\n**Analysis:** ${fix.analysis}\n\n**Edits applied:** ${appliedCount}\n\n**Test notes:** ${fix.test_notes || 'N/A'}\n\n---\n_This PR was auto-generated. Review carefully before merging._`,
+              head: branchName,
+              base: 'main',
+            });
+
+            core.info(`PR created: ${pr.data.html_url}`);
+
+            // ── Comment on issue ──
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body: `An auto-fix PR has been created: ${pr.data.html_url}\n\n**Analysis:** ${fix.analysis}\n**Edits:** ${appliedCount} file(s) modified\n\nAwaiting review and approval.`,
+            });
+
+            // ── Discord notification ──
+            if (process.env.DISCORD_WEBHOOK_URL) {
+              try {
+                await fetch(process.env.DISCORD_WEBHOOK_URL, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    content: '<@133760859087306753>',
+                    embeds: [{
+                      title: `Auto-Fix PR: #${issue.number}`,
+                      description: `**${issue.title}**\n\n${fix.analysis}\n\n**${appliedCount} file(s) edited**`,
+                      url: pr.data.html_url,
+                      color: 5763719,
+                      fields: [
+                        { name: 'Test Notes', value: fix.test_notes || 'N/A' },
+                        { name: 'PR', value: `[View PR](${pr.data.html_url})` },
+                      ],
+                      timestamp: new Date().toISOString(),
+                    }],
+                  }),
+                });
+              } catch (e) {
+                core.warning(`Discord webhook failed: ${e.message}`);
+              }
+            }

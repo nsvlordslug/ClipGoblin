@@ -14,6 +14,7 @@ import {
   Sun,
   Moon,
   HelpCircle,
+  Bug,
 } from 'lucide-react'
 import Tooltip from './components/Tooltip'
 import logoImg from './assets/logo.png'
@@ -27,6 +28,7 @@ import MontageBuilder from './pages/MontageBuilder'
 import Results from './pages/Results'
 import ScheduledUploads from './pages/ScheduledUploads'
 import HelpGuide from './pages/HelpGuide'
+import BugReport from './pages/BugReport'
 import { useScheduleStore } from './stores/scheduleStore'
 
 const navItems = [
@@ -36,6 +38,7 @@ const navItems = [
   { to: '/scheduled', label: 'Scheduled', icon: Clock },
   { to: '/montage', label: 'Montage', icon: Film },
   { to: '/settings', label: 'Settings', icon: Settings },
+  { to: '/bug-report', label: 'Report Bug', icon: Bug },
   { to: '/help', label: 'Help', icon: HelpCircle },
 ]
 
@@ -163,6 +166,7 @@ export default function App() {
               <Route path="/montage" element={<MontageBuilder />} />
               <Route path="/results/:vodId" element={<Results />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/bug-report" element={<BugReport />} />
               <Route path="/help" element={<HelpGuide />} />
             </Routes>
           </div>

@@ -401,7 +401,7 @@ export default function Vods() {
                       <span className="text-xs text-blue-300 font-medium">{vod.download_progress}%</span>
                     </div>
                   </div>
-                ) : vod.download_status !== 'downloading' && (
+                ) : (
                   <button
                     onClick={() => handleDownload(vod.id)}
                     className="absolute inset-0 flex items-center justify-center bg-black/40 hover:bg-black/30 transition-colors cursor-pointer group/play"
