@@ -8,6 +8,7 @@ pub mod bug_report;
 pub mod captions;
 pub mod clip;
 pub mod export;
+pub mod model;
 pub mod scheduled;
 pub mod settings;
 pub mod social;
