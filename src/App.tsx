@@ -17,6 +17,7 @@ import {
   Bug,
 } from 'lucide-react'
 import Tooltip from './components/Tooltip'
+import FirstRunSetup from './components/FirstRunSetup'
 import logoImg from './assets/logo.png'
 import Dashboard from './pages/Dashboard'
 import Vods from './pages/Vods'
@@ -95,6 +96,7 @@ export default function App() {
   const toggleTheme = () => updateUi({ theme: theme === 'dark' ? 'light' : 'dark' })
 
   return (
+    <FirstRunSetup>
     <div className="flex h-screen overflow-hidden">
       {/* Sidebar */}
       <aside className="w-72 shrink-0 bg-surface-900 border-r border-surface-700 flex flex-col">
@@ -173,5 +175,6 @@ export default function App() {
         </ErrorBoundary>
       </main>
     </div>
+    </FirstRunSetup>
   )
 }

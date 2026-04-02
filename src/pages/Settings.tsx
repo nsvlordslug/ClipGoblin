@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Save, FolderOpen, Info, Brain, Check, Loader2, X, Zap, Eye, Sun, Moon, Bookmark, Pencil, Trash2, HardDrive, ExternalLink, Gauge, Tv, LogOut } from 'lucide-react'
+import { Save, FolderOpen, Info, Brain, Check, Loader2, X, Zap, Eye, Sun, Moon, Bookmark, Pencil, Trash2, HardDrive, ExternalLink, Gauge, Tv, LogOut, Download, Mic, Cpu } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import ConnectedAccounts from '../components/ConnectedAccounts'
 import Tooltip from '../components/Tooltip'
 import { useAiStore, PROVIDER_META, MODEL_OPTIONS, type AiProvider } from '../stores/aiStore'
@@ -157,6 +158,14 @@ export default function SettingsPage() {
   const [sensitivity, setSensitivity] = useState<'low' | 'medium' | 'high'>('medium')
   const [sensitivitySaved, setSensitivitySaved] = useState(false)
 
+  // Transcription model state
+  const [modelStatus, setModelStatus] = useState<{ base: { downloaded: boolean }; medium: { downloaded: boolean } } | null>(null)
+  const [activeModel, setActiveModel] = useState<'base' | 'medium'>('base')
+  const [modelDownloading, setModelDownloading] = useState<string | null>(null)
+  const [modelProgress, setModelProgress] = useState(0)
+  const [modelDownloadedMb, setModelDownloadedMb] = useState(0)
+  const [confirmDeleteModel, setConfirmDeleteModel] = useState<string | null>(null)
+
   const ai = useAiStore()
   const ui = useUiStore()
   const { loggedInUser, twitchLogin, twitchLogout, isLoading: twitchLoading } = useAppStore()
@@ -180,6 +189,11 @@ export default function SettingsPage() {
         setStoragePaths(paths)
         const sens = await invoke<string | null>('get_setting', { key: 'detection_sensitivity' })
         if (sens === 'low' || sens === 'high') setSensitivity(sens)
+        // Load whisper model status
+        const mStatus = await invoke<{ base: { downloaded: boolean }; medium: { downloaded: boolean } }>('check_model_status')
+        setModelStatus(mStatus)
+        const savedModel = await invoke<string | null>('get_setting', { key: 'whisper_model' })
+        if (savedModel === 'base' || savedModel === 'medium') setActiveModel(savedModel)
       } catch { /* backend not ready */ }
       // Only load AI settings from DB if they haven't been loaded yet.
       // Re-loading on every Settings mount would overwrite in-memory changes
@@ -190,6 +204,53 @@ export default function SettingsPage() {
     }
     load()
   }, [])
+
+  // Listen for model download progress
+  useEffect(() => {
+    if (!modelDownloading) return
+    const unlisten = listen<{ model: string; percent: number; downloaded_bytes: number; total_bytes: number }>(
+      'model-download-progress',
+      (event) => {
+        setModelProgress(event.payload.percent)
+        setModelDownloadedMb(Math.round(event.payload.downloaded_bytes / 1024 / 1024))
+        if (event.payload.percent >= 100) {
+          setModelDownloading(null)
+          setModelProgress(0)
+          // Refresh status
+          invoke<{ base: { downloaded: boolean }; medium: { downloaded: boolean } }>('check_model_status').then(setModelStatus).catch(() => {})
+        }
+      }
+    )
+    return () => { unlisten.then(fn => fn()) }
+  }, [modelDownloading])
+
+  const handleModelDownload = async (modelName: string) => {
+    setModelDownloading(modelName)
+    setModelProgress(0)
+    setModelDownloadedMb(0)
+    try {
+      await invoke('download_model', { modelName })
+      // Status refreshed via event listener
+    } catch {
+      setModelDownloading(null)
+    }
+  }
+
+  const handleModelDelete = async (modelName: string) => {
+    try {
+      await invoke('delete_model', { modelName })
+      const mStatus = await invoke<{ base: { downloaded: boolean }; medium: { downloaded: boolean } }>('check_model_status')
+      setModelStatus(mStatus)
+    } catch { /* best effort */ }
+    setConfirmDeleteModel(null)
+  }
+
+  const handleModelSelect = async (modelName: 'base' | 'medium') => {
+    setActiveModel(modelName)
+    try {
+      await invoke('save_setting', { key: 'whisper_model', value: modelName })
+    } catch { /* best effort */ }
+  }
 
   const handleSaveAi = async () => {
     try {
@@ -542,6 +603,155 @@ export default function SettingsPage() {
             <Check className="w-3.5 h-3.5" /> Saved — applies to next analysis
           </div>
         )}
+      </section>
+
+      {/* Transcription Model */}
+      <section className="bg-surface-800 border border-surface-700 rounded-xl p-6">
+        <div className="flex items-center gap-2 mb-1">
+          <Mic className="w-5 h-5 text-violet-400" />
+          <h2 className="text-lg font-semibold text-white">Transcription Model</h2>
+        </div>
+        <p className="text-sm text-slate-400 mb-5">
+          Choose which AI model is used for speech recognition during VOD analysis.
+        </p>
+
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          {/* Base model card */}
+          {([
+            {
+              id: 'base' as const,
+              title: 'Base (Fast)',
+              desc: 'Best for clear audio with a good microphone. Transcribes quickly \u2014 about 5\u201310 minutes per hour of video. Occasionally misses quiet words or mumbling.',
+              size: '142 MB',
+              sizeMb: 142,
+              recommended: true,
+            },
+            {
+              id: 'medium' as const,
+              title: 'Medium (Accurate)',
+              desc: 'Better at catching every word, even with background game audio. Takes 2\u20133x longer to transcribe. Choose this if the base model misses too many words.',
+              size: '1.5 GB',
+              sizeMb: 1500,
+              recommended: false,
+            },
+          ]).map(model => {
+            const downloaded = modelStatus?.[model.id]?.downloaded ?? false
+            const isActive = activeModel === model.id
+            const isDownloading = modelDownloading === model.id
+            const isConfirmingDelete = confirmDeleteModel === model.id
+
+            return (
+              <div
+                key={model.id}
+                onClick={() => downloaded && handleModelSelect(model.id)}
+                className={`relative rounded-xl border p-4 transition-colors ${
+                  isActive
+                    ? 'bg-violet-600/10 border-violet-500/50'
+                    : 'bg-surface-900 border-surface-600 hover:border-surface-500'
+                } ${downloaded ? 'cursor-pointer' : ''}`}
+              >
+                {/* Active indicator */}
+                {isActive && downloaded && (
+                  <div className="absolute top-3 right-3 w-3 h-3 rounded-full bg-violet-500 ring-2 ring-violet-500/30" />
+                )}
+
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-sm font-semibold text-white">{model.title}</span>
+                  {model.recommended && (
+                    <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-medium">
+                      Recommended
+                    </span>
+                  )}
+                </div>
+
+                <p className="text-xs text-slate-400 mb-3 leading-relaxed">{model.desc}</p>
+
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-[10px] text-slate-500">Size: {model.size}</span>
+                  {downloaded ? (
+                    <span className="flex items-center gap-1 text-[10px] text-emerald-400">
+                      <Check className="w-3 h-3" /> Downloaded
+                    </span>
+                  ) : (
+                    <span className="text-[10px] text-slate-500">Not downloaded</span>
+                  )}
+                </div>
+
+                {/* Download progress bar */}
+                {isDownloading && (
+                  <div className="mb-3">
+                    <div className="w-full bg-surface-800 rounded-full h-2 border border-surface-700 overflow-hidden mb-1">
+                      <div
+                        className="h-full bg-gradient-to-r from-violet-600 to-violet-400 rounded-full transition-all duration-300"
+                        style={{ width: `${Math.min(modelProgress, 100)}%` }}
+                      />
+                    </div>
+                    <p className="text-[10px] text-slate-400">
+                      {modelDownloadedMb} MB / {model.sizeMb} MB ({Math.min(modelProgress, 100)}%)
+                    </p>
+                  </div>
+                )}
+
+                {/* Action buttons */}
+                <div onClick={e => e.stopPropagation()}>
+                  {!downloaded && !isDownloading && (
+                    <button
+                      onClick={() => handleModelDownload(model.id)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white text-xs font-medium rounded-lg transition-colors cursor-pointer w-full justify-center"
+                    >
+                      <Download className="w-3 h-3" />
+                      Download
+                    </button>
+                  )}
+                  {isDownloading && (
+                    <button
+                      disabled
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-surface-800 border border-surface-600 text-slate-400 text-xs rounded-lg w-full justify-center opacity-60"
+                    >
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      Downloading...
+                    </button>
+                  )}
+                  {downloaded && !isDownloading && (
+                    <>
+                      {isConfirmingDelete ? (
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-red-400">Delete model?</span>
+                          <button
+                            onClick={() => handleModelDelete(model.id)}
+                            className="px-2 py-0.5 rounded bg-red-600 text-white text-[10px] hover:bg-red-500 transition-colors cursor-pointer"
+                          >
+                            Yes
+                          </button>
+                          <button
+                            onClick={() => setConfirmDeleteModel(null)}
+                            className="px-2 py-0.5 rounded bg-surface-700 text-slate-400 text-[10px] hover:text-white transition-colors cursor-pointer"
+                          >
+                            No
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setConfirmDeleteModel(model.id)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-surface-800 border border-surface-600 text-slate-400 hover:text-red-400 hover:border-red-500/40 text-xs rounded-lg transition-colors cursor-pointer w-full justify-center"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          Delete
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+
+        {/* GPU note */}
+        <div className="flex items-center gap-2 text-xs text-slate-500 pt-3 border-t border-surface-700">
+          <Cpu className="w-3.5 h-3.5 shrink-0 text-violet-400" />
+          <span>ClipGoblin automatically uses your NVIDIA GPU for faster transcription when available. No configuration needed.</span>
+        </div>
       </section>
 
       {/* Connected Platforms */}
