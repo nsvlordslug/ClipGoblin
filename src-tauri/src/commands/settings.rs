@@ -35,6 +35,8 @@ const ALLOWED_SETTING_KEYS: &[&str] = &[
     "tiktok_handle",
     "ui_settings",
     "clip_templates",
+    "whisper_model",
+    "detection_sensitivity",
 ];
 
 #[tauri::command]

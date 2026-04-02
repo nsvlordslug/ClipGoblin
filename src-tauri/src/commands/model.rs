@@ -35,14 +35,27 @@ struct DownloadProgress {
 
 #[tauri::command]
 pub fn check_model_status() -> Result<ModelStatus, String> {
+    let dir = whisper::models_dir().unwrap_or_default();
+    let base_path = whisper::model_path(WhisperModel::Base).unwrap_or_default();
+    let medium_path = whisper::model_path(WhisperModel::Medium).unwrap_or_default();
+    let base_exists = base_path.exists();
+    let medium_exists = medium_path.exists();
+    log::info!(
+        "[Model] check_model_status — dir={}, base={} (exists={}), medium={} (exists={})",
+        dir.display(),
+        base_path.display(),
+        base_exists,
+        medium_path.display(),
+        medium_exists,
+    );
     Ok(ModelStatus {
         base: ModelInfo {
-            downloaded: whisper::is_model_downloaded(WhisperModel::Base),
+            downloaded: base_exists,
             size_mb: WhisperModel::Base.size_bytes() / 1_000_000,
             label: WhisperModel::Base.label(),
         },
         medium: ModelInfo {
-            downloaded: whisper::is_model_downloaded(WhisperModel::Medium),
+            downloaded: medium_exists,
             size_mb: WhisperModel::Medium.size_bytes() / 1_000_000,
             label: WhisperModel::Medium.label(),
         },

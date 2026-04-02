@@ -189,12 +189,16 @@ export default function SettingsPage() {
         setStoragePaths(paths)
         const sens = await invoke<string | null>('get_setting', { key: 'detection_sensitivity' })
         if (sens === 'low' || sens === 'high') setSensitivity(sens)
-        // Load whisper model status
+      } catch (error) { console.error('Settings load failed:', error) }
+      // Load whisper model status (separate try/catch so earlier failures don't block it)
+      try {
+        console.log('About to call check_model_status')
         const mStatus = await invoke<{ base: { downloaded: boolean }; medium: { downloaded: boolean } }>('check_model_status')
+        console.log('Model status response:', JSON.stringify(mStatus))
         setModelStatus(mStatus)
         const savedModel = await invoke<string | null>('get_setting', { key: 'whisper_model' })
         if (savedModel === 'base' || savedModel === 'medium') setActiveModel(savedModel)
-      } catch { /* backend not ready */ }
+      } catch (error) { console.error('check_model_status failed:', error) }
       // Only load AI settings from DB if they haven't been loaded yet.
       // Re-loading on every Settings mount would overwrite in-memory changes
       // (e.g. keys the user just typed but auto-save hasn't flushed yet).
@@ -643,23 +647,25 @@ export default function SettingsPage() {
             return (
               <div
                 key={model.id}
-                onClick={() => downloaded && handleModelSelect(model.id)}
                 className={`relative rounded-xl border p-4 transition-colors ${
-                  isActive
-                    ? 'bg-violet-600/10 border-violet-500/50'
-                    : 'bg-surface-900 border-surface-600 hover:border-surface-500'
-                } ${downloaded ? 'cursor-pointer' : ''}`}
+                  isActive && downloaded
+                    ? 'bg-emerald-500/5 border-emerald-500/40'
+                    : downloaded
+                      ? 'bg-surface-900 border-surface-600'
+                      : 'bg-surface-900 border-surface-600'
+                }`}
               >
-                {/* Active indicator */}
-                {isActive && downloaded && (
-                  <div className="absolute top-3 right-3 w-3 h-3 rounded-full bg-violet-500 ring-2 ring-violet-500/30" />
-                )}
-
+                {/* Header: title + badges */}
                 <div className="flex items-center gap-2 mb-2">
                   <span className="text-sm font-semibold text-white">{model.title}</span>
                   {model.recommended && (
                     <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-medium">
                       Recommended
+                    </span>
+                  )}
+                  {isActive && downloaded && (
+                    <span className="flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-medium">
+                      <Check className="w-2.5 h-2.5" /> Active
                     </span>
                   )}
                 </div>
@@ -692,56 +698,92 @@ export default function SettingsPage() {
                   </div>
                 )}
 
-                {/* Action buttons */}
-                <div onClick={e => e.stopPropagation()}>
-                  {!downloaded && !isDownloading && (
+                {/* State 3: Not downloaded — Download button */}
+                {!downloaded && !isDownloading && (
+                  <button
+                    onClick={() => handleModelDownload(model.id)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white text-xs font-medium rounded-lg transition-colors cursor-pointer w-full justify-center"
+                  >
+                    <Download className="w-3 h-3" />
+                    Download
+                  </button>
+                )}
+
+                {/* Downloading state */}
+                {isDownloading && (
+                  <button
+                    disabled
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-surface-800 border border-surface-600 text-slate-400 text-xs rounded-lg w-full justify-center opacity-60"
+                  >
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    Downloading...
+                  </button>
+                )}
+
+                {/* State 2: Downloaded but not active — Use + Delete */}
+                {downloaded && !isDownloading && !isActive && (
+                  <div className="flex items-center gap-2">
                     <button
-                      onClick={() => handleModelDownload(model.id)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white text-xs font-medium rounded-lg transition-colors cursor-pointer w-full justify-center"
+                      onClick={() => handleModelSelect(model.id)}
+                      className="flex-1 flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white text-xs font-medium rounded-lg transition-colors cursor-pointer justify-center"
                     >
-                      <Download className="w-3 h-3" />
-                      Download
+                      Use This Model
                     </button>
-                  )}
-                  {isDownloading && (
-                    <button
-                      disabled
-                      className="flex items-center gap-1.5 px-3 py-1.5 bg-surface-800 border border-surface-600 text-slate-400 text-xs rounded-lg w-full justify-center opacity-60"
-                    >
-                      <Loader2 className="w-3 h-3 animate-spin" />
-                      Downloading...
-                    </button>
-                  )}
-                  {downloaded && !isDownloading && (
-                    <>
-                      {isConfirmingDelete ? (
-                        <div className="flex items-center gap-2">
-                          <span className="text-[10px] text-red-400">Delete model?</span>
-                          <button
-                            onClick={() => handleModelDelete(model.id)}
-                            className="px-2 py-0.5 rounded bg-red-600 text-white text-[10px] hover:bg-red-500 transition-colors cursor-pointer"
-                          >
-                            Yes
-                          </button>
-                          <button
-                            onClick={() => setConfirmDeleteModel(null)}
-                            className="px-2 py-0.5 rounded bg-surface-700 text-slate-400 text-[10px] hover:text-white transition-colors cursor-pointer"
-                          >
-                            No
-                          </button>
-                        </div>
-                      ) : (
+                    {isConfirmingDelete ? (
+                      <div className="flex items-center gap-1">
                         <button
-                          onClick={() => setConfirmDeleteModel(model.id)}
-                          className="flex items-center gap-1.5 px-3 py-1.5 bg-surface-800 border border-surface-600 text-slate-400 hover:text-red-400 hover:border-red-500/40 text-xs rounded-lg transition-colors cursor-pointer w-full justify-center"
+                          onClick={() => handleModelDelete(model.id)}
+                          className="px-2 py-1 rounded bg-red-600 text-white text-[10px] hover:bg-red-500 transition-colors cursor-pointer"
                         >
-                          <Trash2 className="w-3 h-3" />
-                          Delete
+                          Yes
                         </button>
-                      )}
-                    </>
-                  )}
-                </div>
+                        <button
+                          onClick={() => setConfirmDeleteModel(null)}
+                          className="px-2 py-1 rounded bg-surface-700 text-slate-400 text-[10px] hover:text-white transition-colors cursor-pointer"
+                        >
+                          No
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setConfirmDeleteModel(model.id)}
+                        className="px-2 py-1.5 text-slate-500 hover:text-red-400 text-[10px] transition-colors cursor-pointer"
+                      >
+                        Delete
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {/* State 1: Active + Downloaded — subtle Delete only */}
+                {downloaded && !isDownloading && isActive && (
+                  <div className="flex items-center justify-end">
+                    {isConfirmingDelete ? (
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-red-400">Delete active model?</span>
+                        <button
+                          onClick={() => handleModelDelete(model.id)}
+                          className="px-2 py-0.5 rounded bg-red-600 text-white text-[10px] hover:bg-red-500 transition-colors cursor-pointer"
+                        >
+                          Yes
+                        </button>
+                        <button
+                          onClick={() => setConfirmDeleteModel(null)}
+                          className="px-2 py-0.5 rounded bg-surface-700 text-slate-400 text-[10px] hover:text-white transition-colors cursor-pointer"
+                        >
+                          No
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setConfirmDeleteModel(model.id)}
+                        className="px-2 py-1 text-slate-500 hover:text-red-400 text-[10px] transition-colors cursor-pointer"
+                      >
+                        Delete
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             )
           })}
