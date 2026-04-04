@@ -12,7 +12,7 @@ jobs:
   build-windows:
     runs-on: windows-latest
     env:
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PATH: ${{ runner.temp }}/signing-key.txt
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
     steps:
       - uses: actions/checkout@v4
@@ -45,6 +45,11 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Write signing key
+        run: |
+          echo "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" > ${{ runner.temp }}/signing-key.txt
+        shell: bash
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
