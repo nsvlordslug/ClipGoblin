@@ -101,8 +101,11 @@ fn rate_limit_key(user_id: &str) -> String {
 
 /// Send a Discord webhook notification that a user hit the rate limit.
 async fn notify_rate_limit_hit(username: &str, user_id: &str) {
-    let webhook_url = match std::env::var("DISCORD_WEBHOOK_URL") {
-        Ok(u) if !u.is_empty() => u,
+    let webhook_url = match option_env!("DISCORD_WEBHOOK_URL")
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("DISCORD_WEBHOOK_URL").ok())
+    {
+        Some(u) if !u.is_empty() => u,
         _ => return, // no webhook configured — silently skip
     };
 
@@ -203,9 +206,10 @@ pub async fn submit_bug_report(
     );
 
     // 6. POST to GitHub Issues API
-    let gh_token = std::env::var("GITHUB_BUG_TOKEN").map_err(|_| {
-        "GITHUB_BUG_TOKEN not configured — cannot submit bug report".to_string()
-    })?;
+    let gh_token = option_env!("GITHUB_BUG_TOKEN")
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("GITHUB_BUG_TOKEN").ok())
+        .ok_or_else(|| "GITHUB_BUG_TOKEN not configured — cannot submit bug report".to_string())?;
 
     let severity_label = format!("severity:{}", report.severity.to_lowercase());
     let payload = serde_json::json!({
