@@ -43,12 +43,18 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Setup signing key
+        shell: pwsh
+        run: |
+          $keyPath = Join-Path $env:RUNNER_TEMP "signing-key.txt"
+          Set-Content -Path $keyPath -Value '${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}' -NoNewline
+          echo "TAURI_SIGNING_PRIVATE_KEY_PATH=$keyPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
           GITHUB_BUG_TOKEN: ${{ secrets.GITHUB_BUG_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         with:
