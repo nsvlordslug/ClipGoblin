@@ -19,6 +19,7 @@ import {
 import Tooltip from './components/Tooltip'
 import FirstRunSetup from './components/FirstRunSetup'
 import logoImg from './assets/logo.png'
+import { version } from '../package.json'
 import Dashboard from './pages/Dashboard'
 import Vods from './pages/Vods'
 import Clips from './pages/Clips'
@@ -137,7 +138,7 @@ export default function App() {
 
         {/* ── Footer ── */}
         <div className="px-6 py-4 border-t border-surface-700">
-          <p className="text-[10px] text-slate-600 font-medium tracking-wide">ClipGoblin <span className="text-slate-500">v1.0.0</span></p>
+          <p className="text-[10px] text-slate-600 font-medium tracking-wide">ClipGoblin <span className="text-slate-500">v{version}</span></p>
         </div>
       </aside>
 

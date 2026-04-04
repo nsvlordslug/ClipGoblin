@@ -27,6 +27,19 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Install LLVM and CMake
+        run: |
+          choco install llvm cmake --yes
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+
+      - name: Download FFmpeg
+        run: |
+          mkdir -p src-tauri/binaries
+          curl -L -o ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+          tar -xf ffmpeg.zip --strip-components=2 */bin/ffmpeg.exe
+          mv ffmpeg.exe src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
+          rm ffmpeg.zip
+
       - name: Install frontend dependencies
         run: npm ci
 
@@ -36,6 +49,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          GITHUB_BUG_TOKEN: ${{ secrets.GITHUB_BUG_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         with:
           tagName: v__VERSION__
           releaseName: 'ClipGoblin v__VERSION__'
