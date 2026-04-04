@@ -74,3 +74,24 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: --features standalone
+
+      - name: Sign update bundles
+        shell: bash
+        run: |
+          echo "=== All bundle files ==="
+          find src-tauri/target/release/bundle -type f | sort
+          # Find and sign the NSIS zip
+          NSIS_ZIP=$(find src-tauri/target/release/bundle/nsis -name "*.nsis.zip" 2>/dev/null | head -1)
+          if [ -n "$NSIS_ZIP" ]; then
+            echo "Signing $NSIS_ZIP"
+            npx @tauri-apps/cli signer sign -k "$TAURI_SIGNING_PRIVATE_KEY" -p "" "$NSIS_ZIP"
+          fi
+          # Find and sign the MSI zip
+          MSI_ZIP=$(find src-tauri/target/release/bundle/msi -name "*.msi.zip" 2>/dev/null | head -1)
+          if [ -n "$MSI_ZIP" ]; then
+            echo "Signing $MSI_ZIP"
+            npx @tauri-apps/cli signer sign -k "$TAURI_SIGNING_PRIVATE_KEY" -p "" "$MSI_ZIP"
+          fi
+          # List what we have now
+          echo "=== Bundle files ==="
+          find src-tauri/target/release/bundle -name "*.sig" -o -name "*.zip" | sort
