@@ -51,6 +51,16 @@ jobs:
           echo "ENDOFKEY" >> $GITHUB_ENV
           echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=" >> $GITHUB_ENV
 
+      - name: Verify signing key
+        shell: bash
+        run: |
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "Signing key is set (length: ${#TAURI_SIGNING_PRIVATE_KEY})"
+          else
+            echo "ERROR: Signing key is NOT set!"
+          fi
+          echo "Password var set: ${TAURI_SIGNING_PRIVATE_KEY_PASSWORD+yes}"
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
