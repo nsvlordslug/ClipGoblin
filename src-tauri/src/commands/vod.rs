@@ -16,6 +16,7 @@ use crate::twitch;
 use crate::report_error;
 use crate::commands::auth::try_refresh_twitch_token;
 use crate::clip_selector;
+use crate::whisper;
 use crate::commands::captions::{
     grounded_highlight_title, compute_confidence,
     build_highlight_explanation, count_active_signals,
@@ -514,7 +515,110 @@ pub struct TranscriptResult {
     pub keywords_found: Vec<TranscriptKeyword>,
 }
 
+// ── Keyword patterns for transcript scanning ──
+// These match the keywords used by clip_selector::generate_transcript_candidates
+const TRANSCRIPT_KEYWORDS: &[&str] = &[
+    "no way", "oh my god", "what the", "holy", "let's go", "lets go",
+    "clutch", "rage", "noooo", "nooo", "oh no", "run", "help",
+    "behind", "dead", "done", "yes", "dude", "bro",
+];
+
+/// Convert whisper-rs TranscriptResult into the vod.rs TranscriptResult
+/// expected by clip_selector and downstream pipeline.
+fn convert_whisper_result(wr: &whisper::TranscriptResult) -> TranscriptResult {
+    let segments: Vec<TranscriptSegment> = wr.segments.iter().map(|s| TranscriptSegment {
+        start: s.start,
+        end: s.end,
+        text: s.text.clone(),
+        words: Vec::new(), // whisper-rs doesn't provide word-level timestamps
+    }).collect();
+
+    let full_text = segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
+
+    // Scan segments for keywords to generate TranscriptKeyword entries
+    let mut keywords_found = Vec::new();
+    for seg in &segments {
+        let lower = seg.text.to_lowercase();
+        for &kw in TRANSCRIPT_KEYWORDS {
+            if lower.contains(kw) {
+                keywords_found.push(TranscriptKeyword {
+                    keyword: kw.to_string(),
+                    timestamp: seg.start,
+                    end_timestamp: seg.end,
+                    context: seg.text.clone(),
+                });
+            }
+        }
+    }
+
+    TranscriptResult {
+        segments,
+        full_text,
+        language: wr.language.clone(),
+        keywords_found,
+    }
+}
+
+/// Run native whisper-rs transcription on a video file.
+/// Returns transcript and saves JSON to disk for caching.
+pub(crate) fn run_transcription_native(
+    vod_path: &str,
+    output_path: &str,
+    vod_id: Option<&str>,
+) -> Result<TranscriptResult, AppError> {
+    // Resolve model from DB setting, default to base
+    let model = {
+        let model_name = db::db_path().ok()
+            .and_then(|p| rusqlite::Connection::open(&p).ok())
+            .and_then(|conn| db::get_setting(&conn, "whisper_model").ok().flatten())
+            .unwrap_or_else(|| "base".to_string());
+        match model_name.as_str() {
+            "medium" => whisper::WhisperModel::Medium,
+            _ => whisper::WhisperModel::Base,
+        }
+    };
+
+    // Check model is downloaded
+    if !whisper::is_model_downloaded(model) {
+        return Err(AppError::Transcription(format!(
+            "Whisper model '{}' is not downloaded. Go to Settings → Transcription Model to download it.",
+            model.label()
+        )));
+    }
+
+    log::info!("[Transcription] Starting native whisper-rs with model: {}", model.label());
+
+    // Run transcription with progress reporting
+    let vod_id_owned = vod_id.map(|s| s.to_string());
+    let result = whisper::transcribe(vod_path, model, move |pct| {
+        // Map whisper progress (0-100) to analysis progress (20-38%)
+        if let Some(ref vid) = vod_id_owned {
+            let mapped = 20 + (pct as i64 * 18 / 100).min(17);
+            set_analysis_progress(vid, mapped);
+        }
+    }).map_err(|e| AppError::Transcription(e))?;
+
+    // Convert to vod.rs format
+    let transcript = convert_whisper_result(&result);
+
+    // Save to disk for caching
+    if let Ok(json) = serde_json::to_string_pretty(&transcript) {
+        if let Err(e) = std::fs::write(output_path, &json) {
+            log::warn!("[Transcription] Failed to cache transcript: {}", e);
+        }
+    }
+
+    log::info!("[Transcription] Complete: {} segments, {} keywords found",
+        transcript.segments.len(), transcript.keywords_found.len());
+
+    Ok(transcript)
+}
+
+// ── Legacy Python transcription (replaced by whisper-rs native) ──
+
 /// Find Python executable path
+// Replaced by whisper-rs native transcription — kept for potential fallback
+#[allow(dead_code)]
 pub(crate) fn find_python() -> Result<std::path::PathBuf, AppError> {
     // Check common Windows Python paths (user-independent)
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
@@ -537,6 +641,8 @@ pub(crate) fn find_python() -> Result<std::path::PathBuf, AppError> {
 
 /// Run faster-whisper transcription on a video file.
 /// Returns transcript JSON and saves to disk.
+// Replaced by run_transcription_native() — kept for potential fallback
+#[allow(dead_code)]
 pub(crate) fn run_transcription(vod_path: &str, output_path: &str, hw: &HardwareInfo, vod_id: Option<&str>) -> Result<TranscriptResult, AppError> {
     let python = find_python()?;
     let device = if hw.use_cuda { "cuda" } else { "cpu" };
@@ -583,6 +689,8 @@ pub(crate) fn run_transcription(vod_path: &str, output_path: &str, hw: &Hardware
 }
 
 /// Locate transcribe.py by searching project directories and AppData.
+// Replaced by whisper-rs native transcription — kept for potential fallback
+#[allow(dead_code)]
 fn find_transcribe_script() -> Result<std::path::PathBuf, AppError> {
     let exe = std::env::current_exe().unwrap_or_default();
     let mut dir = exe.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
@@ -614,6 +722,8 @@ fn find_transcribe_script() -> Result<std::path::PathBuf, AppError> {
     ))
 }
 
+// Replaced by whisper-rs native transcription — kept for potential fallback
+#[allow(dead_code)]
 fn run_transcription_with_script(
     python: &std::path::Path,
     script: &std::path::Path,
@@ -1109,7 +1219,7 @@ fn set_analysis_progress(vod_id: &str, progress: i64) {
 
 /// Signal-driven analysis using the clip_selector module.
 /// Finds clips via audio spikes, transcript keywords, and chat peaks.
-fn run_analysis_signals(vod: &db::VodRow, hw: &HardwareInfo, sensitivity: &str) -> Result<Vec<db::HighlightRow>, String> {
+fn run_analysis_signals(vod: &db::VodRow, _hw: &HardwareInfo, sensitivity: &str) -> Result<Vec<db::HighlightRow>, String> {
     let ffmpeg = find_ffmpeg()?;
     let vod_path = vod.local_path.clone()
         .ok_or("VOD not downloaded")?;
@@ -1140,14 +1250,20 @@ fn run_analysis_signals(vod: &db::VodRow, hw: &HardwareInfo, sensitivity: &str) 
         set_analysis_progress(vod_id, 25);
         std::fs::read_to_string(&transcript_path).ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-    } else if let Ok(_python) = find_python() {
+    } else {
+        // Native whisper-rs transcription
         set_analysis_progress(vod_id, 20);
         let out = transcript_path.to_string_lossy().to_string();
-        let result = run_transcription(&vod_path, &out, hw, Some(vod_id)).ok();
-        set_analysis_progress(vod_id, 38);
-        result
-    } else {
-        None
+        match run_transcription_native(&vod_path, &out, Some(vod_id)) {
+            Ok(result) => {
+                set_analysis_progress(vod_id, 38);
+                Some(result)
+            }
+            Err(e) => {
+                log::warn!("Native transcription failed: {}. Continuing without transcript.", e.detail());
+                None
+            }
+        }
     };
     set_analysis_progress(vod_id, 40);
 
@@ -2050,7 +2166,7 @@ pub fn update_scoring_from_performance(db: State<'_, DbConn>) -> Result<String, 
 
 /// Get transcript for a VOD (run transcription if not cached)
 #[tauri::command]
-pub async fn get_transcript(vod_id: String, db: State<'_, DbConn>, hw: State<'_, HardwareInfo>) -> Result<serde_json::Value, String> {
+pub async fn get_transcript(vod_id: String, db: State<'_, DbConn>, _hw: State<'_, HardwareInfo>) -> Result<serde_json::Value, String> {
     let vod = {
         let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
         db::get_vod_by_id(&conn, &vod_id)
@@ -2076,12 +2192,11 @@ pub async fn get_transcript(vod_id: String, db: State<'_, DbConn>, hw: State<'_,
         return Ok(val);
     }
 
-    // Run transcription
+    // Run native whisper-rs transcription
     let output_str = output_path.to_string_lossy().to_string();
     let vod_path_clone = vod_path.clone();
-    let hw_clone = hw.inner().clone();
     let result = tokio::task::spawn_blocking(move || {
-        run_transcription(&vod_path_clone, &output_str, &hw_clone, None)
+        run_transcription_native(&vod_path_clone, &output_str, None)
     }).await.map_err(|e| format!("Task error: {}", e))??;
 
     // Save path to VOD record

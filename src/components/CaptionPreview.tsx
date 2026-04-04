@@ -47,8 +47,6 @@ export default function CaptionPreview({
     return null
   }, [segments, currentTime, trimStart, trimEnd])
 
-  if (!activeSegment) return null
-
   // ── Layout computation ──
   const ar = frameWidth / Math.max(frameHeight, 1)
   const isVertical = ar < 0.7
@@ -97,10 +95,10 @@ export default function CaptionPreview({
     : cs.shadow.replace(/(\d+)px/g, (_, n) => `${Math.max(1, Math.round(parseInt(n) * Math.min(scale, 0.4)))}px`)
 
   const emphasisStyle = EMPHASIS_STYLES[cs.id] || EMPHASIS_STYLES.clean
-  const words = activeSegment.text.split(/\s+/).filter(Boolean)
+  const words = activeSegment?.text.split(/\s+/).filter(Boolean) ?? []
 
   const getWordEmphasis = useCallback((word: string, wordIndex: number): CaptionToken | null => {
-    if (!emphasisEnabled || emphasisTokens.length === 0) return null
+    if (!emphasisEnabled || emphasisTokens.length === 0 || !activeSegment) return null
     const segDuration = activeSegment.endTime - activeSegment.startTime
     const wordTime = activeSegment.startTime + (wordIndex / words.length) * segDuration
     for (const t of emphasisTokens) {
@@ -110,6 +108,8 @@ export default function CaptionPreview({
     }
     return null
   }, [emphasisEnabled, emphasisTokens, activeSegment, words.length])
+
+  if (!activeSegment) return null
 
   return (
     <div ref={containerRef}
