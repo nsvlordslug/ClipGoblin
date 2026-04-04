@@ -38,7 +38,7 @@ async-trait = "0.1"
 dotenvy = "0.15"
 sha2 = "0.10"
 regex = "1"
-whisper-rs = { version = "0.16", features = ["cuda"] }
+whisper-rs = { version = "0.16" }
 num_cpus = "1"
 futures-util = "0.3"
 tauri-plugin-updater = { version = "2", optional = true }
@@ -52,3 +52,4 @@ default = ["asset-protocol", "standalone"]
 asset-protocol = ["tauri/protocol-asset"]
 standalone = ["tauri-plugin-updater"]
 steam = ["steamworks"]
+cuda = ["whisper-rs/cuda"]
