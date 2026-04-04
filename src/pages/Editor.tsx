@@ -1686,6 +1686,16 @@ export default function Editor() {
                 Change
               </button>
             </div>
+            {/* Layout picker modal */}
+            {layoutPickerOpen && (
+              <LayoutPicker
+                current={facecamLayout as any}
+                aspectRatio={aspectRatio as '9:16' | '16:9'}
+                platformName={exportPreset.platform}
+                onSelect={(layout) => { setFacecamLayout(layout); setLayoutPickerOpen(false) }}
+                onClose={() => setLayoutPickerOpen(false)}
+              />
+            )}
             {/* Facecam settings — shown when layout uses camera */}
             {(facecamLayout === 'split' || facecamLayout === 'pip') && (
               <FacecamEditor
@@ -1890,6 +1900,26 @@ export default function Editor() {
               </div>
             )}
           </Section>
+
+          {/* Actions: Save / Export / Upload */}
+          <ActionsBar
+            clipId={clipId || ''}
+            clip={clip}
+            saving={saving}
+            saved={saved}
+            exporting={exporting}
+            exportProgress={exportProgress}
+            exportDone={exportDone}
+            exportError={exportError}
+            vodPath={!!vod?.local_path}
+            exportPreset={exportPreset}
+            onSave={handleSave}
+            onExportForFormat={handleExportForFormat}
+            publishMeta={publishMeta}
+            clipTitle={title}
+            uploadHistory={uploadHistory}
+            onUploadHistoryChange={(platform, url) => setUploadHistory(prev => ({ ...prev, [platform]: url }))}
+          />
         </div>
       </div>
     </div>
