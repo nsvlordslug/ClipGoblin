@@ -321,11 +321,11 @@ fn get_sub_style(id: &str) -> SubStyle {
         },
         "fire" => SubStyle {
             font_name: "Impact", font_size: 56, font_weight: 900,
-            // #FF4444 → R=FF G=44 B=44 → ASS &H4444FF
-            primary_colour: "&H4444FF", outline_colour: "&H000000",
+            // #FF6B2B — R=FF G=6B B=2B — ASS &H2B6BFF
+            primary_colour: "&H2B6BFF", outline_colour: "&H000000",
             back_colour: "&H00000000", outline: 3, shadow: 1, border_style: 1,
             spacing: 1.2, glow_blur: 0, glow_colour: "", uppercase: true,
-            dt_fontcolor: "#FF4444", dt_borderw: 4, dt_boxcolor: "",
+            dt_fontcolor: "#FF6B2B", dt_borderw: 4, dt_boxcolor: "",
         },
         // "clean" and any unknown style
         _ => SubStyle {

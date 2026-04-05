@@ -28,7 +28,7 @@ export const EMPHASIS_STYLES: Record<string, EmphasisStyle> = {
   boxed:       { color: '#00FF88', scale: 1.2,  bold: true, uppercase: false },
   neon:        { color: '#FFFFFF', scale: 1.3,  bold: true, uppercase: true },
   minimal:     { color: '#8B5CF6', scale: 1.15, bold: true, uppercase: false },
-  fire:        { color: '#FFFF00', scale: 1.35, bold: true, uppercase: true },
+  fire:        { color: '#00FFFF', scale: 1.35, bold: true, uppercase: true },
 }
 
 // ── Detection dictionaries ──
