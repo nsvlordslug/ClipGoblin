@@ -899,13 +899,12 @@ async fn poll_publish_status(
         };
 
         // Check for API-level errors (e.g. scope issues, rate limits)
+        // TikTok includes error.code = "ok" on success, so only log/break on real errors.
         if let Some(err) = json.get("error") {
             let code = err.get("code").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let msg = err.get("message").and_then(|v| v.as_str()).unwrap_or("");
-            log::warn!("TikTok status poll API error: {} — {}", code, msg);
-            if code == "ok" {
-                // "ok" is not actually an error — TikTok includes error.code = "ok" on success
-            } else {
+            if code != "ok" {
+                let msg = err.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                log::warn!("TikTok status poll API error: {} — {}", code, msg);
                 // Real error — stop polling
                 break;
             }
