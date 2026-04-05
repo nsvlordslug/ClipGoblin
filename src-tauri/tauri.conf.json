@@ -31,7 +31,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhERDBDM0NDNjFBQTFENDMKUldSREhhcGh6TVBRaldGaUdrZ2ZXdnk3Ri93aXYwVStkdGRXVEh6c3pzN0lUWVpOY3VweFJPR2cK",
+      "pubkey": "RWSe7Xz7ksGb7Agvh6ZunxKyzZv6VWG6OjSRE/INMYAjhlSokSz7x48v",
       "endpoints": ["https://github.com/nsvlordslug/ClipGoblin/releases/latest/download/latest.json"]
     }
   },
