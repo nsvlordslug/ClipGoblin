@@ -51,16 +51,6 @@ jobs:
           echo "ENDOFKEY" >> $GITHUB_ENV
           echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=" >> $GITHUB_ENV
 
-      - name: Verify signing key
-        shell: bash
-        run: |
-          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo "Signing key is set (length: ${#TAURI_SIGNING_PRIVATE_KEY})"
-          else
-            echo "ERROR: Signing key is NOT set!"
-          fi
-          echo "Password var set: ${TAURI_SIGNING_PRIVATE_KEY_PASSWORD+yes}"
-
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -77,23 +67,52 @@ jobs:
           prerelease: false
           args: --features standalone
 
-      - name: Sign update bundles
+      - name: Create update artifacts
         shell: bash
         run: |
-          echo "=== All bundle files ==="
-          find src-tauri/target/release/bundle -type f | sort
-          # Find and sign the NSIS zip
-          NSIS_ZIP=$(find src-tauri/target/release/bundle/nsis -name "*.nsis.zip" 2>/dev/null | head -1)
-          if [ -n "$NSIS_ZIP" ]; then
-            echo "Signing $NSIS_ZIP"
-            npx @tauri-apps/cli signer sign -k "$TAURI_SIGNING_PRIVATE_KEY" -p "" "$NSIS_ZIP"
-          fi
-          # Find and sign the MSI zip
-          MSI_ZIP=$(find src-tauri/target/release/bundle/msi -name "*.msi.zip" 2>/dev/null | head -1)
-          if [ -n "$MSI_ZIP" ]; then
-            echo "Signing $MSI_ZIP"
-            npx @tauri-apps/cli signer sign -k "$TAURI_SIGNING_PRIVATE_KEY" -p "" "$MSI_ZIP"
-          fi
-          # List what we have now
-          echo "=== Bundle files ==="
-          find src-tauri/target/release/bundle -name "*.sig" -o -name "*.zip" | sort
+          VERSION=$(grep '"version"' src-tauri/tauri.conf.json | head -1 | sed 's/.*: "\(.*\)".*/\1/')
+          echo "Version: $VERSION"
+
+          NSIS_DIR="src-tauri/target/release/bundle/nsis"
+          NSIS_EXE="ClipGoblin_${VERSION}_x64-setup.exe"
+          NSIS_ZIP="${NSIS_EXE%.exe}.nsis.zip"
+
+          # Create zip
+          cd "$NSIS_DIR"
+          7z a -tzip "$NSIS_ZIP" "$NSIS_EXE"
+          cd -
+
+          # Sign
+          npx @tauri-apps/cli signer sign -k "$TAURI_SIGNING_PRIVATE_KEY" -p "" "$NSIS_DIR/$NSIS_ZIP"
+
+          # Read signature
+          NSIS_SIG=$(cat "$NSIS_DIR/${NSIS_ZIP}.sig")
+
+          # Create latest.json in a place the action can find it
+          cat > src-tauri/target/release/latest.json << ENDJSON
+          {
+            "version": "$VERSION",
+            "notes": "See the changelog for details.",
+            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": {
+              "windows-x86_64": {
+                "signature": "$NSIS_SIG",
+                "url": "https://github.com/nsvlordslug/ClipGoblin/releases/download/v${VERSION}/${NSIS_ZIP}"
+              }
+            }
+          }
+          ENDJSON
+
+          echo "=== latest.json ==="
+          cat src-tauri/target/release/latest.json
+
+      - name: Upload update artifacts
+        uses: softprops/action-gh-release@v1
+        with:
+          draft: true
+          tag_name: v1.0.1
+          files: |
+            src-tauri/target/release/bundle/nsis/*.nsis.zip
+            src-tauri/target/release/latest.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
