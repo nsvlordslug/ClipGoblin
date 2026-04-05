@@ -895,6 +895,14 @@ pub fn select_clips(
         };
         score_clip_candidate(&mut c);
         c.similarity_fingerprint = compute_similarity_fingerprint(&c);
+        // Intro penalty: only for audio-only signals (music/overlays without speech).
+        // If transcript is present, the streamer is talking — likely real gameplay.
+        if c.peak_time < 150.0 && c.signal_sources.len() == 1 && c.signal_sources.contains(&SignalSource::Audio) {
+            let intro_factor = (c.peak_time / 150.0).max(0.3);
+            c.total_score *= intro_factor;
+            log::info!("Clip selector: intro penalty at {:.0}s (audio-only) — score reduced to {:.0}%",
+                c.peak_time, c.total_score * 100.0);
+        }
         c
     }).collect();
 

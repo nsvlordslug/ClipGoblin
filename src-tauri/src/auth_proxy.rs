@@ -42,7 +42,7 @@ impl AuthProxy {
         redirect_uri: &str,
     ) -> Result<TokenResponse, String> {
         self.post(
-            "/twitch/token",
+            "/auth/twitch/token",
             serde_json::json!({
                 "code": code,
                 "redirect_uri": redirect_uri,
@@ -53,7 +53,7 @@ impl AuthProxy {
 
     pub async fn twitch_refresh(&self, refresh_token: &str) -> Result<TokenResponse, String> {
         self.post(
-            "/twitch/refresh",
+            "/auth/twitch/refresh",
             serde_json::json!({
                 "refresh_token": refresh_token,
             }),
@@ -69,7 +69,7 @@ impl AuthProxy {
         redirect_uri: &str,
     ) -> Result<TokenResponse, String> {
         self.post(
-            "/youtube/token",
+            "/auth/youtube/token",
             serde_json::json!({
                 "code": code,
                 "redirect_uri": redirect_uri,
@@ -80,7 +80,7 @@ impl AuthProxy {
 
     pub async fn youtube_refresh(&self, refresh_token: &str) -> Result<TokenResponse, String> {
         self.post(
-            "/youtube/refresh",
+            "/auth/youtube/refresh",
             serde_json::json!({
                 "refresh_token": refresh_token,
             }),
@@ -97,7 +97,7 @@ impl AuthProxy {
         code_verifier: &str,
     ) -> Result<TokenResponse, String> {
         self.post(
-            "/tiktok/token",
+            "/auth/tiktok/token",
             serde_json::json!({
                 "code": code,
                 "redirect_uri": redirect_uri,
@@ -109,7 +109,7 @@ impl AuthProxy {
 
     pub async fn tiktok_refresh(&self, refresh_token: &str) -> Result<TokenResponse, String> {
         self.post(
-            "/tiktok/refresh",
+            "/auth/tiktok/refresh",
             serde_json::json!({
                 "refresh_token": refresh_token,
             }),

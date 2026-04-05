@@ -130,7 +130,11 @@ pub async fn upload_to_platform(
         tokio::runtime::Handle::current()
             .block_on(adapter.upload_video(&conn, &output_path, &meta))
     })
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| {
+        log::error!("[Upload] {} upload failed: {}", platform, e);
+        e.to_string()
+    })?;
+    log::info!("[Upload] {} upload complete: {:?}", platform, result.status);
 
     Ok(result)
 }

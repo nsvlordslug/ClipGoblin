@@ -45,7 +45,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     bgColor: '', bgPadding: 0, bgRadius: 0,
     uppercase: true,
     letterSpacing: 0.05, lineHeight: 1.15,
-    shadow: '3px 3px 0 #000, -3px -3px 0 #000, 3px -3px 0 #000, -3px 3px 0 #000, 0 3px 0 #000, 3px 0 0 #000, 0 -3px 0 #000, -3px 0 0 #000, 0 0 8px #000, 0 4px 12px rgba(0,0,0,0.9)',
+    shadow: '2px 2px 0 #000, -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 0 2px 0 #000, 2px 0 0 #000, 0 -2px 0 #000, -2px 0 0 #000',
   },
   {
     id: 'boxed',
@@ -93,7 +93,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     bgColor: '', bgPadding: 0, bgRadius: 0,
     uppercase: true,
     letterSpacing: 0.03, lineHeight: 1.2,
-    shadow: '0 0 10px #FF4500AA, 0 0 20px #FF450055, 0 0 4px #000, 2px 2px 0 #000, -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 0 3px 8px rgba(0,0,0,0.9)',
+    shadow: '0 0 6px #FF4500, 2px 2px 0 #000, -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 0 2px 0 #000, 0 -2px 0 #000, 2px 0 0 #000, -2px 0 0 #000',
   },
 ]
 
