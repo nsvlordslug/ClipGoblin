@@ -84,7 +84,7 @@ jobs:
 
           # Sign
           KEY_FILE="$RUNNER_TEMP/tauri-signing.key"
-          echo "$TAURI_SIGNING_PRIVATE_KEY" > "$KEY_FILE"
+          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > "$KEY_FILE"
           unset TAURI_SIGNING_PRIVATE_KEY
           npx @tauri-apps/cli signer sign --private-key-path "$KEY_FILE" --password "" "$NSIS_DIR/$NSIS_ZIP"
 
