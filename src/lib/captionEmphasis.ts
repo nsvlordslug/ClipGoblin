@@ -17,6 +17,7 @@ export interface EmphasisStyle {
   scale: number         // font size multiplier (e.g. 1.3 = 30% larger)
   bold: boolean
   uppercase: boolean
+  shadow?: string    // optional text-shadow override for emphasized words
   // TODO: animation — pop-in, shake, pulse scaffold
 }
 
@@ -28,7 +29,7 @@ export const EMPHASIS_STYLES: Record<string, EmphasisStyle> = {
   boxed:       { color: '#00FF88', scale: 1.2,  bold: true, uppercase: false },
   neon:        { color: '#FFFFFF', scale: 1.3,  bold: true, uppercase: true },
   minimal:     { color: '#8B5CF6', scale: 1.15, bold: true, uppercase: false },
-  fire:        { color: '#00FFFF', scale: 1.35, bold: true, uppercase: true },
+  fire:        { color: '#000000', scale: 1.0, bold: true, uppercase: true, shadow: '2px 2px 0 #FF6B2B, -2px -2px 0 #FF6B2B, 2px -2px 0 #FF6B2B, -2px 2px 0 #FF6B2B, 0 2px 0 #FF6B2B, 0 -2px 0 #FF6B2B, 2px 0 0 #FF6B2B, -2px 0 0 #FF6B2B' },
 }
 
 // ── Detection dictionaries ──
