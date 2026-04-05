@@ -83,7 +83,9 @@ jobs:
           cd -
 
           # Sign
-          npx @tauri-apps/cli signer sign -k "$TAURI_SIGNING_PRIVATE_KEY" -p "" "$NSIS_DIR/$NSIS_ZIP"
+          KEY_FILE="$RUNNER_TEMP/tauri-signing.key"
+          echo "$TAURI_SIGNING_PRIVATE_KEY" > "$KEY_FILE"
+          TAURI_SIGNING_PRIVATE_KEY_PATH="$KEY_FILE" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" npx @tauri-apps/cli signer sign "$NSIS_DIR/$NSIS_ZIP"
 
           # Read signature
           NSIS_SIG=$(cat "$NSIS_DIR/${NSIS_ZIP}.sig")
