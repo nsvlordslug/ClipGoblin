@@ -2,7 +2,7 @@ name: Triage Bug Reports
 
 on:
   issues:
-    types: [opened, labeled]
+    types: [opened]
 
 jobs:
   triage:
