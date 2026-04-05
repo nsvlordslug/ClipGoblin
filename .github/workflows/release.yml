@@ -43,14 +43,6 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Setup signing key
-        shell: bash
-        run: |
-          echo "TAURI_SIGNING_PRIVATE_KEY<<ENDOFKEY" >> $GITHUB_ENV
-          echo "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" >> $GITHUB_ENV
-          echo "ENDOFKEY" >> $GITHUB_ENV
-          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=" >> $GITHUB_ENV
-
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -66,56 +58,3 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: --features standalone
-
-      - name: Create update artifacts
-        shell: bash
-        run: |
-          VERSION=$(grep '"version"' src-tauri/tauri.conf.json | head -1 | sed 's/.*: "\(.*\)".*/\1/')
-          echo "Version: $VERSION"
-
-          NSIS_DIR="src-tauri/target/release/bundle/nsis"
-          NSIS_EXE="ClipGoblin_${VERSION}_x64-setup.exe"
-          NSIS_ZIP="${NSIS_EXE%.exe}.nsis.zip"
-
-          # Create zip
-          cd "$NSIS_DIR"
-          7z a -tzip "$NSIS_ZIP" "$NSIS_EXE"
-          cd -
-
-          # Sign
-          KEY_FILE="$RUNNER_TEMP/tauri-signing.key"
-          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > "$KEY_FILE"
-          unset TAURI_SIGNING_PRIVATE_KEY
-          npx @tauri-apps/cli signer sign --private-key-path "$KEY_FILE" --password "" "$NSIS_DIR/$NSIS_ZIP"
-
-          # Read signature
-          NSIS_SIG=$(cat "$NSIS_DIR/${NSIS_ZIP}.sig")
-
-          # Create latest.json in a place the action can find it
-          cat > src-tauri/target/release/latest.json << ENDJSON
-          {
-            "version": "$VERSION",
-            "notes": "See the changelog for details.",
-            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "platforms": {
-              "windows-x86_64": {
-                "signature": "$NSIS_SIG",
-                "url": "https://github.com/nsvlordslug/ClipGoblin/releases/download/v${VERSION}/${NSIS_ZIP}"
-              }
-            }
-          }
-          ENDJSON
-
-          echo "=== latest.json ==="
-          cat src-tauri/target/release/latest.json
-
-      - name: Upload update artifacts
-        uses: softprops/action-gh-release@v1
-        with:
-          draft: true
-          tag_name: v1.0.1
-          files: |
-            src-tauri/target/release/bundle/nsis/*.nsis.zip
-            src-tauri/target/release/latest.json
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
