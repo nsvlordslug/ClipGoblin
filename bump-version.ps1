@@ -1,18 +1,20 @@
-param([Parameter(Mandatory)][string]$Version)
-Write-Host "Bumping ClipGoblin to v$Version..." -ForegroundColor Cyan
+param([string]$Version)
+if (-not $Version) { Write-Host "Usage: bump-version.ps1 <version>"; exit 1 }
+Write-Host "Bumping ClipGoblin to v$Version..."
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
 # package.json
-$pkg = Get-Content package.json -Raw | ConvertFrom-Json
-$pkg.version = $Version
-$pkg | ConvertTo-Json -Depth 10 | Set-Content package.json -Encoding UTF8
-Write-Host "  package.json -> $Version" -ForegroundColor Green
+$pkg = [System.IO.File]::ReadAllText("$PSScriptRoot\package.json").TrimStart([char]0xFEFF)
+$pkg = $pkg -replace '"version":\s*"[^"]*"', "`"version`": `"$Version`""
+[System.IO.File]::WriteAllText("$PSScriptRoot\package.json", $pkg, $utf8NoBom)
+Write-Host "  package.json -> $Version"
 # tauri.conf.json
-$tc = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
-$tc.version = $Version
-$tc | ConvertTo-Json -Depth 10 | Set-Content src-tauri/tauri.conf.json -Encoding UTF8
-Write-Host "  tauri.conf.json -> $Version" -ForegroundColor Green
-# Cargo.toml (regex replace just the package version line)
-$cargo = Get-Content src-tauri/Cargo.toml -Raw
-$cargo = $cargo -replace '(?m)^(version\s*=\s*")[\d.]+(")', "`${1}$Version`${2}"
-Set-Content src-tauri/Cargo.toml $cargo -Encoding UTF8 -NoNewline
-Write-Host "  Cargo.toml -> $Version" -ForegroundColor Green
-Write-Host "`nDone! All files updated to v$Version" -ForegroundColor Cyan
+$tcj = [System.IO.File]::ReadAllText("$PSScriptRoot\src-tauri\tauri.conf.json").TrimStart([char]0xFEFF)
+$tcj = $tcj -replace '"version":\s*"[^"]*"', "`"version`": `"$Version`""
+[System.IO.File]::WriteAllText("$PSScriptRoot\src-tauri\tauri.conf.json", $tcj, $utf8NoBom)
+Write-Host "  tauri.conf.json -> $Version"
+# Cargo.toml (only the top-level version)
+$cargo = [System.IO.File]::ReadAllText("$PSScriptRoot\src-tauri\Cargo.toml").TrimStart([char]0xFEFF)
+$cargo = $cargo -replace '(?m)^version\s*=\s*"[^"]*"', "version = `"$Version`""
+[System.IO.File]::WriteAllText("$PSScriptRoot\src-tauri\Cargo.toml", $cargo, $utf8NoBom)
+Write-Host "  Cargo.toml -> $Version"
+Write-Host "`nDone! All files updated to v$Version"
