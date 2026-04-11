@@ -313,55 +313,40 @@ pub async fn get_app_access_token(_client_secret: &str) -> Result<String, String
     Err("App access tokens (client_credentials) are not supported via the auth proxy. Use exchange_code() for user tokens.".to_string())
 }
 
-/// Helper: run a curl GET request against the Twitch Helix API and return the body as a string.
-pub async fn curl_twitch_get(url: &str, access_token: &str) -> Result<String, String> {
-    let output = tokio::process::Command::new("curl")
-        .args([
-            "-s", "-S", "--max-time", "15",
-            "-H", &format!("Client-Id: {}", client_id()),
-            "-H", &format!("Authorization: Bearer {}", access_token),
-            url,
-        ])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run curl: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("curl failed: {}", stderr));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
 /// Get the authenticated user's info using their user access token.
 pub async fn get_authenticated_user(
     access_token: &str,
 ) -> Result<TwitchUser, String> {
     log::info!("[Twitch User] Fetching user info with token (len={}), client_id={}", access_token.len(), client_id());
 
-    let url = format!("{}/users", TWITCH_API_URL);
-    let body = curl_twitch_get(&url, access_token).await.map_err(|e| {
-        log::error!("[Twitch User] HTTP request failed: {}", e);
-        format!("Failed to fetch user: {}", e)
-    })?;
+    // reqwest removed - using curl fallback
+    let resp = client
+        .get(format!("{}/users", TWITCH_API_URL))
+        .header("Client-Id", client_id())
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .await
+        .map_err(|e| {
+            log::error!("[Twitch User] HTTP request failed: {}", e);
+            format!("Failed to fetch user: {}", e)
+        })?;
 
-    log::info!("[Twitch User] Response status: 200 OK");
+    let status = resp.status();
+    log::info!("[Twitch User] Response status: {}", status);
 
-    let users_resp: UsersResponse = serde_json::from_str(&body)
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        log::error!("[Twitch User] Fetch FAILED ({}): {}", status, body);
+        return Err(format!("User lookup failed ({}): {}", status, body));
+    }
+
+    let users_resp: UsersResponse = resp
+        .json()
+        .await
         .map_err(|e| {
             log::error!("[Twitch User] JSON parse failed: {}", e);
             format!("Failed to parse user response: {}", e)
         })?;
-
-    // Check for API error in response
-    if let Ok(err_val) = serde_json::from_str::<serde_json::Value>(&body) {
-        if let Some(status) = err_val.get("status") {
-            let msg = err_val.get("message").and_then(|m| m.as_str()).unwrap_or("");
-            log::error!("[Twitch User] Fetch FAILED ({}): {}", status, msg);
-            return Err(format!("User lookup failed ({}): {}", status, msg));
-        }
-    }
 
     match users_resp.data.into_iter().next() {
         Some(user) => {
@@ -392,17 +377,23 @@ pub async fn get_vods(
             url.push_str(&format!("&after={}", c));
         }
 
-        let body = curl_twitch_get(&url, access_token).await?;
+        let resp = client
+            .get(&url)
+            .header("Client-Id", client_id())
+            .header("Authorization", format!("Bearer {}", access_token))
+            .send()
+            .await
+            .map_err(|e| format!("Failed to fetch VODs: {}", e))?;
 
-        // Check for API error
-        if let Ok(err_val) = serde_json::from_str::<serde_json::Value>(&body) {
-            if let Some(status) = err_val.get("status") {
-                let msg = err_val.get("message").and_then(|m| m.as_str()).unwrap_or("");
-                return Err(format!("VODs request failed ({}): {}", status, msg));
-            }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("VODs request failed ({}): {}", status, body));
         }
 
-        let videos_resp: VideosResponse = serde_json::from_str(&body)
+        let videos_resp: VideosResponse = resp
+            .json()
+            .await
             .map_err(|e| format!("Failed to parse VODs response: {}", e))?;
 
         let page_empty = videos_resp.data.is_empty();
@@ -444,11 +435,26 @@ pub async fn get_channel_info(
     access_token: &str,
     broadcaster_id: &str,
 ) -> Result<Option<ChannelInfo>, String> {
+    // reqwest removed - using curl fallback
     let url = format!("{}/channels?broadcaster_id={}", TWITCH_API_URL, broadcaster_id);
 
-    let body = curl_twitch_get(&url, access_token).await?;
+    let resp = client
+        .get(&url)
+        .header("Client-Id", client_id())
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch channel info: {}", e))?;
 
-    let info: ChannelInfoResponse = serde_json::from_str(&body)
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Channel info request failed ({}): {}", status, body));
+    }
+
+    let info: ChannelInfoResponse = resp
+        .json()
+        .await
         .map_err(|e| format!("Failed to parse channel info: {}", e))?;
 
     Ok(info.data.into_iter().next())
@@ -476,3 +482,4 @@ pub fn parse_duration(duration: &str) -> i64 {
 
     total
 }
+

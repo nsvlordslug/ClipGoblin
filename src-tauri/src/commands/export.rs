@@ -331,7 +331,7 @@ fn get_sub_style(id: &str) -> SubStyle {
         _ => SubStyle {
             font_name: "Arial", font_size: 52, font_weight: 700,
             primary_colour: "&HFFFFFF", outline_colour: "&H000000",
-            back_colour: "&H00000000", outline: 2, shadow: 1, border_style: 1,
+            back_colour: "&H00000000", outline: 2, shadow: 0, border_style: 1,
             spacing: 0.4, glow_blur: 0, glow_colour: "", uppercase: false,
             dt_fontcolor: "white", dt_borderw: 3, dt_boxcolor: "",
         },

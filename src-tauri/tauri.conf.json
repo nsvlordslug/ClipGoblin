@@ -1,50 +1,59 @@
-{
-  "$schema": "https://schema.tauri.app/config/2",
-  "productName": "ClipGoblin",
-  "version": "1.0.4",
-  "identifier": "com.clipgoblin.desktop",
-  "build": {
-    "frontendDist": "../dist",
-    "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
-  },
-  "app": {
-    "windows": [
-      {
-        "title": "ClipGoblin — Twitch Stream Clip Generator",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 900,
-        "minHeight": 600,
-        "resizable": true,
-        "fullscreen": false,
-        "center": true
-      }
-    ],
-    "security": {
-      "csp": "default-src 'self' asset: http://asset.localhost https://asset.localhost; img-src 'self' asset: http://asset.localhost https://asset.localhost https://static-cdn.jtvnw.net https://*.twitch.tv https://*.jtvnw.net https://*.cloudfront.net; connect-src 'self' https://api.twitch.tv https://id.twitch.tv https://api.anthropic.com asset: http://asset.localhost https://asset.localhost; media-src 'self' asset: http://asset.localhost https://asset.localhost blob:",
-      "assetProtocol": {
-        "scope": ["**"]
-      }
-    }
-  },
-  "plugins": {
-    "updater": {
-      "pubkey": "RWSe7Xz7ksGb7Agvh6ZunxKyzZv6VWG6OjSRE/INMYAjhlSokSz7x48v",
-      "endpoints": ["https://github.com/nsvlordslug/ClipGoblin/releases/latest/download/latest.json"]
-    }
-  },
-  "bundle": {
-    "active": true,
-    "externalBin": ["binaries/ffmpeg"],
-    "targets": ["msi", "nsis"],
-    "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.icns",
-      "icons/icon.ico"
-    ]
-  }
+﻿{
+    "$schema":  "https://schema.tauri.app/config/2",
+    "productName":  "ClipGoblin",
+    "version":  "1.0.5",
+    "identifier":  "com.clipgoblin.desktop",
+    "build":  {
+                  "frontendDist":  "../dist",
+                  "devUrl":  "http://localhost:5173",
+                  "beforeDevCommand":  "npm run dev",
+                  "beforeBuildCommand":  "npm run build"
+              },
+    "app":  {
+                "windows":  [
+                                {
+                                    "title":  "ClipGoblin â€” Twitch Stream Clip Generator",
+                                    "width":  1280,
+                                    "height":  800,
+                                    "minWidth":  900,
+                                    "minHeight":  600,
+                                    "resizable":  true,
+                                    "fullscreen":  false,
+                                    "center":  true
+                                }
+                            ],
+                "security":  {
+                                 "csp":  "default-src \u0027self\u0027 asset: http://asset.localhost https://asset.localhost; img-src \u0027self\u0027 asset: http://asset.localhost https://asset.localhost https://static-cdn.jtvnw.net https://*.twitch.tv https://*.jtvnw.net https://*.cloudfront.net; connect-src \u0027self\u0027 https://api.twitch.tv https://id.twitch.tv https://api.anthropic.com asset: http://asset.localhost https://asset.localhost; media-src \u0027self\u0027 asset: http://asset.localhost https://asset.localhost blob:",
+                                 "assetProtocol":  {
+                                                       "scope":  [
+                                                                     "**"
+                                                                 ]
+                                                   }
+                             }
+            },
+    "plugins":  {
+                    "updater":  {
+                                    "pubkey":  "RWSe7Xz7ksGb7Agvh6ZunxKyzZv6VWG6OjSRE/INMYAjhlSokSz7x48v",
+                                    "endpoints":  [
+                                                      "https://github.com/nsvlordslug/ClipGoblin/releases/latest/download/latest.json"
+                                                  ]
+                                }
+                },
+    "bundle":  {
+                   "active":  true,
+                   "externalBin":  [
+                                       "binaries/ffmpeg"
+                                   ],
+                   "targets":  [
+                                   "msi",
+                                   "nsis"
+                               ],
+                   "icon":  [
+                                "icons/32x32.png",
+                                "icons/128x128.png",
+                                "icons/128x128@2x.png",
+                                "icons/icon.icns",
+                                "icons/icon.ico"
+                            ]
+               }
 }

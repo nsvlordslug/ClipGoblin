@@ -9,7 +9,7 @@ pub struct TokenResponse {
     pub refresh_token: Option<String>,
     pub expires_in: Option<u64>,
     pub token_type: Option<String>,
-    pub scope: Option<String>,
+    pub scope: Option<serde_json::Value>,
     /// TikTok-specific field
     pub open_id: Option<String>,
     pub error: Option<String>,
@@ -28,10 +28,12 @@ impl AuthProxy {
     pub fn new() -> Result<Self, String> {
         let api_key = std::env::var("PROXY_API_KEY")
             .map_err(|_| "PROXY_API_KEY env var not set".to_string())?;
-        Ok(Self {
-            client: reqwest::Client::new(),
-            api_key,
-        })
+        let client = reqwest::Client::builder()
+            .use_native_tls()
+            .http1_only()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()            .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+        Ok(Self { client, api_key })
     }
 
     // ── Twitch ──────────────────────────────────────────────
@@ -125,26 +127,29 @@ impl AuthProxy {
         body: serde_json::Value,
     ) -> Result<TokenResponse, String> {
         let url = format!("{}{}", PROXY_BASE, path);
-        let resp = self
-            .client
-            .post(&url)
-            .header("X-Proxy-Key", &self.api_key)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("Auth proxy request failed: {e}"))?;
+        let body_str = serde_json::to_string(&body)
+            .map_err(|e| format!("Failed to serialize body: {e}"))?;
 
-        let status = resp.status();
-        let text = resp
-            .text()
+        let output = tokio::process::Command::new("curl")
+            .args([
+                "-s", "-S",
+                "--max-time", "15",
+                "-X", "POST",
+                "-H", &format!("X-Proxy-Key: {}", self.api_key),
+                "-H", "Content-Type: application/json",
+                "-d", &body_str,
+                &url,
+            ])
+            .output()
             .await
-            .map_err(|e| format!("Failed to read proxy response: {e}"))?;
+            .map_err(|e| format!("Failed to run curl: {e}"))?;
 
-        if !status.is_success() {
-            return Err(format!("Auth proxy returned {status}: {text}"));
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("curl failed: {stderr}"));
         }
 
+        let text = String::from_utf8_lossy(&output.stdout);
         serde_json::from_str::<TokenResponse>(&text)
             .map_err(|e| format!("Failed to parse proxy response: {e}"))
     }

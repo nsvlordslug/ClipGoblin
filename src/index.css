@@ -324,3 +324,11 @@ body {
   animation: goblinFloat 6s ease-in-out infinite,
              goblinGlow 4s ease-in-out infinite;
 }
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translate(-50%, 20px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+.animate-slide-up {
+  animation: slideUp 0.3s ease-out;
+}

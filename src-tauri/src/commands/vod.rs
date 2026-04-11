@@ -1,4 +1,4 @@
-//! VOD, clip, and analysis commands.
+﻿//! VOD, clip, and analysis commands.
 
 use std::io::{BufRead, BufReader};
 use std::process::Stdio;
@@ -22,7 +22,7 @@ use crate::commands::captions::{
     build_highlight_explanation, count_active_signals,
 };
 
-// ── AudioProfile struct (local to this module) ──
+// â”€â”€ AudioProfile struct (local to this module) â”€â”€
 
 /// Audio profile extracted from a video file.
 #[derive(Debug, Clone)]
@@ -33,7 +33,7 @@ struct AudioProfile {
     spike_seconds: Vec<usize>,
 }
 
-// ── Tool finders ──
+// â”€â”€ Tool finders â”€â”€
 
 /// Find yt-dlp executable by checking common install locations and PATH.
 fn find_ytdlp() -> Result<std::path::PathBuf, AppError> {
@@ -130,7 +130,7 @@ pub(crate) fn find_ffmpeg() -> Result<std::path::PathBuf, AppError> {
     Err(AppError::Ffmpeg("Not found. Please install ffmpeg (winget install Gyan.FFmpeg).".into()))
 }
 
-// ── Download helpers ──
+// â”€â”€ Download helpers â”€â”€
 
 /// Parse yt-dlp progress output to extract download percentage.
 fn parse_ytdlp_progress(line: &str) -> Option<u8> {
@@ -193,7 +193,7 @@ pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>)
     let vod_id_bg = vod_id.clone();
     let app_handle = app.clone();
 
-    // Spawn background task — returns immediately so UI stays responsive
+    // Spawn background task â€” returns immediately so UI stays responsive
     tokio::task::spawn(async move {
         let vod_id_progress = vod_id_bg.clone();
         let vod_id_status = vod_id_bg;
@@ -317,7 +317,7 @@ pub fn get_cached_vods(channel_id: String, db: State<'_, DbConn>) -> Result<Vec<
     db::get_vods_by_channel(&conn, &channel_id).map_err(|e| format!("DB error: {}", e))
 }
 
-// ── AI Analysis ──
+// â”€â”€ AI Analysis â”€â”€
 
 /// Extract per-second audio intensity from a video file using ffmpeg.
 /// Returns an AudioProfile with RMS levels and detected spike positions.
@@ -332,7 +332,7 @@ fn analyze_audio_intensity(
         .join(format!("{}.txt", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(temp_file.parent().unwrap()).ok();
 
-    // Escape the path for ffmpeg filter syntax — colons in Windows drive letters
+    // Escape the path for ffmpeg filter syntax â€” colons in Windows drive letters
     // (e.g. C:\...) conflict with ffmpeg's filter parameter separator (:)
     let escaped_path = temp_file.to_string_lossy()
         .replace('\\', "/")
@@ -481,7 +481,7 @@ pub(crate) fn generate_thumbnail(
     }
 }
 
-// ── Speech-to-Text (faster-whisper) ──
+// â”€â”€ Speech-to-Text (faster-whisper) â”€â”€
 
 /// Transcript data from faster-whisper
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -515,7 +515,7 @@ pub struct TranscriptResult {
     pub keywords_found: Vec<TranscriptKeyword>,
 }
 
-// ── Keyword patterns for transcript scanning ──
+// â”€â”€ Keyword patterns for transcript scanning â”€â”€
 // These match the keywords used by clip_selector::generate_transcript_candidates
 const TRANSCRIPT_KEYWORDS: &[&str] = &[
     "no way", "oh my god", "what the", "holy", "let's go", "lets go",
@@ -581,7 +581,7 @@ pub(crate) fn run_transcription_native(
     // Check model is downloaded
     if !whisper::is_model_downloaded(model) {
         return Err(AppError::Transcription(format!(
-            "Whisper model '{}' is not downloaded. Go to Settings → Transcription Model to download it.",
+            "Whisper model '{}' is not downloaded. Go to Settings â†’ Transcription Model to download it.",
             model.label()
         )));
     }
@@ -614,10 +614,10 @@ pub(crate) fn run_transcription_native(
     Ok(transcript)
 }
 
-// ── Legacy Python transcription (replaced by whisper-rs native) ──
+// â”€â”€ Legacy Python transcription (replaced by whisper-rs native) â”€â”€
 
 /// Find Python executable path
-// Replaced by whisper-rs native transcription — kept for potential fallback
+// Replaced by whisper-rs native transcription â€” kept for potential fallback
 #[allow(dead_code)]
 pub(crate) fn find_python() -> Result<std::path::PathBuf, AppError> {
     // Check common Windows Python paths (user-independent)
@@ -641,7 +641,7 @@ pub(crate) fn find_python() -> Result<std::path::PathBuf, AppError> {
 
 /// Run faster-whisper transcription on a video file.
 /// Returns transcript JSON and saves to disk.
-// Replaced by run_transcription_native() — kept for potential fallback
+// Replaced by run_transcription_native() â€” kept for potential fallback
 #[allow(dead_code)]
 pub(crate) fn run_transcription(vod_path: &str, output_path: &str, hw: &HardwareInfo, vod_id: Option<&str>) -> Result<TranscriptResult, AppError> {
     let python = find_python()?;
@@ -689,7 +689,7 @@ pub(crate) fn run_transcription(vod_path: &str, output_path: &str, hw: &Hardware
 }
 
 /// Locate transcribe.py by searching project directories and AppData.
-// Replaced by whisper-rs native transcription — kept for potential fallback
+// Replaced by whisper-rs native transcription â€” kept for potential fallback
 #[allow(dead_code)]
 fn find_transcribe_script() -> Result<std::path::PathBuf, AppError> {
     let exe = std::env::current_exe().unwrap_or_default();
@@ -718,11 +718,11 @@ fn find_transcribe_script() -> Result<std::path::PathBuf, AppError> {
     }
 
     Err(AppError::Transcription(
-        "transcribe.py not found — place it in ai_engine/ next to the executable or in AppData/clipviral/ai_engine/".into()
+        "transcribe.py not found â€” place it in ai_engine/ next to the executable or in AppData/clipviral/ai_engine/".into()
     ))
 }
 
-// Replaced by whisper-rs native transcription — kept for potential fallback
+// Replaced by whisper-rs native transcription â€” kept for potential fallback
 #[allow(dead_code)]
 fn run_transcription_with_script(
     python: &std::path::Path,
@@ -745,7 +745,7 @@ fn run_transcription_with_script(
 
     // When running in CPU mode, prevent CUDA library loading entirely.
     // faster-whisper (via CTranslate2) probes for cuBLAS at import time,
-    // which crashes if CUDA DLLs are missing — even with --device cpu.
+    // which crashes if CUDA DLLs are missing â€” even with --device cpu.
     // Blanking CUDA_VISIBLE_DEVICES forces the library to skip GPU init.
     if device == "cpu" {
         cmd.env("CUDA_VISIBLE_DEVICES", "");
@@ -792,7 +792,7 @@ fn run_transcription_with_script(
                                 continue;
                             }
                         }
-                        // Not a heartbeat — collect as regular stderr
+                        // Not a heartbeat â€” collect as regular stderr
                         buf.extend_from_slice(line.as_bytes());
                         buf.push(b'\n');
                     }
@@ -818,7 +818,7 @@ fn run_transcription_with_script(
                     last_activity = std::time::Instant::now();
                 }
                 if last_activity.elapsed() > no_heartbeat_timeout {
-                    log::error!("Transcription stalled — no heartbeat for {}s, killing process",
+                    log::error!("Transcription stalled â€” no heartbeat for {}s, killing process",
                         no_heartbeat_timeout.as_secs());
                     child.kill().ok();
                     child.wait().ok();
@@ -851,7 +851,7 @@ fn run_transcription_with_script(
             status.code().unwrap_or(-1), stderr.trim(), stdout.trim());
 
         // Parse structured error from stdout if the script managed to output JSON
-        // (stdout may contain multiple JSON lines — check each)
+        // (stdout may contain multiple JSON lines â€” check each)
         for line in stdout.lines() {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(line.trim()) {
                 if let Some(err_msg) = json.get("error").and_then(|e| e.as_str()) {
@@ -950,7 +950,7 @@ fn format_srt_time(seconds: f64) -> String {
 }
 
 /// Extract the full dialogue text from transcript segments that overlap a clip's time range.
-/// Concatenates all segment text into a single string — used to save a richer
+/// Concatenates all segment text into a single string â€” used to save a richer
 /// `transcript_snippet` in the highlights table so Claude gets more context.
 fn extract_transcript_for_range(transcript: &TranscriptResult, start: f64, end: f64) -> Option<String> {
     let texts: Vec<&str> = transcript.segments.iter()
@@ -1026,12 +1026,12 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
             db::update_vod_analysis_progress(&conn, &vod_id_bg, 2).ok();
         }
 
-        // Cascading analysis: signal-driven (local) → position heuristic.
+        // Cascading analysis: signal-driven (local) â†’ position heuristic.
         let has_local_file = vod_clone.local_path.is_some();
 
         let mut result: Result<Vec<db::HighlightRow>, String> = Err("No analysis method available".into());
 
-        // Tier 1: Signal-driven (audio + transcript + chat) — fully local
+        // Tier 1: Signal-driven (audio + transcript + chat) â€” fully local
         if has_ffmpeg && has_local_file {
             log::info!("Running signal-driven analysis for VOD {}", vod_id_bg);
             let vod_for_sync = vod_clone.clone();
@@ -1227,7 +1227,7 @@ fn run_analysis_signals(vod: &db::VodRow, _hw: &HardwareInfo, sensitivity: &str)
     let vod_id = &vod.id;
     let now = chrono::Utc::now().to_rfc3339();
 
-    // ── Stage 1: Audio analysis (5-15%) ──
+    // â”€â”€ Stage 1: Audio analysis (5-15%) â”€â”€
     log::info!("Signal analysis: extracting audio profile...");
     set_analysis_progress(vod_id, 5);
     let audio_profile = analyze_audio_intensity(&vod_path, &ffmpeg).ok();
@@ -1236,7 +1236,7 @@ fn run_analysis_signals(vod: &db::VodRow, _hw: &HardwareInfo, sensitivity: &str)
     });
     set_analysis_progress(vod_id, 15);
 
-    // ── Stage 2: Transcription (15-40%) ──
+    // â”€â”€ Stage 2: Transcription (15-40%) â”€â”€
     log::info!("Signal analysis: attempting transcription...");
     set_analysis_progress(vod_id, 18);
     let transcript_dir = dirs::data_dir()
@@ -1267,13 +1267,13 @@ fn run_analysis_signals(vod: &db::VodRow, _hw: &HardwareInfo, sensitivity: &str)
     };
     set_analysis_progress(vod_id, 40);
 
-    // ── Stage 3: Chat analysis (40-50%) ──
+    // â”€â”€ Stage 3: Chat analysis (40-50%) â”€â”€
     log::info!("Signal analysis: analyzing chat activity...");
     set_analysis_progress(vod_id, 42);
     let chat_peaks: Vec<db::HighlightRow> = analyze_via_chat(vod).unwrap_or_default();
     set_analysis_progress(vod_id, 50);
 
-    // ── Stage 4: Clip selection pipeline (50-65%) ──
+    // â”€â”€ Stage 4: Clip selection pipeline (50-65%) â”€â”€
     log::info!("Signal analysis: running clip selector pipeline...");
     set_analysis_progress(vod_id, 52);
     let (selected, detection_stats): (Vec<clip_selector::ClipCandidate>, _) = clip_selector::select_clips(
@@ -1299,7 +1299,7 @@ fn run_analysis_signals(vod: &db::VodRow, _hw: &HardwareInfo, sensitivity: &str)
         return run_analysis(vod);
     }
 
-    // ── Stage 5: Scoring and ranking (60-75%) ──
+    // â”€â”€ Stage 5: Scoring and ranking (60-75%) â”€â”€
     log::info!("Signal analysis: scoring {} candidates...", selected.len());
     set_analysis_progress(vod_id, 62);
     let mut highlights: Vec<db::HighlightRow> = Vec::new();
@@ -1367,7 +1367,7 @@ fn run_analysis_signals(vod: &db::VodRow, _hw: &HardwareInfo, sensitivity: &str)
     }
     set_analysis_progress(vod_id, 75);
 
-    // ── Stage 6: Generate captions (75-82%) ──
+    // â”€â”€ Stage 6: Generate captions (75-82%) â”€â”€
     log::info!("Signal analysis: generating captions...");
     set_analysis_progress(vod_id, 76);
     if let Some(ref t) = transcript {
@@ -1394,7 +1394,7 @@ fn run_analysis_signals(vod: &db::VodRow, _hw: &HardwareInfo, sensitivity: &str)
     Ok(highlights)
 }
 
-/// Position-based fallback — last resort when no signals are available.
+/// Position-based fallback â€” last resort when no signals are available.
 /// Only used when VOD is not downloaded or ffmpeg is missing.
 fn run_analysis(vod: &db::VodRow) -> Result<Vec<db::HighlightRow>, String> {
     let duration = vod.duration_seconds as f64;
@@ -1570,7 +1570,7 @@ fn analyze_via_chat(vod: &db::VodRow) -> Result<Vec<db::HighlightRow>, String> {
             thumbnail_path: None,
             created_at: now.clone(),
             confidence_score: Some(compute_confidence(virality, 1)),
-            explanation: Some(format!("1 signal — chat {:.0}% ({} messages)", chat_score * 100.0, count)),
+            explanation: Some(format!("1 signal â€” chat {:.0}% ({} messages)", chat_score * 100.0, count)),
             event_summary: Some(format!("chat went off with {} messages", count)),
         });
     }
@@ -1578,7 +1578,7 @@ fn analyze_via_chat(vod: &db::VodRow) -> Result<Vec<db::HighlightRow>, String> {
     Ok(highlights)
 }
 
-// ── VOD info / list commands ──
+// â”€â”€ VOD info / list commands â”€â”€
 
 #[tauri::command]
 pub async fn open_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>) -> Result<(), String> {
@@ -1624,7 +1624,7 @@ pub async fn get_vods(
     };
 
     if access_token.is_empty() {
-        log::warn!("[get_vods] No access token found — user not logged in");
+        log::warn!("[get_vods] No access token found â€” user not logged in");
         return Err("Not logged in. Please log in with Twitch first.".into());
     }
 
@@ -1739,7 +1739,7 @@ pub fn delete_clip(clip_id: String, db: State<'_, DbConn>) -> Result<(), String>
         if remaining == 0 {
             db::update_vod_analysis_status(&conn, &vid, "pending")
                 .map_err(|e| format!("DB error: {}", e))?;
-            log::info!("All clips deleted for VOD {} — reset analysis_status to pending", vid);
+            log::info!("All clips deleted for VOD {} â€” reset analysis_status to pending", vid);
         }
     }
 
@@ -1768,38 +1768,28 @@ pub async fn refresh_vod_metadata(
         return Err("Not logged in. Please log in with Twitch first.".into());
     }
 
-    // Fetch fresh video data from Twitch — retry with refreshed token on 401
-    let client = reqwest::Client::new();
+    // Fetch fresh video data from Twitch via curl fallback â€” retry with refreshed token on 401
     let url = format!("https://api.twitch.tv/helix/videos?id={}", twitch_video_id);
-    let resp = client
-        .get(&url)
-        .header("Client-Id", twitch::client_id())
-        .header("Authorization", format!("Bearer {}", &access_token))
-        .send()
-        .await
+    let mut body = twitch::curl_twitch_get(&url, &access_token).await
         .map_err(|e| format!("Twitch API error: {}", e))?;
 
-    let resp = if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        // Token expired — try refreshing
+    // Check for 401 in the response body (curl doesn't give us HTTP status codes directly)
+    if body.contains("\"status\":401") || body.contains("\"status\": 401") {
+        // Token expired â€” try refreshing
         access_token = try_refresh_twitch_token(&db).await?;
-        client
-            .get(&url)
-            .header("Client-Id", twitch::client_id())
-            .header("Authorization", format!("Bearer {}", &access_token))
-            .send()
-            .await
-            .map_err(|e| format!("Twitch API error: {}", e))?
-    } else {
-        resp
-    };
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Twitch API {}: {}", status, body));
+        body = twitch::curl_twitch_get(&url, &access_token).await
+            .map_err(|e| format!("Twitch API error: {}", e))?;
     }
 
-    let resp_json: serde_json::Value = resp.json().await
+    // Check for other API errors
+    if let Ok(err_val) = serde_json::from_str::<serde_json::Value>(&body) {
+        if let Some(status) = err_val.get("status") {
+            let msg = err_val.get("message").and_then(|m| m.as_str()).unwrap_or("");
+            return Err(format!("Twitch API {}: {}", status, msg));
+        }
+    }
+
+    let resp_json: serde_json::Value = serde_json::from_str(&body)
         .map_err(|e| format!("Parse error: {}", e))?;
 
     let video = resp_json["data"].as_array()
@@ -1812,7 +1802,7 @@ pub async fn refresh_vod_metadata(
         .replace("%{height}", "360");
 
     // Update VOD title and thumbnail in database.
-    // Preserve game_name — it's user-set and should not be cleared on metadata refresh.
+    // Preserve game_name â€” it's user-set and should not be cleared on metadata refresh.
     {
         let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
         conn.execute(
@@ -1829,7 +1819,7 @@ pub async fn refresh_vod_metadata(
         .ok_or_else(|| "VOD not found after update".to_string())
 }
 
-/// Set the game on a single clip (lightweight — used for auto-save after subtitle inference).
+/// Set the game on a single clip (lightweight â€” used for auto-save after subtitle inference).
 #[tauri::command]
 pub fn set_clip_game(clip_id: String, game: Option<String>, db: State<'_, DbConn>) -> Result<(), String> {
     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
@@ -1839,7 +1829,7 @@ pub fn set_clip_game(clip_id: String, game: Option<String>, db: State<'_, DbConn
         .map_err(|e| format!("DB error: {}", e))
 }
 
-/// Set the title on a single clip (lightweight — used for auto-save on blur).
+/// Set the title on a single clip (lightweight â€” used for auto-save on blur).
 #[tauri::command]
 pub fn set_clip_title(clip_id: String, title: Option<String>, db: State<'_, DbConn>) -> Result<(), String> {
     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
@@ -2064,7 +2054,7 @@ pub fn get_creator_profile(db: State<'_, DbConn>) -> Result<db::CreatorProfileRo
 }
 
 /// Recalculate creator scoring weights based on actual clip performance data.
-/// This is the feedback loop — learn what works for this creator.
+/// This is the feedback loop â€” learn what works for this creator.
 #[tauri::command]
 pub fn update_scoring_from_performance(db: State<'_, DbConn>) -> Result<String, String> {
     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;

@@ -1,6 +1,6 @@
-[package]
+﻿[package]
 name = "clipviral"
-version = "1.0.4"
+version = "1.0.5"
 description = "AI-powered Twitch stream clip generator"
 authors = ["ClipViral"]
 license = "MIT"
@@ -24,7 +24,7 @@ tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "native-tls"] }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -48,7 +48,7 @@ steamworks = { version = "0.11", optional = true }
 windows = { version = "0.58", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
 
 [features]
-default = ["asset-protocol", "standalone"]
+default = ["asset-protocol", "standalone", "cuda"]
 asset-protocol = ["tauri/protocol-asset"]
 standalone = ["tauri-plugin-updater"]
 steam = ["steamworks"]

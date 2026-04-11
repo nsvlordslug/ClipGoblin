@@ -39,6 +39,9 @@ cd "C:\Users\cereb\Desktop\Claude projects\clipviral" && git add -A && git commi
 ### 5. Rust Not Available in Cowork VM
 You cannot run `cargo check` in this VM. Always ask Slug to run it in his terminal. Do static analysis to catch obvious errors, but the real compiler check happens on his machine.
 
+### 6. Version Bump Before Every Commit
+IMPORTANT: Before every git commit, run `powershell -file bump-version.ps1 <new_version>` to sync the version across package.json, src-tauri/Cargo.toml, and src-tauri/tauri.conf.json.
+
 ---
 
 ## Codebase Structure
