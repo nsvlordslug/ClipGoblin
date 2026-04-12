@@ -26,8 +26,10 @@ pub struct AuthProxy {
 impl AuthProxy {
     /// Create a new proxy client. Reads `PROXY_API_KEY` from the environment.
     pub fn new() -> Result<Self, String> {
-        let api_key = std::env::var("PROXY_API_KEY")
-            .map_err(|_| "PROXY_API_KEY env var not set".to_string())?;
+        let api_key = option_env!("PROXY_API_KEY")
+            .map(|s| s.to_string())
+            .or_else(|| std::env::var("PROXY_API_KEY").ok())
+            .ok_or_else(|| "PROXY_API_KEY not set at build or runtime".to_string())?;
         let client = reqwest::Client::builder()
             .use_native_tls()
             .http1_only()
