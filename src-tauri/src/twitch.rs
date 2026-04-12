@@ -315,28 +315,30 @@ pub async fn get_app_access_token(_client_secret: &str) -> Result<String, String
 
 /// Helper: run a curl GET request against the Twitch Helix API and return the body as a string.
 pub async fn curl_twitch_get(url: &str, access_token: &str) -> Result<String, String> {
-    let mut curl_cmd = tokio::process::Command::new("curl");
-    curl_cmd.args([
-        "-s", "-S", "--max-time", "15",
-        "-H", &format!("Client-Id: {}", client_id()),
-        "-H", &format!("Authorization: Bearer {}", access_token),
-        url,
-    ]);
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        curl_cmd.creation_flags(0x08000000);
-    }
-    let output = curl_cmd.output()
+    let client = reqwest::Client::builder()
+        .use_native_tls()
+        .http1_only()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+
+    let resp = client
+        .get(url)
+        .header("Client-Id", client_id())
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
         .await
-        .map_err(|e| format!("Failed to run curl: {}", e))?;
+        .map_err(|e| format!("Failed to fetch: {}", e))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("curl failed: {}", stderr));
+    let status = resp.status();
+    let text = resp.text().await
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+
+    if !status.is_success() {
+        return Err(format!("Twitch API request failed ({}): {}", status, text));
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(text)
 }
 
 /// Get the authenticated user's info using their user access token.

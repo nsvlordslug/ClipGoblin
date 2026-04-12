@@ -132,31 +132,23 @@ impl AuthProxy {
         let body_str = serde_json::to_string(&body)
             .map_err(|e| format!("Failed to serialize body: {e}"))?;
 
-        let mut curl_cmd = tokio::process::Command::new("curl");
-        curl_cmd.args([
-            "-s", "-S",
-            "--max-time", "15",
-            "-X", "POST",
-            "-H", &format!("X-Proxy-Key: {}", self.api_key),
-            "-H", "Content-Type: application/json",
-            "-d", &body_str,
-            &url,
-        ]);
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            curl_cmd.creation_flags(0x08000000);
-        }
-        let output = curl_cmd.output()
+        let resp = self.client
+            .post(&url)
+            .header("X-Proxy-Key", &self.api_key)
+            .header("Content-Type", "application/json")
+            .body(body_str)
+            .send()
             .await
-            .map_err(|e| format!("Failed to run curl: {e}"))?;
+            .map_err(|e| format!("HTTP request failed: {e}"))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("curl failed: {stderr}"));
+        let status = resp.status();
+        let text = resp.text().await
+            .map_err(|e| format!("Failed to read response body: {e}"))?;
+
+        if !status.is_success() {
+            return Err(format!("Proxy request failed ({}): {}", status, text));
         }
 
-        let text = String::from_utf8_lossy(&output.stdout);
         serde_json::from_str::<TokenResponse>(&text)
             .map_err(|e| format!("Failed to parse proxy response: {e}"))
     }
