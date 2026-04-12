@@ -127,7 +127,14 @@ pub fn find_ffmpeg() -> Result<PathBuf, String> {
     }
 
     // 3. PATH lookup
-    if let Ok(output) = Command::new("ffmpeg").arg("-version").output() {
+    let mut ver_cmd = Command::new("ffmpeg");
+    ver_cmd.arg("-version");
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        ver_cmd.creation_flags(0x08000000);
+    }
+    if let Ok(output) = ver_cmd.output() {
         if output.status.success() {
             return Ok(PathBuf::from("ffmpeg"));
         }
@@ -140,18 +147,24 @@ pub fn find_ffmpeg() -> Result<PathBuf, String> {
 
 /// Extract 16 kHz mono f32le PCM from a media file using ffmpeg, piped to stdout.
 fn extract_pcm_audio(audio_path: &str, ffmpeg: &PathBuf) -> Result<Vec<f32>, String> {
-    let mut child = Command::new(ffmpeg)
-        .args([
-            "-i", audio_path,
-            "-ar", "16000",
-            "-ac", "1",
-            "-f", "f32le",
-            "-acodec", "pcm_f32le",
-            "pipe:1",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
+    let mut child_cmd = Command::new(ffmpeg);
+    child_cmd.args([
+        "-i", audio_path,
+        "-ar", "16000",
+        "-ac", "1",
+        "-f", "f32le",
+        "-acodec", "pcm_f32le",
+        "pipe:1",
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        child_cmd.creation_flags(0x08000000);
+    }
+    let mut child = child_cmd.spawn()
         .map_err(|e| format!("Failed to spawn ffmpeg: {}", e))?;
 
     let mut raw = Vec::new();

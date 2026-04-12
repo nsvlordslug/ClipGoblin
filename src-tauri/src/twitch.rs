@@ -315,14 +315,19 @@ pub async fn get_app_access_token(_client_secret: &str) -> Result<String, String
 
 /// Helper: run a curl GET request against the Twitch Helix API and return the body as a string.
 pub async fn curl_twitch_get(url: &str, access_token: &str) -> Result<String, String> {
-    let output = tokio::process::Command::new("curl")
-        .args([
-            "-s", "-S", "--max-time", "15",
-            "-H", &format!("Client-Id: {}", client_id()),
-            "-H", &format!("Authorization: Bearer {}", access_token),
-            url,
-        ])
-        .output()
+    let mut curl_cmd = tokio::process::Command::new("curl");
+    curl_cmd.args([
+        "-s", "-S", "--max-time", "15",
+        "-H", &format!("Client-Id: {}", client_id()),
+        "-H", &format!("Authorization: Bearer {}", access_token),
+        url,
+    ]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        curl_cmd.creation_flags(0x08000000);
+    }
+    let output = curl_cmd.output()
         .await
         .map_err(|e| format!("Failed to run curl: {}", e))?;
 

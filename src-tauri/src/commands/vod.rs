@@ -1,4 +1,4 @@
-﻿//! VOD, clip, and analysis commands.
+//! VOD, clip, and analysis commands.
 
 use std::io::{BufRead, BufReader};
 use std::process::Stdio;
@@ -75,7 +75,14 @@ fn find_ytdlp() -> Result<std::path::PathBuf, AppError> {
     }
 
     // Last resort: check PATH
-    if let Ok(output) = std::process::Command::new("yt-dlp").arg("--version").output() {
+    let mut yt_check = std::process::Command::new("yt-dlp");
+    yt_check.arg("--version");
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        yt_check.creation_flags(0x08000000);
+    }
+    if let Ok(output) = yt_check.output() {
         if output.status.success() {
             return Ok(std::path::PathBuf::from("yt-dlp"));
         }
@@ -653,10 +660,15 @@ pub(crate) fn run_transcription(vod_path: &str, output_path: &str, hw: &Hardware
     log::info!("Transcription: python={} script={} device={}", python.display(), script.display(), device);
 
     // Quick diagnostic: check if faster-whisper is importable
-    if let Ok(check) = std::process::Command::new(&python)
-        .args(["-c", "import faster_whisper; print(faster_whisper.__version__)"])
-        .env("CUDA_VISIBLE_DEVICES", "")
-        .output()
+    let mut py_cmd = std::process::Command::new(&python);
+    py_cmd.args(["-c", "import faster_whisper; print(faster_whisper.__version__)"]);
+    py_cmd.env("CUDA_VISIBLE_DEVICES", "");
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        py_cmd.creation_flags(0x08000000);
+    }
+    if let Ok(check) = py_cmd.output()
     {
         if check.status.success() {
             let ver = String::from_utf8_lossy(&check.stdout);

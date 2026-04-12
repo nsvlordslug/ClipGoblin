@@ -42,9 +42,14 @@ impl HardwareInfo {
 pub fn detect_hardware() -> HardwareInfo {
     // Query GPU name and total memory in one call using csv format.
     // --query-gpu=name,memory.total returns e.g. "NVIDIA GeForce RTX 4070, 12282 MiB"
-    let output = match Command::new("nvidia-smi")
-        .args(["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"])
-        .output()
+    let mut smi_cmd = Command::new("nvidia-smi");
+    smi_cmd.args(["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        smi_cmd.creation_flags(0x08000000);
+    }
+    let output = match smi_cmd.output()
     {
         Ok(output) if output.status.success() => output,
         Ok(_) => {

@@ -132,17 +132,22 @@ impl AuthProxy {
         let body_str = serde_json::to_string(&body)
             .map_err(|e| format!("Failed to serialize body: {e}"))?;
 
-        let output = tokio::process::Command::new("curl")
-            .args([
-                "-s", "-S",
-                "--max-time", "15",
-                "-X", "POST",
-                "-H", &format!("X-Proxy-Key: {}", self.api_key),
-                "-H", "Content-Type: application/json",
-                "-d", &body_str,
-                &url,
-            ])
-            .output()
+        let mut curl_cmd = tokio::process::Command::new("curl");
+        curl_cmd.args([
+            "-s", "-S",
+            "--max-time", "15",
+            "-X", "POST",
+            "-H", &format!("X-Proxy-Key: {}", self.api_key),
+            "-H", "Content-Type: application/json",
+            "-d", &body_str,
+            &url,
+        ]);
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            curl_cmd.creation_flags(0x08000000);
+        }
+        let output = curl_cmd.output()
             .await
             .map_err(|e| format!("Failed to run curl: {e}"))?;
 
