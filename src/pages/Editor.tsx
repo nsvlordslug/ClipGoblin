@@ -1491,7 +1491,7 @@ export default function Editor() {
           {/* Export Preset */}
           <Section title="Export For">
             <div className="grid grid-cols-2 gap-2">
-              {EXPORT_PRESETS.map(p => (
+              {EXPORT_PRESETS.filter(p => !p.hidden).map(p => (
                 <Tooltip key={p.id} text={`Export in ${p.name} format (${p.aspectRatio})`} position="bottom">
                   <button onClick={() => setExportPresetId(p.id)}
                     className={`w-full px-3 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer border ${

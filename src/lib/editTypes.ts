@@ -121,6 +121,8 @@ export interface ExportPreset {
   resolution: { w: number; h: number }
   fileLabel: string     // appended to filename
   description: string
+  /** If true, hide this preset from the UI (but keep it available for code that references it by id). */
+  hidden?: boolean
 }
 
 export const EXPORT_PRESETS: ExportPreset[] = [
@@ -143,6 +145,7 @@ export const EXPORT_PRESETS: ExportPreset[] = [
     resolution: { w: 1080, h: 1920 },
     fileLabel: 'reels',
     description: '9:16 vertical, max 90s',
+    hidden: true, // Hidden until Instagram is re-enabled in platformStore (available: true)
   },
   {
     id: 'shorts',
