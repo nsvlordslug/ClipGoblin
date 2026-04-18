@@ -244,10 +244,31 @@ pub fn generate_transcript_candidates(keywords: &[TranscriptKeyword]) -> Vec<Raw
             else if lower.contains("let's go") || lower.contains("clutch") || lower.contains("rage") || lower.contains("noooo") { 0.75 }
             else { 0.60 };
         let mut tags = vec!["speech".to_string()];
-        if lower.contains("no") || lower.contains("what") || lower.contains("oh") { tags.push("shock".to_string()); }
-        if lower.contains("go") || lower.contains("yes") || lower.contains("clutch") { tags.push("hype".to_string()); }
-        if lower.contains("rage") || lower.contains("dead") || lower.contains("done") { tags.push("frustration".to_string()); }
-        if lower.contains("run") || lower.contains("help") || lower.contains("behind") { tags.push("panic".to_string()); }
+        // — Emotion tagging: require stronger signals than single common words —
+        // Shock: needs exclamation OR multiple shock words together, not just "oh" alone
+        let shock_words = ["what the", "oh my", "oh no", "holy", "wtf", "dude"];
+        let shock_exclaim = (lower.contains("no!") || lower.contains("what!") || lower.contains("oh!"));
+        if shock_words.iter().any(|w| lower.contains(w)) || shock_exclaim {
+            tags.push("shock".to_string());
+        }
+
+        // Hype: "go" alone is too common — require gaming-specific phrases
+        let hype_words = ["let's go!", "lets go", "let's gooo", "yes!", "clutch", "got 'em", "got him", "got em", "nice!", "huge"];
+        if hype_words.iter().any(|w| lower.contains(w)) {
+            tags.push("hype".to_string());
+        }
+
+        // Frustration: "dead" and "done" are too common in gaming narration
+        let frust_words = ["rage", "i'm done", "are you kidding", "are you serious", "bull", "stupid", "i quit", "i can't"];
+        if frust_words.iter().any(|w| lower.contains(w)) {
+            tags.push("frustration".to_string());
+        }
+
+        // Panic: these are more specific, keep but tighten
+        let panic_words = ["run!", "help!", "behind me", "behind you", "get out", "oh god", "he's coming", "she's coming"];
+        if panic_words.iter().any(|w| lower.contains(w)) {
+            tags.push("panic".to_string());
+        }
         RawSignal { center: kw.timestamp, intensity, source: SignalSource::Transcript, tags, transcript_snippet: Some(kw.context.clone()), spike_delta: 0.0 }
     }).collect()
 }
@@ -314,14 +335,14 @@ pub fn analyze_emotional_spike(m: &FusedMoment, audio: Option<&AudioContext>) ->
     else if has("scream") || has("reaction") || has("frustration") || has("panic") { score += 0.25; }
     else if has("hype") || has("excitement") { score += 0.15; }
     if let Some(a) = audio { if a.intensity_in_range(m.center - 1.0, m.center + 2.0) > a.avg_rms * 2.0 { score += 0.10; } }
-    if m.transcript_snippet.is_some() { score += 0.08; }
+    if m.transcript_snippet.is_some() { score += 0.03; }
     score.min(1.0)
     // TODO(v2): facial expression recognition
 }
 
 pub fn analyze_payoff_clarity(m: &FusedMoment) -> f64 {
     let mut score = 0.25;
-    if m.transcript_snippet.is_some() { score += 0.30; }
+    if m.transcript_snippet.is_some() { score += 0.10; }
     score += (m.signal_sources.len() as f64 * 0.12).min(0.25);
     let has = |tag: &str| m.tags.iter().any(|t| t == tag);
     if has("jumpscare") || has("scream") { score += 0.12; }
@@ -333,7 +354,7 @@ pub fn analyze_payoff_clarity(m: &FusedMoment) -> f64 {
 pub fn analyze_event_reaction_alignment(m: &FusedMoment) -> f64 {
     match m.signal_sources.len() {
         n if n >= 3 => 0.95,
-        2 => if m.signal_sources.contains(&SignalSource::Transcript) { 0.82 } else { 0.72 },
+        2 => if m.signal_sources.contains(&SignalSource::Transcript) { 0.76 } else { 0.72 },
         _ => if m.spike_delta > 0.0 { 0.35 + (m.spike_delta * 0.5).min(0.25) } else { 0.30 + m.best_intensity * 0.2 },
     }
     // TODO(v2): temporal alignment model
@@ -351,9 +372,10 @@ pub fn analyze_context_simplicity(m: &FusedMoment) -> f64 {
 pub fn analyze_replay_value(m: &FusedMoment) -> f64 {
     let mut score = m.best_intensity * 0.35;
     let has = |tag: &str| m.tags.iter().any(|t| t == tag);
-    if has("jumpscare") || has("surprise") || has("shock") { score += 0.40; }
+    if has("jumpscare") || has("surprise") { score += 0.40; }
+    else if has("shock") { score += 0.20; }
     if has("scream") || has("panic") { score += 0.20; }
-    if m.transcript_snippet.is_some() { score += 0.12; }
+    if m.transcript_snippet.is_some() { score += 0.05; }
     if m.signal_sources.len() >= 2 { score += 0.10; }
     score.min(1.0)
     // TODO(v2): audio loop analysis
