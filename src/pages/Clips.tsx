@@ -61,7 +61,6 @@ function clipDisplayTitle(
 // ─── Persistence helpers (sessionStorage for ephemeral UI state) ──
 
 const STORAGE_KEY_COLLAPSED = 'clips_collapsed_vods'
-const STORAGE_KEY_SCROLL = 'clips_scroll_y'
 const STORAGE_KEY_SORT = 'clips_sort'
 const STORAGE_KEY_HIDE_DONE = 'clips_hide_done'
 
@@ -104,6 +103,11 @@ function saveHideDone(v: boolean) {
 function getConfirmDeletePref(): boolean {
   try { return localStorage.getItem('clips_confirm_delete') !== 'false' } catch { return true }
 }
+
+// ─── Last-edited clip ref (module-level so it survives this page's unmount
+// while the Editor is mounted; cleared after the scroll restore runs) ───
+
+const lastEditedClipIdRef: { current: string | null } = { current: null }
 
 // ─── Undo toast state ─────────────────────────────────────────────
 
@@ -150,6 +154,7 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
 
   return (
     <div
+      data-clip-id={clip.id}
       className={`relative bg-surface-800 border rounded-xl overflow-hidden flex flex-col transition-colors ${
         selectMode && selected
           ? 'border-violet-500 ring-1 ring-violet-500/30'
@@ -333,18 +338,25 @@ export default function Clips() {
     loadSchedules()
   }, [fetchClips, fetchHighlights, loadSchedules])
 
-  // ── Scroll position restore ──
+  // ── Scroll-to-last-edited-clip on return from Editor ──
+  // Runs whenever clip count changes while a pending clip ID is set, so it
+  // fires as soon as the list has actually rendered the card we care about.
   useEffect(() => {
-    const savedY = sessionStorage.getItem(STORAGE_KEY_SCROLL)
-    if (savedY) {
-      // Small delay so DOM has rendered
-      const t = setTimeout(() => {
-        window.scrollTo(0, parseInt(savedY, 10))
-        sessionStorage.removeItem(STORAGE_KEY_SCROLL)
-      }, 100)
-      return () => clearTimeout(t)
-    }
-  }, [])
+    const clipId = lastEditedClipIdRef.current
+    if (!clipId) return
+    if (clips.length === 0) return
+    const raf = requestAnimationFrame(() => {
+      const el = document.querySelector<HTMLElement>(`[data-clip-id="${clipId}"]`)
+      if (el) {
+        el.scrollIntoView({ block: 'center', behavior: 'instant' as ScrollBehavior })
+        // Brief highlight flash so the user can spot where they were
+        el.classList.add('ring-2', 'ring-violet-500/60')
+        setTimeout(() => el.classList.remove('ring-2', 'ring-violet-500/60'), 900)
+        lastEditedClipIdRef.current = null
+      }
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [clips.length])
 
   // ── Track scroll for floating button ──
   useEffect(() => {
@@ -598,7 +610,7 @@ export default function Clips() {
   // ── Navigation with scroll save ──
 
   const navigateToEditor = (clipId: string) => {
-    sessionStorage.setItem(STORAGE_KEY_SCROLL, String(window.scrollY))
+    lastEditedClipIdRef.current = clipId
     navigate(`/editor/${clipId}`)
   }
 

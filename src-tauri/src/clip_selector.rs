@@ -117,14 +117,14 @@ impl CurationConfig {
         let (max_clips, sensitivity_mult) = match sensitivity {
             "low"  => ((base_max as f64 * 0.6).round() as usize, 0.6_f64),
             "high" => ((base_max as f64 * 1.4).round() as usize, 1.4_f64),
-            _      => (base_max, 1.0_f64),
+            _      => ((base_max as f64 * 0.8).round() as usize, 1.0_f64),
         };
         let max_clips = max_clips.clamp(4, 40);
 
         // ── Threshold scaling ──
         // Longer VODs → slightly lower bar so good clips aren't thrown away.
         // Sensitivity also shifts thresholds.
-        let duration_factor = 1.0 - (duration_hrs * 0.05).min(0.20); // 0.80–1.0
+        let duration_factor = 1.0 - (duration_hrs * 0.03).min(0.12); // 0.88–1.0
         let sensitivity_threshold = match sensitivity {
             "low"  => 1.15,  // raise the bar
             "high" => 0.85,  // lower the bar
@@ -132,9 +132,9 @@ impl CurationConfig {
         };
         let threshold_scale = duration_factor * sensitivity_threshold;
 
-        let min_total_score = (0.35 * threshold_scale).clamp(0.20, 0.45);
-        let min_hook        = (0.25 * threshold_scale).clamp(0.15, 0.35);
-        let min_emotion     = (0.20 * threshold_scale).clamp(0.10, 0.30);
+        let min_total_score = (0.45 * threshold_scale).clamp(0.30, 0.55);
+        let min_hook        = (0.32 * threshold_scale).clamp(0.22, 0.40);
+        let min_emotion     = (0.28 * threshold_scale).clamp(0.18, 0.35);
 
         // ── Cooldown scaling ──
         // Shorter cooldown for longer VODs (more content spread out).
