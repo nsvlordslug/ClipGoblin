@@ -53,6 +53,7 @@ use commands::captions::{generate_post_captions, generate_ai_title, test_ai_conn
 use commands::clip::{update_clip_settings, get_clip_detail, save_clip_to_disk};
 use commands::export::{export_clip, set_clip_thumbnail, generate_clip_captions};
 use commands::model::{check_model_status, download_model, delete_model};
+use commands::binaries::{check_binary_status, download_binaries};
 use commands::scheduled::{
     schedule_upload, list_scheduled_uploads, get_scheduled_uploads_for_clip,
     cancel_scheduled_upload, reschedule_upload, start_upload_scheduler,
@@ -194,6 +195,8 @@ pub fn run() {
             check_model_status,
             download_model,
             delete_model,
+            check_binary_status,
+            download_binaries,
         ])
         .setup(|app| {
             // Wire job queue events into Tauri's frontend event system.
