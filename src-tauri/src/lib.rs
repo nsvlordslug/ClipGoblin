@@ -1,3 +1,4 @@
+mod bin_manager;
 mod ai_provider;
 mod auth_proxy;
 mod crypto;
