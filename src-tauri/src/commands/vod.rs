@@ -35,106 +35,14 @@ struct AudioProfile {
 
 // â”€â”€ Tool finders â”€â”€
 
-/// Find yt-dlp executable by checking common install locations and PATH.
+/// Find yt-dlp executable. Delegates to bin_manager (bundled → PATH).
 fn find_ytdlp() -> Result<std::path::PathBuf, AppError> {
-    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        for ver in &["Python312", "Python313", "Python311", "Python310"] {
-            candidates.push(
-                std::path::PathBuf::from(&local)
-                    .join("Programs")
-                    .join("Python")
-                    .join(ver)
-                    .join("Scripts")
-                    .join("yt-dlp.exe"),
-            );
-        }
-    }
-
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        for ver in &["Python312", "Python313", "Python311", "Python310"] {
-            candidates.push(
-                std::path::PathBuf::from(&appdata)
-                    .join("Python")
-                    .join(ver)
-                    .join("Scripts")
-                    .join("yt-dlp.exe"),
-            );
-        }
-    }
-
-    if let Ok(userprofile) = std::env::var("USERPROFILE") {
-        candidates.push(std::path::PathBuf::from(&userprofile).join(".local").join("bin").join("yt-dlp.exe"));
-    }
-
-    for path in &candidates {
-        if path.exists() {
-            return Ok(path.clone());
-        }
-    }
-
-    // Last resort: check PATH
-    let mut yt_check = std::process::Command::new("yt-dlp");
-    yt_check.arg("--version");
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        yt_check.creation_flags(0x08000000);
-    }
-    if let Ok(output) = yt_check.output() {
-        if output.status.success() {
-            return Ok(std::path::PathBuf::from("yt-dlp"));
-        }
-    }
-
-    Err(AppError::Download(format!(
-        "yt-dlp not found. Install it with: pip install yt-dlp\nSearched: {}",
-        candidates.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>().join(", ")
-    )))
+    crate::bin_manager::ytdlp_path()
 }
 
-/// Find ffmpeg executable by checking common install locations and PATH.
+/// Find ffmpeg executable. Delegates to bin_manager (bundled → PATH).
 pub(crate) fn find_ffmpeg() -> Result<std::path::PathBuf, AppError> {
-    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-
-    // winget installs to a tools directory
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        candidates.push(std::path::PathBuf::from(&local).join("Microsoft").join("WinGet").join("Links").join("ffmpeg.exe"));
-    }
-
-    // Common install locations
-    candidates.push(std::path::PathBuf::from("C:\\ffmpeg\\bin\\ffmpeg.exe"));
-    candidates.push(std::path::PathBuf::from("C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe"));
-
-    // App data directory (bundled)
-    if let Some(data) = dirs::data_dir() {
-        candidates.push(data.join("clipviral").join("ffmpeg").join("ffmpeg.exe"));
-    }
-
-    for path in &candidates {
-        if path.exists() {
-            return Ok(path.clone());
-        }
-    }
-
-    // Check PATH
-    let mut cmd = std::process::Command::new("ffmpeg");
-    cmd.arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
-    }
-    if let Ok(status) = cmd.status() {
-        if status.success() {
-            return Ok(std::path::PathBuf::from("ffmpeg"));
-        }
-    }
-
-    Err(AppError::Ffmpeg("Not found. Please install ffmpeg (winget install Gyan.FFmpeg).".into()))
+    crate::bin_manager::ffmpeg_path()
 }
 
 // â”€â”€ Download helpers â”€â”€

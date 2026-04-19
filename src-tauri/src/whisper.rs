@@ -91,56 +91,9 @@ pub fn is_model_downloaded(model: WhisperModel) -> bool {
 
 // ── FFmpeg helper ──
 
-/// Locate ffmpeg: first check next to the running executable (bundled),
-/// then fall back to well-known locations and PATH.
+/// Locate ffmpeg. Delegates to bin_manager (bundled → PATH).
 pub fn find_ffmpeg() -> Result<PathBuf, String> {
-    // 1. Bundled: next to the executable
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let bundled = dir.join("ffmpeg.exe");
-            if bundled.exists() {
-                return Ok(bundled);
-            }
-        }
-    }
-
-    // 2. Common install locations (Windows)
-    #[cfg(target_os = "windows")]
-    {
-        let candidates = [
-            "C:\\ffmpeg\\bin\\ffmpeg.exe",
-            "C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe",
-        ];
-        for c in candidates {
-            let p = PathBuf::from(c);
-            if p.exists() {
-                return Ok(p);
-            }
-        }
-        // AppData bundled location
-        if let Some(data) = dirs::data_dir() {
-            let p = data.join("clipviral").join("ffmpeg").join("ffmpeg.exe");
-            if p.exists() {
-                return Ok(p);
-            }
-        }
-    }
-
-    // 3. PATH lookup
-    let mut ver_cmd = Command::new("ffmpeg");
-    ver_cmd.arg("-version");
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        ver_cmd.creation_flags(0x08000000);
-    }
-    if let Ok(output) = ver_cmd.output() {
-        if output.status.success() {
-            return Ok(PathBuf::from("ffmpeg"));
-        }
-    }
-
-    Err("ffmpeg not found. Please install ffmpeg.".into())
+    crate::bin_manager::ffmpeg_path().map_err(|e| e.to_string())
 }
 
 // ── Transcription ──
