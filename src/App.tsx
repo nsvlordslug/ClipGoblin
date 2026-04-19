@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import Tooltip from './components/Tooltip'
 import FirstRunSetup from './components/FirstRunSetup'
+import BinariesSetup from './components/BinariesSetup'
 import logoImg from './assets/logo.png'
 import { version } from '../package.json'
 import Dashboard from './pages/Dashboard'
@@ -97,6 +98,7 @@ export default function App() {
   const toggleTheme = () => updateUi({ theme: theme === 'dark' ? 'light' : 'dark' })
 
   return (
+    <BinariesSetup>
     <FirstRunSetup>
     <div className="flex h-screen overflow-hidden">
       {/* Sidebar */}
@@ -177,5 +179,6 @@ export default function App() {
       </main>
     </div>
     </FirstRunSetup>
+    </BinariesSetup>
   )
 }
