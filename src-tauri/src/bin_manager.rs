@@ -272,3 +272,47 @@ fn extract_ffmpeg_bins(zip_path: &std::path::Path, dir: &std::path::Path) -> Res
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Real network + filesystem test. Downloads ~150 MB to
+    /// `%APPDATA%\clipviral\bin\`. Run explicitly:
+    ///   cargo test --lib bin_manager::tests::download_real -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn download_real() {
+        let dir = bin_dir().expect("bin_dir");
+        let yt = dir.join("yt-dlp.exe");
+        let ff = dir.join("ffmpeg.exe");
+        let fp = dir.join("ffprobe.exe");
+        let _ = std::fs::remove_file(&yt);
+        let _ = std::fs::remove_file(&ff);
+        let _ = std::fs::remove_file(&fp);
+
+        let cb: ProgressCb = Box::new(|d, t| {
+            if t > 0 && d % (5 * 1024 * 1024) < 64 * 1024 {
+                eprintln!("  progress: {} / {} MB ({}%)", d / 1_000_000, t / 1_000_000, (d * 100) / t);
+            }
+        });
+
+        eprintln!("-- downloading yt-dlp --");
+        download_ytdlp(&cb).await.expect("yt-dlp download failed");
+        assert!(yt.exists(), "yt-dlp.exe missing after download");
+        let yt_size = std::fs::metadata(&yt).unwrap().len();
+        eprintln!("  yt-dlp.exe {} MB", yt_size / 1_000_000);
+        assert!(yt_size > 5_000_000, "yt-dlp.exe suspiciously small: {yt_size}");
+
+        eprintln!("-- downloading ffmpeg --");
+        download_ffmpeg(&cb).await.expect("ffmpeg download failed");
+        assert!(ff.exists(), "ffmpeg.exe missing after extract");
+        assert!(fp.exists(), "ffprobe.exe missing after extract");
+        let ff_size = std::fs::metadata(&ff).unwrap().len();
+        let fp_size = std::fs::metadata(&fp).unwrap().len();
+        eprintln!("  ffmpeg.exe {} MB", ff_size / 1_000_000);
+        eprintln!("  ffprobe.exe {} MB", fp_size / 1_000_000);
+        assert!(ff_size > 10_000_000);
+        assert!(fp_size > 10_000_000);
+    }
+}

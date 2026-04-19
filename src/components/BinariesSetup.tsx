@@ -21,7 +21,7 @@ interface ProgressEvent {
   phase: 'downloading' | 'extracting' | 'done'
 }
 
-const FFMPEG_APPROX_MB = 130
+const FFMPEG_APPROX_MB = 220
 const YTDLP_APPROX_MB = 20
 
 export default function BinariesSetup({ children }: { children: ReactNode }) {
