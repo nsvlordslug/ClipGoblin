@@ -49,4 +49,4 @@ jobs:
           releaseDraft: true
           prerelease: false
           includeUpdaterJson: true
-          args: --no-default-features --features "asset-protocol,standalone"
+          args: -- --no-default-features --features asset-protocol,standalone
