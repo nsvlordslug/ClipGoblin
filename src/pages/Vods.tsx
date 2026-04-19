@@ -146,10 +146,12 @@ export default function Vods() {
       // Transcription alone can take 10-20+ min for long VODs, so we use a generous timeout.
       let lastProgress = -1
       let lastActivityTime = Date.now()
-      // 5 minutes with zero progress change = likely stuck.
+      // 10 minutes with zero progress change = likely stuck.
       // The backend sends heartbeats that update progress during transcription,
       // so even slow transcription will show incremental progress updates.
-      const STALE_TIMEOUT_MS = 5 * 60 * 1000
+      // Audio extraction on 4-hour VODs can run ~3 minutes without emitting
+      // progress, so a 10-minute floor prevents false stall alerts.
+      const STALE_TIMEOUT_MS = 10 * 60 * 1000
 
       const poll = setInterval(async () => {
         try {

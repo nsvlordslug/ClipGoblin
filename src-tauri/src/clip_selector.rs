@@ -132,7 +132,7 @@ impl CurationConfig {
         };
         let threshold_scale = duration_factor * sensitivity_threshold;
 
-        let min_total_score = (0.45 * threshold_scale).clamp(0.30, 0.55);
+        let min_total_score = (0.50 * threshold_scale).clamp(0.50, 0.55);
         let min_hook        = (0.32 * threshold_scale).clamp(0.22, 0.40);
         let min_emotion     = (0.28 * threshold_scale).clamp(0.18, 0.35);
 
