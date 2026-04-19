@@ -41,9 +41,6 @@
                 },
     "bundle":  {
                    "active":  true, "createUpdaterArtifacts": true,
-                   "externalBin":  [
-                                       "binaries/ffmpeg"
-                                   ],
                    "targets":  [
                                    "msi",
                                    "nsis"

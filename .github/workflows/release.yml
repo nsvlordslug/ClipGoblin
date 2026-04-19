@@ -32,14 +32,6 @@ jobs:
           choco install llvm cmake --yes
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
 
-      - name: Download FFmpeg
-        run: |
-          mkdir -p src-tauri/binaries
-          curl -L -o ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
-          tar -xf ffmpeg.zip --strip-components=2 */bin/ffmpeg.exe
-          mv ffmpeg.exe src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
-          rm ffmpeg.zip
-
       - name: Install frontend dependencies
         run: npm ci
 
