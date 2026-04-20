@@ -161,7 +161,7 @@ export default function ImportVodDialog({ open, onClose, onImported }: Props) {
                 Close
               </button>
               <a
-                href={success.vod_url}
+                href={`https://www.twitch.tv/videos/${success.twitch_video_id}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="v4-btn"
