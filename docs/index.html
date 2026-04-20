@@ -226,6 +226,84 @@
 
     .btn:hover { transform: translateY(-1px); text-decoration: none; box-shadow: 0 10px 32px -6px rgba(244, 114, 182, 0.55); }
 
+    /* Beta disclaimer */
+    .beta-disclaimer {
+      background: rgba(244, 114, 182, 0.06);
+      border: 1px solid rgba(244, 114, 182, 0.28);
+      border-radius: 12px;
+      overflow: hidden;
+      transition: border-color 0.2s;
+    }
+    .beta-disclaimer[open] { border-color: rgba(244, 114, 182, 0.55); }
+    .beta-disclaimer summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 14px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      user-select: none;
+    }
+    .beta-disclaimer summary::-webkit-details-marker { display: none; }
+    .beta-disclaimer summary::after {
+      content: "▼";
+      color: var(--pink);
+      font-size: 10px;
+      transition: transform 0.2s;
+    }
+    .beta-disclaimer[open] summary::after { transform: rotate(180deg); }
+    .beta-disclaimer summary:hover .disclaimer-label { color: #fff; }
+    .disclaimer-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: #f9a8d4;
+      transition: color 0.15s;
+    }
+    .disclaimer-hint {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-left: auto;
+      margin-right: 6px;
+    }
+    .disclaimer-body {
+      padding: 4px 20px 20px;
+      font-size: 13px;
+      color: #c9c1db;
+      line-height: 1.7;
+      border-top: 1px solid rgba(244, 114, 182, 0.18);
+    }
+    .disclaimer-body h4 {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      color: #f9a8d4;
+      margin: 18px 0 8px;
+    }
+    .disclaimer-body h4:first-child { margin-top: 14px; }
+    .disclaimer-body ul {
+      margin: 0;
+      padding-left: 20px;
+    }
+    .disclaimer-body li { margin-bottom: 6px; }
+    .disclaimer-body li strong { color: #e8e3f5; }
+    .disclaimer-body code {
+      background: rgba(255, 255, 255, 0.06);
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 12px;
+      color: #c4b5fd;
+    }
+    .disclaimer-body a { color: var(--violet); }
+    .disclaimer-body .fine-print {
+      margin-top: 18px;
+      font-size: 11px;
+      color: var(--text-muted);
+      border-top: 1px dashed rgba(244, 114, 182, 0.18);
+      padding-top: 12px;
+    }
+
     /* Footer */
     footer {
       margin-top: auto;
@@ -359,6 +437,51 @@
         <li>Something broken? Hit the in-app <strong>Report a Bug</strong> button &mdash; it auto-attaches logs and system info to a GitHub issue.</li>
       </ul>
     </div>
+  </section>
+
+  <section class="cta" style="padding-top: 0; margin: 20px auto 64px; max-width: 720px; width: 100%; align-self: center;">
+    <details class="beta-disclaimer">
+      <summary>
+        <span class="disclaimer-label">Beta program disclaimer &amp; NDA</span>
+        <span class="disclaimer-hint">please read before installing</span>
+      </summary>
+      <div class="disclaimer-body">
+
+        <h4>Software status</h4>
+        <ul>
+          <li><strong>Pre-release beta.</strong> Things will break. Features may change or be removed between versions.</li>
+          <li><strong>Unsigned binary.</strong> Windows SmartScreen will flag it. Click <em>More info &rarr; Run anyway</em>. Code signing arrives with Steam distribution.</li>
+          <li><strong>Provided &ldquo;as-is&rdquo;</strong> with no warranty on uptime, stability, or data safety.</li>
+        </ul>
+
+        <h4>Your data &amp; accounts</h4>
+        <ul>
+          <li><strong>Back up your work.</strong> Exports live at <code>%APPDATA%/clipviral/exports/</code> &mdash; copy important files somewhere else before major updates.</li>
+          <li><strong>OAuth sessions</strong> (Twitch / YouTube / TikTok) may be invalidated during development. If an upload fails, disconnect and reconnect in Settings.</li>
+          <li>See the <a href="privacy.html">Privacy Policy</a> for data handling details.</li>
+        </ul>
+
+        <h4>Bug reporting</h4>
+        <ul>
+          <li>Use the in-app <strong>Report a Bug</strong> button &mdash; it auto-attaches logs and system info to a GitHub issue.</li>
+        </ul>
+
+        <h4>Confidentiality (NDA)</h4>
+        <p>As a beta tester, you agree to keep the following confidential until public launch or written release from the developer:</p>
+        <ul>
+          <li><strong>Do not redistribute.</strong> Do not share the installer, download link, or tester credentials with non-testers. New testers join through official channels only.</li>
+          <li><strong>Do not leak unreleased features.</strong> Screenshots, recordings, or discussion of in-development UI / features / build notes stay within the tester community.
+            <br /><em>Exception:</em> clips you <strong>create</strong> with ClipGoblin are yours to post publicly &mdash; that is the entire point of the app.</li>
+          <li><strong>Keep bug discussion in designated channels</strong> &mdash; the in-app reporter or the official tester Discord. Not public forums.</li>
+          <li><strong>No benchmark comparisons or reverse-engineering writeups</strong> without written permission. Marketing claims are managed centrally.</li>
+          <li><strong>Installer license &amp; update credentials</strong> are for your personal use as a tester only.</li>
+        </ul>
+
+        <p class="fine-print">
+          By downloading and installing ClipGoblin while it is in pre-release beta, you acknowledge you have read and agree to the terms above, the <a href="terms.html">Terms of Service</a>, and the <a href="privacy.html">Privacy Policy</a>.
+        </p>
+      </div>
+    </details>
   </section>
 
   <footer>
