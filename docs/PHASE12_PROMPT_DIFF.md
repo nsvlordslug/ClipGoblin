@@ -510,3 +510,414 @@ All 11 open decisions from the first draft resolved 2026-04-20. Recorded here fo
 - Static analysis (Rust unavailable in sandbox — Slug runs `cd src-tauri && cargo check`)
 - Unit tests in `ranker.rs` (can run via `cargo test`)
 - Regression: existing `build_hashtags` callers still produce same output for the no-platform / no-niche case.
+
+**Wave 1 status:** landed in commit `ae0dc1a`. 70/70 tests green.
+
+---
+
+## 11. Wave 2 — concrete Rust diff for review
+
+**Status:** design reviewed + approved. This section is the code-level plan Slug approves **before** any Rust edit against `post_captions.rs`.
+
+**Scope:**
+1. Add `TitleCandidate` + `TitlePattern` types
+2. Add `generate_llm_titles()` (new function — 3-pattern structured prompt, JSON 5-candidate output, ranker-scored)
+3. Add `extract_money_quote_llm()` (BYOK — separate tiny API call)
+4. Add `extract_money_quote_free()` (pure heuristic — no API)
+5. Add non-async unit tests (JSON parse, pattern regex, Free heuristic)
+
+**Out of scope for Wave 2** (explicit — keeps review tight):
+- Modifying the existing `generate_llm_title()` body or its prompt. It stays as-is; the new function lives alongside. Caller migration happens in a follow-up once the new function is proven.
+- Any caller changes in `commands/captions.rs`. Zero touch.
+- Wave 3 items (caption rewrite, Free-path emotion × context matrix).
+
+### 11a. New types (append to `post_captions.rs` near the LLM section)
+
+```rust
+// ═══════════════════════════════════════════════════════════════════
+//  Title candidate types (Phase 12 Wave 2)
+// ═══════════════════════════════════════════════════════════════════
+
+/// One of three structural patterns a title candidate must match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TitlePattern {
+    /// `{stake} → {outcome}` — e.g. "down 0-12 → 1v5 ACE"
+    StakeArrowOutcome,
+    /// `{Emotion}: {specific detail}` — e.g. "Speechless: one-tap through smoke"
+    EmotionColonDetail,
+    /// `"{money quote}" {twist}` — e.g. `"I can't miss" — misses next shot`
+    QuoteTwist,
+}
+
+/// One title candidate with its structural pattern and post-hoc score.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TitleCandidate {
+    pub text: String,
+    pub pattern: TitlePattern,
+    /// Score from `detection::ranker::score_title`. 0.0 = banlist hit (reject).
+    #[serde(default)]
+    pub score: f32,
+}
+```
+
+### 11b. New function: `generate_llm_titles()`
+
+Signature (note the new `money_quote` and `streamer_history` params):
+
+```rust
+pub async fn generate_llm_titles(
+    api_key: &str,
+    model: &str,
+    event_summary: &str,
+    money_quote: Option<&str>,
+    full_transcript: Option<&str>,
+    tags: &[String],
+    game_name: Option<&str>,
+    streamer_history: Option<&[String]>,
+) -> Result<Vec<TitleCandidate>, AppError>;
+```
+
+Body outline (pseudocode — full prompt text in section 1d of this doc):
+
+```rust
+pub async fn generate_llm_titles(...) -> Result<Vec<TitleCandidate>, AppError> {
+    let transcript_section = /* identical to existing generate_llm_title logic */;
+    let money_quote_line = money_quote
+        .map(|q| format!("MONEY QUOTE (if any): \"{}\"\n", q))
+        .unwrap_or_default();
+    let tag_line = /* identical */;
+    let game_line = /* identical */;
+    let history_line = match streamer_history {
+        Some(h) if !h.is_empty() => format!("STREAMER RECENT TITLES:\n{}\n", h.join("\n")),
+        _ => "STREAMER RECENT TITLES: none yet\n".into(),
+    };
+
+    let prompt = format!(
+        r#"Generate 5 SHORT title candidates for a gaming clip. Return JSON only.
+
+{game}WHAT HAPPENED: {event}
+{money_quote}{transcript}{tags}
+{history}
+STRUCTURE — every candidate MUST follow exactly one of these three patterns:
+... (full prompt text from section 1d)
+
+OUTPUT — JSON only, no prose:
+{{"candidates": [{{"pattern": "...", "text": "..."}}, ...5 total]}}"#,
+        game = game_line,
+        event = event_summary,
+        money_quote = money_quote_line,
+        transcript = transcript_section,
+        tags = tag_line,
+        history = history_line,
+    );
+
+    // Same request infrastructure as existing generate_llm_title
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "max_tokens": 400,  // 5 × ~40 chars + JSON overhead
+        "system": LLM_SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": prompt}],
+    });
+
+    let resp = client.post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&body).send().await
+        .map_err(|e| AppError::Api(format!("Claude titles request failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AppError::Api(format!("Claude API {}: {}", status, &body[..body.len().min(200)])));
+    }
+
+    let resp_json: serde_json::Value = resp.json().await
+        .map_err(|e| AppError::Api(format!("Failed to parse Claude response: {e}")))?;
+
+    let text = resp_json["content"][0]["text"].as_str()
+        .ok_or_else(|| AppError::Api("No text in Claude titles response".into()))?;
+
+    // Parse the JSON output
+    let parsed: TitlesResponse = serde_json::from_str(text)
+        .or_else(|_| extract_json_from_markdown(text).and_then(|s| serde_json::from_str(&s)))
+        .map_err(|e| AppError::Api(format!("Malformed titles JSON: {e}")))?;
+
+    // Score each candidate via the ranker
+    use crate::detection::{Platform, ranker};
+    let ctx = ranker::RankerContext {
+        streamer_history: streamer_history.unwrap_or(&[]),
+        banned_words: ranker::DEFAULT_BANNED_WORDS,
+        target_platform: Platform::TikTok,  // default; caller can re-score for other platforms
+        has_money_quote: money_quote.is_some(),
+    };
+
+    let mut scored: Vec<TitleCandidate> = parsed.candidates.into_iter()
+        .map(|c| TitleCandidate {
+            score: ranker::score_title(&c.text, &ctx),
+            text: c.text,
+            pattern: c.pattern,
+        })
+        .collect();
+
+    // Sort descending by score — caller picks candidates[0]
+    scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+    if scored.is_empty() {
+        return Err(AppError::Api("Claude returned zero title candidates".into()));
+    }
+
+    Ok(scored)
+}
+
+#[derive(serde::Deserialize)]
+struct TitlesResponse {
+    candidates: Vec<TitleCandidate>,
+}
+
+/// If the model wraps the JSON in a markdown code fence, strip it.
+fn extract_json_from_markdown(text: &str) -> Result<String, AppError> {
+    let trimmed = text.trim();
+    if let Some(stripped) = trimmed.strip_prefix("```json").and_then(|s| s.strip_suffix("```")) {
+        Ok(stripped.trim().to_string())
+    } else if let Some(stripped) = trimmed.strip_prefix("```").and_then(|s| s.strip_suffix("```")) {
+        Ok(stripped.trim().to_string())
+    } else {
+        // Try to find the first '{' and last '}' and slice
+        let start = trimmed.find('{').ok_or_else(|| AppError::Api("No JSON in response".into()))?;
+        let end = trimmed.rfind('}').ok_or_else(|| AppError::Api("No JSON end in response".into()))?;
+        Ok(trimmed[start..=end].to_string())
+    }
+}
+```
+
+**Design notes:**
+- `generate_llm_titles` does NOT client-side enforce the 40-char limit — that's the ranker's job (length scoring). Over-40-char candidates get score penalties but aren't rejected. Caller decides.
+- Scoring happens inside the function so the returned `Vec<TitleCandidate>` is pre-sorted.
+- Platform defaults to `TikTok` for scoring; for multi-platform use the caller can re-score via `ranker::score_title` with a different platform.
+
+### 11c. Keeping old `generate_llm_title()` alive (no changes)
+
+The existing `pub async fn generate_llm_title(...) -> Result<String, AppError>` at [post_captions.rs:1360](../src-tauri/src/post_captions.rs) is **not modified** in Wave 2. It stays byte-identical. This keeps `commands/captions.rs:446` working with zero changes and gives us a safe rollback path.
+
+Caller migration happens as a follow-up after Wave 2 is proven in integration: either a tiny "Wave 2.5" PR or bundled with Wave 3. That migration will:
+1. Change `commands/captions.rs` to call `generate_llm_titles(..., money_quote=None, streamer_history=None)` and take `.text` of the first candidate.
+2. Mark old `generate_llm_title()` `#[deprecated]` then delete.
+
+### 11d. Money-quote extraction
+
+**BYOK path — new function in `post_captions.rs`:**
+
+```rust
+pub async fn extract_money_quote_llm(
+    api_key: &str,
+    model: &str,
+    event_summary: &str,
+    full_transcript: &str,
+    tags: &[String],
+) -> Result<Option<String>, AppError> {
+    let tag_line = if tags.is_empty() {
+        String::new()
+    } else {
+        format!("SIGNALS: {}\n", tags.join(", "))
+    };
+
+    let prompt = format!(
+        r#"Extract the single best "money quote" from this gaming clip transcript.
+A money quote is a 2–6 word phrase worth prominently displaying on the clip
+(title, caption, or video overlay).
+
+WHAT HAPPENED: {event}
+TRANSCRIPT: "{transcript}"
+{tags}
+CRITERIA:
+- Must be 2 to 6 words total (strict)
+- Must be something the streamer ACTUALLY said (no fabrication)
+- Should be self-contained (makes sense out of context)
+- Priority: memorable phrasing > on-topic > emotional reaction
+- If nothing in transcript qualifies, return null
+
+OUTPUT — JSON only:
+{{"quote": "...", "confidence": 0.0-1.0}}
+or
+{{"quote": null, "confidence": 0.0}}"#,
+        event = event_summary,
+        transcript = full_transcript.chars().take(800).collect::<String>(),
+        tags = tag_line,
+    );
+
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "max_tokens": 60,
+        "system": LLM_SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": prompt}],
+    });
+
+    let resp = client.post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&body).send().await
+        .map_err(|e| AppError::Api(format!("Money-quote request failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        // Non-fatal — caller treats as None
+        return Ok(None);
+    }
+
+    let resp_json: serde_json::Value = resp.json().await
+        .map_err(|e| AppError::Api(format!("Malformed money-quote response: {e}")))?;
+
+    let text = resp_json["content"][0]["text"].as_str()
+        .ok_or_else(|| AppError::Api("No text in money-quote response".into()))?;
+
+    #[derive(serde::Deserialize)]
+    struct MoneyQuoteResponse {
+        quote: Option<String>,
+        #[serde(default)]
+        confidence: f32,
+    }
+
+    let parsed: MoneyQuoteResponse = serde_json::from_str(text.trim())
+        .or_else(|_| extract_json_from_markdown(text).and_then(|s| serde_json::from_str(&s)))
+        .map_err(|e| AppError::Api(format!("Malformed money-quote JSON: {e}")))?;
+
+    // Confidence threshold: return None below 0.6
+    if parsed.confidence < 0.6 {
+        return Ok(None);
+    }
+
+    Ok(parsed.quote.filter(|q| {
+        let wc = q.split_whitespace().count();
+        wc >= 2 && wc <= 6  // client-side 2-6 word enforcement
+    }))
+}
+```
+
+**Free path — pure function, no API, unit-testable:**
+
+```rust
+pub fn extract_money_quote_free(
+    transcript_segments: &[(f64, f64, String)],  // (start_sec, end_sec, text)
+    rms_samples: Option<&[(f64, f32)]>,           // (timestamp_sec, rms)
+) -> Option<String> {
+    const EMOTIONAL_KEYWORDS: &[&str] = &[
+        "insane", "crazy", "clutch", "wow", "nope", "yes", "no way",
+        "what", "damn", "lord", "god", "jesus", "holy", "dude", "bro",
+        "kidding", "serious", "actually", "literally", "honestly",
+        // Include the emotional words from the ranker list too
+    ];
+
+    let mut best: Option<(f32, String)> = None;
+
+    for (start, end, text) in transcript_segments {
+        // Slide a 2-6 word window over the segment
+        let words: Vec<&str> = text.split_whitespace().collect();
+        for window_size in 2..=6 {
+            for start_idx in 0..words.len().saturating_sub(window_size - 1) {
+                let phrase_words = &words[start_idx..start_idx + window_size];
+                let phrase = phrase_words.join(" ");
+
+                let keyword_hit = phrase_words.iter().any(|w| {
+                    let clean = w.trim_matches(|c: char| !c.is_alphabetic()).to_lowercase();
+                    EMOTIONAL_KEYWORDS.iter().any(|k| clean == *k)
+                });
+
+                let rms_during = rms_samples
+                    .map(|samples| samples.iter()
+                        .filter(|(t, _)| t >= start && t <= end)
+                        .map(|(_, r)| *r)
+                        .fold(0.0_f32, f32::max))
+                    .unwrap_or(0.5);
+
+                let brevity_bonus = (6 - window_size) as f32 / 4.0 * 0.2;
+
+                let score = (if keyword_hit { 0.4 } else { 0.0 })
+                    + (rms_during * 0.4)
+                    + brevity_bonus;
+
+                if score > 0.5 && best.as_ref().map_or(true, |(s, _)| score > *s) {
+                    best = Some((score, phrase));
+                }
+            }
+        }
+    }
+
+    best.map(|(_, phrase)| phrase)
+}
+```
+
+### 11e. Tests (non-async, unit-testable)
+
+Add to the existing `#[cfg(test)] mod tests` block:
+
+```rust
+// ── TitleCandidate / TitlePattern ─────────────────────────────
+
+#[test]
+fn title_pattern_serialize_screaming_snake() {
+    let p = TitlePattern::StakeArrowOutcome;
+    let s = serde_json::to_string(&p).unwrap();
+    assert_eq!(s, "\"STAKE_ARROW_OUTCOME\"");
+}
+
+#[test]
+fn title_pattern_deserialize_from_llm_shape() {
+    let json = r#"{"text": "1v5 ACE", "pattern": "STAKE_ARROW_OUTCOME"}"#;
+    let c: TitleCandidate = serde_json::from_str(json).unwrap();
+    assert_eq!(c.text, "1v5 ACE");
+    assert_eq!(c.pattern, TitlePattern::StakeArrowOutcome);
+}
+
+#[test]
+fn extract_json_strips_markdown_fence() {
+    assert_eq!(extract_json_from_markdown("```json\n{\"x\": 1}\n```").unwrap(), "{\"x\": 1}");
+    assert_eq!(extract_json_from_markdown("{\"x\": 1}").unwrap(), "{\"x\": 1}");
+    assert_eq!(
+        extract_json_from_markdown("here is your answer:\n{\"x\": 1}\nhope it helps").unwrap(),
+        "{\"x\": 1}",
+    );
+}
+
+// ── extract_money_quote_free ──────────────────────────────────
+
+#[test]
+fn money_quote_free_picks_emotional_short_phrase() {
+    let segments = vec![
+        (10.0, 12.0, "I have no idea what just happened".to_string()),
+        (12.0, 14.0, "that was actually insane dude".to_string()),
+    ];
+    let rms = vec![(11.0, 0.3), (13.0, 0.9)];
+    let q = extract_money_quote_free(&segments, Some(&rms));
+    assert!(q.is_some());
+    let q = q.unwrap();
+    let wc = q.split_whitespace().count();
+    assert!(wc >= 2 && wc <= 6, "got {} words: {}", wc, q);
+}
+
+#[test]
+fn money_quote_free_returns_none_on_empty() {
+    assert!(extract_money_quote_free(&[], None).is_none());
+}
+
+#[test]
+fn money_quote_free_works_without_rms() {
+    let segments = vec![(0.0, 2.0, "actually insane play".to_string())];
+    // Without RMS, we fall back to 0.5 default. Keyword hit + brevity should still score.
+    let q = extract_money_quote_free(&segments, None);
+    assert!(q.is_some());
+}
+```
+
+### 11f. Open decisions for Slug (Wave 2 only)
+
+- [ ] **JSON robustness:** should `extract_json_from_markdown` also handle the model emitting the JSON with leading commentary? Current pseudocode tries `{`..`}` slice as fallback. Keep or strip?
+- [ ] **Confidence threshold for money-quote:** set at 0.6. Too strict? Too lenient?
+- [ ] **Default platform for title scoring:** `Platform::TikTok`. OK as default, or take it as a parameter so Shorts/Reels users get proper length scoring?
+- [ ] **Free-path emotional keywords:** starter list is ~20 words. Want to source from a bigger corpus (curse words, streamer-specific vocab), or keep minimal for Wave 2 and expand in Wave 3?
+- [ ] **Money-quote `Result<Option<String>>` vs `Option<String>`:** BYOK returns Result (for API errors) + Option (for "no good quote found"). OK to have both semantics?
+
+Once resolved, I'll make the actual Rust edits + add the tests.
