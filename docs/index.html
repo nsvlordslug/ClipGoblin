@@ -3,21 +3,22 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ClipGoblin</title>
-  <meta name="description" content="ClipGoblin analyzes your Twitch VODs, detects highlights, generates AI captions and titles, and uploads directly to YouTube, TikTok, and Instagram.">
+  <title>ClipGoblin &mdash; Twitch VODs to viral shorts, hands-off</title>
+  <meta name="description" content="ClipGoblin detects highlights in your Twitch VODs using chat, audio, and community-clip signals, writes AI captions and titles, and auto-publishes to YouTube and TikTok.">
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
     :root {
-      --bg: #0c0a13;
-      --surface: #16121f;
-      --surface-light: #1e1a2a;
-      --border: #2a2440;
-      --text: #e2dff0;
-      --text-muted: #9992b0;
-      --purple: #863bff;
-      --purple-dim: rgba(134, 59, 255, 0.15);
-      --blue: #47bfff;
+      --bg: #0a0516;
+      --surface: #120a22;
+      --surface-light: #1a1030;
+      --border: #2a1f44;
+      --text: #e8e3f5;
+      --text-muted: #b8b0cc;
+      --violet: #a78bfa;
+      --pink: #f472b6;
+      --violet-dim: rgba(167, 139, 250, 0.15);
+      --accent-grad: linear-gradient(135deg, #a78bfa 0%, #f472b6 100%);
     }
 
     body {
@@ -30,14 +31,14 @@
       flex-direction: column;
     }
 
-    a { color: var(--purple); text-decoration: none; }
+    a { color: var(--violet); text-decoration: none; }
     a:hover { text-decoration: underline; }
 
     /* Hero */
     .hero {
       text-align: center;
       padding: 80px 24px 60px;
-      background: radial-gradient(ellipse at 50% 0%, var(--purple-dim) 0%, transparent 70%);
+      background: radial-gradient(ellipse at 50% 0%, var(--violet-dim) 0%, transparent 70%);
     }
 
     .hero-logo {
@@ -55,7 +56,12 @@
       margin-bottom: 12px;
     }
 
-    .hero h1 span { color: var(--purple); }
+    .hero h1 span {
+      background: var(--accent-grad);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
 
     .hero .tagline {
       font-size: 1.25rem;
@@ -93,7 +99,7 @@
       font-size: 1.5rem;
       margin-bottom: 12px;
       display: block;
-      color: var(--purple);
+      color: var(--violet);
     }
 
     .feature h3 {
@@ -140,15 +146,15 @@
       flex-shrink: 0;
       width: 32px;
       height: 32px;
-      background: var(--purple-dim);
-      border: 1px solid var(--purple);
+      background: var(--violet-dim);
+      border: 1px solid var(--violet);
       border-radius: 8px;
       display: flex;
       align-items: center;
       justify-content: center;
       font-size: 0.85rem;
       font-weight: 700;
-      color: var(--purple);
+      color: var(--violet);
     }
 
     .step-text strong {
@@ -175,16 +181,17 @@
 
     .btn {
       display: inline-block;
-      padding: 12px 28px;
-      background: var(--purple);
+      padding: 13px 32px;
+      background: var(--accent-grad);
       color: #fff;
-      border-radius: 8px;
+      border-radius: 10px;
       font-weight: 600;
       font-size: 0.95rem;
-      transition: opacity 0.15s;
+      transition: transform 0.15s, box-shadow 0.15s;
+      box-shadow: 0 8px 24px -8px rgba(167, 139, 250, 0.55);
     }
 
-    .btn:hover { opacity: 0.85; text-decoration: none; }
+    .btn:hover { transform: translateY(-1px); text-decoration: none; box-shadow: 0 10px 32px -6px rgba(244, 114, 182, 0.55); }
 
     /* Footer */
     footer {
@@ -220,43 +227,45 @@
   <section class="hero">
     <img class="hero-logo" src="logo.png" alt="ClipGoblin logo" />
     <h1>Clip<span>Goblin</span></h1>
-    <p class="tagline">Turn your Twitch streams into viral clips</p>
+    <p class="tagline">Stream &rarr; clip &rarr; scroll-stopping short. Hands-off.</p>
     <p class="desc">
-      ClipGoblin watches your Twitch VODs, automatically detects the best moments,
-      generates AI-powered captions and titles, and uploads directly to YouTube, TikTok, and Instagram.
+      ClipGoblin pulls your Twitch VODs, fuses chat spikes, audio energy, and
+      Twitch community-clip data to find the moments that actually pop, writes
+      AI captions and titles, and ships them to YouTube and TikTok on a schedule
+      you control &mdash; or fully automatically.
     </p>
   </section>
 
   <section class="features">
     <div class="feature">
+      <span class="feature-icon">&#128293;</span>
+      <h3>Multi-Signal Detection</h3>
+      <p>Fuses chat spikes, audio energy, scene changes, and <strong>Twitch community-clip data</strong> to rank the moments real viewers reacted to &mdash; not just loud ones.</p>
+    </div>
+    <div class="feature">
       <span class="feature-icon">&#9889;</span>
-      <h3>Smart Highlight Detection</h3>
-      <p>Analyzes audio spikes, chat activity, and visual changes to find your best moments automatically. No manual scrubbing required.</p>
+      <h3>Auto-Ship Mode</h3>
+      <p>Opt in and ClipGoblin analyzes, exports, and queues uploads for every new VOD automatically. Wake up to a scheduled drop already in the pipeline.</p>
     </div>
     <div class="feature">
       <span class="feature-icon">&#9998;</span>
       <h3>AI Captions &amp; Titles</h3>
-      <p>Generate scroll-stopping captions in multiple tones: hype, punchy, observation, or direct quote. Titles that sound like a real creator wrote them.</p>
+      <p>Ten caption tones and six title angles, powered by Claude, GPT, Gemini, or free pattern-based templates. Bring your own key or don't &mdash; your call.</p>
+    </div>
+    <div class="feature">
+      <span class="feature-icon">&#127910;</span>
+      <h3>YouTube &amp; TikTok Native</h3>
+      <p>Direct publishing to both platforms with titles, hashtags, visibility, and schedule. Batch upload or drip them out across the week.</p>
     </div>
     <div class="feature">
       <span class="feature-icon">&#127916;</span>
-      <h3>Multi-Platform Upload</h3>
-      <p>Connect your YouTube, TikTok, and Instagram accounts. Upload clips directly from the app with one click.</p>
-    </div>
-    <div class="feature">
-      <span class="feature-icon">&#127912;</span>
-      <h3>Subtitle Styles</h3>
-      <p>Speech-to-text subtitles with multiple visual styles. Position them where they look best for vertical or horizontal formats.</p>
-    </div>
-    <div class="feature">
-      <span class="feature-icon">&#9731;</span>
-      <h3>Vertical Crop &amp; Facecam</h3>
-      <p>Auto-crop to 9:16 for Shorts and Reels. Smart facecam detection keeps you in frame.</p>
+      <h3>Full Clip Editor</h3>
+      <p>Trim, vertical crop to 9:16, facecam placement, subtitle styles, thumbnail picker, custom captions, layout templates. All GPU-accelerated when you've got CUDA.</p>
     </div>
     <div class="feature">
       <span class="feature-icon">&#128274;</span>
-      <h3>Your Keys, Your Data</h3>
-      <p>Bring your own API key for AI features. Everything runs locally on your machine. No cloud, no subscriptions, no data collection.</p>
+      <h3>Runs Local, Your Keys</h3>
+      <p>Everything analyses and renders on your machine. No cloud subscription, no usage caps, no data collection. Bring your own AI key, or use the free tier with zero signup.</p>
     </div>
   </section>
 
@@ -266,48 +275,48 @@
       <div class="step">
         <div class="step-num">1</div>
         <div class="step-text">
-          <strong>Paste a VOD link</strong>
-          <span>Drop in a Twitch VOD URL. ClipGoblin downloads it and starts analyzing.</span>
+          <strong>Connect Twitch</strong>
+          <span>One-click OAuth pulls your VOD list. Or paste any public Twitch VOD URL to analyse a stream you don't own.</span>
         </div>
       </div>
       <div class="step">
         <div class="step-num">2</div>
         <div class="step-text">
-          <strong>Review detected highlights</strong>
-          <span>See a ranked list of the best moments with timestamps, intensity scores, and event tags.</span>
+          <strong>Analyse (or let it run nightly)</strong>
+          <span>Chat, audio, scene, and community-clip signals fuse into a ranked highlight list. Each clip gets a viral-score and detected vibe tag.</span>
         </div>
       </div>
       <div class="step">
         <div class="step-num">3</div>
         <div class="step-text">
-          <strong>Edit and polish</strong>
-          <span>Trim timing, add subtitles, pick a caption tone, adjust the crop. Preview everything before export.</span>
+          <strong>Polish in the editor &mdash; or skip it</strong>
+          <span>Trim, crop, add subtitles, pick a caption tone. Or enable Auto-Ship and let defaults handle every step for you.</span>
         </div>
       </div>
       <div class="step">
         <div class="step-num">4</div>
         <div class="step-text">
-          <strong>Export and upload</strong>
-          <span>Render your clip and upload to YouTube, TikTok, or Instagram directly from the app.</span>
+          <strong>Schedule &amp; publish</strong>
+          <span>YouTube and TikTok connected in-app. Upload instantly or drip them out across the week with the built-in scheduler.</span>
         </div>
       </div>
     </div>
   </section>
 
   <section class="cta">
-    <p>ClipGoblin is a desktop app for Windows. Currently in pre-release testing.</p>
+    <p>Windows desktop app. Free while in pre-release. Auto-updates once installed.</p>
     <a href="./download.html" class="btn">Download latest build</a>
-    <a href="https://github.com/nsvlordslug/ClipGoblin" class="btn" style="background: transparent; border: 1px solid var(--border); margin-left: 8px;">View on GitHub</a>
+    <a href="https://github.com/nsvlordslug/ClipGoblin" class="btn" style="background: transparent; border: 1px solid var(--border); margin-left: 8px; box-shadow: none;">View on GitHub</a>
   </section>
 
   <section class="cta" style="padding-top: 0; margin-top: 32px; max-width: 720px; text-align: left;">
     <div style="background: rgba(167,139,250,0.08); border: 1px solid rgba(167,139,250,0.25); border-radius: 12px; padding: 18px 20px;">
-      <div style="font-size: 11px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; color: #a78bfa; margin-bottom: 10px;">🧪 For testers</div>
+      <div style="font-size: 11px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; background: var(--accent-grad); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin-bottom: 10px;">Heads-up for first-run</div>
       <ul style="font-size: 13px; color: #b8b0cc; line-height: 1.7; margin: 0; padding-left: 20px;">
-        <li>Download the latest <code style="color: #c4b5fd;">.msi</code> from the Releases page above.</li>
-        <li>Windows SmartScreen will warn "Unknown publisher" — click <strong>More info → Run anyway</strong>. Not code-signed yet; Steam distribution will handle that later.</li>
-        <li>Connect Twitch on first run. The onboarding checklist on the Dashboard walks you through the rest.</li>
-        <li>Hit the <strong>Report a Bug</strong> button in-app when something breaks — it auto-attaches logs + system info.</li>
+        <li>Windows SmartScreen will warn &ldquo;Unknown publisher&rdquo; on first launch &mdash; click <strong>More info &rarr; Run anyway</strong>. Not code-signed yet; that'll come with Steam distribution later.</li>
+        <li>Connect Twitch on first run. The onboarding checklist on the Dashboard walks you through AI keys and connecting YouTube / TikTok.</li>
+        <li>ffmpeg and yt-dlp auto-download on first launch &mdash; no manual setup needed.</li>
+        <li>Something broken? Hit the in-app <strong>Report a Bug</strong> button &mdash; it auto-attaches logs and system info to a GitHub issue.</li>
       </ul>
     </div>
   </section>
