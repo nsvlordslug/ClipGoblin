@@ -8,6 +8,7 @@ mod clip_labeler;
 mod clip_output;
 mod clip_ranker;
 mod db;
+mod detection;
 mod engine;
 mod integration_test;
 mod clip_selector;

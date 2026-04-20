@@ -10,6 +10,7 @@
 
 use crate::pipeline::CandidateClip;
 use crate::error::AppError;
+use crate::detection::Platform;
 
 // ═══════════════════════════════════════════════════════════════════
 //  Output
@@ -697,12 +698,14 @@ fn gen_direct_quote(ctx: &CaptionCtx) -> String {
 fn gen_internal_thought(ctx: &CaptionCtx) -> String {
     let ev = &ctx.event_summary;
 
-    // If there's a quote, contrast internal vs external state
+    // If there's a quote, contrast internal vs external state.
+    // Keep leading words short — captions_are_short test asserts ≤16 words total,
+    // and a mid-length transcript quote adds 8+ on its own.
     if let Some(ref q) = ctx.quote {
         let opts = [
-            format!("in my head i was calm. out loud: \"{}\"", q),
-            format!("what i wanted to say: nothing. what i said: \"{}\"", q),
-            format!("i told myself i wouldn't react. then: \"{}\"", q),
+            format!("inside: calm. out loud: \"{}\"", q),
+            format!("wanted to say nothing. said: \"{}\"", q),
+            format!("told myself i wouldn't. then: \"{}\"", q),
         ];
         return opts[ctx.seed % opts.len()].clone();
     }
@@ -1034,30 +1037,101 @@ fn primary_event(tags: &[String]) -> Option<&'static str> {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  Hashtags — tone-adapted
+//  Hashtags — tone + platform + streamer niche
 // ═══════════════════════════════════════════════════════════════════
+//
+//  Strategy: 3 evergreen (platform-specific) + 2 niche (game + content).
+//  Per the Phase 12 decision (section 9 of docs/PHASE12_PROMPT_DIFF.md),
+//  hashtags are never LLM-generated — this function is the single source
+//  of truth.
+//
+//  Back-compat: the old signature `build_hashtags(tags, tone)` is preserved
+//  as a thin wrapper that delegates to `build_hashtags_v2` with
+//  `Platform::Generic`, empty niche tags, and no game name. Existing
+//  callers produce the same tag list they did before Wave 1 for that
+//  default case, modulo ordering and the new evergreen set.
 
+/// Backward-compat shim: produce hashtags with no platform/niche context.
+/// Preserved so existing call sites (generate_with_seed, generate_from_parts,
+/// build_hashtags_pub) keep working without modification in Wave 1.
 fn build_hashtags(tags: &[String], tone: Tone) -> Vec<String> {
-    let mut out = vec!["gaming".to_string()];
+    build_hashtags_v2(tags, tone, Platform::Generic, &[], None)
+}
 
-    // Tone-specific tag
-    match tone {
-        GameType::Horror => out.push("horrorgaming".into()),
-        GameType::Cozy => out.push("cozygaming".into()),
-        GameType::Social => out.push("partygame".into()),
-        GameType::FPS => out.push("fps".into()),
-        GameType::Generic => out.push("clips".into()),
+/// Expanded hashtag builder — platform-aware, niche-aware.
+///
+/// Returns up to 5 hashtags:
+/// - **3 evergreen** (from `platform.evergreen_hashtags()`)
+/// - **1 game/tone niche** — game name (snake-cased) if present, else tone tag
+/// - **1 content niche** — clutch / fail / jumpscare / or first of `streamer_niche_tags`
+///
+/// All output is lowercase, strip-non-alphanumeric, deduped, capped at 5.
+pub fn build_hashtags_v2(
+    tags: &[String],
+    tone: Tone,
+    platform: Platform,
+    streamer_niche_tags: &[String],
+    game_name: Option<&str>,
+) -> Vec<String> {
+    let mut out: Vec<String> = platform
+        .evergreen_hashtags()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    // Niche slot 1: game name if present, else tone tag.
+    let tone_tag = match tone {
+        GameType::Horror  => "horrorgaming",
+        GameType::Cozy    => "cozygaming",
+        GameType::Social  => "partygame",
+        GameType::FPS     => "fps",
+        GameType::Generic => "clips",
+    };
+    if let Some(game) = game_name.map(sanitize_hashtag).filter(|g| !g.is_empty()) {
+        out.push(game);
+    } else {
+        out.push(tone_tag.to_string());
     }
 
+    // Niche slot 2: content-specific signal tag or first streamer-niche tag.
     let has = |t: &str| tags.iter().any(|x| x == t);
-    if has("jumpscare") || has("ambush") { out.push("jumpscare".into()); }
-    if has("celebration") || has("hype") { out.push("clutch".into()); }
-    if has("frustration") || has("panic") { out.push("fail".into()); }
+    if has("jumpscare") || has("ambush") {
+        out.push("jumpscare".into());
+    } else if has("celebration") || has("hype") {
+        out.push("clutch".into());
+    } else if has("frustration") || has("panic") {
+        out.push("fail".into());
+    } else if let Some(niche) = streamer_niche_tags.first().map(|s| sanitize_hashtag(s)) {
+        if !niche.is_empty() {
+            out.push(niche);
+        }
+    }
 
-    out.push("fyp".into());
+    // If we have headroom and a streamer-niche tag not yet included, append it.
+    if out.len() < 5 {
+        for niche in streamer_niche_tags.iter().skip(1) {
+            let clean = sanitize_hashtag(niche);
+            if !clean.is_empty() && !out.contains(&clean) {
+                out.push(clean);
+                if out.len() >= 5 {
+                    break;
+                }
+            }
+        }
+    }
+
     out.dedup();
     out.truncate(5);
     out
+}
+
+/// Sanitize a string into a hashtag-safe form: lowercase, alphanumeric only,
+/// no spaces. Empty if the input has no alphanumeric characters.
+fn sanitize_hashtag(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1881,5 +1955,109 @@ mod tests {
         assert_eq!(GameType::Cozy.label(), "cozy / chaotic casual");
         assert_eq!(GameType::Social.label(), "social / party / co-op");
         assert_eq!(GameType::Generic.label(), "general gaming");
+    }
+
+    // ── build_hashtags_v2 (Wave 1) ────────────────────────────────
+
+    #[test]
+    fn v2_backcompat_matches_old_behavior_for_generic_platform() {
+        // Old wrapper should produce evergreen + tone-tag + content-tag shape
+        let tags = vec!["jumpscare".into()];
+        let out = build_hashtags(&tags, GameType::Horror);
+        assert!(out.contains(&"gaming".to_string()));
+        assert!(out.contains(&"horrorgaming".to_string()));
+        assert!(out.contains(&"jumpscare".to_string()));
+        assert!(out.len() <= 5);
+    }
+
+    #[test]
+    fn v2_tiktok_evergreen_matches_platform() {
+        let out = build_hashtags_v2(&[], GameType::Generic, Platform::TikTok, &[], None);
+        // TikTok evergreen: gaming, fyp, gamingtiktok
+        assert!(out.contains(&"gaming".to_string()));
+        assert!(out.contains(&"fyp".to_string()));
+        assert!(out.contains(&"gamingtiktok".to_string()));
+    }
+
+    #[test]
+    fn v2_game_name_takes_niche_slot_one() {
+        let out = build_hashtags_v2(
+            &[],
+            GameType::FPS,
+            Platform::TikTok,
+            &[],
+            Some("Valorant"),
+        );
+        assert!(out.contains(&"valorant".to_string()), "expected valorant in {:?}", out);
+        // Tone tag "fps" should be displaced by the game name
+        assert!(!out.contains(&"fps".to_string()) || out.len() == 5);
+    }
+
+    #[test]
+    fn v2_tone_tag_used_when_no_game_name() {
+        let out = build_hashtags_v2(
+            &[],
+            GameType::Horror,
+            Platform::TikTok,
+            &[],
+            None,
+        );
+        assert!(out.contains(&"horrorgaming".to_string()));
+    }
+
+    #[test]
+    fn v2_streamer_niche_fills_content_slot_when_no_event_tag() {
+        let out = build_hashtags_v2(
+            &[],
+            GameType::FPS,
+            Platform::TikTok,
+            &vec!["radiant".into(), "aimlab".into()],
+            Some("Valorant"),
+        );
+        assert!(out.contains(&"radiant".to_string()));
+    }
+
+    #[test]
+    fn v2_event_tag_wins_over_streamer_niche() {
+        // When a content-specific event tag (jumpscare) is present,
+        // it wins over streamer-niche tags for niche slot 2.
+        let out = build_hashtags_v2(
+            &["jumpscare".into()],
+            GameType::Horror,
+            Platform::TikTok,
+            &vec!["radiant".into()],
+            None,
+        );
+        assert!(out.contains(&"jumpscare".to_string()));
+    }
+
+    #[test]
+    fn v2_always_caps_at_five() {
+        let out = build_hashtags_v2(
+            &["jumpscare".into(), "celebration".into()],
+            GameType::Horror,
+            Platform::TikTok,
+            &vec!["radiant".into(), "aimlab".into(), "omen".into()],
+            Some("Valorant"),
+        );
+        assert!(out.len() <= 5, "got {:?}", out);
+    }
+
+    #[test]
+    fn v2_sanitize_hashtag_strips_spaces_and_symbols() {
+        assert_eq!(sanitize_hashtag("Dead by Daylight"), "deadbydaylight");
+        assert_eq!(sanitize_hashtag("Counter-Strike 2"), "counterstrike2");
+        assert_eq!(sanitize_hashtag("#FYP!"), "fyp");
+        assert_eq!(sanitize_hashtag(""), "");
+        assert_eq!(sanitize_hashtag("   "), "");
+    }
+
+    #[test]
+    fn v2_different_platforms_produce_different_evergreens() {
+        let tiktok = build_hashtags_v2(&[], GameType::Generic, Platform::TikTok, &[], None);
+        let shorts = build_hashtags_v2(&[], GameType::Generic, Platform::YouTubeShorts, &[], None);
+        assert!(tiktok.contains(&"fyp".to_string()));
+        assert!(shorts.contains(&"shorts".to_string()));
+        assert_ne!(tiktok, shorts);
     }
 }
