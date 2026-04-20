@@ -37,6 +37,7 @@ const ALLOWED_SETTING_KEYS: &[&str] = &[
     "clip_templates",
     "whisper_model",
     "detection_sensitivity",
+    "use_twitch_community_clips",
 ];
 
 #[tauri::command]

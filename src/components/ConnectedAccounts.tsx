@@ -57,7 +57,7 @@ export default function ConnectedAccounts() {
                   {isLoading
                     ? 'Connecting...'
                     : account
-                      ? <>@{account.account_name}{key === 'tiktok' ? ' · Sandbox mode' : ''}</>
+                      ? <>@{account.account_name}</>
                       : info.available
                         ? 'Not connected'
                         : 'Coming soon · planned v2'}

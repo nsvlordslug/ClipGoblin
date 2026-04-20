@@ -39,8 +39,11 @@ const TIKTOK_PUBLISH_STATUS_URL: &str =
 const CALLBACK_PORT: u16 = 17387;
 const REDIRECT_URI: &str = "https://nsvlordslug.github.io/ClipGoblin/callback/";
 
-// Scopes for Login Kit + Content Posting + Display API (for view-count refresh)
-const SCOPES: &str = "user.info.basic,video.publish,video.upload,video.list";
+// Scopes for Login Kit + Content Posting.
+// NOTE: `video.list` (Display API — for view-count refresh) is NOT included
+// because it requires a separate TikTok app-review submission. Analytics'
+// Refresh stats button will return no TikTok view counts until that's approved.
+const SCOPES: &str = "user.info.basic,video.publish,video.upload";
 
 const AUTH_TIMEOUT_SECS: u64 = 120;
 

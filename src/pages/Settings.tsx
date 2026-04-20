@@ -354,13 +354,6 @@ export default function SettingsPage() {
 
         {/* YouTube / TikTok / Instagram rows */}
         <ConnectedAccounts />
-
-        {/* TikTok reconnect notice — view-count refresh needs the video.list scope */}
-        <div className="v4-tip mt-3" style={{fontSize: 11}}>
-          ℹ <b>If TikTok is connected</b>, disconnect and reconnect once to grant the
-          new <code className="text-violet-300">video.list</code> permission. Required for
-          view-count refresh on the Analytics page.
-        </div>
       </section>
 
       {/* AI Provider */}
