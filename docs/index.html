@@ -78,6 +78,39 @@
       line-height: 1.7;
     }
 
+    /* Screenshot showcase */
+    .showcase {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 8px 24px 72px;
+      text-align: center;
+    }
+    .showcase-frame {
+      position: relative;
+      display: inline-block;
+      padding: 2px;
+      background: var(--accent-grad);
+      border-radius: 14px;
+      box-shadow: 0 30px 90px -30px rgba(167, 139, 250, 0.45),
+                  0 12px 40px -12px rgba(244, 114, 182, 0.3);
+    }
+    .showcase-frame img {
+      display: block;
+      width: 100%;
+      max-width: 1040px;
+      height: auto;
+      border-radius: 12px;
+      background: var(--bg);
+    }
+    .showcase-caption {
+      margin-top: 18px;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+    }
+    @media (max-width: 600px) {
+      .showcase { padding: 8px 16px 48px; }
+    }
+
     /* Features */
     .features {
       display: grid;
@@ -234,6 +267,13 @@
       AI captions and titles, and ships them to YouTube and TikTok on a schedule
       you control &mdash; or fully automatically.
     </p>
+  </section>
+
+  <section class="showcase">
+    <div class="showcase-frame">
+      <img src="app-dashboard.png" alt="ClipGoblin Dashboard — welcome banner, today's pipeline stats, and Clip Workbench" loading="lazy" />
+    </div>
+    <p class="showcase-caption">The Dashboard &mdash; your stream scored, queued, and ready to ship.</p>
   </section>
 
   <section class="features">
