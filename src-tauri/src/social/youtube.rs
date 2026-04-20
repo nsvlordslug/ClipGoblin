@@ -690,3 +690,116 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&#x27;")
 }
+
+// ── Stats ────────────────────────────────────────────────────────────────
+
+/// View + like counts for a single uploaded video.
+#[derive(Debug, Clone)]
+pub struct VideoStats {
+    pub view_count: Option<i64>,
+    pub like_count: Option<i64>,
+}
+
+/// Extract a YouTube video ID from the upload's `video_url` column.
+/// Handles:
+///   https://youtu.be/abc123
+///   https://www.youtube.com/watch?v=abc123
+///   https://www.youtube.com/shorts/abc123
+///   https://youtube.com/shorts/abc123?feature=...
+pub fn extract_video_id(url: &str) -> Option<String> {
+    if let Some(rest) = url.strip_prefix("https://youtu.be/") {
+        let id: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+        if !id.is_empty() { return Some(id) }
+    }
+    let lower = url.to_lowercase();
+    if let Some(idx) = lower.find("/shorts/") {
+        let rest = &url[idx + "/shorts/".len()..];
+        let id: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+        if !id.is_empty() { return Some(id) }
+    }
+    if let Some(idx) = lower.find("v=") {
+        let rest = &url[idx + 2..];
+        let id: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+        if !id.is_empty() { return Some(id) }
+    }
+    None
+}
+
+/// Ensure we have a valid YouTube access token, refreshing if the stored one
+/// is expired or about to expire. Returns the current bearer token.
+/// Callers must hold a `&Connection` (not `State`) because the adapter pattern
+/// assumes sync DB access interleaved with async network calls.
+pub async fn ensure_fresh_access_token(conn: &Connection) -> Result<String, AppError> {
+    let expiry_str = db::get_setting(conn, "youtube_token_expiry")
+        .map_err(|e| AppError::Database(e.to_string()))?;
+    let needs_refresh = match expiry_str {
+        Some(s) => {
+            let expiry: i64 = s.parse().unwrap_or(0);
+            let now = chrono::Utc::now().timestamp();
+            now >= expiry - 60
+        }
+        None => true,
+    };
+
+    if needs_refresh {
+        let refresh_tok = db::get_setting(conn, "youtube_refresh_token")
+            .map_err(|e| AppError::Database(e.to_string()))?
+            .ok_or_else(|| AppError::Api("No YouTube refresh token — please reconnect.".into()))?;
+        let new_tokens = do_refresh_token_net(&refresh_tok).await?;
+        let new_expiry = chrono::Utc::now().timestamp() + new_tokens.expires_in as i64;
+        db::save_setting(conn, "youtube_access_token", &new_tokens.access_token)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        db::save_setting(conn, "youtube_token_expiry", &new_expiry.to_string())
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        if let Some(ref rt) = new_tokens.refresh_token {
+            db::save_setting(conn, "youtube_refresh_token", rt)
+                .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+    }
+
+    db::get_setting(conn, "youtube_access_token")
+        .map_err(|e| AppError::Database(e.to_string()))?
+        .ok_or_else(|| AppError::Api("No YouTube access token — please reconnect.".into()))
+}
+
+/// Fetch view + like counts for a single YouTube video via the Data API.
+/// Requires `youtube.readonly` scope (already in SCOPES).
+/// Returns `Ok(VideoStats)` with `None` fields when the API returns an empty
+/// result (deleted video) — only errors on network/auth failures.
+pub async fn fetch_video_stats(access_token: &str, video_id: &str) -> Result<VideoStats, AppError> {
+    let url = format!(
+        "{}/videos?part=statistics&id={}",
+        YOUTUBE_API_URL, video_id
+    );
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .await
+        .map_err(|e| AppError::Api(format!("YouTube stats network: {}", e)))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AppError::Api(format!("YouTube stats {}: {}", status, body)));
+    }
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| AppError::Api(format!("YouTube stats parse: {}", e)))?;
+    let items = json["items"].as_array();
+    let stats = items
+        .and_then(|arr| arr.first())
+        .and_then(|item| item.get("statistics"));
+    match stats {
+        None => Ok(VideoStats { view_count: None, like_count: None }),
+        Some(s) => {
+            let parse_u64 = |v: &serde_json::Value| -> Option<i64> {
+                v.as_str().and_then(|s| s.parse::<i64>().ok())
+            };
+            Ok(VideoStats {
+                view_count: s.get("viewCount").and_then(parse_u64),
+                like_count: s.get("likeCount").and_then(parse_u64),
+            })
+        }
+    }
+}

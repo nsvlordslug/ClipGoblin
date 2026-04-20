@@ -16,6 +16,43 @@ export function formatDuration(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`
 }
 
+/** "2h 14m 22s" countdown from an ISO time. Returns '0:00:00' when past. */
+export function fmtCountdown(targetISO: string): string {
+  const diff = new Date(targetISO).getTime() - Date.now()
+  if (diff <= 0) return '0:00:00'
+  const h = Math.floor(diff / 3_600_000)
+  const m = Math.floor((diff % 3_600_000) / 60_000)
+  const s = Math.floor((diff % 60_000) / 1000)
+  return `${h}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`
+}
+
+/** "3:12:04" or "48m" style VOD-length formatter. */
+export function formatVodLength(seconds: number): string {
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = Math.floor(seconds % 60)
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+/** Compress legacy virality_score (0-1) to calibrated confidence (0-1). */
+export function legacyToConfidence(virality: number): number {
+  const n = Math.max(0, Math.min(virality * 0.85 - 0.10, 0.99))
+  const anchors: [number, number][] = [
+    [0.00, 0.00], [0.25, 0.25], [0.40, 0.55], [0.50, 0.65],
+    [0.60, 0.77], [0.70, 0.84], [0.80, 0.89], [0.90, 0.93],
+  ]
+  if (n >= 0.90) return Math.min(0.93 + (n - 0.90) * 0.20, 0.95)
+  for (let i = 1; i < anchors.length; i++) {
+    if (n <= anchors[i][0]) {
+      const [x0, y0] = anchors[i - 1]
+      const [x1, y1] = anchors[i]
+      return y0 + ((n - x0) / (x1 - x0)) * (y1 - y0)
+    }
+  }
+  return 0.95
+}
+
 const TAG_LABELS: Record<string, string> = {
   shock: 'Shock',
   hype: 'Hype',

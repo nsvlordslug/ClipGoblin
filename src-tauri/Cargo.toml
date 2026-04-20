@@ -1,6 +1,6 @@
 [package]
 name = "clipviral"
-version = "1.1.0"
+version = "1.2.0"
 description = "AI-powered Twitch stream clip generator"
 authors = ["ClipViral"]
 license = "MIT"
@@ -43,6 +43,7 @@ num_cpus = "1"
 futures-util = "0.3"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tauri-plugin-updater = { version = "2", optional = true }
+tauri-plugin-process = "2"
 steamworks = { version = "0.11", optional = true }
 
 [target.'cfg(windows)'.dependencies]

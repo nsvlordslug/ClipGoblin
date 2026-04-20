@@ -172,3 +172,149 @@ pub fn restore_deleted_vods(db: State<'_, DbConn>) -> Result<u64, String> {
     log::info!("[restore_deleted_vods] Cleared {} entries from deleted_vods table", count);
     Ok(count as u64)
 }
+
+/// Summary returned by `refresh_upload_stats` — shown in a toast.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RefreshStatsSummary {
+    pub updated: u32,
+    pub skipped: u32,
+    pub failed: u32,
+}
+
+/// Refresh view/like counts for every completed upload with a known video_url.
+/// Per-upload failures are swallowed (logged + counted as `failed`) so one bad
+/// row doesn't abort the whole sweep. Safe to call on-demand from the UI.
+///
+/// Uses the same `block_in_place`/`block_on` pattern as `connect_platform` because
+/// rusqlite's `Connection` is `!Sync`, which prevents holding `&Connection` across
+/// `.await` in a `Send` future. Running the inner future on the current worker
+/// thread (via `block_on`) makes Send not required.
+#[tauri::command]
+pub async fn refresh_upload_stats(
+    db: State<'_, DbConn>,
+) -> Result<RefreshStatsSummary, String> {
+    use crate::social::{youtube, tiktok};
+
+    let rt = tokio::runtime::Handle::current();
+    tokio::task::block_in_place(|| {
+        rt.block_on(async {
+            // 1. Snapshot the uploads that need refreshing (sync).
+            let uploads = {
+                let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                db::get_completed_uploads_with_url(&conn)
+                    .map_err(|e| format!("DB error: {}", e))?
+            };
+
+            let mut summary = RefreshStatsSummary { updated: 0, skipped: 0, failed: 0 };
+
+            // 2. Cache each platform's access token once per refresh so we don't
+            //    hammer the refresh endpoint per upload.
+            let has_youtube = uploads.iter().any(|u| u.platform == "youtube");
+            let has_tiktok = uploads.iter().any(|u| u.platform == "tiktok");
+
+            let yt_token: Option<String> = if has_youtube {
+                let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                match youtube::ensure_fresh_access_token(&conn).await {
+                    Ok(t) => Some(t),
+                    Err(e) => {
+                        log::warn!("[refresh_upload_stats] YouTube token unavailable: {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let tt_token: Option<String> = if has_tiktok {
+                let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                match tiktok::ensure_fresh_access_token(&conn).await {
+                    Ok(t) => Some(t),
+                    Err(e) => {
+                        log::warn!("[refresh_upload_stats] TikTok token unavailable: {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            for u in uploads {
+                let video_url = match &u.video_url {
+                    Some(url) => url.clone(),
+                    None => { summary.skipped += 1; continue }
+                };
+
+                match u.platform.as_str() {
+                    "youtube" => {
+                        let token = match &yt_token {
+                            Some(t) => t,
+                            None => { summary.skipped += 1; continue }
+                        };
+                        let video_id = match youtube::extract_video_id(&video_url) {
+                            Some(id) => id,
+                            None => {
+                                log::warn!("[refresh_upload_stats] Couldn't extract YT video id from {}", video_url);
+                                summary.skipped += 1;
+                                continue
+                            }
+                        };
+                        match youtube::fetch_video_stats(token, &video_id).await {
+                            Ok(stats) => {
+                                let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                                if let Err(e) = db::update_upload_stats(
+                                    &conn, &u.id, stats.view_count, stats.like_count, None,
+                                ) {
+                                    log::error!("[refresh_upload_stats] DB update failed for {}: {}", u.id, e);
+                                    summary.failed += 1;
+                                } else {
+                                    summary.updated += 1;
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("[refresh_upload_stats] YT stats failed for {}: {}", u.id, e);
+                                summary.failed += 1;
+                            }
+                        }
+                    }
+                    "tiktok" => {
+                        let token = match &tt_token {
+                            Some(t) => t,
+                            None => { summary.skipped += 1; continue }
+                        };
+                        let video_id = match tiktok::extract_video_id(&video_url) {
+                            Some(id) => id,
+                            None => {
+                                log::warn!("[refresh_upload_stats] Couldn't extract TT video id from {}", video_url);
+                                summary.skipped += 1;
+                                continue
+                            }
+                        };
+                        match tiktok::fetch_video_stats(token, &video_id).await {
+                            Ok(stats) => {
+                                let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                                if let Err(e) = db::update_upload_stats(
+                                    &conn, &u.id, stats.view_count, stats.like_count, None,
+                                ) {
+                                    log::error!("[refresh_upload_stats] DB update failed for {}: {}", u.id, e);
+                                    summary.failed += 1;
+                                } else {
+                                    summary.updated += 1;
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("[refresh_upload_stats] TT stats failed for {}: {}", u.id, e);
+                                summary.failed += 1;
+                            }
+                        }
+                    }
+                    _ => { summary.skipped += 1 }
+                }
+            }
+
+            log::info!(
+                "[refresh_upload_stats] updated={} skipped={} failed={}",
+                summary.updated, summary.skipped, summary.failed,
+            );
+            Ok::<RefreshStatsSummary, String>(summary)
+        })
+    })
+}

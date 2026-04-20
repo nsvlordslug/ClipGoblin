@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Bug, Send, Loader2, CheckCircle2, AlertCircle, ExternalLink } from 'lucide-react'
+import { Send, Loader2, CheckCircle2, AlertCircle, ExternalLink } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 
 const PAGES = ['VODs', 'Clips', 'Editor', 'Publishing', 'Settings', 'Other'] as const
@@ -49,13 +49,10 @@ export default function BugReport() {
 
   return (
     <div className="space-y-6 max-w-2xl">
-      <div className="flex items-center gap-3">
-        <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-red-500/20">
-          <Bug className="w-5 h-5 text-red-400" />
-        </div>
+      <div className="v4-page-header">
         <div>
-          <h1 className="text-2xl font-bold text-white">Report a Bug</h1>
-          <p className="text-sm text-slate-400">Help improve ClipGoblin by reporting issues you find.</p>
+          <div className="v4-page-title">Report a Bug 🐛</div>
+          <div className="v4-page-sub">Help improve ClipGoblin — your report goes straight to the dev.</div>
         </div>
       </div>
 
@@ -87,10 +84,9 @@ export default function BugReport() {
         </div>
       )}
 
-      <div className="bg-surface-800 border border-surface-700 rounded-xl p-6 space-y-5">
-        {/* Title */}
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium text-slate-300">
+      <div className="v4-section">
+        <div className="v4-form-field">
+          <label className="v4-label">
             Title <span className="text-red-400">*</span>
           </label>
           <input
@@ -98,13 +94,12 @@ export default function BugReport() {
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             placeholder="Short summary of the issue"
-            className="w-full bg-surface-900 border border-surface-600 text-white text-sm px-3 py-2 rounded-lg outline-none focus:border-violet-500 transition-colors placeholder:text-slate-600"
+            className="v4-input"
           />
         </div>
 
-        {/* Description */}
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium text-slate-300">
+        <div className="v4-form-field">
+          <label className="v4-label">
             Description <span className="text-red-400">*</span>
           </label>
           <textarea
@@ -112,13 +107,12 @@ export default function BugReport() {
             onChange={(e) => setDescription(e.target.value)}
             placeholder="What happened? Be as specific as possible."
             rows={3}
-            className="w-full bg-surface-900 border border-surface-600 text-white text-sm px-3 py-2 rounded-lg outline-none focus:border-violet-500 transition-colors placeholder:text-slate-600 resize-y"
+            className="v4-input"
           />
         </div>
 
-        {/* Steps to Reproduce */}
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium text-slate-300">
+        <div className="v4-form-field">
+          <label className="v4-label">
             Steps to Reproduce <span className="text-red-400">*</span>
           </label>
           <textarea
@@ -126,41 +120,36 @@ export default function BugReport() {
             onChange={(e) => setSteps(e.target.value)}
             placeholder={"1. Go to...\n2. Click on...\n3. See error"}
             rows={3}
-            className="w-full bg-surface-900 border border-surface-600 text-white text-sm px-3 py-2 rounded-lg outline-none focus:border-violet-500 transition-colors placeholder:text-slate-600 resize-y"
+            className="v4-input"
           />
         </div>
 
-        {/* Expected Behavior */}
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium text-slate-300">Expected Behavior</label>
+        <div className="v4-form-field">
+          <label className="v4-label">Expected Behavior</label>
           <textarea
             value={expected}
             onChange={(e) => setExpected(e.target.value)}
             placeholder="What did you expect to happen?"
             rows={2}
-            className="w-full bg-surface-900 border border-surface-600 text-white text-sm px-3 py-2 rounded-lg outline-none focus:border-violet-500 transition-colors placeholder:text-slate-600 resize-y"
+            className="v4-input"
           />
         </div>
 
-        {/* Page + Severity row */}
         <div className="grid grid-cols-2 gap-5">
-          {/* Page / Feature */}
-          <div className="space-y-1.5">
-            <label className="text-sm font-medium text-slate-300">Page / Feature</label>
+          <div className="v4-form-field">
+            <label className="v4-label">Page / Feature</label>
             <select
               value={page}
               onChange={(e) => setPage(e.target.value)}
-              className="w-full bg-surface-900 border border-surface-600 text-white text-sm px-3 py-2 rounded-lg outline-none focus:border-violet-500 transition-colors cursor-pointer"
+              className="v4-input cursor-pointer"
             >
               {PAGES.map((p) => (
                 <option key={p} value={p}>{p}</option>
               ))}
             </select>
           </div>
-
-          {/* Severity */}
-          <div className="space-y-1.5">
-            <label className="text-sm font-medium text-slate-300">Severity</label>
+          <div className="v4-form-field">
+            <label className="v4-label">Severity</label>
             <div className="flex gap-2">
               {SEVERITIES.map((s) => (
                 <button
@@ -183,16 +172,15 @@ export default function BugReport() {
           </div>
         </div>
 
-        {/* Info note */}
-        <p className="text-[11px] text-slate-500">
+        <p className="text-[11px] text-slate-500 mb-4">
           System info and recent logs will be automatically attached (scrubbed of sensitive data). Limited to 5 reports per day.
         </p>
 
-        {/* Submit */}
         <button
           onClick={handleSubmit}
           disabled={!canSubmit || submitting}
-          className="flex items-center justify-center gap-2 w-full px-4 py-2.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 disabled:hover:bg-violet-600 text-white text-sm font-semibold rounded-lg transition-colors cursor-pointer"
+          className="v4-btn primary"
+          style={{width: '100%', justifyContent: 'center'}}
         >
           {submitting ? (
             <><Loader2 className="w-4 h-4 animate-spin" /> Submitting...</>

@@ -195,6 +195,13 @@ pub fn init_db() -> SqliteResult<Connection> {
         )"
     )?;
 
+    // Platform analytics on published uploads (populated by refresh_upload_stats).
+    // Nullable — null means "not yet fetched"; 0 means "fetched but zero views".
+    conn.execute("ALTER TABLE scheduled_uploads ADD COLUMN view_count INTEGER", []).ok();
+    conn.execute("ALTER TABLE scheduled_uploads ADD COLUMN like_count INTEGER", []).ok();
+    conn.execute("ALTER TABLE scheduled_uploads ADD COLUMN ctr_percent REAL", []).ok();
+    conn.execute("ALTER TABLE scheduled_uploads ADD COLUMN stats_updated_at TEXT", []).ok();
+
     Ok(conn)
 }
 
@@ -1092,6 +1099,18 @@ pub struct ScheduledUploadRow {
     pub video_url: Option<String>,
     pub upload_meta_json: Option<String>,
     pub created_at: String,
+    /// Views as reported by the platform API. None = never fetched.
+    #[serde(default)]
+    pub view_count: Option<i64>,
+    /// Likes as reported by the platform API. None = never fetched / unsupported.
+    #[serde(default)]
+    pub like_count: Option<i64>,
+    /// Click-through rate as a percentage (0.0-100.0). YouTube-only for now.
+    #[serde(default)]
+    pub ctr_percent: Option<f64>,
+    /// ISO8601 timestamp of the last successful stats refresh.
+    #[serde(default)]
+    pub stats_updated_at: Option<String>,
 }
 
 // ── Scheduled upload helpers ──
@@ -1107,7 +1126,7 @@ pub fn insert_scheduled_upload(conn: &Connection, row: &ScheduledUploadRow) -> S
 
 pub fn get_all_scheduled_uploads(conn: &Connection) -> SqliteResult<Vec<ScheduledUploadRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, clip_id, platform, scheduled_time, status, retry_count, error_message, video_url, upload_meta_json, created_at
+        "SELECT id, clip_id, platform, scheduled_time, status, retry_count, error_message, video_url, upload_meta_json, created_at, view_count, like_count, ctr_percent, stats_updated_at
          FROM scheduled_uploads ORDER BY scheduled_time ASC"
     )?;
     let rows = stmt.query_map([], |row| {
@@ -1122,6 +1141,10 @@ pub fn get_all_scheduled_uploads(conn: &Connection) -> SqliteResult<Vec<Schedule
             video_url: row.get(7)?,
             upload_meta_json: row.get(8)?,
             created_at: row.get(9)?,
+            view_count: row.get(10).ok(),
+            like_count: row.get(11).ok(),
+            ctr_percent: row.get(12).ok(),
+            stats_updated_at: row.get(13).ok(),
         })
     })?;
     rows.collect()
@@ -1129,7 +1152,7 @@ pub fn get_all_scheduled_uploads(conn: &Connection) -> SqliteResult<Vec<Schedule
 
 pub fn get_scheduled_uploads_for_clip(conn: &Connection, clip_id: &str) -> SqliteResult<Vec<ScheduledUploadRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, clip_id, platform, scheduled_time, status, retry_count, error_message, video_url, upload_meta_json, created_at
+        "SELECT id, clip_id, platform, scheduled_time, status, retry_count, error_message, video_url, upload_meta_json, created_at, view_count, like_count, ctr_percent, stats_updated_at
          FROM scheduled_uploads WHERE clip_id = ?1 ORDER BY scheduled_time ASC"
     )?;
     let rows = stmt.query_map(params![clip_id], |row| {
@@ -1144,6 +1167,10 @@ pub fn get_scheduled_uploads_for_clip(conn: &Connection, clip_id: &str) -> Sqlit
             video_url: row.get(7)?,
             upload_meta_json: row.get(8)?,
             created_at: row.get(9)?,
+            view_count: row.get(10).ok(),
+            like_count: row.get(11).ok(),
+            ctr_percent: row.get(12).ok(),
+            stats_updated_at: row.get(13).ok(),
         })
     })?;
     rows.collect()
@@ -1151,7 +1178,7 @@ pub fn get_scheduled_uploads_for_clip(conn: &Connection, clip_id: &str) -> Sqlit
 
 pub fn get_due_scheduled_uploads(conn: &Connection, now: &str) -> SqliteResult<Vec<ScheduledUploadRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, clip_id, platform, scheduled_time, status, retry_count, error_message, video_url, upload_meta_json, created_at
+        "SELECT id, clip_id, platform, scheduled_time, status, retry_count, error_message, video_url, upload_meta_json, created_at, view_count, like_count, ctr_percent, stats_updated_at
          FROM scheduled_uploads WHERE status = 'pending' AND scheduled_time <= ?1 ORDER BY scheduled_time ASC"
     )?;
     let rows = stmt.query_map(params![now], |row| {
@@ -1166,6 +1193,10 @@ pub fn get_due_scheduled_uploads(conn: &Connection, now: &str) -> SqliteResult<V
             video_url: row.get(7)?,
             upload_meta_json: row.get(8)?,
             created_at: row.get(9)?,
+            view_count: row.get(10).ok(),
+            like_count: row.get(11).ok(),
+            ctr_percent: row.get(12).ok(),
+            stats_updated_at: row.get(13).ok(),
         })
     })?;
     rows.collect()
@@ -1192,6 +1223,56 @@ pub fn cancel_scheduled_upload(conn: &Connection, id: &str) -> SqliteResult<bool
         params![id],
     )?;
     Ok(changed > 0)
+}
+
+/// Write platform analytics back to a scheduled upload row. Null fields are
+/// left untouched so a partial refresh (e.g., views but no CTR on TikTok)
+/// doesn't clobber previously-known values.
+pub fn update_upload_stats(
+    conn: &Connection,
+    id: &str,
+    view_count: Option<i64>,
+    like_count: Option<i64>,
+    ctr_percent: Option<f64>,
+) -> SqliteResult<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE scheduled_uploads SET
+           view_count = COALESCE(?1, view_count),
+           like_count = COALESCE(?2, like_count),
+           ctr_percent = COALESCE(?3, ctr_percent),
+           stats_updated_at = ?4
+         WHERE id = ?5",
+        params![view_count, like_count, ctr_percent, now, id],
+    )?;
+    Ok(())
+}
+
+/// Return all completed uploads with a video_url — the refresher iterates this.
+pub fn get_completed_uploads_with_url(conn: &Connection) -> SqliteResult<Vec<ScheduledUploadRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, clip_id, platform, scheduled_time, status, retry_count, error_message, video_url, upload_meta_json, created_at, view_count, like_count, ctr_percent, stats_updated_at
+         FROM scheduled_uploads WHERE status = 'completed' AND video_url IS NOT NULL ORDER BY scheduled_time DESC"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ScheduledUploadRow {
+            id: row.get(0)?,
+            clip_id: row.get(1)?,
+            platform: row.get(2)?,
+            scheduled_time: row.get(3)?,
+            status: row.get(4)?,
+            retry_count: row.get(5)?,
+            error_message: row.get(6)?,
+            video_url: row.get(7)?,
+            upload_meta_json: row.get(8)?,
+            created_at: row.get(9)?,
+            view_count: row.get(10).ok(),
+            like_count: row.get(11).ok(),
+            ctr_percent: row.get(12).ok(),
+            stats_updated_at: row.get(13).ok(),
+        })
+    })?;
+    rows.collect()
 }
 
 pub fn reschedule_upload(conn: &Connection, id: &str, new_time: &str) -> SqliteResult<bool> {

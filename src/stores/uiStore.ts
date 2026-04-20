@@ -10,11 +10,17 @@ export interface UiSettings {
   showTooltips: boolean
   /** Color theme. Default: 'dark'. */
   theme: ThemeMode
+  /** Auto-publish clips that score >= 0.9 confidence without review. Default: false. */
+  autoShipHighConfidence: boolean
+  /** Use GPU (CUDA) for transcription. Default: true (falls back to CPU if unavailable). */
+  useGpu: boolean
 }
 
 export const UI_DEFAULTS: UiSettings = {
   showTooltips: true,
   theme: 'dark',
+  autoShipHighConfidence: false,
+  useGpu: true,
 }
 
 const SETTINGS_KEY = 'ui_settings'

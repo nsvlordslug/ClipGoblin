@@ -211,6 +211,80 @@ pub async fn export_clip(
     Ok(())
 }
 
+/// Export a clip synchronously by id. Returns the rendered file path on success.
+/// Used by both the `export_clip` Tauri command (via its JobQueue wrapper) and
+/// the scheduler's auto-export path when a pending upload lacks an output_path.
+///
+/// Opens its own `rusqlite::Connection` via `db::db_path()` so callers don't
+/// need to juggle the DbConn State mutex. Safe to call from any async context;
+/// the actual ffmpeg work runs inside `tokio::task::spawn_blocking`.
+pub(crate) async fn render_clip_by_id(clip_id: &str) -> Result<std::path::PathBuf, String> {
+    let ffmpeg = find_ffmpeg().map_err(|e| e.to_string())?;
+
+    // Load clip + vod path (sync)
+    let (clip, vod_path) = {
+        let db_path = db::db_path().map_err(|e| format!("DB path: {}", e))?;
+        let conn = rusqlite::Connection::open(&db_path)
+            .map_err(|e| format!("DB open: {}", e))?;
+        let clip = db::get_clip_by_id(&conn, clip_id)
+            .map_err(|e| format!("DB error: {}", e))?
+            .ok_or_else(|| "Clip not found".to_string())?;
+        let vod = db::get_vod_by_id(&conn, &clip.vod_id)
+            .map_err(|e| format!("DB error: {}", e))?
+            .ok_or_else(|| "VOD not found".to_string())?;
+        let path = vod.local_path.ok_or_else(|| "VOD not downloaded".to_string())?;
+        (clip, path)
+    };
+
+    let output_dir = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("clipviral")
+        .join("exports");
+    std::fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("Create export dir: {}", e))?;
+    let output_path = output_dir.join(format!("{}.mp4", clip_id));
+
+    // Mark rendering in DB
+    {
+        let db_path = db::db_path().map_err(|e| format!("DB path: {}", e))?;
+        let conn = rusqlite::Connection::open(&db_path)
+            .map_err(|e| format!("DB open: {}", e))?;
+        db::update_clip_render_status(&conn, clip_id, "rendering", None)
+            .map_err(|e| format!("DB error: {}", e))?;
+    }
+
+    let request = clip_to_export_request(&clip, &vod_path, &output_path);
+    let output_ref = output_path.clone();
+    let clip_id_owned = clip_id.to_string();
+
+    let result = tokio::task::spawn_blocking(move || {
+        vertical_crop::run_export(&ffmpeg, &request, |_pct| {
+            // no progress callback — scheduler's simpler.
+        })
+    })
+    .await
+    .map_err(|e| format!("Export task panicked: {}", e))?;
+
+    // Persist result
+    let db_path = db::db_path().map_err(|e| format!("DB path: {}", e))?;
+    let conn = rusqlite::Connection::open(&db_path)
+        .map_err(|e| format!("DB open: {}", e))?;
+
+    if result.success {
+        db::update_clip_render_status(&conn, &clip_id_owned, "completed",
+            Some(&output_ref.to_string_lossy())).ok();
+        Ok(output_ref)
+    } else {
+        db::update_clip_render_status(&conn, &clip_id_owned, "failed", None).ok();
+        let msg = if result.stderr_tail.is_empty() {
+            "FFmpeg exited with an error".to_string()
+        } else {
+            format!("FFmpeg error: {}", result.stderr_tail)
+        };
+        Err(msg)
+    }
+}
+
 /// Convert a DB ClipRow into an ExportRequest for the vertical_crop module.
 fn clip_to_export_request(
     clip: &db::ClipRow,

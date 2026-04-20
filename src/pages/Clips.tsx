@@ -7,12 +7,10 @@ import {
 } from 'lucide-react'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import { useAppStore } from '../stores/appStore'
-import { formatConfidence } from '../lib/uiFormat'
 import ClipPlayer from '../components/ClipPlayer'
 import Tooltip from '../components/Tooltip'
 import BatchUploadDialog from '../components/BatchUploadDialog'
 import { useScheduleStore } from '../stores/scheduleStore'
-import { PLATFORM_INFO } from '../stores/platformStore'
 import type { Clip, Vod } from '../types'
 
 // ─── Helpers ───────────────────────────────────────────────────────
@@ -152,13 +150,15 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
     else ensureSrc()
   }
 
+  const isViral = confidence !== null && confidence >= 0.9
+
   return (
     <div
       data-clip-id={clip.id}
-      className={`relative bg-surface-800 border rounded-xl overflow-hidden flex flex-col transition-colors ${
+      className={`v4-lib-clip relative flex flex-col transition-all ${
         selectMode && selected
-          ? 'border-violet-500 ring-1 ring-violet-500/30'
-          : 'border-surface-700'
+          ? '!border-violet-500 ring-1 ring-violet-500/30'
+          : ''
       } ${selectMode ? 'cursor-pointer' : ''}`}
       onClick={handleClick}
     >
@@ -181,16 +181,20 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
           className="w-full h-full"
           objectFit="contain"
         />
+        {/* v4 score overlay — top right */}
+        {confidence !== null && (
+          <span className="v4-lib-score">{Math.round(confidence * 100)}%</span>
+        )}
         {clip.render_status === 'completed' && clip.output_path && (
-          <div className="absolute bottom-1 right-1 z-10 bg-green-600/80 text-white text-[10px] px-1.5 py-0.5 rounded font-medium">
-            Exported
+          <div className="absolute bottom-1 left-1 z-10 bg-green-600/80 backdrop-blur-sm text-white text-[10px] px-1.5 py-0.5 rounded font-medium">
+            ✓ Exported
           </div>
         )}
       </div>
 
-      <div className="px-3 pb-3 pt-1 flex flex-col gap-2">
+      <div className="v4-lib-body flex flex-col gap-2">
         <div className="flex items-start justify-between gap-2">
-          <h3 className="text-sm font-medium text-white line-clamp-2 leading-snug flex-1">
+          <h3 className="v4-lib-title flex-1" style={{whiteSpace:'normal',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical' as any}}>
             {displayTitle}
           </h3>
           {!selectMode && (
@@ -214,15 +218,8 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
             </div>
           )}
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          {confidence !== null && (() => {
-            const conf = formatConfidence(confidence)
-            return (
-              <span className={`text-xs px-2 py-0.5 rounded-full border border-surface-600 ${conf.color}`}>
-                {conf.text} ({Math.round(confidence * 100)}%)
-              </span>
-            )
-          })()}
+        <div className="v4-lib-meta flex-wrap">
+          {isViral && <span className="v4-viral-badge">🔥 VIRAL PICK</span>}
           {scheduledPlatforms && scheduledPlatforms.length > 0 && (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/20 text-amber-300 border border-amber-500/30">
               <Clock className="w-2.5 h-2.5" />
@@ -337,6 +334,15 @@ export default function Clips() {
     fetchHighlights()
     loadSchedules()
   }, [fetchClips, fetchHighlights, loadSchedules])
+
+  // ── Auto-enter select mode when navigated with ?action=schedule or ?action=export ──
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const action = params.get('action')
+    if (action === 'schedule' || action === 'export') {
+      setSelectMode(true)
+    }
+  }, [])
 
   // ── Scroll-to-last-edited-clip on return from Editor ──
   // Runs whenever clip count changes while a pending clip ID is set, so it
@@ -629,8 +635,13 @@ export default function Clips() {
   return (
     <div className="space-y-4" ref={containerRef}>
       {/* ── Header ── */}
-      <div className="flex items-center justify-between gap-4">
-        <h1 className="text-2xl font-bold text-white">My Clips</h1>
+      <div className="v4-page-header">
+        <div>
+          <div className="v4-page-title">Clip Library ✂</div>
+          <div className="v4-page-sub">
+            {clips.length} total clips{visibleClips.length !== clips.length ? ` · ${visibleClips.length} shown` : ''}
+          </div>
+        </div>
         {visibleClips.length > 0 && (
           <div className="flex items-center gap-2">
             {selectMode && (
@@ -670,6 +681,26 @@ export default function Clips() {
               }`}
             >
               {selectMode ? <><X className="w-3.5 h-3.5" /> Exit Select</> : <><CheckSquare className="w-3.5 h-3.5" /> Select</>}
+            </button>
+            <button
+              onClick={() => navigate('/vods')}
+              className="v4-btn primary"
+              style={{padding:'6px 12px', fontSize:12}}
+              title="Pick a VOD to clip from"
+            >
+              + New clip
+            </button>
+          </div>
+        )}
+        {/* Show "+ New clip" even in empty state so it's discoverable */}
+        {visibleClips.length === 0 && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => navigate('/vods')}
+              className="v4-btn primary"
+              style={{padding:'6px 12px', fontSize:12}}
+            >
+              + New clip
             </button>
           </div>
         )}
@@ -754,7 +785,7 @@ export default function Clips() {
 
       {/* ── Empty state ── */}
       {clips.length === 0 ? (
-        <div className="bg-surface-800 border border-surface-700 rounded-xl p-12 text-center">
+        <div className="v4-panel text-center p-12">
           <Scissors className="w-12 h-12 text-slate-600 mx-auto mb-4" />
           <h3 className="text-lg font-medium text-white mb-2">No clips yet</h3>
           <p className="text-slate-400 text-sm">
@@ -762,7 +793,7 @@ export default function Clips() {
           </p>
         </div>
       ) : groupedClips.length === 0 && hideDone ? (
-        <div className="bg-surface-800 border border-surface-700 rounded-xl p-12 text-center">
+        <div className="v4-panel text-center p-12">
           <Eye className="w-12 h-12 text-slate-600 mx-auto mb-4" />
           <h3 className="text-lg font-medium text-white mb-2">All VODs completed</h3>
           <p className="text-slate-400 text-sm mb-4">
@@ -770,7 +801,7 @@ export default function Clips() {
           </p>
           <button
             onClick={() => setHideDone(false)}
-            className="px-4 py-2 rounded-lg text-sm font-medium border border-surface-600 text-slate-400 hover:text-white hover:bg-surface-700 transition-colors cursor-pointer"
+            className="v4-btn ghost"
           >
             Show all VODs
           </button>
@@ -828,7 +859,7 @@ export default function Clips() {
 
               {/* Clip grid (collapsible) */}
               {!isCollapsed && (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 pl-1">
+                <div className="v4-clips-library pl-1">
                   {group.clips.map((clip) => {
                     const hl = highlights.find(h => h.id === clip.highlight_id)
                     return (

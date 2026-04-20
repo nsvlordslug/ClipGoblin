@@ -481,16 +481,26 @@ pub(crate) fn run_transcription_native(
     output_path: &str,
     vod_id: Option<&str>,
 ) -> Result<TranscriptResult, AppError> {
-    // Resolve model from DB setting, default to base
-    let model = {
-        let model_name = db::db_path().ok()
-            .and_then(|p| rusqlite::Connection::open(&p).ok())
-            .and_then(|conn| db::get_setting(&conn, "whisper_model").ok().flatten())
+    // Resolve model + GPU preference from DB (both read from the same conn).
+    // useGpu default is true (honor hardware CUDA support); users can flip it
+    // off via Settings → Detection → "Use GPU (CUDA)".
+    let (model, use_gpu) = {
+        let conn = db::db_path().ok().and_then(|p| rusqlite::Connection::open(&p).ok());
+        let model_name = conn.as_ref()
+            .and_then(|c| db::get_setting(c, "whisper_model").ok().flatten())
             .unwrap_or_else(|| "base".to_string());
-        match model_name.as_str() {
+        let model = match model_name.as_str() {
             "medium" => whisper::WhisperModel::Medium,
             _ => whisper::WhisperModel::Base,
-        }
+        };
+        let ui_json = conn.as_ref()
+            .and_then(|c| db::get_setting(c, "ui_settings").ok().flatten())
+            .unwrap_or_default();
+        let use_gpu = serde_json::from_str::<serde_json::Value>(&ui_json)
+            .ok()
+            .and_then(|v| v.get("useGpu").and_then(|b| b.as_bool()))
+            .unwrap_or(true);
+        (model, use_gpu)
     };
 
     // Check model is downloaded
@@ -501,11 +511,15 @@ pub(crate) fn run_transcription_native(
         )));
     }
 
-    log::info!("[Transcription] Starting native whisper-rs with model: {}", model.label());
+    log::info!(
+        "[Transcription] Starting native whisper-rs · model={} · gpu={}",
+        model.label(),
+        use_gpu,
+    );
 
     // Run transcription with progress reporting
     let vod_id_owned = vod_id.map(|s| s.to_string());
-    let result = whisper::transcribe(vod_path, model, move |pct| {
+    let result = whisper::transcribe(vod_path, model, use_gpu, move |pct| {
         // Map whisper progress (0-100) to analysis progress (20-38%)
         if let Some(ref vid) = vod_id_owned {
             let mapped = 20 + (pct as i64 * 18 / 100).min(17);
@@ -954,10 +968,19 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
         // Tier 1: Signal-driven (audio + transcript + chat) â€” fully local
         if has_ffmpeg && has_local_file {
             log::info!("Running signal-driven analysis for VOD {}", vod_id_bg);
+
+            // ── Twitch community clips (optional detection signal) ──
+            // Fetched here in async context so the sync `run_analysis_signals`
+            // worker can consume them without needing tokio itself.
+            let community_clips = fetch_community_clips_for_vod(&db, &vod_clone).await;
+            if !community_clips.is_empty() {
+                log::info!("[community-clips] {} clips feeding into selector", community_clips.len());
+            }
+
             let vod_for_sync = vod_clone.clone();
             let hw_for_sync = hw_info.clone();
             let sens = sensitivity.clone();
-            match tokio::task::spawn_blocking(move || run_analysis_signals(&vod_for_sync, &hw_for_sync, &sens)).await {
+            match tokio::task::spawn_blocking(move || run_analysis_signals(&vod_for_sync, &hw_for_sync, &sens, &community_clips)).await {
                 Ok(Ok(highlights)) => { result = Ok(highlights); }
                 Ok(Err(e)) => {
                     log::warn!("Signal analysis failed, falling back to position heuristic: {e}");
@@ -990,6 +1013,10 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
         match result {
             Ok(highlights) => {
                 let mut clip_thumb_info: Vec<(String, f64)> = Vec::new();
+                // Clip IDs that qualify for auto-ship (confidence >= 0.9), built
+                // alongside the clip-insert loop below. Sorted by confidence desc
+                // so the cap picks the best ones first.
+                let mut auto_ship_candidates: Vec<(String, f64)> = Vec::new();
 
                 if let Ok(conn) = db.lock() {
                     // Clear previous analysis
@@ -1049,10 +1076,33 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
                             db::update_clip_auto_captions(&conn, &clip_id, &srt_path.to_string_lossy()).ok();
                         }
 
+                        // Remember clip for auto-ship if it meets the confidence threshold.
+                        let conf = h.confidence_score.unwrap_or(h.virality_score);
+                        if conf >= 0.9 {
+                            auto_ship_candidates.push((clip_id.clone(), conf));
+                        }
+
                         clip_thumb_info.push((clip_id, h.start_seconds));
                     }
 
                     db::update_vod_analysis_progress(&conn, &vod_id_bg, 88).ok();
+
+                    // ── Auto-ship high-confidence clips ──
+                    // Sort candidates by confidence desc so the per-VOD cap picks the strongest.
+                    auto_ship_candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    let candidate_ids: Vec<String> = auto_ship_candidates.iter().map(|(id, _)| id.clone()).collect();
+                    match run_auto_ship_for_vod(&conn, &vod_id_bg, &candidate_ids) {
+                        Ok(report) if report.clips_queued > 0 => {
+                            use tauri::Emitter;
+                            log::info!(
+                                "[auto-ship] queued {} clips across {:?} · next publish {:?}",
+                                report.clips_queued, report.platforms, report.next_publish_at,
+                            );
+                            let _ = app.emit("auto-ship-queued", &report);
+                        }
+                        Ok(_) => { /* nothing queued — either disabled or no candidates */ }
+                        Err(e) => log::warn!("[auto-ship] failed non-fatally: {}", e),
+                    }
                 }
                 // conn lock dropped here
 
@@ -1139,7 +1189,201 @@ fn set_analysis_progress(vod_id: &str, progress: i64) {
 
 /// Signal-driven analysis using the clip_selector module.
 /// Finds clips via audio spikes, transcript keywords, and chat peaks.
-fn run_analysis_signals(vod: &db::VodRow, _hw: &HardwareInfo, sensitivity: &str) -> Result<Vec<db::HighlightRow>, String> {
+/// Report returned to the frontend after an auto-ship pass.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AutoShipReport {
+    pub clips_queued: usize,
+    pub platforms: Vec<String>,
+    /// Scheduled time (ISO8601) of the earliest queued upload.
+    pub next_publish_at: Option<String>,
+}
+
+/// Auto-ship MVP: after analysis produces highlights + clips, queue uploads
+/// for every clip scoring 90%+ on every connected platform with a 5-minute
+/// grace period. User can cancel via Scheduled page before the scheduler fires.
+///
+/// **Known limitation (v1):** clips must be exported manually before the grace
+/// period expires — the scheduler currently refuses uploads without an
+/// `output_path`. A future commit will add scheduler auto-export.
+fn run_auto_ship_for_vod(
+    conn: &rusqlite::Connection,
+    vod_id: &str,
+    candidate_clip_ids: &[String],
+) -> Result<AutoShipReport, String> {
+    // Read enable-flag out of the uiStore JSON blob (single source of truth).
+    let ui_json = db::get_setting(conn, "ui_settings").ok().flatten().unwrap_or_default();
+    let auto_ship_enabled = serde_json::from_str::<serde_json::Value>(&ui_json)
+        .ok()
+        .and_then(|v| v.get("autoShipHighConfidence").and_then(|b| b.as_bool()))
+        .unwrap_or(false);
+    if !auto_ship_enabled {
+        return Ok(AutoShipReport { clips_queued: 0, platforms: Vec::new(), next_publish_at: None });
+    }
+    if candidate_clip_ids.is_empty() {
+        return Ok(AutoShipReport { clips_queued: 0, platforms: Vec::new(), next_publish_at: None });
+    }
+
+    // Detect which platforms are connected (non-empty access token).
+    let mut platforms: Vec<&'static str> = Vec::new();
+    if db::get_setting(conn, "youtube_access_token").ok().flatten().map_or(false, |s| !s.is_empty()) {
+        platforms.push("youtube");
+    }
+    if db::get_setting(conn, "tiktok_access_token").ok().flatten().map_or(false, |s| !s.is_empty()) {
+        platforms.push("tiktok");
+    }
+    if platforms.is_empty() {
+        log::info!("[auto-ship] enabled but no platforms connected for VOD {}", vod_id);
+        return Ok(AutoShipReport { clips_queued: 0, platforms: Vec::new(), next_publish_at: None });
+    }
+
+    // Cap per analysis to prevent a 20-highlight VOD from flood-queuing.
+    const MAX_AUTO_SHIPS_PER_ANALYSIS: usize = 3;
+    let target_clips: Vec<&String> = candidate_clip_ids.iter().take(MAX_AUTO_SHIPS_PER_ANALYSIS).collect();
+
+    let grace = chrono::Utc::now() + chrono::Duration::minutes(5);
+    let scheduled_time = grace.to_rfc3339();
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut queued: usize = 0;
+
+    for clip_id in &target_clips {
+        // Idempotency: skip if an auto-ship row already exists for this clip.
+        let existing_for_clip = db::get_scheduled_uploads_for_clip(conn, clip_id)
+            .unwrap_or_default();
+        // Load clip to build the upload metadata stub.
+        let clip = match db::get_clip_by_id(conn, clip_id) {
+            Ok(Some(c)) => c,
+            _ => { log::warn!("[auto-ship] clip {} not found, skipping", clip_id); continue }
+        };
+
+        for platform in &platforms {
+            if existing_for_clip.iter().any(|u| u.platform == *platform) {
+                log::info!("[auto-ship] {} / {} already scheduled, skipping", clip_id, platform);
+                continue;
+            }
+            let meta = crate::social::UploadMeta {
+                title: clip.title.clone(),
+                description: clip.publish_description.clone().unwrap_or_default(),
+                tags: clip.publish_hashtags
+                    .as_deref()
+                    .map(|s| s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect())
+                    .unwrap_or_default(),
+                visibility: "public".to_string(),
+                clip_id: (*clip_id).clone(),
+                force: false,
+            };
+            let meta_json = match serde_json::to_string(&meta) {
+                Ok(s) => s,
+                Err(e) => { log::error!("[auto-ship] meta serialize failed: {}", e); continue }
+            };
+
+            let row = db::ScheduledUploadRow {
+                id: uuid::Uuid::new_v4().to_string(),
+                clip_id: (*clip_id).clone(),
+                platform: (*platform).to_string(),
+                scheduled_time: scheduled_time.clone(),
+                status: "pending".to_string(),
+                retry_count: 0,
+                error_message: None,
+                video_url: None,
+                upload_meta_json: Some(meta_json),
+                created_at: now.clone(),
+                view_count: None,
+                like_count: None,
+                ctr_percent: None,
+                stats_updated_at: None,
+            };
+            if let Err(e) = db::insert_scheduled_upload(conn, &row) {
+                log::error!("[auto-ship] insert failed for {} / {}: {}", clip_id, platform, e);
+                continue;
+            }
+            log::info!("[auto-ship] queued upload {} for clip {} to {} at {}", row.id, clip_id, platform, scheduled_time);
+            queued += 1;
+        }
+    }
+
+    Ok(AutoShipReport {
+        clips_queued: target_clips.len().min(queued),
+        platforms: platforms.iter().map(|s| s.to_string()).collect(),
+        next_publish_at: if queued > 0 { Some(scheduled_time) } else { None },
+    })
+}
+
+/// Fetch Twitch community-created clips for this VOD and map them to the
+/// selector's CommunityClip signal format. Non-fatal on any error — returns
+/// an empty Vec so analysis continues without the boost signal.
+async fn fetch_community_clips_for_vod(
+    db: &State<'_, DbConn>,
+    vod: &db::VodRow,
+) -> Vec<clip_selector::CommunityClip> {
+    // Read setting + token + broadcaster_id under one lock, drop before network IO.
+    let (use_community, token, broadcaster_id) = {
+        let conn = match db.lock() {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        let use_community = db::get_setting(&conn, "use_twitch_community_clips")
+            .ok().flatten()
+            .map(|v| v != "false")
+            .unwrap_or(true);
+        let token = db::get_setting(&conn, "twitch_user_access_token")
+            .ok().flatten().unwrap_or_default();
+        let broadcaster_id = db::get_all_channels(&conn)
+            .ok()
+            .and_then(|cs| cs.into_iter().find(|c| c.id == vod.channel_id))
+            .map(|c| c.twitch_user_id)
+            .unwrap_or_default();
+        (use_community, token, broadcaster_id)
+    };
+
+    if !use_community {
+        log::info!("[community-clips] disabled by user setting, skipping fetch");
+        return Vec::new();
+    }
+    if token.is_empty() || broadcaster_id.is_empty() {
+        log::info!("[community-clips] missing token or broadcaster id, skipping fetch");
+        return Vec::new();
+    }
+
+    // 48h window around stream_date; filter to this VOD on the client.
+    let started_at = vod.stream_date.clone();
+    let ended_at = chrono::DateTime::parse_from_rfc3339(&vod.stream_date)
+        .ok()
+        .map(|dt| (dt + chrono::Duration::hours(48)).to_rfc3339())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+
+    match crate::twitch::fetch_community_clips(&token, &broadcaster_id, &started_at, &ended_at).await {
+        Ok(clips) => {
+            let this_vod = vod.twitch_video_id.clone();
+            let raw = clips.len();
+            let matching: Vec<_> = clips.into_iter()
+                .filter(|c| c.video_id.as_deref() == Some(this_vod.as_str()))
+                .collect();
+            log::info!(
+                "[community-clips] broadcaster={}: fetched {} total, {} matched this VOD ({})",
+                broadcaster_id, raw, matching.len(), this_vod,
+            );
+            matching.into_iter().filter_map(|c| {
+                c.vod_offset.map(|off| clip_selector::CommunityClip {
+                    vod_offset_seconds: off as f64,
+                    duration_seconds: c.duration,
+                    view_count: c.view_count,
+                    title: c.title,
+                })
+            }).collect()
+        }
+        Err(e) => {
+            log::warn!("[community-clips] fetch failed (non-fatal): {}", e);
+            Vec::new()
+        }
+    }
+}
+
+fn run_analysis_signals(
+    vod: &db::VodRow,
+    _hw: &HardwareInfo,
+    sensitivity: &str,
+    community_clips: &[clip_selector::CommunityClip],
+) -> Result<Vec<db::HighlightRow>, String> {
     let ffmpeg = find_ffmpeg()?;
     let vod_path = vod.local_path.clone()
         .ok_or("VOD not downloaded")?;
@@ -1194,12 +1438,15 @@ fn run_analysis_signals(vod: &db::VodRow, _hw: &HardwareInfo, sensitivity: &str)
     set_analysis_progress(vod_id, 50);
 
     // â”€â”€ Stage 4: Clip selection pipeline (50-65%) â”€â”€
+    // Community clips are fetched in the async caller (this fn is sync because
+    // it runs inside tokio::task::spawn_blocking) and passed in as `community_clips`.
     log::info!("Signal analysis: running clip selector pipeline...");
     set_analysis_progress(vod_id, 52);
     let (selected, detection_stats): (Vec<clip_selector::ClipCandidate>, _) = clip_selector::select_clips(
         audio_ctx.as_ref(),
         transcript.as_ref(),
         &chat_peaks,
+        community_clips,
         duration,
         sensitivity,
     );
@@ -2116,4 +2363,226 @@ pub async fn get_transcript(vod_id: String, db: State<'_, DbConn>, _hw: State<'_
     }
 
     serde_json::to_value(&result).map_err(|e| format!("Serialize: {}", e))
+}
+
+/// Extract the numeric Twitch video ID from common VOD URL shapes:
+///   https://www.twitch.tv/videos/2345678901
+///   https://twitch.tv/videos/2345678901?t=1h2m3s
+///   www.twitch.tv/videos/2345678901
+///   twitch.tv/videos/2345678901
+///   2345678901  (bare ID)
+fn parse_twitch_vod_id(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() { return None }
+    // Bare numeric ID
+    if trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return Some(trimmed.to_string())
+    }
+    // Find "videos/" segment and take following digits
+    let lower = trimmed.to_lowercase();
+    let marker = "videos/";
+    if let Some(start) = lower.find(marker) {
+        let tail = &trimmed[start + marker.len()..];
+        let id: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !id.is_empty() {
+            return Some(id)
+        }
+    }
+    None
+}
+
+/// Import a Twitch VOD by pasting its URL. Fetches metadata from Helix,
+/// creates/updates the channel row if needed, and upserts the VOD.
+/// Returns the resulting VodRow (caller should refresh the VODs list after).
+#[tauri::command]
+pub async fn import_vod_by_url(
+    url: String,
+    db: State<'_, DbConn>,
+) -> Result<db::VodRow, String> {
+    let twitch_video_id = parse_twitch_vod_id(&url)
+        .ok_or_else(|| format!("Couldn't find a Twitch VOD ID in: {}", url))?;
+
+    // If this VOD was already imported, return it as-is (idempotent)
+    {
+        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+        let existing: Option<db::VodRow> = conn.query_row(
+            "SELECT id FROM vods WHERE twitch_video_id = ?1",
+            rusqlite::params![twitch_video_id],
+            |row| row.get::<_, String>(0),
+        ).ok().and_then(|id| db::get_vod_by_id(&conn, &id).ok().flatten());
+        if let Some(v) = existing {
+            log::info!("[import_vod_by_url] VOD {} already imported ({})", twitch_video_id, v.id);
+            return Ok(v)
+        }
+    }
+
+    // Access token for Helix call
+    let mut access_token = {
+        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+        db::get_setting(&conn, "twitch_user_access_token")
+            .map_err(|e| format!("DB error: {}", e))?
+            .unwrap_or_default()
+    };
+    if access_token.is_empty() {
+        return Err("Not logged in. Please connect Twitch in Settings first.".into());
+    }
+
+    // Fetch video metadata — retry once on 401 with refreshed token
+    let api_url = format!("https://api.twitch.tv/helix/videos?id={}", twitch_video_id);
+    let mut body = twitch::curl_twitch_get(&api_url, &access_token).await
+        .map_err(|e| format!("Twitch API error: {}", e))?;
+    if body.contains("\"status\":401") || body.contains("\"status\": 401") {
+        access_token = try_refresh_twitch_token(&db).await?;
+        body = twitch::curl_twitch_get(&api_url, &access_token).await
+            .map_err(|e| format!("Twitch API error: {}", e))?;
+    }
+
+    let resp: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("Parse error: {}", e))?;
+
+    if let Some(status) = resp.get("status") {
+        let msg = resp.get("message").and_then(|m| m.as_str()).unwrap_or("");
+        return Err(format!("Twitch API {}: {}", status, msg));
+    }
+
+    let video = resp["data"].as_array()
+        .and_then(|arr| arr.first())
+        .ok_or_else(|| format!("VOD {} not found on Twitch (deleted, private, or sub-only)", twitch_video_id))?;
+
+    let title = video["title"].as_str().unwrap_or("Untitled VOD").to_string();
+    let thumbnail_url = video["thumbnail_url"].as_str().unwrap_or("")
+        .replace("%{width}", "640")
+        .replace("%{height}", "360");
+    let duration_str = video["duration"].as_str().unwrap_or("0s");
+    let duration_seconds = twitch::parse_duration(duration_str);
+    let stream_date = video["created_at"].as_str().unwrap_or("").to_string();
+    let vod_url = video["url"].as_str().unwrap_or(&url).to_string();
+    let user_id = video["user_id"].as_str().unwrap_or("").to_string();
+    let user_login = video["user_login"].as_str().unwrap_or("").to_string();
+    let user_name = video["user_name"].as_str().unwrap_or(&user_login).to_string();
+
+    if user_id.is_empty() {
+        return Err("Twitch response missing channel info".into());
+    }
+
+    // Find-or-create channel row
+    let channel_id = {
+        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+        let channels = db::get_all_channels(&conn)
+            .map_err(|e| format!("DB error: {}", e))?;
+        if let Some(ch) = channels.into_iter().find(|c| c.twitch_user_id == user_id) {
+            ch.id
+        } else {
+            // Create a stub channel so the VOD has something to attach to
+            let new_id = uuid::Uuid::new_v4().to_string();
+            db::insert_channel(&conn, &new_id, &user_id, &user_login, &user_name, "")
+                .map_err(|e| format!("DB error: {}", e))?;
+            log::info!("[import_vod_by_url] Created stub channel for @{} ({})", user_login, user_id);
+            new_id
+        }
+    };
+
+    // Build and upsert the VOD
+    let vod_row = db::VodRow {
+        id: uuid::Uuid::new_v4().to_string(),
+        channel_id: channel_id.clone(),
+        twitch_video_id: twitch_video_id.clone(),
+        title,
+        duration_seconds,
+        stream_date,
+        thumbnail_url,
+        vod_url,
+        download_status: "pending".to_string(),
+        local_path: None,
+        file_size_bytes: None,
+        analysis_status: "pending".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        download_progress: Some(0),
+        analysis_progress: 0,
+        game_name: None,
+    };
+    {
+        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+        db::upsert_vod(&conn, &vod_row).map_err(|e| format!("DB error: {}", e))?;
+        log::info!("[import_vod_by_url] Imported VOD {} ({}) from @{}", twitch_video_id, vod_row.id, user_login);
+    }
+
+    // Re-read so we return any DB-side defaults that may have been applied
+    let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+    db::get_vod_by_id(&conn, &vod_row.id)
+        .map_err(|e| format!("DB error: {}", e))?
+        .ok_or_else(|| "VOD not found after insert".to_string())
+}
+
+/// Stream-live status for the sidebar channel card. All fields optional — when
+/// the channel isn't live the frontend just shows their handle without the pulse.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StreamStatus {
+    pub is_live: bool,
+    pub viewer_count: i64,
+    pub game_name: Option<String>,
+    pub title: Option<String>,
+    pub started_at: Option<String>,
+}
+
+/// Check whether a Twitch channel is currently streaming and pull the viewer
+/// count + game. Called every ~60s by the frontend for the sidebar card.
+/// Cheap Helix call — does NOT consume any analysis quota.
+#[tauri::command]
+pub async fn get_stream_status(
+    channel_id: String,
+    db: State<'_, DbConn>,
+) -> Result<StreamStatus, String> {
+    let (twitch_user_id, mut access_token) = {
+        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+        let channels = db::get_all_channels(&conn)
+            .map_err(|e| format!("DB error: {}", e))?;
+        let channel = channels.into_iter().find(|c| c.id == channel_id)
+            .ok_or("Channel not found")?;
+        let token = db::get_setting(&conn, "twitch_user_access_token")
+            .map_err(|e| format!("DB error: {}", e))?
+            .unwrap_or_default();
+        (channel.twitch_user_id, token)
+    };
+
+    if access_token.is_empty() {
+        return Ok(StreamStatus {
+            is_live: false,
+            viewer_count: 0,
+            game_name: None,
+            title: None,
+            started_at: None,
+        });
+    }
+
+    let url = format!("https://api.twitch.tv/helix/streams?user_id={}", twitch_user_id);
+    let mut body = twitch::curl_twitch_get(&url, &access_token).await
+        .map_err(|e| format!("Twitch API error: {}", e))?;
+    if body.contains("\"status\":401") || body.contains("\"status\": 401") {
+        access_token = try_refresh_twitch_token(&db).await?;
+        body = twitch::curl_twitch_get(&url, &access_token).await
+            .map_err(|e| format!("Twitch API error: {}", e))?;
+    }
+
+    let resp: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("Parse error: {}", e))?;
+
+    // When the user is offline, Twitch returns { data: [] } — not an error.
+    let stream = resp["data"].as_array().and_then(|arr| arr.first());
+    match stream {
+        None => Ok(StreamStatus {
+            is_live: false,
+            viewer_count: 0,
+            game_name: None,
+            title: None,
+            started_at: None,
+        }),
+        Some(s) => Ok(StreamStatus {
+            is_live: true,
+            viewer_count: s["viewer_count"].as_i64().unwrap_or(0),
+            game_name: s["game_name"].as_str().map(|x| x.to_string()).filter(|x| !x.is_empty()),
+            title: s["title"].as_str().map(|x| x.to_string()).filter(|x| !x.is_empty()),
+            started_at: s["started_at"].as_str().map(|x| x.to_string()),
+        }),
+    }
 }

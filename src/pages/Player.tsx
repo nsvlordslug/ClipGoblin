@@ -34,38 +34,42 @@ export default function Player() {
 
   return (
     <div className="space-y-4">
-      <button
-        onClick={() => navigate('/vods')}
-        className="flex items-center gap-2 text-slate-400 hover:text-white text-sm transition-colors cursor-pointer"
-      >
-        <ArrowLeft className="w-4 h-4" />
-        Back to VODs
-      </button>
+      <div className="v4-page-header">
+        <button
+          onClick={() => navigate('/vods')}
+          className="v4-btn ghost"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          Back to VODs
+        </button>
+      </div>
 
       {error ? (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-8 text-center">
+        <div className="v4-panel text-center p-8" style={{background:'rgba(248,113,113,0.08)',borderColor:'rgba(248,113,113,0.3)'}}>
           <Video className="w-10 h-10 text-red-400 mx-auto mb-3" />
           <p className="text-red-400">{error}</p>
         </div>
       ) : vod ? (
         <div className="space-y-4">
-          <h1 className="text-xl font-bold text-white">{vod.title}</h1>
-          <div className="rounded-xl overflow-hidden bg-black aspect-video max-h-[75vh]">
-            <ClipPlayer
-              src={videoSrc}
-              clipStart={0}
-              clipEnd={vod.duration_seconds}
-              mode="full"
-              controlsOverlay
-              className="h-full"
-            />
+          <div className="v4-panel">
+            <h1 className="v4-page-title mb-3" style={{fontSize: 20}}>{vod.title}</h1>
+            <div className="rounded-xl overflow-hidden bg-black aspect-video max-h-[75vh]">
+              <ClipPlayer
+                src={videoSrc}
+                clipStart={0}
+                clipEnd={vod.duration_seconds}
+                mode="full"
+                controlsOverlay
+                className="h-full"
+              />
+            </div>
+            <p className="text-xs text-slate-500 font-mono truncate mt-3">
+              {vod.local_path}
+            </p>
           </div>
-          <p className="text-xs text-slate-500 font-mono truncate">
-            {vod.local_path}
-          </p>
         </div>
       ) : (
-        <div className="bg-surface-800 border border-surface-700 rounded-xl p-12 text-center">
+        <div className="v4-panel text-center p-12">
           <p className="text-slate-400 text-sm">Loading video...</p>
         </div>
       )}

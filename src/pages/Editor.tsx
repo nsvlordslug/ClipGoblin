@@ -50,8 +50,8 @@ function formatTime(seconds: number) {
 // ── Reusable section component ──
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="bg-surface-800 border border-surface-700 rounded-xl p-4">
-      <h3 className="text-sm font-semibold text-slate-300 mb-3">{title}</h3>
+    <div className="v4-panel" style={{padding: 16}}>
+      <h3 className="v4-section-label" style={{marginBottom: 12}}>{title}</h3>
       {children}
     </div>
   )
@@ -1195,7 +1195,7 @@ export default function Editor() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* ── Left: Preview ── */}
         <div className="space-y-4">
-          <div className="bg-surface-800 border border-surface-700 rounded-xl p-4">
+          <div className="v4-panel" style={{padding: 16}}>
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-sm font-semibold text-slate-300">Preview</h2>
               <span className="text-[9px] font-mono text-slate-500 bg-surface-900 px-1.5 py-0.5 rounded border border-surface-600">
@@ -1355,7 +1355,7 @@ export default function Editor() {
           )}
 
           {/* Thumbnail selector */}
-          <div className="bg-surface-800 border border-surface-700 rounded-xl p-4">
+          <div className="v4-panel" style={{padding: 16}}>
             <h2 className="text-sm font-semibold text-slate-300 mb-3">Thumbnail</h2>
             <ThumbnailSelector
               clipId={clipId!}

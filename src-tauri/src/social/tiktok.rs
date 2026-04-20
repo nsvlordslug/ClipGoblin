@@ -39,8 +39,8 @@ const TIKTOK_PUBLISH_STATUS_URL: &str =
 const CALLBACK_PORT: u16 = 17387;
 const REDIRECT_URI: &str = "https://nsvlordslug.github.io/ClipGoblin/callback/";
 
-// Scopes for Login Kit + Content Posting
-const SCOPES: &str = "user.info.basic,video.publish,video.upload";
+// Scopes for Login Kit + Content Posting + Display API (for view-count refresh)
+const SCOPES: &str = "user.info.basic,video.publish,video.upload,video.list";
 
 const AUTH_TIMEOUT_SECS: u64 = 120;
 
@@ -1145,4 +1145,97 @@ fn html_escape(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#x27;")
+}
+
+// ── Stats ────────────────────────────────────────────────────────────────
+
+/// View + like counts for a single TikTok video.
+#[derive(Debug, Clone)]
+pub struct VideoStats {
+    pub view_count: Option<i64>,
+    pub like_count: Option<i64>,
+}
+
+/// Extract a TikTok video ID from the final `video_url` we stored.
+/// Handles both canonical formats:
+///   https://www.tiktok.com/@user/video/7296847283472837373
+///   https://m.tiktok.com/v/7296847283472837373.html
+pub fn extract_video_id(url: &str) -> Option<String> {
+    if let Some(idx) = url.find("/video/") {
+        let rest = &url[idx + "/video/".len()..];
+        let id: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !id.is_empty() { return Some(id) }
+    }
+    if let Some(idx) = url.find("/v/") {
+        let rest = &url[idx + "/v/".len()..];
+        let id: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !id.is_empty() { return Some(id) }
+    }
+    None
+}
+
+/// Ensure we have a valid TikTok access token, refreshing if needed.
+pub async fn ensure_fresh_access_token(conn: &Connection) -> Result<String, AppError> {
+    let expiry_str = db::get_setting(conn, "tiktok_token_expiry")
+        .map_err(|e| AppError::Database(e.to_string()))?;
+    let needs_refresh = match expiry_str {
+        Some(s) => {
+            let expiry: i64 = s.parse().unwrap_or(0);
+            let now = chrono::Utc::now().timestamp();
+            now >= expiry - 60
+        }
+        None => true,
+    };
+    if needs_refresh {
+        let refresh_tok = db::get_setting(conn, "tiktok_refresh_token")
+            .map_err(|e| AppError::Database(e.to_string()))?
+            .ok_or_else(|| AppError::Api("No TikTok refresh token — please reconnect.".into()))?;
+        let new_tokens = do_refresh_token_net(&refresh_tok).await?;
+        let new_expiry = chrono::Utc::now().timestamp() + new_tokens.expires_in as i64;
+        db::save_setting(conn, "tiktok_access_token", &new_tokens.access_token)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        db::save_setting(conn, "tiktok_token_expiry", &new_expiry.to_string())
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        db::save_setting(conn, "tiktok_refresh_token", &new_tokens.refresh_token)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+    }
+    db::get_setting(conn, "tiktok_access_token")
+        .map_err(|e| AppError::Database(e.to_string()))?
+        .ok_or_else(|| AppError::Api("No TikTok access token — please reconnect.".into()))
+}
+
+/// Fetch view + like counts for a single TikTok video via the Display API's
+/// `/v2/video/list/` endpoint. Requires the `video.list` scope — users will
+/// need to disconnect + reconnect TikTok once to grant it.
+pub async fn fetch_video_stats(access_token: &str, video_id: &str) -> Result<VideoStats, AppError> {
+    let url = "https://open.tiktokapis.com/v2/video/list/?fields=view_count,like_count";
+    let body = serde_json::json!({
+        "filters": { "video_ids": [video_id] }
+    });
+    let resp = reqwest::Client::new()
+        .post(url)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| AppError::Api(format!("TikTok stats network: {}", e)))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AppError::Api(format!("TikTok stats {}: {}", status, body)));
+    }
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| AppError::Api(format!("TikTok stats parse: {}", e)))?;
+    let videos = json["data"]["videos"].as_array();
+    let video = videos.and_then(|arr| arr.first());
+    match video {
+        None => Ok(VideoStats { view_count: None, like_count: None }),
+        Some(v) => Ok(VideoStats {
+            view_count: v.get("view_count").and_then(|x| x.as_i64()),
+            like_count: v.get("like_count").and_then(|x| x.as_i64()),
+        }),
+    }
 }

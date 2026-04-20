@@ -27,6 +27,10 @@ pub fn schedule_upload(
         video_url: None,
         upload_meta_json: Some(meta_json),
         created_at: now,
+        view_count: None,
+        like_count: None,
+        ctr_percent: None,
+        stats_updated_at: None,
     };
     db::insert_scheduled_upload(&conn, &row).map_err(|e| format!("DB error: {}", e))?;
     Ok(id)
@@ -130,21 +134,49 @@ pub(crate) fn process_due_uploads(handle: &tauri::AppHandle) -> Result<(), Strin
             }
         };
 
-        // Get clip output path
+        // Get clip output path — auto-export if missing/invalid so the
+        // scheduler can process Auto-ship uploads without a manual export step.
         let output_path = {
-            let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-            let clip = match db::get_clip_by_id(&conn, &upload.clip_id) {
-                Ok(Some(c)) => c,
-                _ => {
-                    db::update_scheduled_upload_status(&conn, &upload.id, "failed", Some("Clip not found"), None, None).ok();
-                    continue;
+            let clip = {
+                let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                match db::get_clip_by_id(&conn, &upload.clip_id) {
+                    Ok(Some(c)) => c,
+                    _ => {
+                        db::update_scheduled_upload_status(&conn, &upload.id, "failed", Some("Clip not found"), None, None).ok();
+                        continue;
+                    }
                 }
             };
             match social::validate_export_file(clip.output_path.as_deref()) {
                 Ok(p) => p.to_string(),
-                Err(e) => {
-                    db::update_scheduled_upload_status(&conn, &upload.id, "failed", Some(&format!("Export file: {}", e)), None, None).ok();
-                    continue;
+                Err(_missing) => {
+                    // No existing export — try to render one now. This is the
+                    // critical path for Auto-ship: user hasn't clicked Export,
+                    // but the scheduled upload is due and we have a clip row.
+                    log::info!(
+                        "[Scheduler] Clip {} has no ready export — auto-exporting before upload",
+                        upload.clip_id,
+                    );
+                    let _ = handle.emit("scheduled-upload-status", serde_json::json!({
+                        "id": upload.id, "status": "exporting", "clip_id": upload.clip_id, "platform": upload.platform,
+                    }));
+                    match tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(
+                            crate::commands::export::render_clip_by_id(&upload.clip_id)
+                        )
+                    }) {
+                        Ok(path) => path.to_string_lossy().to_string(),
+                        Err(e) => {
+                            let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                            db::update_scheduled_upload_status(
+                                &conn, &upload.id, "failed",
+                                Some(&format!("Auto-export failed: {}", e)),
+                                None, None,
+                            ).ok();
+                            log::error!("[Scheduler] Auto-export failed for {}: {}", upload.clip_id, e);
+                            continue;
+                        }
+                    }
                 }
             }
         };

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { Video, Download, Search, Eye, Tv, LogIn, Check, RotateCcw, RefreshCw, Trash2, X, Gamepad2, Plus, Play } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
 import { invoke } from '@tauri-apps/api/core'
+import ImportVodDialog from '../components/ImportVodDialog'
 
 function formatDuration(seconds: number) {
   const h = Math.floor(seconds / 3600)
@@ -54,6 +55,24 @@ const statusBadge: Record<string, string> = {
   failed: 'bg-red-500/20 text-red-400 border-red-500/30',
 }
 
+// Map analysis status → v4-vod-status class variant.
+function v4StatusClass(vod: { analysis_status: string; download_status: string }): string {
+  if (vod.analysis_status === 'completed') return 'done'
+  if (vod.analysis_status === 'analyzing') return 'analyzing'
+  if (vod.analysis_status === 'failed') return 'failed'
+  if (vod.download_status === 'downloading' || vod.download_status === 'downloaded') return 'queued'
+  return 'queued'
+}
+
+function v4StatusLabel(vod: { analysis_status: string; analysis_progress?: number; download_status: string; download_progress?: number }): string {
+  if (vod.analysis_status === 'completed') return 'COMPLETE'
+  if (vod.analysis_status === 'analyzing') return `ANALYZING · ${vod.analysis_progress ?? 0}%`
+  if (vod.analysis_status === 'failed') return 'FAILED · RETRY'
+  if (vod.download_status === 'downloading') return `DOWNLOADING · ${vod.download_progress ?? 0}%`
+  if (vod.download_status === 'downloaded') return 'READY TO ANALYZE'
+  return 'PENDING'
+}
+
 export default function Vods() {
   const { loggedInUser, vods, isLoading, checkLogin, fetchVods, refreshVods, removeVod, updateVod, removeClipsForVod } = useAppStore()
   const navigate = useNavigate()
@@ -65,6 +84,7 @@ export default function Vods() {
   const [editingGameId, setEditingGameId] = useState<string | null>(null)
   const [gameInput, setGameInput] = useState('')
   const [restoringVods, setRestoringVods] = useState(false)
+  const [showImportDialog, setShowImportDialog] = useState(false)
   const [detectionStats, setDetectionStats] = useState<Record<string, { candidatesFound: number; candidatesRejected: number; duplicatesSuppressed: number; clipsSelected: number; sensitivity: string }>>({})
 
   // Load detection stats for completed VODs
@@ -303,7 +323,12 @@ export default function Vods() {
   if (!loggedInUser) {
     return (
       <div className="space-y-6">
-        <h1 className="text-2xl font-bold text-white">VODs</h1>
+        <div className="v4-page-header">
+          <div>
+            <div className="v4-page-title">VODs 📺</div>
+            <div className="v4-page-sub">Connect Twitch to view and analyze your VODs</div>
+          </div>
+        </div>
         <div className="bg-surface-800 border border-surface-700 rounded-xl p-12 text-center">
           <div className="flex items-center justify-center w-16 h-16 rounded-2xl bg-violet-600/20 mx-auto mb-5">
             <Tv className="w-8 h-8 text-violet-400" />
@@ -326,15 +351,31 @@ export default function Vods() {
     )
   }
 
+  const vodsAnalyzing = vods.filter(v => v.analysis_status === 'analyzing').length
+  const vodsComplete = vods.filter(v => v.analysis_status === 'completed').length
+  const vodsFailed = vods.filter(v => v.analysis_status === 'failed').length
+
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-white">VODs</h1>
-        <div className="flex items-center gap-3">
+      <div className="v4-page-header">
+        <div>
+          <div className="v4-page-title">VODs 📺</div>
+          <div className="v4-page-sub">
+            {vods.length} total · {vodsAnalyzing} analyzing · {vodsComplete} completed{vodsFailed > 0 ? ` · ${vodsFailed} failed` : ''}
+          </div>
+        </div>
+        <div className="v4-page-actions">
+          <button
+            onClick={() => setShowImportDialog(true)}
+            className="v4-btn primary"
+            title="Import a Twitch VOD by pasting its URL"
+          >
+            📥 Import VOD
+          </button>
           <button
             onClick={handleRestoreDeletedVods}
             disabled={restoringVods}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-slate-300 bg-surface-700 border border-surface-600 rounded-lg hover:bg-surface-600 hover:text-white transition-colors cursor-pointer disabled:opacity-50"
+            className="v4-btn ghost"
             title="Re-fetch all VODs from Twitch, including previously deleted ones"
           >
             <Plus className="w-3.5 h-3.5" />
@@ -354,11 +395,11 @@ export default function Vods() {
       </div>
 
       {isLoading ? (
-        <div className="bg-surface-800 border border-surface-700 rounded-xl p-12 text-center">
+        <div className="v4-panel text-center p-12">
           <p className="text-slate-400 text-sm">Loading VODs...</p>
         </div>
       ) : vods.length === 0 ? (
-        <div className="bg-surface-800 border border-surface-700 rounded-xl p-12 text-center">
+        <div className="v4-panel text-center p-12">
           <Video className="w-12 h-12 text-slate-600 mx-auto mb-4" />
           <h3 className="text-lg font-medium text-white mb-2">No VODs found</h3>
           <p className="text-slate-400 text-sm">
@@ -366,28 +407,38 @@ export default function Vods() {
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="v4-vod-grid">
           {vods.map((vod) => (
-            <div
-              key={vod.id}
-              className="bg-surface-800 border border-surface-700 rounded-xl overflow-hidden flex flex-col"
-            >
+            <div key={vod.id} className="v4-vod-card flex flex-col">
               {/* Thumbnail */}
-              <div className="relative aspect-video bg-surface-700">
+              <div className="v4-vod-thumb" style={{height:150}}>
                 {vod.thumbnail_url ? (
                   <img
                     src={vod.thumbnail_url}
                     alt={vod.title}
-                    className="w-full h-full object-cover"
+                    className="w-full h-full object-cover absolute inset-0"
                   />
                 ) : (
-                  <div className="w-full h-full flex items-center justify-center">
-                    <Video className="w-8 h-8 text-slate-600" />
+                  <div className="w-full h-full flex items-center justify-center absolute inset-0">
+                    <Video className="w-8 h-8 text-white/40" />
                   </div>
                 )}
-                <span className="absolute bottom-2 right-2 bg-black/80 text-white text-xs px-1.5 py-0.5 rounded">
+                <span className={`v4-vod-status ${v4StatusClass(vod)}`}>
+                  {v4StatusLabel(vod)}
+                </span>
+                <span className="v4-vod-dur">
                   {formatDuration(vod.duration_seconds)}
                 </span>
+                {vod.analysis_status === 'analyzing' && (
+                  <div className="v4-vod-progress">
+                    <div className="v4-vod-progress-bar" style={{width:`${vod.analysis_progress || 0}%`}} />
+                  </div>
+                )}
+                {vod.download_status === 'downloading' && vod.analysis_status !== 'analyzing' && (
+                  <div className="v4-vod-progress">
+                    <div className="v4-vod-progress-bar" style={{width:`${vod.download_progress || 0}%`}} />
+                  </div>
+                )}
                 {/* Play/Download overlay on thumbnail */}
                 {vod.download_status === 'downloaded' ? (
                   <button
@@ -417,8 +468,8 @@ export default function Vods() {
               </div>
 
               {/* Info */}
-              <div className="p-4 flex-1 flex flex-col gap-3">
-                <h3 className="text-sm font-medium text-white line-clamp-2 leading-snug">
+              <div className="v4-vod-body flex-1 flex flex-col gap-3">
+                <h3 className="v4-vod-title" title={vod.title} style={{whiteSpace:'normal',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical' as any,overflow:'hidden'}}>
                   {vod.title}
                 </h3>
                 <p className="text-xs text-slate-500">{formatDate(vod.stream_date)}</p>
@@ -642,6 +693,10 @@ export default function Vods() {
           ))}
         </div>
       )}
+      <ImportVodDialog
+        open={showImportDialog}
+        onClose={() => setShowImportDialog(false)}
+      />
     </div>
   )
 }

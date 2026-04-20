@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Save, FolderOpen, Info, Brain, Check, Loader2, X, Zap, Eye, Sun, Moon, Bookmark, Pencil, Trash2, HardDrive, ExternalLink, Gauge, Tv, LogOut, Download, Mic, Cpu } from 'lucide-react'
+import { Save, FolderOpen, Info, Brain, Check, Loader2, X, Zap, Sun, Moon, Bookmark, Pencil, Trash2, HardDrive, ExternalLink, Gauge, Tv, LogOut, Download, Mic, Cpu } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import ConnectedAccounts from '../components/ConnectedAccounts'
@@ -9,6 +9,7 @@ import { useAppStore } from '../stores/appStore'
 import { useUiStore } from '../stores/uiStore'
 import { useTemplateStore } from '../stores/templateStore'
 import { CAPTION_STYLES, EXPORT_PRESETS } from '../lib/editTypes'
+import { version as appVersion } from '../../package.json'
 
 const PROVIDERS: AiProvider[] = ['free', 'openai', 'claude', 'gemini']
 
@@ -40,11 +41,11 @@ function TemplateManager() {
   }
 
   return (
-    <section className="bg-surface-800 border border-surface-700 rounded-xl p-6">
-      <div className="flex items-center gap-2 mb-1">
-        <Bookmark className="w-5 h-5 text-violet-400" />
-        <h2 className="text-lg font-semibold text-white">Clip Templates</h2>
-      </div>
+    <section className="v4-section">
+      <h3 className="v4-section-label">
+        <Bookmark className="w-3.5 h-3.5 inline-block mr-1.5 text-violet-400" style={{verticalAlign: -2}} />
+        Clip Templates
+      </h3>
       <p className="text-sm text-slate-400 mb-5">
         Manage your saved editor presets. Built-in templates cannot be modified.
       </p>
@@ -157,6 +158,7 @@ export default function SettingsPage() {
   const [openingFolder, setOpeningFolder] = useState<string | null>(null)
   const [sensitivity, setSensitivity] = useState<'low' | 'medium' | 'high'>('medium')
   const [sensitivitySaved, setSensitivitySaved] = useState(false)
+  const [useCommunityClips, setUseCommunityClips] = useState(true)
 
   // Transcription model state
   const [modelStatus, setModelStatus] = useState<{ base: { downloaded: boolean }; medium: { downloaded: boolean } } | null>(null)
@@ -189,6 +191,8 @@ export default function SettingsPage() {
         setStoragePaths(paths)
         const sens = await invoke<string | null>('get_setting', { key: 'detection_sensitivity' })
         if (sens === 'low' || sens === 'high') setSensitivity(sens)
+        const communityRaw = await invoke<string | null>('get_setting', { key: 'use_twitch_community_clips' })
+        if (communityRaw === 'false') setUseCommunityClips(false)
       } catch (error) { console.error('Settings load failed:', error) }
       // Load whisper model status (separate try/catch so earlier failures don't block it)
       try {
@@ -282,82 +286,104 @@ export default function SettingsPage() {
     }
   }
 
-  const inputCls = "w-full px-4 py-2.5 bg-surface-900 border border-surface-600 rounded-lg text-white text-sm placeholder-slate-500 focus:outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500"
+  const inputCls = "v4-input"
   const btnCls = "flex items-center gap-2 px-5 py-2.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors cursor-pointer"
 
   return (
-    <div className="space-y-8 max-w-2xl">
-      <h1 className="text-2xl font-bold text-white">Settings</h1>
+    <div className="space-y-6 max-w-3xl">
+      <div className="v4-page-header">
+        <div>
+          <div className="v4-page-title">Settings ⚙</div>
+          <div className="v4-page-sub">Connect platforms, configure AI, set detection sensitivity</div>
+        </div>
+      </div>
 
       {/* Twitch Account */}
-      <section className="bg-surface-800 border border-surface-700 rounded-xl p-6">
-        <div className="flex items-center gap-2 mb-1">
-          <Tv className="w-5 h-5 text-violet-400" />
-          <h2 className="text-lg font-semibold text-white">Twitch Account</h2>
-        </div>
-        <p className="text-sm text-slate-400 mb-5">
-          Connect your Twitch account to fetch VODs and analyze streams.
-        </p>
-        {loggedInUser ? (
-          <div className="space-y-3">
-            <div className="flex items-center gap-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-4 py-3">
-              {loggedInUser.profile_image_url && (
-                <img src={loggedInUser.profile_image_url} alt="" className="w-8 h-8 rounded-full" />
-              )}
-              <div className="flex-1">
-                <p className="text-sm text-white font-medium">{loggedInUser.display_name}</p>
-                <p className="text-xs text-emerald-400">Connected</p>
+      <section className="v4-section">
+        <h3 className="v4-section-label">Connected accounts</h3>
+
+        {/* Twitch row */}
+        <div className="v4-setting-row">
+          <div className="v4-setting-info flex items-center gap-2.5">
+            <span
+              className="w-6 h-6 rounded-md flex items-center justify-center text-[11px] font-bold shrink-0"
+              style={{background: 'rgba(145,70,255,0.15)', color: '#9146FF', border: '1px solid rgba(145,70,255,0.4)'}}
+            >
+              {loggedInUser?.profile_image_url ? (
+                <img src={loggedInUser.profile_image_url} alt="" className="w-full h-full rounded-md object-cover" />
+              ) : '🟣'}
+            </span>
+            <div className="min-w-0">
+              <div className="v4-setting-name flex items-center gap-2">
+                <Tv className="w-3.5 h-3.5 text-violet-400" />
+                Twitch
               </div>
-              <button
-                onClick={twitchLogout}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-surface-900 border border-surface-600 rounded-lg text-xs text-slate-300 hover:text-red-400 hover:border-red-500/40 transition-colors cursor-pointer"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                Disconnect
-              </button>
+              <div className="v4-setting-desc">
+                {loggedInUser
+                  ? `@${loggedInUser.twitch_login} · VODs fetched automatically`
+                  : 'Connect to fetch VODs and analyze streams'}
+              </div>
             </div>
           </div>
-        ) : (
-          <button
-            onClick={twitchLogin}
-            disabled={twitchLoading}
-            className={btnCls}
-          >
-            {twitchLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Tv className="w-4 h-4" />}
-            {twitchLoading ? 'Connecting...' : 'Connect Twitch'}
-          </button>
-        )}
+          {loggedInUser ? (
+            <div className="flex items-center gap-2">
+              <span className="v4-connected-pill">● CONNECTED</span>
+              <Tooltip text="Disconnect your Twitch account" position="left">
+                <button
+                  onClick={twitchLogout}
+                  className="v4-btn ghost"
+                  style={{padding: '6px 12px', fontSize: 12}}
+                >
+                  <LogOut className="w-3 h-3" />
+                  Disconnect
+                </button>
+              </Tooltip>
+            </div>
+          ) : (
+            <button
+              onClick={twitchLogin}
+              disabled={twitchLoading}
+              className="v4-btn primary"
+              style={{padding: '6px 12px', fontSize: 12}}
+            >
+              {twitchLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Tv className="w-3 h-3" />}
+              {twitchLoading ? 'Connecting...' : 'Connect'}
+            </button>
+          )}
+        </div>
+
+        {/* YouTube / TikTok / Instagram rows */}
+        <ConnectedAccounts />
+
+        {/* TikTok reconnect notice — view-count refresh needs the video.list scope */}
+        <div className="v4-tip mt-3" style={{fontSize: 11}}>
+          ℹ <b>If TikTok is connected</b>, disconnect and reconnect once to grant the
+          new <code className="text-violet-300">video.list</code> permission. Required for
+          view-count refresh on the Analytics page.
+        </div>
       </section>
 
       {/* AI Provider */}
-      <section className="bg-surface-800 border border-surface-700 rounded-xl p-6">
-        <div className="flex items-center gap-2 mb-1">
-          <Brain className="w-5 h-5 text-violet-400" />
-          <h2 className="text-lg font-semibold text-white">AI Provider</h2>
-        </div>
-        <p className="text-sm text-slate-400 mb-5">
-          Free mode is always available. BYOK only improves generation quality.
-        </p>
-
-        {/* Current status */}
-        <div className={`flex items-center justify-between px-3 py-2 rounded-lg border mb-4 ${
-          ai.isMisconfigured()
-            ? 'bg-amber-500/10 border-amber-500/30'
-            : ai.effectiveMode() !== 'free'
-              ? 'bg-emerald-500/10 border-emerald-500/30'
-              : 'bg-surface-900 border-surface-600'
-        }`}>
-          <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full shrink-0 ${
-              ai.isMisconfigured() ? 'bg-amber-400' : ai.effectiveMode() === 'free' ? 'bg-slate-500' : 'bg-emerald-400'
-            }`} />
-            <span className={`text-xs ${
-              ai.isMisconfigured() ? 'text-amber-400' : ai.effectiveMode() !== 'free' ? 'text-emerald-400' : 'text-slate-400'
-            }`}>{ai.statusText()}</span>
+      <section className="v4-section">
+        <h3 className="v4-section-label">🧠 AI Provider (BYOK)</h3>
+        <div className="v4-setting-row">
+          <div className="v4-setting-info">
+            <div className="v4-setting-name flex items-center gap-2">
+              <Brain className="w-4 h-4 text-violet-400" />
+              {PROVIDER_META[s.provider].name}
+            </div>
+            <div className="v4-setting-desc">
+              {ai.statusText()}
+              {ai.effectiveMode() !== 'free' && ' · Usage billed through your API provider'}
+            </div>
           </div>
-          {ai.effectiveMode() !== 'free' && (
-            <span className="text-[9px] text-slate-500">Usage billed through your API provider</span>
-          )}
+          <span
+            className={`v4-connected-pill ${
+              ai.isMisconfigured() ? 'offline' : ai.effectiveMode() === 'free' ? 'idle' : ''
+            }`}
+          >
+            ● {ai.isMisconfigured() ? 'MISCONFIGURED' : ai.effectiveMode() === 'free' ? 'IDLE' : 'ACTIVE'}
+          </span>
         </div>
 
         {/* Provider selector */}
@@ -513,65 +539,12 @@ export default function SettingsPage() {
         </button>
       </section>
 
-      {/* UI Preferences */}
-      <section className="bg-surface-800 border border-surface-700 rounded-xl p-6">
-        <div className="flex items-center gap-2 mb-1">
-          <Eye className="w-5 h-5 text-violet-400" />
-          <h2 className="text-lg font-semibold text-white">UI Preferences</h2>
-        </div>
-        <p className="text-sm text-slate-400 mb-5">
-          Customize how the interface looks and behaves.
-        </p>
-        <Tooltip text="Turn off hover tooltips once you're familiar with the app" position="right">
-          <label className="flex items-center gap-3 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={ui.settings.showTooltips}
-              onChange={e => ui.update({ showTooltips: e.target.checked })}
-              className="w-4 h-4 rounded border-surface-600 bg-surface-900 text-violet-500 focus:ring-violet-500"
-            />
-            <div>
-              <span className="text-sm text-slate-300">Show Tooltips</span>
-              <p className="text-[10px] text-slate-500">Display helpful descriptions when hovering over buttons and controls</p>
-            </div>
-          </label>
-        </Tooltip>
-
-        {/* Theme toggle */}
-        <div className="mt-5 pt-5 border-t border-surface-700">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              {ui.settings.theme === 'dark' ? <Moon className="w-4 h-4 text-violet-400" /> : <Sun className="w-4 h-4 text-amber-400" />}
-              <div>
-                <span className="text-sm text-slate-300">Theme</span>
-                <p className="text-[10px] text-slate-500">Switch between dark and light color schemes</p>
-              </div>
-            </div>
-            <Tooltip text={`Switch to ${ui.settings.theme === 'dark' ? 'light' : 'dark'} mode`} position="left">
-              <button
-                onClick={() => ui.update({ theme: ui.settings.theme === 'dark' ? 'light' : 'dark' })}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-surface-900 border border-surface-600 text-sm text-slate-300 hover:text-white hover:border-surface-500 transition-colors cursor-pointer"
-              >
-                {ui.settings.theme === 'dark' ? (
-                  <><Sun className="w-3.5 h-3.5" /> Light</>
-                ) : (
-                  <><Moon className="w-3.5 h-3.5" /> Dark</>
-                )}
-              </button>
-            </Tooltip>
-          </div>
-        </div>
-      </section>
-
-      {/* Clip Templates */}
-      <TemplateManager />
-
-      {/* Clip Detection Sensitivity */}
-      <section className="bg-surface-800 border border-surface-700 rounded-xl p-6">
-        <div className="flex items-center gap-2 mb-1">
-          <Gauge className="w-5 h-5 text-violet-400" />
-          <h2 className="text-lg font-semibold text-white">Detection Sensitivity</h2>
-        </div>
+      {/* Detection */}
+      <section className="v4-section">
+        <h3 className="v4-section-label">
+          <Gauge className="w-3.5 h-3.5 inline-block mr-1.5 text-violet-400" style={{verticalAlign: -2}} />
+          Detection
+        </h3>
         <p className="text-sm text-slate-400 mb-5">
           Controls how many clips are found during VOD analysis. Higher sensitivity catches more subtle moments.
         </p>
@@ -603,18 +576,71 @@ export default function SettingsPage() {
           ))}
         </div>
         {sensitivitySaved && (
-          <div className="flex items-center gap-1.5 text-xs text-emerald-400">
+          <div className="flex items-center gap-1.5 text-xs text-emerald-400 mb-2">
             <Check className="w-3.5 h-3.5" /> Saved — applies to next analysis
           </div>
         )}
+
+        {/* Use Twitch community clips as a detection signal */}
+        <div className="v4-setting-row">
+          <div className="v4-setting-info">
+            <div className="v4-setting-name">Use Twitch community clips</div>
+            <div className="v4-setting-desc">
+              Boost highlights where viewers already made a Twitch clip. Human-curated signal · no extra scope needed.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={async () => {
+              const next = !useCommunityClips
+              setUseCommunityClips(next)
+              try {
+                await invoke('save_setting', { key: 'use_twitch_community_clips', value: next ? 'true' : 'false' })
+              } catch { /* best effort */ }
+            }}
+            className={`v4-toggle ${useCommunityClips ? 'on' : ''}`}
+            aria-label="Toggle Twitch community clip signal"
+            aria-pressed={useCommunityClips}
+          />
+        </div>
+
+        {/* Auto-ship high-confidence */}
+        <div className="v4-setting-row">
+          <div className="v4-setting-info">
+            <div className="v4-setting-name">Auto-ship high-confidence</div>
+            <div className="v4-setting-desc">Ship clips scoring 90%+ without review</div>
+          </div>
+          <button
+            type="button"
+            onClick={() => ui.update({ autoShipHighConfidence: !ui.settings.autoShipHighConfidence })}
+            className={`v4-toggle ${ui.settings.autoShipHighConfidence ? 'on' : ''}`}
+            aria-label="Toggle auto-ship high-confidence clips"
+            aria-pressed={ui.settings.autoShipHighConfidence}
+          />
+        </div>
+
+        {/* Use GPU (CUDA) */}
+        <div className="v4-setting-row">
+          <div className="v4-setting-info">
+            <div className="v4-setting-name">Use GPU (CUDA)</div>
+            <div className="v4-setting-desc">Faster transcription · requires CUDA 12</div>
+          </div>
+          <button
+            type="button"
+            onClick={() => ui.update({ useGpu: !ui.settings.useGpu })}
+            className={`v4-toggle ${ui.settings.useGpu ? 'on' : ''}`}
+            aria-label="Toggle GPU acceleration"
+            aria-pressed={ui.settings.useGpu}
+          />
+        </div>
       </section>
 
       {/* Transcription Model */}
-      <section className="bg-surface-800 border border-surface-700 rounded-xl p-6">
-        <div className="flex items-center gap-2 mb-1">
-          <Mic className="w-5 h-5 text-violet-400" />
-          <h2 className="text-lg font-semibold text-white">Transcription Model</h2>
-        </div>
+      <section className="v4-section">
+        <h3 className="v4-section-label">
+          <Mic className="w-3.5 h-3.5 inline-block mr-1.5 text-violet-400" style={{verticalAlign: -2}} />
+          Transcription Model
+        </h3>
         <p className="text-sm text-slate-400 mb-5">
           Choose which AI model is used for speech recognition during VOD analysis.
         </p>
@@ -796,75 +822,109 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      {/* Connected Platforms */}
-      <section className="bg-surface-800 border border-surface-700 rounded-xl p-6">
-        <h2 className="text-lg font-semibold text-white mb-1">Publishing Accounts</h2>
-        <p className="text-sm text-slate-400 mb-5">
-          Connect your social accounts to publish clips directly from ClipGoblin.
-        </p>
-        <ConnectedAccounts />
-      </section>
+      {/* Storage */}
+      <section className="v4-section">
+        <h3 className="v4-section-label">
+          <HardDrive className="w-3.5 h-3.5 inline-block mr-1.5 text-violet-400" style={{verticalAlign: -2}} />
+          Storage
+        </h3>
 
-      {/* Download Location */}
-      <section className="bg-surface-800 border border-surface-700 rounded-xl p-6">
-        <h2 className="text-lg font-semibold text-white mb-1">Download Location</h2>
-        <p className="text-sm text-slate-400 mb-5">Choose where downloaded VODs are saved.</p>
-        <div className="flex items-center gap-3">
-          <FolderOpen className="w-4 h-4 text-slate-400 shrink-0" />
-          <span className="text-slate-400 truncate font-mono text-xs flex-1 min-w-0">{downloadDir}</span>
+        {/* VOD download path */}
+        <div className="v4-setting-row">
+          <div className="v4-setting-info">
+            <div className="v4-setting-name">VOD download path</div>
+            <div className="v4-setting-desc font-mono truncate" title={downloadDir}>
+              {downloadDir || '—'}
+            </div>
+          </div>
           <button onClick={handleBrowseFolder}
-            className="flex items-center gap-2 px-4 py-2.5 bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium rounded-lg transition-colors cursor-pointer shrink-0">
-            Browse
+            className="v4-btn"
+            style={{padding: '6px 12px', fontSize: 12}}
+          >
+            <FolderOpen className="w-3 h-3" />
+            Change
           </button>
         </div>
+
+        {/* Storage locations — Exports, Downloads, App Data */}
+        {([
+          { label: 'Exports folder', desc: 'Rendered clips ready to upload or share', path: storagePaths?.exportsDir },
+          { label: 'Downloads folder', desc: 'Downloaded Twitch VODs', path: storagePaths?.downloadsDir },
+          { label: 'App data folder', desc: 'Database, thumbnails, transcripts, captions', path: storagePaths?.dataDir },
+        ] as const).map(({ label, desc, path }) => (
+          <div key={label} className="v4-setting-row">
+            <div className="v4-setting-info">
+              <div className="v4-setting-name">{label}</div>
+              <div className="v4-setting-desc">
+                {desc}
+                {path && <span className="font-mono block text-slate-600 mt-0.5 truncate" title={path}>{path}</span>}
+              </div>
+            </div>
+            <button
+              onClick={() => path && handleOpenFolder(path)}
+              disabled={!path || openingFolder === path}
+              className="v4-btn"
+              style={{padding: '6px 12px', fontSize: 12}}
+            >
+              {openingFolder === path ? <Loader2 className="w-3 h-3 animate-spin" /> : <ExternalLink className="w-3 h-3" />}
+              Open
+            </button>
+          </div>
+        ))}
       </section>
 
-      {/* Storage Locations */}
-      <section className="bg-surface-800 border border-surface-700 rounded-xl p-6">
-        <div className="flex items-center gap-2 mb-1">
-          <HardDrive className="w-5 h-5 text-violet-400" />
-          <h2 className="text-lg font-semibold text-white">Storage Locations</h2>
+      {/* UI Preferences */}
+      <section className="v4-section">
+        <h3 className="v4-section-label">👁 UI Preferences</h3>
+        <div className="v4-setting-row">
+          <div className="v4-setting-info">
+            <div className="v4-setting-name">Show Tooltips</div>
+            <div className="v4-setting-desc">Display helpful descriptions when hovering over buttons and controls</div>
+          </div>
+          <button
+            type="button"
+            onClick={() => ui.update({ showTooltips: !ui.settings.showTooltips })}
+            className={`v4-toggle ${ui.settings.showTooltips ? 'on' : ''}`}
+            aria-label="Toggle tooltips"
+          />
         </div>
-        <p className="text-sm text-slate-400 mb-5">
-          Open the folders where ClipGoblin stores your files.
-        </p>
-        <div className="space-y-3">
-          {([
-            { label: 'Open Exports Folder', desc: 'Rendered clips ready to upload or share', path: storagePaths?.exportsDir },
-            { label: 'Open Downloads Folder', desc: 'Downloaded Twitch VODs', path: storagePaths?.downloadsDir },
-            { label: 'Open App Data Folder', desc: 'Database, thumbnails, transcripts, captions', path: storagePaths?.dataDir },
-          ] as const).map(({ label, desc, path }) => (
-            <div key={label} className="flex items-center gap-3 bg-surface-900 rounded-lg px-4 py-3">
-              <div className="flex-1 min-w-0">
-                <span className="text-sm text-slate-300">{label}</span>
-                <p className="text-[10px] text-slate-500 mt-0.5">{desc}</p>
-                {path && (
-                  <p className="text-[10px] text-slate-600 font-mono mt-1 truncate" title={path}>{path}</p>
-                )}
-              </div>
-              <button
-                onClick={() => path && handleOpenFolder(path)}
-                disabled={!path || openingFolder === path}
-                className="flex items-center gap-1.5 px-3 py-2 bg-surface-800 border border-surface-600 rounded-lg text-xs text-slate-300 hover:text-white hover:border-violet-500/40 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
-              >
-                {openingFolder === path ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ExternalLink className="w-3.5 h-3.5" />}
-                Open
-              </button>
+        <div className="v4-setting-row">
+          <div className="v4-setting-info flex items-center gap-3">
+            {ui.settings.theme === 'dark'
+              ? <Moon className="w-4 h-4 text-violet-400 shrink-0" />
+              : <Sun className="w-4 h-4 text-amber-400 shrink-0" />}
+            <div>
+              <div className="v4-setting-name">Theme</div>
+              <div className="v4-setting-desc">Switch between dark and light color schemes</div>
             </div>
-          ))}
+          </div>
+          <Tooltip text={`Switch to ${ui.settings.theme === 'dark' ? 'light' : 'dark'} mode`} position="left">
+            <button
+              onClick={() => ui.update({ theme: ui.settings.theme === 'dark' ? 'light' : 'dark' })}
+              className="v4-btn"
+              style={{padding: '6px 12px', fontSize: 12}}
+            >
+              {ui.settings.theme === 'dark'
+                ? <><Sun className="w-3 h-3" /> Light</>
+                : <><Moon className="w-3 h-3" /> Dark</>}
+            </button>
+          </Tooltip>
         </div>
       </section>
+
+      {/* Clip Templates */}
+      <TemplateManager />
 
       {/* About */}
-      <section className="bg-surface-800 border border-surface-700 rounded-xl p-6">
-        <h2 className="text-lg font-semibold text-white mb-1">About</h2>
+      <section className="v4-section">
+        <h3 className="v4-section-label">ℹ About</h3>
         <p className="text-sm text-slate-400 mb-4">
           ClipGoblin is a Twitch stream clip generator powered by AI analysis.
         </p>
         <div className="space-y-2 text-sm">
           <div className="flex gap-2">
             <span className="text-slate-300">Version:</span>
-            <span className="text-slate-400">1.0.0</span>
+            <span className="text-slate-400">{appVersion}</span>
           </div>
           <div className="flex gap-2">
             <span className="text-slate-300">Built with:</span>

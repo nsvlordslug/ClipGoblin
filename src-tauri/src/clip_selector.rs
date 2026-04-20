@@ -28,7 +28,22 @@ pub struct RawSignal {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum SignalSource { Audio, Transcript, Chat }
+pub enum SignalSource { Audio, Transcript, Chat, Community }
+
+/// A community-created Twitch clip associated with this VOD. Used as a
+/// human-curated detection signal: if multiple viewers clipped a moment,
+/// it's almost certainly worth surfacing.
+#[derive(Clone, Debug)]
+pub struct CommunityClip {
+    /// Seconds into the VOD where the clip starts.
+    pub vod_offset_seconds: f64,
+    /// Clip length in seconds (usually 5-60).
+    pub duration_seconds: f64,
+    /// Number of views on the clip itself — strong signal of quality.
+    pub view_count: i64,
+    /// Optional: the clipper's chosen title. Used for display only, not scoring.
+    pub title: String,
+}
 
 /// Multi-signal moment after fusion.
 #[derive(Clone, Debug)]
@@ -279,6 +294,32 @@ pub fn generate_chat_candidates(chat_peaks: &[db::HighlightRow]) -> Vec<RawSigna
     }).collect()
 }
 
+/// Convert community-created Twitch clips into detection signals. Each clip's
+/// center timestamp becomes a RawSignal with intensity scaled by view count.
+///
+/// Intensity curve: log(views + 1) / log(1000), clamped to [0.45, 1.0].
+/// This means:
+///   1 view    → 0.45  (floor — still a strong human signal, just not viral)
+///   10 views  → 0.45
+///   50 views  → 0.57
+///   200 views → 0.77
+///   1k+ views → 1.0   (ceiling)
+pub fn generate_community_candidates(clips: &[CommunityClip]) -> Vec<RawSignal> {
+    clips.iter().map(|c| {
+        let raw = ((c.view_count as f64 + 1.0).ln() / 1000.0_f64.ln()).clamp(0.45, 1.0);
+        RawSignal {
+            // Center the signal mid-clip so the fusion window catches nearby
+            // audio/chat/transcript peaks.
+            center: c.vod_offset_seconds + c.duration_seconds / 2.0,
+            intensity: raw,
+            source: SignalSource::Community,
+            tags: vec!["community-clip".to_string(), "viewer-validated".to_string()],
+            transcript_snippet: if c.title.is_empty() { None } else { Some(c.title.clone()) },
+            spike_delta: 0.0,
+        }
+    }).collect()
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Stage 2: Signal fusion
 // ═══════════════════════════════════════════════════════════════════════
@@ -336,6 +377,8 @@ pub fn analyze_emotional_spike(m: &FusedMoment, audio: Option<&AudioContext>) ->
     else if has("hype") || has("excitement") { score += 0.15; }
     if let Some(a) = audio { if a.intensity_in_range(m.center - 1.0, m.center + 2.0) > a.avg_rms * 2.0 { score += 0.10; } }
     if m.transcript_snippet.is_some() { score += 0.03; }
+    // Community validation boost — viewers thought this was clip-worthy.
+    if has("community-clip") { score += 0.12; }
     score.min(1.0)
     // TODO(v2): facial expression recognition
 }
@@ -347,6 +390,8 @@ pub fn analyze_payoff_clarity(m: &FusedMoment) -> f64 {
     let has = |tag: &str| m.tags.iter().any(|t| t == tag);
     if has("jumpscare") || has("scream") { score += 0.12; }
     if has("shock") || has("panic") { score += 0.08; }
+    // Community signal implies a concrete payoff viewers recognized.
+    if has("community-clip") { score += 0.10; }
     score.min(1.0)
     // TODO(v2): game state detection (kill feeds, objectives)
 }
@@ -847,6 +892,7 @@ pub fn select_clips(
     audio: Option<&AudioContext>,
     transcript: Option<&TranscriptResult>,
     chat_peaks: &[db::HighlightRow],
+    community_clips: &[CommunityClip],
     duration: f64,
     sensitivity: &str,
 ) -> (Vec<ClipCandidate>, DetectionStats) {
@@ -867,6 +913,11 @@ pub fn select_clips(
     let cs = generate_chat_candidates(chat_peaks);
     if !cs.is_empty() { log::info!("Clip selector: {} chat candidates", cs.len()); }
     all_signals.extend(cs);
+    let community = generate_community_candidates(community_clips);
+    if !community.is_empty() {
+        log::info!("Clip selector: {} community clip candidates", community.len());
+    }
+    all_signals.extend(community);
     if all_signals.is_empty() {
         log::warn!("Clip selector: no candidates");
         let stats = DetectionStats {

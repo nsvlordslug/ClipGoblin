@@ -28,14 +28,16 @@ export default function Results() {
       <ProgressOverlay progress={progress} analyzing={analyzing} />
 
       {/* Header */}
-      <div className="mb-6">
-        <h1 className="text-xl font-bold text-white">Results</h1>
-        <p className="text-sm text-surface-400 mt-0.5">
-          {clips.length} clip{clips.length !== 1 ? 's' : ''} found
-          {result && result.signals_used.length > 0 && (
-            <> &middot; {result.signals_used.join(' + ')}</>
-          )}
-        </p>
+      <div className="v4-page-header">
+        <div>
+          <div className="v4-page-title">Results ✨</div>
+          <div className="v4-page-sub">
+            {clips.length} clip{clips.length !== 1 ? 's' : ''} found
+            {result && result.signals_used.length > 0 && (
+              <> &middot; {result.signals_used.join(' + ')}</>
+            )}
+          </div>
+        </div>
       </div>
 
       {clips.length === 0 ? (

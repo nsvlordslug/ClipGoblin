@@ -154,13 +154,13 @@ fn extract_pcm_audio(audio_path: &str, ffmpeg: &PathBuf) -> Result<Vec<f32>, Str
 ///
 /// - `audio_path`: path to the media file (ffmpeg extracts audio)
 /// - `model`: which whisper model to use
+/// - `use_gpu`: whether to allow GPU acceleration. Pass `false` to force CPU
+///   even on a CUDA-capable machine — respects the user's UI toggle.
 /// - `on_progress`: callback with percentage (0–100)
-///
-/// CUDA/GPU acceleration is handled automatically by whisper-rs when
-/// the `cuda` feature is enabled and CUDA runtime is available.
 pub fn transcribe<F>(
     audio_path: &str,
     model: WhisperModel,
+    use_gpu: bool,
     on_progress: F,
 ) -> Result<TranscriptResult, String>
 where
@@ -200,10 +200,16 @@ where
     progress_fn(15);
 
     // 3. Load whisper model
-    log::info!("[Whisper] Loading model: {}", mpath.display());
+    log::info!(
+        "[Whisper] Loading model: {} (GPU={})",
+        mpath.display(),
+        if use_gpu { "enabled" } else { "disabled" },
+    );
+    let mut params = WhisperContextParameters::default();
+    params.use_gpu = use_gpu;
     let ctx = WhisperContext::new_with_params(
         mpath.to_str().ok_or("Invalid model path encoding")?,
-        WhisperContextParameters::default(),
+        params,
     )
     .map_err(|e| format!("Failed to load whisper model: {}", e))?;
 

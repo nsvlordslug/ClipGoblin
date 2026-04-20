@@ -483,3 +483,83 @@ pub fn parse_duration(duration: &str) -> i64 {
 
     total
 }
+
+// ── Community clips ────────────────────────────────────────────────────
+
+/// Raw clip record from the `/helix/clips` endpoint. Only the fields we need.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct TwitchCommunityClip {
+    /// VOD the clip was cut from. Some clips aren't tied to a VOD (null).
+    #[serde(default)]
+    pub video_id: Option<String>,
+    /// Seconds from the VOD start where the clip begins. Can be null for
+    /// clips made from old VODs or during live streams before the VOD rendered.
+    #[serde(default)]
+    pub vod_offset: Option<i64>,
+    /// Clip length in seconds (float — e.g. 27.6).
+    #[serde(default)]
+    pub duration: f64,
+    /// How many times the clip was viewed — our strongest quality signal.
+    #[serde(default)]
+    pub view_count: i64,
+    #[serde(default)]
+    pub title: String,
+}
+
+/// Fetch every community-created clip cut from the given broadcaster between
+/// `started_at` and `ended_at` (RFC3339 timestamps). Paginates up to ~600
+/// clips (6 pages × 100) — more than enough for a single streaming session.
+///
+/// Returns only clips that are tied to a specific VOD (`video_id` set) and
+/// that have a `vod_offset` — clips without offsets can't be mapped to a
+/// timeline position.
+///
+/// Uses the user's existing access token — no additional scope required.
+/// The `/helix/clips` endpoint is accessible with any authenticated call.
+pub async fn fetch_community_clips(
+    access_token: &str,
+    broadcaster_id: &str,
+    started_at: &str,
+    ended_at: &str,
+) -> Result<Vec<TwitchCommunityClip>, String> {
+    let mut all: Vec<TwitchCommunityClip> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let max_pages = 6;
+
+    for _ in 0..max_pages {
+        let mut url = format!(
+            "https://api.twitch.tv/helix/clips?broadcaster_id={}&started_at={}&ended_at={}&first=100",
+            broadcaster_id, started_at, ended_at
+        );
+        if let Some(c) = &cursor {
+            url.push_str(&format!("&after={}", c));
+        }
+
+        let body = curl_twitch_get(&url, access_token).await
+            .map_err(|e| format!("helix/clips: {}", e))?;
+
+        let resp: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| format!("helix/clips parse: {}", e))?;
+
+        if let Some(status) = resp.get("status") {
+            let msg = resp.get("message").and_then(|m| m.as_str()).unwrap_or("");
+            return Err(format!("Twitch API {}: {}", status, msg));
+        }
+
+        if let Some(arr) = resp["data"].as_array() {
+            for v in arr {
+                if let Ok(clip) = serde_json::from_value::<TwitchCommunityClip>(v.clone()) {
+                    // Keep only VOD-anchored clips with a resolvable timeline position.
+                    if clip.video_id.is_some() && clip.vod_offset.is_some() {
+                        all.push(clip);
+                    }
+                }
+            }
+        }
+
+        cursor = resp["pagination"]["cursor"].as_str().map(|s| s.to_string());
+        if cursor.is_none() || cursor.as_deref() == Some("") { break; }
+    }
+
+    Ok(all)
+}

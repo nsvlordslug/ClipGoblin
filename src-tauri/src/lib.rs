@@ -66,12 +66,12 @@ use commands::settings::{
 use commands::social::{
     connect_platform, disconnect_platform, get_connected_account,
     get_all_connected_accounts, upload_to_platform, get_upload_status,
-    get_clip_upload_history, restore_deleted_vods,
+    get_clip_upload_history, restore_deleted_vods, refresh_upload_stats,
 };
 use commands::vod::{
     download_vod, get_cached_vods, analyze_vod, open_vod, get_vods,
     get_highlights, get_all_highlights, get_clips, delete_clip,
-    refresh_vod_metadata, set_clip_game, set_clip_title, set_clip_publish_meta,
+    refresh_vod_metadata, import_vod_by_url, get_stream_status, set_clip_game, set_clip_title, set_clip_publish_meta,
     set_vod_game, delete_vod_file, delete_vod_and_clips, get_vod_disk_usage,
     get_vod_detail, set_vod_analysis_status, save_clip_performance,
     get_clip_performance, get_creator_profile, update_scoring_from_performance,
@@ -116,7 +116,8 @@ pub fn run() {
         }).build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init());
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init());
 
     #[cfg(feature = "standalone")]
     {
@@ -172,6 +173,7 @@ pub fn run() {
             get_upload_status,
             get_clip_upload_history,
             restore_deleted_vods,
+            refresh_upload_stats,
             schedule_upload,
             list_scheduled_uploads,
             get_scheduled_uploads_for_clip,
@@ -180,6 +182,8 @@ pub fn run() {
             open_url,
             save_clip_to_disk,
             refresh_vod_metadata,
+            import_vod_by_url,
+            get_stream_status,
             set_clip_game,
             set_clip_title,
             set_clip_publish_meta,

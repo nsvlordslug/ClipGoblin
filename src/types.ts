@@ -84,4 +84,12 @@ export interface ScheduledUpload {
   video_url: string | null
   upload_meta_json: string | null
   created_at: string
+  /** Views reported by the platform's API. null = never fetched. */
+  view_count?: number | null
+  /** Likes reported by the platform. null = never fetched or platform doesn't expose this. */
+  like_count?: number | null
+  /** Click-through rate as a percentage (0-100). YouTube-only. */
+  ctr_percent?: number | null
+  /** ISO8601 timestamp of the last successful stats refresh. */
+  stats_updated_at?: string | null
 }
