@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Downloading ClipGoblin…</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: #0a0516;
+      color: #e8e3f5;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      text-align: center;
+      padding: 24px;
+    }
+    h1 { font-size: 22px; margin: 0 0 8px; font-weight: 600; }
+    p { color: #b8b0cc; font-size: 14px; margin: 0 0 16px; line-height: 1.6; max-width: 480px; }
+    .spinner {
+      width: 32px; height: 32px;
+      border: 3px solid #2a1f44;
+      border-top-color: #a78bfa;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-bottom: 24px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    a { color: #a78bfa; }
+    .fallback { margin-top: 16px; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="spinner" id="spin"></div>
+  <h1 id="heading">Preparing your download…</h1>
+  <p id="status">Fetching the latest ClipGoblin installer from GitHub.</p>
+  <p class="fallback">
+    Not redirecting? <a id="fallback-link" href="https://github.com/nsvlordslug/ClipGoblin/releases/latest">Pick a download manually</a>.
+  </p>
+
+  <script>
+    (async () => {
+      const heading = document.getElementById('heading');
+      const status = document.getElementById('status');
+      const spin = document.getElementById('spin');
+      const fallbackLink = document.getElementById('fallback-link');
+
+      try {
+        const res = await fetch('https://api.github.com/repos/nsvlordslug/ClipGoblin/releases/latest', {
+          headers: { 'Accept': 'application/vnd.github+json' }
+        });
+        if (!res.ok) throw new Error('GitHub API returned ' + res.status);
+        const data = await res.json();
+
+        // Prefer the NSIS .exe installer; fall back to .msi if absent.
+        const assets = data.assets || [];
+        const exe = assets.find(a => /x64-setup\.exe$/i.test(a.name));
+        const msi = assets.find(a => /\.msi$/i.test(a.name));
+        const pick = exe || msi;
+
+        if (!pick) throw new Error('No installer asset found in release ' + data.tag_name);
+
+        heading.textContent = 'Downloading ' + pick.name;
+        status.textContent = 'ClipGoblin ' + data.tag_name + ' · ' + (pick.size / 1e6).toFixed(1) + ' MB';
+        fallbackLink.href = pick.browser_download_url;
+
+        window.location.replace(pick.browser_download_url);
+      } catch (err) {
+        spin.style.display = 'none';
+        heading.textContent = 'Could not fetch latest release';
+        status.textContent = err.message + ' — use the manual link below.';
+      }
+    })();
+  </script>
+</body>
+</html>
