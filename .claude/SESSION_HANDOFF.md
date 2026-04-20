@@ -1,32 +1,37 @@
 # Session Handoff — ClipGoblin
 
-**Last session:** 2026-04-20
+**Last session:** 2026-04-20 (Wave 1 complete)
 **Written for:** next Claude Code session resuming work on ClipGoblin.
 
-Read this first, then [docs/ROADMAP.md](../docs/ROADMAP.md), then [CLAUDE.md](../CLAUDE.md) for unchanging project rules.
+Read this first, then [docs/ROADMAP.md](../docs/ROADMAP.md), then [docs/PHASE12_PROMPT_DIFF.md](../docs/PHASE12_PROMPT_DIFF.md), then [CLAUDE.md](../CLAUDE.md) for unchanging project rules.
 
 ---
 
 ## tl;dr — where we are, what's next
 
-**Shipped this session:**
+**Shipped in v1.2.2 session (prior work):**
 - v1.2.2 released and published to GitHub
 - Custom domain `clipgoblin.mindrotstudios.com` live on Cloudflare + GitHub Pages
-- Landing page refreshed to match v4 app UI (violet→pink gradient, new copy)
-- `/download.html` redirect shim for evergreen installer link
-- Dashboard screenshot added to landing page
+- Landing page refreshed to match v4 app UI, `/download.html` redirect shim, dashboard screenshot
 - [docs/ROADMAP.md](../docs/ROADMAP.md) — full 7-week expansion plan approved
 
-**Immediate next step (start of new session):**
-Read [src-tauri/src/post_captions.rs](../src-tauri/src/post_captions.rs) (~572 lines) and produce a concrete prompt diff for Slug's review covering:
-1. `generate_llm_title()` rewrite (structure constraints, anti-cliché banlist, few-shot, JSON 5-candidates output)
-2. `generate_llm()` rewrite (two-part hook+body, hashtag strategy, money-quote priority)
-3. New function for money-quote extraction (BYOK)
-4. Outline the Free path template matrix (emotion × context grid)
+**Shipped this session (Phase 12 Wave 1, commit `ae0dc1a`):**
+- New `detection` module (`src-tauri/src/detection/`) with:
+  - `Platform` enum — TikTok / YouTubeShorts / InstagramReels / Generic
+  - `ranker` submodule — `score_title()`, `pick_best()`, banlist / emotional-word / generic-word constants
+- `build_hashtags_v2(tags, tone, platform, streamer_niche_tags, game_name)` in `post_captions.rs` (3 evergreen + 2 niche strategy). Old `build_hashtags()` preserved as thin wrapper.
+- Pre-existing `captions_are_short` test flake fixed (shortened `gen_internal_thought` quote-contrast templates).
+- [docs/PHASE12_PROMPT_DIFF.md](../docs/PHASE12_PROMPT_DIFF.md) — resolved all 11 open design decisions + Wave 1/2/3 rollout plan.
+- **Tests:** 70/70 green (41 post_captions + 29 detection).
 
-Slug reviews the diff → once approved → Phase 5 cleanup → Phase 6.0 toggle framework → Phase 1 starts.
+**Immediate next step (Wave 2 — requires Slug review of Rust diff before landing):**
+1. Rewrite `generate_llm_title()` → new `generate_llm_titles()` returning `Vec<TitleCandidate>` with 3 hard-structure patterns (stake→outcome / Emotion:detail / quote+twist), 5 candidates, 40-char limit, enforced banlist, JSON output. Old `generate_llm_title()` becomes a thin wrapper that picks the best candidate via `detection::ranker::pick_best` and returns `String`.
+2. New `extract_money_quote_llm()` (BYOK, separate tiny API call) + `extract_money_quote_free()` (RMS × emotional-keyword heuristic).
+3. Wire money-quote into `generate_llm_titles()` input.
 
-**Do NOT** start code changes to `post_captions.rs` until Slug approves the diff. The prompts were previously marked finalized; this session re-opened them for improvement but only after concrete review.
+**Do NOT** edit `generate_llm_title()` or the prompt body until Slug reviews the Wave 2 Rust diff. (CLAUDE.md rule #3 applies; Phase 12 reopened it but review-first still holds.)
+
+Wave 3 (after Wave 2 ships): caption rewrite + Free-path emotion × context template matrix.
 
 ---
 
@@ -82,6 +87,8 @@ Delete all of these Day 1 before adding new code, or we get parallel abstraction
 | `src-tauri/src/twitch.rs` | Twitch OAuth + Helix clips fetch |
 | `src-tauri/src/post_captions.rs` | **AI title/caption generation** (FINALIZED per CLAUDE.md but reopened in Phase 12) |
 | `src-tauri/src/ai_provider.rs` | BYOK provider resolution (Claude/OpenAI/Gemini/Free) |
+| `src-tauri/src/detection/mod.rs` | **NEW (Wave 1)** — `Platform` enum + evergreen hashtag lists + title-length targets |
+| `src-tauri/src/detection/ranker.rs` | **NEW (Wave 1)** — `score_title()` / `pick_best()` / banlists for title+caption candidates |
 | `src-tauri/src/commands/settings.rs` | Settings whitelist + get/save |
 | `src-tauri/src/whisper.rs` | Whisper-rs integration (CUDA/CPU toggle) |
 | `src-tauri/src/db.rs` | SQLite schema + migrations |
@@ -148,6 +155,9 @@ Delete all of these Day 1 before adding new code, or we get parallel abstraction
 ## Recent commit history (for orientation)
 
 ```
+ae0dc1a  phase 12 wave 1: ranker module + platform-aware hashtags
+c05271c  docs: add expandable beta disclaimer + NDA to landing page
+efa2541  docs: add ROADMAP + SESSION_HANDOFF for detection pipeline expansion
 4891225  docs: center the first-run callout on the landing page
 6b32d2c  docs: refresh landing page to match v1.2.x app
 a020a75  docs: serve landing page at clipgoblin.mindrotstudios.com with clean /download link
@@ -156,18 +166,22 @@ d293939  v1.2.1 — TikTok production connection hotfix  (tag exists but broken 
 18995a1  feat(v1.2.0): v4 UI port, Twitch community clips, Auto-ship, Analytics, onboarding
 ```
 
-Plus the ROADMAP.md + SESSION_HANDOFF.md commits that will land at the end of this session.
-
 ---
 
 ## How to resume
 
 1. **Read this file.**
-2. **Read [docs/ROADMAP.md](../docs/ROADMAP.md)** — full approved plan.
-3. **Skim [CLAUDE.md](../CLAUDE.md)** — unchanging rules.
-4. **Confirm release state:** `curl -s https://api.github.com/repos/nsvlordslug/ClipGoblin/releases/latest | python -c "import json,sys; d=json.load(sys.stdin); print(d['tag_name'])"` — should print `v1.2.2` (or newer if released since).
-5. **Immediate next step:** read `src-tauri/src/post_captions.rs` end-to-end and produce a concrete prompt diff per Phase 12 spec.
-6. **Check in with Slug** before making any code changes — especially to post_captions.rs.
+2. **Read [docs/PHASE12_PROMPT_DIFF.md](../docs/PHASE12_PROMPT_DIFF.md)** — Phase 12 design decisions + Wave 1/2/3 plan.
+3. **Read [docs/ROADMAP.md](../docs/ROADMAP.md)** — full approved plan.
+4. **Skim [CLAUDE.md](../CLAUDE.md)** — unchanging rules.
+5. **Confirm repo state:** `git log --oneline -3` — top should be `ae0dc1a phase 12 wave 1: ranker module + platform-aware hashtags`.
+6. **Confirm tests still green:** `cd src-tauri && cargo test --lib detection:: && cargo test --lib post_captions::` — expect 29 + 41 = 70 pass.
+7. **Immediate next step:** produce the Wave 2 Rust diff for Slug to review:
+   - `generate_llm_titles()` new function with JSON 5-candidate output + 3-pattern structure + banlist
+   - `generate_llm_title()` becomes thin wrapper delegating to new fn + `detection::ranker::pick_best`
+   - `extract_money_quote_llm()` (BYOK) + `extract_money_quote_free()` (heuristic)
+   - `TitleCandidate` + `TitlePattern` structs in post_captions.rs
+8. **Check in with Slug** before editing `generate_llm_title()` body or the `LLM_SYSTEM_PROMPT`.
 
 ---
 
