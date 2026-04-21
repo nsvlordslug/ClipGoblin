@@ -42,6 +42,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           GITHUB_BUG_TOKEN: ${{ secrets.GITHUB_BUG_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Required for AuthProxy::new() — embeds the proxy key at compile
+          # time via option_env! so release builds can talk to the Cloudflare
+          # auth-proxy Worker (Twitch / YouTube / TikTok token exchange).
+          PROXY_API_KEY: ${{ secrets.PROXY_API_KEY }}
         with:
           tagName: v__VERSION__
           releaseName: 'ClipGoblin v__VERSION__'
