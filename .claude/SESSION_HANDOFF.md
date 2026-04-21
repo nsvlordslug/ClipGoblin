@@ -1,6 +1,6 @@
 # Session Handoff — ClipGoblin
 
-**Last session:** 2026-04-20 (Wave 2 complete)
+**Last session:** 2026-04-20 (Wave 2 done + v1.2.3 OAuth hotfix shipped)
 **Written for:** next Claude Code session resuming work on ClipGoblin.
 
 Read this first, then [docs/PHASE12_PROMPT_DIFF.md](../docs/PHASE12_PROMPT_DIFF.md), then [docs/ROADMAP.md](../docs/ROADMAP.md), then [CLAUDE.md](../CLAUDE.md) for unchanging project rules.
@@ -33,6 +33,39 @@ Existing `generate_llm_title()` + `generate_llm()` are byte-identical. `commands
 
 **Tests:** 329/329 green (28 new `w2_*` tests all passing).
 
+**Shipped this session — v1.2.3 OAuth hotfix (commits `ea0649d`, `0f13812`, `e9435b6`, `d951b51`, `bd45864`):**
+
+A multi-secret propagation failure was breaking OAuth on tester installs. Symptoms reported by tester:
+- Twitch login showed "Logged in!" page but app didn't register the channel
+- YouTube login returned "access blocked authorization error"
+- In-app bug reporter returned `GitHub API 401 unauthorized`
+
+Root causes (3, all related):
+1. `PROXY_API_KEY` was never passed to GitHub Actions release builds (workflow env block missing) → `option_env!("PROXY_API_KEY")` captured nothing → `AuthProxy::new()` failed silently after the callback page already showed success.
+2. `YOUTUBE_CLIENT_ID` and `TIKTOK_CLIENT_KEY` had no embedded fallback constants (only `std::env::var`, no `option_env!`, no default const) → release binaries had empty client IDs.
+3. `GITHUB_BUG_TOKEN` was referenced in release.yml but the secret could never be created in GitHub Actions because **secret names cannot start with `GITHUB_`** (reserved by GitHub) → empty value embedded → 401.
+
+Fixes:
+- `social/youtube.rs` + `social/tiktok.rs` — added `DEFAULT_*_CLIENT_ID/KEY` constants matching the existing Twitch pattern. Public client IDs are safe to embed (already in `worker/wrangler.toml`).
+- `.github/workflows/release.yml` — added `PROXY_API_KEY: ${{ secrets.PROXY_API_KEY }}` to the env block so `option_env!` captures it at compile time.
+- `.github/workflows/release.yml` — remapped `GITHUB_BUG_TOKEN: ${{ secrets.BUG_REPORT_PAT }}`. The Rust code's env var name stays `GITHUB_BUG_TOKEN`; only the GitHub-side secret name is different.
+
+GitHub Actions secrets that must exist (verified 2026-04-20):
+- `ANTHROPIC_API_KEY` (for autofix.yml / triage.yml)
+- `BUG_REPORT_PAT` (fine-grained PAT, Issues:Read+Write, scoped to nsvlordslug/ClipGoblin) — DO NOT name this `GITHUB_BUG_TOKEN`
+- `DISCORD_WEBHOOK_URL`
+- `PROXY_API_KEY` — must match the value in Cloudflare Worker (`npx wrangler secret list`)
+- `TAURI_SIGNING_PRIVATE_KEY`
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+
+YouTube OAuth is in **Testing** mode in Google Cloud Console (project: ClipGoblin). Test users currently allowlisted:
+- `lordslug@gmail.com`
+- `thegameingbros1143@gmail.com`
+
+Adding new testers means adding them to the OAuth Audience → Test users list at https://console.cloud.google.com (the project named "ClipGoblin"). If pushed past 100 testers, the app must go through Google verification (the youtube.upload scope is "sensitive").
+
+v1.2.3 verified on Slug's clean env (Twitch / YouTube / TikTok / bug reporter all green) before publishing. Auto-updater is now serving v1.2.3.
+
 **Immediate next step — pick one:**
 
 1. **Caller migration (tiny)** — rewire `commands/captions.rs:446` to call `generate_llm_titles()`, take `.text` of the top candidate, and surface the money-quote pipeline. Requires Slug review of how money-quote wires into the existing analyze_vod flow (transcript + RMS samples plumbing).
@@ -41,12 +74,13 @@ Existing `generate_llm_title()` + `generate_llm()` are byte-identical. `commands
    - `generate_llm_caption()` — hook_line + body split, 3 candidates, money-quote priority, ranker-scored
    - `config/caption_templates.toml` + loader — emotion × context matrix replacing the hardcoded `synthesize_event()` compound/single lookup
    - Community-clip title passthrough (Free path)
+   - Design lives in [docs/PHASE12_PROMPT_DIFF.md](../docs/PHASE12_PROMPT_DIFF.md) section 12 (split into 3a / 3b / 3c)
 
-3. **Cleanup deferred from Wave 1** — audit Phase 5 dead scaffolding (`pipeline.rs`, `engine.rs`, `audio_signal.rs`, `scene_signal.rs`, etc. — see ROADMAP Phase 5). Not blocking, but recommended before Wave 3 to prevent parallel abstractions.
+3. **Phase 5 cleanup — DEFERRED.** Earlier this session, audit revealed the "dead" modules listed in ROADMAP Phase 5 are NOT actually dead — `pipeline.rs::CandidateClip` is used by `post_captions.rs`, and 100+ integration tests exercise the supposedly-dead subsystem. Do not touch without a much more careful per-module plan.
 
-Slug's call. Recommended order: 3 → 1 → 2 (cleanup first, then wire callers to new API, then tackle Wave 3).
+Slug's call. Recommended order: 1 → 2 (caller migration unblocks user-facing benefit of Wave 2 first, then Wave 3 ships the bigger piece).
 
-**Do NOT** edit `generate_llm()` prompt body until Slug reviews the Wave 3 diff (section 11 not yet expanded for captions).
+**Do NOT** edit `generate_llm()` prompt body until Slug reviews any Wave 3 diff against it. The 3-pattern title prompt is already approved + shipped (Wave 2); the caption prompt is what Wave 3a addresses.
 
 ---
 
@@ -170,6 +204,13 @@ Delete all of these Day 1 before adding new code, or we get parallel abstraction
 ## Recent commit history (for orientation)
 
 ```
+bd45864  v1.2.3: fix OAuth for release builds (Twitch / YouTube / TikTok / bug reporter)
+d951b51  fix(ci): remap BUG_REPORT_PAT secret to GITHUB_BUG_TOKEN env var
+e9435b6  fix(ci): pass PROXY_API_KEY to release build so AuthProxy can init
+0f13812  fix(tiktok): embed default OAuth client key for release builds
+ea0649d  fix(youtube): embed default OAuth client ID for release builds
+6b75917  docs: add Wave 3 design for review (caption rewrite + Free-path matrix)
+fa4ba77  docs: update SESSION_HANDOFF after Wave 2 ship
 b157c6a  phase 12 wave 2: title candidates + money-quote extraction
 94a5c25  docs: add Wave 2 concrete Rust diff for review
 d3f92e6  docs: update SESSION_HANDOFF after Wave 1 ship
@@ -192,10 +233,11 @@ d293939  v1.2.1 — TikTok production connection hotfix  (tag exists but broken 
 2. **Read [docs/PHASE12_PROMPT_DIFF.md](../docs/PHASE12_PROMPT_DIFF.md)** — Phase 12 design decisions + Wave 1/2/3 plan.
 3. **Read [docs/ROADMAP.md](../docs/ROADMAP.md)** — full approved plan.
 4. **Skim [CLAUDE.md](../CLAUDE.md)** — unchanging rules.
-5. **Confirm repo state:** `git log --oneline -5` — top should be `b157c6a phase 12 wave 2: title candidates + money-quote extraction`.
+5. **Confirm repo state:** `git log --oneline -5` — top should be `bd45864 v1.2.3: fix OAuth for release builds`.
 6. **Confirm tests still green:** `cd src-tauri && cargo test --lib` — expect 329 pass, 1 ignored (`bin_manager::tests::download_real`).
-7. **Immediate next step:** pick from the three options in the tl;dr above (Wave 3 prompt rewrite / caller migration / Phase 5 cleanup). Recommended order: cleanup → caller migration → Wave 3.
-8. **Check in with Slug** before editing `generate_llm()` body or the `LLM_SYSTEM_PROMPT`.
+7. **Confirm release shipped:** `curl -s https://api.github.com/repos/nsvlordslug/ClipGoblin/releases/latest | python -c "import json,sys; d=json.load(sys.stdin); print(d['tag_name'])"` — should print `v1.2.3` or newer.
+8. **Immediate next step:** pick from the two options in the tl;dr above (caller migration / Wave 3). Recommended order: caller migration first, then Wave 3.
+9. **Check in with Slug** before editing `generate_llm()` body or the `LLM_SYSTEM_PROMPT`.
 
 ---
 
