@@ -931,3 +931,319 @@ fn money_quote_free_works_without_rms() {
 5. **Title generator** — `generate_llm_titles` (async) → ✋ final checkpoint
 
 Steps 1–3 fully unit-testable. Steps 4–5 depend on Slug running the app for real LLM validation.
+
+**Wave 2 status:** landed in commit `b157c6a`. 329/329 tests green (28 new `w2_*` tests).
+
+---
+
+## 12. Wave 3 — caption rewrite + Free-path matrix (for review)
+
+**Status:** design for Slug review. No Rust edits yet.
+
+**Scope (3 sub-waves — separately shippable):**
+
+| Sub-wave | What | Touches | Independent? |
+|---|---|---|---|
+| **3a** | `generate_llm_caption()` new function — 3-candidate structured prompt with `hook_line + body` split, ranker-scored | `post_captions.rs` additions only | Yes — same pattern as Wave 2's `generate_llm_titles()` |
+| **3b** | `config/caption_templates.toml` + loader + matrix-first integration into `synthesize_event()` | New `config/` dir or `assets/`, Rust loader, small change to existing `synthesize_event()` | Yes — matrix-first with fallback preserves current Free path |
+| **3c** | Community-clip title passthrough (Free path) | `twitch.rs` (reads community-clip title), Free-path title generator | Yes — tiny addition |
+
+Recommendation: ship 3a first (parallel API like Wave 2), 3b second (bigger scope), 3c last (tiny). Each can be its own commit + test run.
+
+### 12a. `generate_llm_caption()` — new function
+
+Parallel to Wave 2's `generate_llm_titles()`. Does NOT replace existing `generate_llm()`.
+
+#### Signature
+
+```rust
+pub async fn generate_llm_caption(
+    api_key: &str,
+    model: &str,
+    selected_mode: &str,               // keep 10-mode system per Wave 1 decision 5
+    platform: Option<Platform>,         // None = TikTok default
+    event_summary: &str,
+    money_quote: Option<&str>,
+    transcript_quote: Option<&str>,
+    tone_label: &str,
+    tags: &[String],
+    full_transcript: Option<&str>,
+    clip_title: &str,
+    game_name: Option<&str>,
+    streamer_niche_tags: &[String],
+) -> Result<Vec<CaptionCandidate>, AppError>;
+
+pub struct CaptionCandidate {
+    pub hook_line: String,          // ≤50 chars, active voice, emotional driver
+    pub body: String,               // ≤230 chars, specifics + context
+    pub uses_money_quote: bool,
+    pub score: f32,                 // ranker score on hook_line
+    // NOTE: no hashtags — Wave 1 decision 4, those come from build_hashtags_v2
+}
+```
+
+#### Prompt shape
+
+```
+Write 3 caption candidates for my gaming clip. Return JSON only.
+
+PLATFORM: TikTok | YouTube Shorts | Instagram Reels
+GAME: {game_name}
+GENRE: {tone_label}
+CLIP TITLE: {clip_title}
+WHAT HAPPENED: {event_summary}
+MONEY QUOTE (use if present): "{money_quote}"
+TRANSCRIPT (800 chars): "{transcript}"
+SIGNAL TAGS: {tags}
+
+MODE: {mode} - {tone_instruction text}
+
+STRUCTURE - each candidate has two parts:
+- hook_line: first ~50 characters. Active voice. Emotional driver.
+  Scroll-stopper. Must be complete on its own when read alone.
+- body: remainder (<230 chars). Specifics. Context. Reaction.
+
+MONEY-QUOTE PRIORITY:
+- If quote present, 2 of 3 candidates SHOULD use it verbatim or close-paraphrase in hook_line
+- Never fabricate quotes. Only use provided quote or transcript fragments.
+
+HARD LIMITS:
+- hook_line: ≤50 chars (enforced client-side, truncate if over)
+- body: ≤230 chars
+- hook_line + body: ≤280 chars total
+- no hashtags in output (those are generated separately)
+
+BANNED PHRASES (reject candidate):
+this happened, caught on stream, this was crazy, just happened,
+watch this, you need to see this, you won't believe, check this out,
+insane clip, literally, epic
+
+OUTPUT JSON only, no prose, no markdown fence:
+{"candidates": [
+  {"hook_line": "...", "body": "...", "uses_money_quote": true|false},
+  {"hook_line": "...", "body": "...", "uses_money_quote": true|false},
+  {"hook_line": "...", "body": "...", "uses_money_quote": true|false}
+]}
+```
+
+#### Scoring
+
+Reuse `detection::ranker::score_title` on the `hook_line` only (it's the critical scroll-stopper). Body gets a lighter secondary score:
+- +0.1 if `body.chars().count() <= 230` (hard limit compliance)
+- +0.1 if `body` contains a specific detail (not just restating hook)
+
+Sort `candidates` descending by `hook_score + body_score`.
+
+#### Backward compat
+
+`generate_llm()` stays byte-identical. Caller migration happens with Wave 3 caller unification (all prompts migrate together, one commit, after Wave 3 lands).
+
+#### Tests (unit-testable)
+
+- `CaptionCandidate` serde roundtrip
+- JSON parsing of `{"candidates": [...]}` shape with `hook_line` + `body`
+- Client-side 50-char hook truncation
+- Rejection of candidate with banned phrase via ranker
+
+### 12b. Free-path emotion × context matrix
+
+Replaces the hardcoded `synthesize_event()` compound/single lookup at [post_captions.rs:436–559](../src-tauri/src/post_captions.rs) with a TOML-driven matrix.
+
+**Per decision 10:** matrix-first with fallback to existing hardcoded rules. Deletion of the hardcoded rules is a later cleanup.
+
+#### File: `config/caption_templates.toml` (new, at repo root in new `config/` dir)
+
+Format:
+
+```toml
+# Phase 12 Wave 3b - Free-path caption template matrix.
+#
+# Emotion (rows): shock, hype, funny, rage, panic
+# Context (cols): ace, death, clutch, fail, reaction, chase, explosion
+
+[[templates]]
+emotion = "shock"
+context = "ace"
+text = "went from zero to 5 in {time_est}s"
+# Slot fills (optional):
+#   {time_est}, {kill_count}, {game}, {streamer}, {enemy}
+
+[[templates]]
+emotion = "shock"
+context = "ace"
+text = "clean 5-for-5 through the smoke"
+
+[[templates]]
+emotion = "hype"
+context = "clutch"
+text = "one bullet left. one bullet used."
+
+# ... 50–80 templates total (3–5 per cell), seeded incrementally
+```
+
+Storage: **embedded via `include_str!` at compile time** (not a runtime file read). Keeps the binary self-contained and avoids file-path runtime issues. Hot-reload in dev is nice but not worth the complexity.
+
+#### Loader
+
+```rust
+// src-tauri/src/post_captions/template_matrix.rs (new sub-module)
+// OR inline in post_captions.rs
+
+#[derive(serde::Deserialize)]
+struct TemplateFile {
+    templates: Vec<TemplateEntry>,
+}
+
+#[derive(serde::Deserialize, Clone)]
+pub struct TemplateEntry {
+    pub emotion: String,   // shock / hype / funny / rage / panic
+    pub context: String,   // ace / death / clutch / fail / reaction / chase / explosion
+    pub text: String,      // may contain {slot} placeholders
+}
+
+pub fn load_matrix() -> Vec<TemplateEntry> {
+    const TOML: &str = include_str!("../../../config/caption_templates.toml");
+    let file: TemplateFile = toml::from_str(TOML)
+        .expect("caption_templates.toml must parse at compile time");
+    file.templates
+}
+
+// Cached via OnceLock or lazy_static so we parse once.
+```
+
+Add `toml = "0.8"` to `src-tauri/Cargo.toml` dependencies (already likely there since Tauri uses TOML).
+
+#### Integration point
+
+`synthesize_event()` at [post_captions.rs:436](../src-tauri/src/post_captions.rs):
+
+```rust
+fn synthesize_event(event: Option<&str>, tone: Tone, tags: &[String], seed: usize) -> String {
+    // NEW: try matrix first
+    if let Some(from_matrix) = try_matrix_template(event, tone, tags, seed) {
+        return from_matrix;
+    }
+
+    // Existing hardcoded fallback (unchanged)
+    let has = |t: &str| tags.iter().any(|x| x == t);
+    if has("fight") && has("panic") { /* ... */ }
+    // ... rest unchanged
+}
+
+fn try_matrix_template(event: Option<&str>, tone: Tone, tags: &[String], seed: usize) -> Option<String> {
+    let emotion = infer_emotion(tone, tags)?;   // map GameType + tags → emotion row
+    let context = infer_context(event, tags)?;  // map event + tags → context col
+
+    let matches: Vec<&TemplateEntry> = load_matrix()
+        .iter()
+        .filter(|t| t.emotion == emotion && t.context == context)
+        .collect();
+
+    if matches.is_empty() { return None; }
+
+    let picked = matches[seed % matches.len()];
+    Some(fill_slots(&picked.text, event, tags))
+}
+```
+
+The `infer_emotion` and `infer_context` functions are tiny — they map the existing `GameType` + tags to the new matrix dimensions. Each should be ~20 lines of match arms.
+
+#### Slot filling
+
+Keep it simple for Wave 3b: support only `{time_est}` and `{kill_count}` placeholders. Additional slots (streamer name, game name, enemy type) deferred to later when per-game TOML configs (Phase 1) land.
+
+```rust
+fn fill_slots(template: &str, event: Option<&str>, tags: &[String]) -> String {
+    template
+        .replace("{time_est}", "5")      // placeholder for now
+        .replace("{kill_count}", "3")     // placeholder for now
+        // Future: pull from clip signals or per-game config
+}
+```
+
+Templates without matching slots (most of them) pass through unchanged.
+
+#### Seed data (50-80 templates)
+
+Writing 50-80 high-quality templates by hand takes ~2 hours of focused work. I'd do this as a **separate prose-writing pass** with Slug, not inline in the design doc.
+
+Starter seeding: 3 templates per (emotion, context) cell = 5 emotions × 7 contexts × 3 = **105 templates**. But only cells that commonly appear need seeding. Realistic starter: cells from the existing `synthesize_event()` compound/single logic, which gives maybe 30 cells × 3 templates = 90 templates.
+
+Proposed: ship 3b with ~50 templates covering common cells, grow over time. Fallback to hardcoded rules handles uncovered cells.
+
+#### Tests (unit-testable)
+
+- TOML parses without error (compile-time guarantee via `expect`, but add explicit test)
+- At least 3 templates per top-10 most-common cells
+- `try_matrix_template` returns `None` for uncovered cells (falls through to hardcoded)
+- `fill_slots` leaves non-slot templates unchanged
+- `infer_emotion` / `infer_context` map all GameTypes and common tags
+
+### 12c. Community-clip title passthrough (Free path)
+
+When a Twitch community clip covers the moment, use its title verbatim as the Free-path title — subject to safety checks.
+
+#### Where
+
+Free-path title is currently synthesized from event/tags. Passthrough happens **before** synthesis.
+
+There's currently no single "free title" function — titles come from `generate_llm_title()` (BYOK) OR are built inline in `commands/captions.rs`. Scope: add a free-title function that Wave 3c's caller migration uses.
+
+```rust
+pub fn free_title(
+    community_clip_title: Option<&str>,
+    fallback_event: &str,
+    fallback_tags: &[String],
+) -> String {
+    if let Some(title) = community_clip_title {
+        if let Some(clean) = sanitize_community_title(title) {
+            return clean;
+        }
+    }
+    // Fallback to synthesized title (pattern-based)
+    synthesize_free_title(fallback_event, fallback_tags)
+}
+
+fn sanitize_community_title(title: &str) -> Option<String> {
+    // Length check: truncate at word boundary to ≤60 chars
+    // Profanity filter: reject if matches minimal banlist
+    // Reject if empty after trimming
+    // Return Some(clean) or None
+}
+
+const PROFANITY_BANLIST: &[&str] = &[
+    // Minimal starter list — conservative, let Twitch's own moderation
+    // do the heavy lift since these are clips from Twitch
+    "slur1", "slur2", // placeholders — Slug to provide real list
+];
+```
+
+#### Integration
+
+Wave 3c delivers the `free_title()` function. Actual wiring happens in the Wave 3 caller migration commit (after 3a + 3b are proven).
+
+#### Tests
+
+- `sanitize_community_title` truncates long titles at word boundary
+- Profanity banlist rejection
+- Empty/whitespace title returns None
+- `free_title` falls back to synthesized when community title rejected
+
+### 12d. Open decisions for Slug
+
+- [ ] **Split 3a/3b/3c into separate commits** or land as one big Wave 3? Proposal: separate (easier review + rollback).
+- [ ] **`config/` directory location** — new top-level `config/` dir, or inside `src-tauri/assets/`? Proposal: `config/` at repo root (future-proofs for per-game configs in Phase 1).
+- [ ] **Number of starter templates for 3b** — 50? 80? Proposal: aim for 50 covering common cells, ship as-is.
+- [ ] **Slot filling scope for 3b** — `{time_est}` + `{kill_count}` only, or full set (game, streamer, enemy)? Proposal: two slots for Wave 3b, expand in Phase 1 game configs.
+- [ ] **Profanity banlist for 3c** — tight/medium/loose? Proposal: minimal (slurs only) since Twitch already moderates community clips.
+- [ ] **Caller migration timing** — with Wave 3 or as a separate commit after 3a/3b/3c all land? Proposal: separate unified migration commit after 3c.
+
+### 12e. Rollout order
+
+1. Slug reviews + approves this section
+2. **3a** — `generate_llm_caption()` — smallest, parallel API, same shape as Wave 2
+3. **3b** — matrix + loader + integration — bigger scope, replace hardcoded `synthesize_event` rules incrementally
+4. **3c** — community-clip passthrough — tiny
+5. **Caller migration (separate commit)** — unified rewiring of `commands/captions.rs` to use `generate_llm_titles()`, `generate_llm_caption()`, `extract_money_quote_llm()`, and `free_title()`
+
+Each step has its own `cargo test` checkpoint and commit.
