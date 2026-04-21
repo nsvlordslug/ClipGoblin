@@ -1135,6 +1135,43 @@ fn sanitize_hashtag(raw: &str) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+//  Title candidate types (Phase 12 Wave 2)
+// ═══════════════════════════════════════════════════════════════════
+//
+//  Consumed by `generate_llm_titles()` and by callers who want to
+//  re-score with a different platform / history context via
+//  `detection::ranker::score_title`.
+
+/// One of three structural patterns a title candidate must match.
+///
+/// See `docs/PHASE12_PROMPT_DIFF.md` section 1d for the full rationale
+/// and prompt text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TitlePattern {
+    /// `{stake} → {outcome}` — e.g. `"down 0-12 → 1v5 ACE"`.
+    StakeArrowOutcome,
+    /// `{Emotion}: {specific detail}` — e.g. `"Speechless: one-tap through smoke"`.
+    EmotionColonDetail,
+    /// `"{money quote}" {twist}` — e.g. `"\"I can't miss\" — misses next shot"`.
+    QuoteTwist,
+}
+
+/// A single title candidate produced by `generate_llm_titles()`.
+///
+/// `score` is filled in by `detection::ranker::score_title` during generation;
+/// callers can re-score with their own `RankerContext` if needed (e.g. a
+/// different target platform or an updated streamer history).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TitleCandidate {
+    pub text: String,
+    pub pattern: TitlePattern,
+    /// Ranker score 0.0–1.0. 0.0 = banlist hit, hard reject.
+    #[serde(default)]
+    pub score: f32,
+}
+
+// ═══════════════════════════════════════════════════════════════════
 //  LLM-based caption generation (BYOK)
 // ═══════════════════════════════════════════════════════════════════
 //
@@ -1518,6 +1555,505 @@ Respond with ONLY the title. No quotes, no explanation — just the title text."
     log::debug!("Title RESULT — len: {}, text: \"{}\"", final_title.chars().count(), final_title);
 
     Ok(final_title)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Money-quote extraction — Free path (Phase 12 Wave 2)
+// ═══════════════════════════════════════════════════════════════════
+//
+//  Pure heuristic, no network. Slides a 2–6 word window over each
+//  transcript segment, scores candidates on:
+//
+//  - emotional keyword hit  (uses ranker's curated list, +0.40)
+//  - peak RMS during phrase (when samples available, +0–0.40)
+//  - brevity bonus          (shorter = punchier, +0–0.20)
+//
+//  Returns the best-scoring phrase above threshold 0.5, or None.
+//
+//  See section 3b of docs/PHASE12_PROMPT_DIFF.md.
+
+/// Extract a money-quote from transcript segments using a pure heuristic.
+///
+/// `transcript_segments`: `(start_sec, end_sec, text)` for each segment.
+/// `rms_samples`: optional `(timestamp_sec, rms)` audio samples; when
+/// `None`, the RMS factor falls back to a constant 0.5.
+///
+/// Returns `Some(phrase)` if any 2–6 word phrase scores above 0.5,
+/// else `None`.
+pub fn extract_money_quote_free(
+    transcript_segments: &[(f64, f64, String)],
+    rms_samples: Option<&[(f64, f32)]>,
+) -> Option<String> {
+    use crate::detection::ranker::DEFAULT_EMOTIONAL_WORDS;
+
+    const SCORE_THRESHOLD: f32 = 0.5;
+    const DEFAULT_RMS_WHEN_NO_SAMPLES: f32 = 0.5;
+
+    let mut best: Option<(f32, String)> = None;
+
+    for (start, end, text) in transcript_segments {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        if words.len() < 2 {
+            continue;
+        }
+
+        // Pre-compute the peak RMS once per segment — same across all windows.
+        let rms_during = match rms_samples {
+            Some(samples) => samples
+                .iter()
+                .filter(|(t, _)| t >= start && t <= end)
+                .map(|(_, r)| *r)
+                .fold(0.0_f32, f32::max),
+            None => DEFAULT_RMS_WHEN_NO_SAMPLES,
+        };
+
+        for window_size in 2..=6 {
+            if window_size > words.len() {
+                break;
+            }
+            for start_idx in 0..=(words.len() - window_size) {
+                let phrase_words = &words[start_idx..start_idx + window_size];
+
+                let keyword_hit = phrase_words.iter().any(|w| {
+                    let clean = w
+                        .trim_matches(|c: char| !c.is_alphabetic())
+                        .to_lowercase();
+                    DEFAULT_EMOTIONAL_WORDS.iter().any(|k| clean == *k)
+                });
+
+                // Brevity: 2 words → 0.20, 6 words → 0.00, linear.
+                let brevity_bonus = (6 - window_size) as f32 / 4.0 * 0.20;
+
+                let score = (if keyword_hit { 0.40 } else { 0.0 })
+                    + (rms_during.clamp(0.0, 1.0) * 0.40)
+                    + brevity_bonus;
+
+                if score >= SCORE_THRESHOLD
+                    && best.as_ref().map_or(true, |(best_s, _)| score > *best_s)
+                {
+                    best = Some((score, phrase_words.join(" ")));
+                }
+            }
+        }
+    }
+
+    best.map(|(_, phrase)| phrase)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Title generation — new API (Phase 12 Wave 2)
+// ═══════════════════════════════════════════════════════════════════
+//
+//  Produces 5 title candidates in one Claude API call. Each candidate
+//  must match one of three structural patterns (StakeArrowOutcome /
+//  EmotionColonDetail / QuoteTwist). Candidates are pre-scored via
+//  `detection::ranker::score_title` and sorted descending, so callers
+//  can just take `candidates[0]`.
+//
+//  The old `generate_llm_title` (single-string output) is left in
+//  place byte-for-byte. `commands/captions.rs` still calls it; caller
+//  migration is a separate tiny follow-up after Wave 2 is proven.
+//
+//  See section 11b of docs/PHASE12_PROMPT_DIFF.md.
+
+/// Generate 5 title candidates, ranker-scored and sorted.
+///
+/// `money_quote` (optional): if present, at least 2 of the 5 candidates
+/// should favor `TitlePattern::QuoteTwist`.
+/// `streamer_history` (optional): past titles used for overlap check in
+/// the prompt's "avoid repetition" instruction AND in the ranker's
+/// history-overlap scoring. Pass `None` until Phase 11 populates it.
+/// `target_platform`: `None` defaults to `Platform::TikTok` for scoring.
+/// Callers that know the publish target (Shorts / Reels) should pass it
+/// explicitly so length scoring is accurate.
+pub async fn generate_llm_titles(
+    api_key: &str,
+    model: &str,
+    event_summary: &str,
+    money_quote: Option<&str>,
+    full_transcript: Option<&str>,
+    tags: &[String],
+    game_name: Option<&str>,
+    streamer_history: Option<&[String]>,
+    target_platform: Option<Platform>,
+) -> Result<Vec<TitleCandidate>, AppError> {
+    const TRANSCRIPT_CHAR_LIMIT: usize = 800;
+
+    // ── Assemble prompt sections ──────────────────────────────
+
+    let game_line = match game_name {
+        Some(name) if !name.is_empty() => format!("GAME: {}\n", name),
+        _ => String::new(),
+    };
+
+    let transcript_section = match full_transcript.filter(|t| !t.trim().is_empty()) {
+        Some(ft) => {
+            let truncated: String = ft.chars().take(TRANSCRIPT_CHAR_LIMIT).collect();
+            format!("TRANSCRIPT:\n\"{}\"\n\n", truncated)
+        }
+        None => String::new(),
+    };
+
+    let money_quote_line = match money_quote {
+        Some(q) if !q.trim().is_empty() => format!("MONEY QUOTE (use in at least 2 of 5): \"{}\"\n", q),
+        _ => String::new(),
+    };
+
+    let tag_line = if tags.is_empty() {
+        String::new()
+    } else {
+        format!("SIGNAL TAGS: {}\n", tags.join(", "))
+    };
+
+    let history_line = match streamer_history {
+        Some(h) if !h.is_empty() => format!(
+            "STREAMER RECENT TITLES (avoid >50% token overlap with these):\n{}\n",
+            h.iter().take(10).cloned().collect::<Vec<_>>().join("\n"),
+        ),
+        _ => "STREAMER RECENT TITLES: none yet\n".into(),
+    };
+
+    let prompt = format!(
+        r#"Generate 5 SHORT title candidates for a gaming clip. Return JSON only.
+
+{game}WHAT HAPPENED: {event}
+{money_quote}{transcript}{tags}{history}
+STRUCTURE - every candidate MUST follow exactly one of these three patterns:
+
+1. STAKE_ARROW_OUTCOME - format: "{{stake}} -> {{outcome}}"
+   Examples: "down 0-12 -> 1v5 ACE", "120hp -> one-shot", "last alive -> 4k"
+
+2. EMOTION_COLON_DETAIL - format: "{{Emotion}}: {{specific visual or action}}"
+   Use Title Case for the Emotion word (not ALL CAPS).
+   Examples: "Speechless: one-tap through smoke", "Rattled: smoke into headshot",
+   "Floored: three kills, zero ammo left"
+
+3. QUOTE_TWIST - format: "\"{{money quote}}\" {{twist or contradiction}}"
+   Examples: "\"I can't miss\" - misses next shot", "\"easy game\" 0-5 next round"
+
+REQUIRED ELEMENTS - every candidate must include AT LEAST ONE:
+- A number or stake (1v5, 0hp, 12s, 3 kills, round 12)
+- An emotional word (Speechless, Rattled, Floored, Stunned, etc.)
+- A specific visual or action detail (through smoke, through the wall)
+
+HARD LIMITS:
+- Maximum 40 characters per title
+- Lowercase is fine EXCEPT Title Case for the Emotion word in pattern 2
+- No hashtags. No emojis. No period at end.
+
+BANNED WORDS (reject any candidate containing these):
+insane, crazy, epic, literally, wild, shocking, unbelievable, omg,
+you won't believe, mind-blowing, must see, check this, watch this
+
+TONE INHERITANCE:
+- If a money quote is provided, at least 2 of 5 candidates MUST use pattern 3
+- If no quote and the event is visual, favor patterns 1 and 2
+- Candidates should span all 3 patterns (not all one shape)
+
+OUTPUT - JSON only, no prose, no markdown fence:
+{{"candidates": [
+  {{"pattern": "STAKE_ARROW_OUTCOME", "text": "..."}},
+  {{"pattern": "EMOTION_COLON_DETAIL", "text": "..."}},
+  {{"pattern": "QUOTE_TWIST", "text": "..."}},
+  {{"pattern": "STAKE_ARROW_OUTCOME", "text": "..."}},
+  {{"pattern": "EMOTION_COLON_DETAIL", "text": "..."}}
+]}}"#,
+        game = game_line,
+        event = event_summary,
+        money_quote = money_quote_line,
+        transcript = transcript_section,
+        tags = tag_line,
+        history = history_line,
+    );
+
+    // ── Send request ──────────────────────────────────────────
+
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "max_tokens": 400,
+        "system": LLM_SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": prompt}],
+    });
+
+    log::debug!("generate_llm_titles request - model: {}, history: {}",
+        model,
+        streamer_history.map(|h| h.len()).unwrap_or(0),
+    );
+
+    let resp = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| AppError::Api(format!("Claude titles request failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AppError::Api(format!(
+            "Claude API {}: {}",
+            status,
+            &body[..body.len().min(200)]
+        )));
+    }
+
+    let resp_json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| AppError::Api(format!("Failed to parse Claude titles response: {e}")))?;
+
+    let text = resp_json["content"][0]["text"]
+        .as_str()
+        .ok_or_else(|| AppError::Api("No text in Claude titles response".into()))?;
+
+    // ── Parse JSON (try raw, then markdown-fence fallback) ────
+
+    let parsed: TitlesResponse = match serde_json::from_str(text.trim()) {
+        Ok(p) => p,
+        Err(_) => {
+            let json_str = extract_json_from_markdown(text)?;
+            serde_json::from_str(&json_str)
+                .map_err(|e| AppError::Api(format!("Malformed titles JSON: {e}")))?
+        }
+    };
+
+    if parsed.candidates.is_empty() {
+        return Err(AppError::Api("Claude returned zero title candidates".into()));
+    }
+
+    // ── Score via the ranker and sort ─────────────────────────
+
+    let platform = target_platform.unwrap_or(Platform::TikTok);
+    let empty_history: Vec<String> = Vec::new();
+    let history_ref = streamer_history.unwrap_or(&empty_history);
+
+    let ctx = crate::detection::ranker::RankerContext {
+        streamer_history: history_ref,
+        banned_words: crate::detection::ranker::DEFAULT_BANNED_WORDS,
+        target_platform: platform,
+        has_money_quote: money_quote.is_some(),
+    };
+
+    let mut scored: Vec<TitleCandidate> = parsed
+        .candidates
+        .into_iter()
+        .map(|c| TitleCandidate {
+            score: crate::detection::ranker::score_title(&c.text, &ctx),
+            text: c.text,
+            pattern: c.pattern,
+        })
+        .collect();
+
+    // Descending by score so candidates[0] is the winner.
+    scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+    log::debug!(
+        "generate_llm_titles result - top score: {:.2}, pattern spread: {}",
+        scored.first().map(|c| c.score).unwrap_or(0.0),
+        scored
+            .iter()
+            .map(|c| format!("{:?}", c.pattern))
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+
+    Ok(scored)
+}
+
+#[derive(serde::Deserialize)]
+struct TitlesResponse {
+    candidates: Vec<RawTitleCandidate>,
+}
+
+/// Intermediate shape — what the LLM returns per candidate before
+/// ranker scoring. `score` is added in the pipeline, not the LLM.
+#[derive(serde::Deserialize)]
+struct RawTitleCandidate {
+    text: String,
+    pattern: TitlePattern,
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Money-quote extraction — BYOK path (Phase 12 Wave 2)
+// ═══════════════════════════════════════════════════════════════════
+//
+//  Small separate API call — gated independently by `ai_for_titles ||
+//  ai_for_captions` in the toggle framework (Phase 6.0). Returns the
+//  model's best 2–6 word phrase from the transcript, with a confidence
+//  floor of 0.6.
+//
+//  See section 3a of docs/PHASE12_PROMPT_DIFF.md.
+
+/// Extract a money-quote via a BYOK LLM call.
+///
+/// Returns:
+/// - `Err(e)` — API error (network failure, HTTP != 2xx, malformed response).
+/// - `Ok(None)` — model said no quote qualifies, OR confidence < 0.6,
+///   OR returned phrase failed the 2–6 word check.
+/// - `Ok(Some(phrase))` — usable money-quote.
+pub async fn extract_money_quote_llm(
+    api_key: &str,
+    model: &str,
+    event_summary: &str,
+    full_transcript: &str,
+    tags: &[String],
+) -> Result<Option<String>, AppError> {
+    const CONFIDENCE_THRESHOLD: f32 = 0.6;
+    const TRANSCRIPT_CHAR_LIMIT: usize = 800;
+
+    let tag_line = if tags.is_empty() {
+        String::new()
+    } else {
+        format!("SIGNALS: {}\n", tags.join(", "))
+    };
+
+    let truncated: String = full_transcript.chars().take(TRANSCRIPT_CHAR_LIMIT).collect();
+
+    let prompt = format!(
+        r#"Extract the single best "money quote" from this gaming clip transcript.
+A money quote is a 2-6 word phrase worth prominently displaying on the clip
+(title, caption, or video overlay).
+
+WHAT HAPPENED: {event}
+TRANSCRIPT: "{transcript}"
+{tags}
+CRITERIA:
+- Must be 2 to 6 words total (strict)
+- Must be something the streamer ACTUALLY said (no fabrication)
+- Should be self-contained (makes sense out of context)
+- Priority: memorable phrasing > on-topic > emotional reaction
+- If nothing in transcript qualifies, return null
+
+OUTPUT - JSON only, no prose, no markdown fence:
+{{"quote": "...", "confidence": 0.0-1.0}}
+or
+{{"quote": null, "confidence": 0.0}}"#,
+        event = event_summary,
+        transcript = truncated,
+        tags = tag_line,
+    );
+
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "max_tokens": 80,
+        "system": LLM_SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": prompt}],
+    });
+
+    log::debug!("money-quote LLM request — model: {}", model);
+
+    let resp = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| AppError::Api(format!("Money-quote request failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AppError::Api(format!(
+            "Claude API {}: {}",
+            status,
+            &body[..body.len().min(200)]
+        )));
+    }
+
+    let resp_json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| AppError::Api(format!("Failed to parse Claude money-quote response: {e}")))?;
+
+    let text = resp_json["content"][0]["text"]
+        .as_str()
+        .ok_or_else(|| AppError::Api("No text in Claude money-quote response".into()))?;
+
+    let json_str = match serde_json::from_str::<MoneyQuoteResponse>(text.trim()) {
+        Ok(r) => return Ok(validate_money_quote(r, CONFIDENCE_THRESHOLD)),
+        Err(_) => extract_json_from_markdown(text)?,
+    };
+
+    let parsed: MoneyQuoteResponse = serde_json::from_str(&json_str)
+        .map_err(|e| AppError::Api(format!("Malformed money-quote JSON: {e}")))?;
+
+    Ok(validate_money_quote(parsed, CONFIDENCE_THRESHOLD))
+}
+
+#[derive(serde::Deserialize)]
+struct MoneyQuoteResponse {
+    quote: Option<String>,
+    #[serde(default)]
+    confidence: f32,
+}
+
+/// Apply confidence threshold + client-side 2–6 word validation.
+/// Returns the quote only if both checks pass. Logs the confidence
+/// value so we can tune the threshold from production data.
+fn validate_money_quote(resp: MoneyQuoteResponse, threshold: f32) -> Option<String> {
+    log::debug!(
+        "money-quote LLM result — confidence: {:.2}, quote: {:?}",
+        resp.confidence,
+        resp.quote,
+    );
+    if resp.confidence < threshold {
+        return None;
+    }
+    resp.quote.filter(|q| {
+        let wc = q.split_whitespace().count();
+        wc >= 2 && wc <= 6
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  JSON extraction helper (Phase 12 Wave 2)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Strip common LLM wrappings around a JSON response and return the raw
+/// JSON string. Tries (in order):
+///
+/// 1. ```` ```json ... ``` ```` — markdown code fence with language tag
+/// 2. ```` ``` ... ``` ```` — generic markdown code fence
+/// 3. First `{` through last `}` — slice out embedded JSON
+///
+/// Returns `Err` only if no balanced braces found at all.
+///
+/// This is tolerant on purpose — LLMs are inconsistent about emitting
+/// structured output. For stricter guarantees we'd switch to Anthropic's
+/// tool-use API; that's a larger migration deferred past Wave 2.
+pub(crate) fn extract_json_from_markdown(text: &str) -> Result<String, AppError> {
+    let trimmed = text.trim();
+
+    // Layer 1: ```json ... ```
+    if let Some(rest) = trimmed.strip_prefix("```json") {
+        if let Some(inner) = rest.strip_suffix("```") {
+            return Ok(inner.trim().to_string());
+        }
+    }
+
+    // Layer 2: ``` ... ```
+    if let Some(rest) = trimmed.strip_prefix("```") {
+        if let Some(inner) = rest.strip_suffix("```") {
+            return Ok(inner.trim().to_string());
+        }
+    }
+
+    // Layer 3: first `{` to last `}`
+    let start = trimmed.find('{')
+        .ok_or_else(|| AppError::Api("No JSON object in response".into()))?;
+    let end = trimmed.rfind('}')
+        .ok_or_else(|| AppError::Api("No JSON closing brace in response".into()))?;
+    if end <= start {
+        return Err(AppError::Api("Unbalanced braces in response".into()));
+    }
+    Ok(trimmed[start..=end].to_string())
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -2059,5 +2595,307 @@ mod tests {
         assert!(tiktok.contains(&"fyp".to_string()));
         assert!(shorts.contains(&"shorts".to_string()));
         assert_ne!(tiktok, shorts);
+    }
+
+    // ── Wave 2: TitlePattern / TitleCandidate serde ──────────────
+
+    #[test]
+    fn w2_title_pattern_serializes_screaming_snake() {
+        assert_eq!(
+            serde_json::to_string(&TitlePattern::StakeArrowOutcome).unwrap(),
+            "\"STAKE_ARROW_OUTCOME\"",
+        );
+        assert_eq!(
+            serde_json::to_string(&TitlePattern::EmotionColonDetail).unwrap(),
+            "\"EMOTION_COLON_DETAIL\"",
+        );
+        assert_eq!(
+            serde_json::to_string(&TitlePattern::QuoteTwist).unwrap(),
+            "\"QUOTE_TWIST\"",
+        );
+    }
+
+    #[test]
+    fn w2_title_candidate_deserializes_from_llm_shape() {
+        let json = r#"{"text": "1v5 ACE", "pattern": "STAKE_ARROW_OUTCOME"}"#;
+        let c: TitleCandidate = serde_json::from_str(json).unwrap();
+        assert_eq!(c.text, "1v5 ACE");
+        assert_eq!(c.pattern, TitlePattern::StakeArrowOutcome);
+        assert_eq!(c.score, 0.0); // default when absent
+    }
+
+    #[test]
+    fn w2_title_candidate_roundtrips() {
+        let original = TitleCandidate {
+            text: "Speechless: through smoke".into(),
+            pattern: TitlePattern::EmotionColonDetail,
+            score: 0.75,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let back: TitleCandidate = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.text, original.text);
+        assert_eq!(back.pattern, original.pattern);
+        assert!((back.score - original.score).abs() < 1e-6);
+    }
+
+    // ── Wave 2: extract_json_from_markdown ───────────────────────
+
+    #[test]
+    fn w2_extract_json_from_plain_object() {
+        assert_eq!(
+            extract_json_from_markdown("{\"x\": 1}").unwrap(),
+            "{\"x\": 1}",
+        );
+    }
+
+    #[test]
+    fn w2_extract_json_strips_language_fence() {
+        assert_eq!(
+            extract_json_from_markdown("```json\n{\"x\": 1}\n```").unwrap(),
+            "{\"x\": 1}",
+        );
+    }
+
+    #[test]
+    fn w2_extract_json_strips_bare_fence() {
+        assert_eq!(
+            extract_json_from_markdown("```\n{\"x\": 1}\n```").unwrap(),
+            "{\"x\": 1}",
+        );
+    }
+
+    #[test]
+    fn w2_extract_json_strips_surrounding_prose() {
+        let input = "Here is your answer:\n{\"x\": 1}\nhope that helps";
+        assert_eq!(extract_json_from_markdown(input).unwrap(), "{\"x\": 1}");
+    }
+
+    #[test]
+    fn w2_extract_json_handles_multiline_object() {
+        let input = "```json\n{\n  \"candidates\": [\n    {\"text\": \"a\"}\n  ]\n}\n```";
+        let out = extract_json_from_markdown(input).unwrap();
+        assert!(out.starts_with('{'));
+        assert!(out.ends_with('}'));
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(parsed["candidates"].is_array());
+    }
+
+    #[test]
+    fn w2_extract_json_errors_when_no_braces() {
+        assert!(extract_json_from_markdown("just plain text").is_err());
+    }
+
+    #[test]
+    fn w2_extract_json_errors_when_unbalanced() {
+        // Only opening brace
+        assert!(extract_json_from_markdown("{").is_err());
+    }
+
+    // ── Wave 2: extract_money_quote_free ─────────────────────────
+
+    #[test]
+    fn w2_money_quote_free_picks_emotional_phrase() {
+        // "speechless" is in DEFAULT_EMOTIONAL_WORDS.
+        let segments = vec![(0.0, 3.0, "i'm literally speechless right now".to_string())];
+        let q = extract_money_quote_free(&segments, None);
+        assert!(q.is_some(), "expected Some; got None");
+        let q = q.unwrap();
+        assert!(q.to_lowercase().contains("speechless"), "got {:?}", q);
+        let wc = q.split_whitespace().count();
+        assert!(wc >= 2 && wc <= 6, "got {} words: {:?}", wc, q);
+    }
+
+    #[test]
+    fn w2_money_quote_free_returns_none_when_no_emotional_words() {
+        // No emotional keywords → score below threshold → None.
+        // Without RMS, RMS factor = 0.5 → 0.20 contribution. Brevity max 0.20.
+        // Total max without keyword = 0.40. Below threshold 0.50.
+        let segments = vec![(0.0, 3.0, "we went to the store".to_string())];
+        assert!(extract_money_quote_free(&segments, None).is_none());
+    }
+
+    #[test]
+    fn w2_money_quote_free_returns_none_on_empty_input() {
+        assert!(extract_money_quote_free(&[], None).is_none());
+    }
+
+    #[test]
+    fn w2_money_quote_free_skips_one_word_segments() {
+        let segments = vec![(0.0, 1.0, "speechless".to_string())];
+        // Only 1 word — can't form a 2-word phrase.
+        assert!(extract_money_quote_free(&segments, None).is_none());
+    }
+
+    #[test]
+    fn w2_money_quote_free_respects_word_boundaries_for_keyword_match() {
+        // "speechlessly" (with suffix) should NOT match "speechless" as a keyword,
+        // because we clean non-alphabetic chars then compare the full word.
+        let segments = vec![(0.0, 3.0, "he was speechlessly staring forward".to_string())];
+        // Without the "speechless" exact match, score stays ≤ 0.40 → None.
+        assert!(extract_money_quote_free(&segments, None).is_none());
+    }
+
+    #[test]
+    fn w2_money_quote_free_prefers_shorter_phrase_on_tie() {
+        // Two equally-scored phrases (both have "speechless", same RMS):
+        // shorter wins via brevity bonus.
+        let segments = vec![(0.0, 3.0, "literally speechless right now dude".to_string())];
+        let q = extract_money_quote_free(&segments, None).unwrap();
+        let wc = q.split_whitespace().count();
+        assert!(wc <= 3, "expected short phrase, got {} words: {:?}", wc, q);
+    }
+
+    #[test]
+    fn w2_money_quote_free_uses_rms_peak() {
+        // Same text, but with a high-RMS sample overlapping segment — score boosts.
+        let segments = vec![(0.0, 3.0, "yeah no totally dead bro".to_string())];
+        // "dead" IS an emotional word.
+        // Without RMS: keyword(0.40) + 0.5*0.40 + brevity = should pass threshold
+        let with_default_rms = extract_money_quote_free(&segments, None);
+        assert!(with_default_rms.is_some());
+
+        // With high RMS: score even higher, still some result.
+        let rms = vec![(1.0, 0.95)];
+        let with_high_rms = extract_money_quote_free(&segments, Some(&rms));
+        assert!(with_high_rms.is_some());
+    }
+
+    #[test]
+    fn w2_money_quote_free_picks_across_multiple_segments() {
+        let segments = vec![
+            (0.0, 1.0, "we went to the store".to_string()),   // no keyword
+            (5.0, 7.0, "i'm honestly speechless here".to_string()), // keyword
+            (10.0, 11.0, "then we left".to_string()),          // no keyword
+        ];
+        let q = extract_money_quote_free(&segments, None);
+        assert!(q.is_some());
+        assert!(q.unwrap().to_lowercase().contains("speechless"));
+    }
+
+    // ── Wave 2: validate_money_quote (sync validation layer) ─────
+
+    #[test]
+    fn w2_validate_money_quote_accepts_valid_response() {
+        let resp = MoneyQuoteResponse {
+            quote: Some("clean through the smoke".into()),
+            confidence: 0.85,
+        };
+        assert_eq!(
+            validate_money_quote(resp, 0.6),
+            Some("clean through the smoke".into()),
+        );
+    }
+
+    #[test]
+    fn w2_validate_money_quote_rejects_low_confidence() {
+        let resp = MoneyQuoteResponse {
+            quote: Some("some phrase".into()),
+            confidence: 0.4,
+        };
+        assert_eq!(validate_money_quote(resp, 0.6), None);
+    }
+
+    #[test]
+    fn w2_validate_money_quote_rejects_null_quote() {
+        let resp = MoneyQuoteResponse { quote: None, confidence: 0.0 };
+        assert_eq!(validate_money_quote(resp, 0.6), None);
+    }
+
+    #[test]
+    fn w2_validate_money_quote_rejects_too_short() {
+        let resp = MoneyQuoteResponse {
+            quote: Some("nope".into()), // 1 word — below 2-word floor
+            confidence: 0.9,
+        };
+        assert_eq!(validate_money_quote(resp, 0.6), None);
+    }
+
+    #[test]
+    fn w2_validate_money_quote_rejects_too_long() {
+        let resp = MoneyQuoteResponse {
+            quote: Some("this is a seven word phrase indeed".into()), // 7 words
+            confidence: 0.9,
+        };
+        assert_eq!(validate_money_quote(resp, 0.6), None);
+    }
+
+    #[test]
+    fn w2_validate_money_quote_accepts_six_words_exactly() {
+        let resp = MoneyQuoteResponse {
+            quote: Some("no way this actually just happened".into()), // 6 words
+            confidence: 0.8,
+        };
+        assert!(validate_money_quote(resp, 0.6).is_some());
+    }
+
+    #[test]
+    fn w2_validate_money_quote_accepts_two_words_exactly() {
+        let resp = MoneyQuoteResponse {
+            quote: Some("clean shot".into()), // 2 words
+            confidence: 0.8,
+        };
+        assert!(validate_money_quote(resp, 0.6).is_some());
+    }
+
+    #[test]
+    fn w2_money_quote_response_deserializes_null() {
+        let json = r#"{"quote": null, "confidence": 0.0}"#;
+        let r: MoneyQuoteResponse = serde_json::from_str(json).unwrap();
+        assert!(r.quote.is_none());
+        assert_eq!(r.confidence, 0.0);
+    }
+
+    #[test]
+    fn w2_money_quote_response_deserializes_valid() {
+        let json = r#"{"quote": "no way bro", "confidence": 0.87}"#;
+        let r: MoneyQuoteResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(r.quote.as_deref(), Some("no way bro"));
+        assert!((r.confidence - 0.87).abs() < 1e-6);
+    }
+
+    // ── Wave 2: TitlesResponse JSON parsing ──────────────────────
+
+    #[test]
+    fn w2_titles_response_parses_llm_shape() {
+        let json = r#"{
+            "candidates": [
+                {"pattern": "STAKE_ARROW_OUTCOME", "text": "down 0-12 -> 1v5 ACE"},
+                {"pattern": "EMOTION_COLON_DETAIL", "text": "Speechless: one-tap through smoke"},
+                {"pattern": "QUOTE_TWIST", "text": "\"I can't miss\" - misses next shot"},
+                {"pattern": "STAKE_ARROW_OUTCOME", "text": "last alive -> 4k"},
+                {"pattern": "EMOTION_COLON_DETAIL", "text": "Rattled: clutch play"}
+            ]
+        }"#;
+        let r: TitlesResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(r.candidates.len(), 5);
+        assert_eq!(r.candidates[0].pattern, TitlePattern::StakeArrowOutcome);
+        assert_eq!(r.candidates[1].pattern, TitlePattern::EmotionColonDetail);
+        assert_eq!(r.candidates[2].pattern, TitlePattern::QuoteTwist);
+    }
+
+    #[test]
+    fn w2_titles_response_parses_markdown_fenced_shape() {
+        // Simulate the model wrapping the output in a fence, then the
+        // full extract-then-parse flow the async function uses.
+        let fenced = "```json\n{\"candidates\":[{\"pattern\":\"STAKE_ARROW_OUTCOME\",\"text\":\"1v5 ACE\"}]}\n```";
+        let extracted = extract_json_from_markdown(fenced).unwrap();
+        let parsed: TitlesResponse = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(parsed.candidates.len(), 1);
+        assert_eq!(parsed.candidates[0].text, "1v5 ACE");
+    }
+
+    #[test]
+    fn w2_titles_response_parses_with_surrounding_prose() {
+        let text = "Sure, here are your candidates:\n{\"candidates\":[{\"pattern\":\"QUOTE_TWIST\",\"text\":\"yeah nah\"}]}\nLet me know if you need more.";
+        let extracted = extract_json_from_markdown(text).unwrap();
+        let parsed: TitlesResponse = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(parsed.candidates.len(), 1);
+        assert_eq!(parsed.candidates[0].pattern, TitlePattern::QuoteTwist);
+    }
+
+    #[test]
+    fn w2_titles_response_rejects_unknown_pattern_variant() {
+        let json = r#"{"candidates": [{"pattern": "FREEFORM", "text": "whatever"}]}"#;
+        assert!(serde_json::from_str::<TitlesResponse>(json).is_err());
     }
 }

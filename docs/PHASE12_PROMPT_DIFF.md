@@ -912,12 +912,22 @@ fn money_quote_free_works_without_rms() {
 }
 ```
 
-### 11f. Open decisions for Slug (Wave 2 only)
+### 11f. Resolved Wave 2 decisions
 
-- [ ] **JSON robustness:** should `extract_json_from_markdown` also handle the model emitting the JSON with leading commentary? Current pseudocode tries `{`..`}` slice as fallback. Keep or strip?
-- [ ] **Confidence threshold for money-quote:** set at 0.6. Too strict? Too lenient?
-- [ ] **Default platform for title scoring:** `Platform::TikTok`. OK as default, or take it as a parameter so Shorts/Reels users get proper length scoring?
-- [ ] **Free-path emotional keywords:** starter list is ~20 words. Want to source from a bigger corpus (curse words, streamer-specific vocab), or keep minimal for Wave 2 and expand in Wave 3?
-- [ ] **Money-quote `Result<Option<String>>` vs `Option<String>`:** BYOK returns Result (for API errors) + Option (for "no good quote found"). OK to have both semantics?
+| # | Decision | Resolution | Why |
+|---|---|---|---|
+| 1 | Markdown fence extraction | 3-layer fallback: ```` ```json ````, generic ``` ``` ```, then first-`{` to last-`}` slice | Handles 95% of real failure modes. Structured-output mode is a later migration. |
+| 2 | Money-quote confidence threshold | 0.6 + `log::debug!` actual confidence per call | Natural split point between real and marginal phrases. Log gives us data to tune after ~20 real clips. |
+| 3 | Default platform for title scoring | `target_platform: Option<Platform>` param, `None` → TikTok | Caller during analysis has no platform; caller during publish does. Honest defaulting beats silent assumption. |
+| 4 | Free-path emotional keywords | **Reuse `ranker::DEFAULT_EMOTIONAL_WORDS`** (30 curated words from Wave 1) | DRY. Expanding vocab without a bigger corpus is risky; Wave 3 template matrix will share the list. |
+| 5 | Money-quote return type | `Result<Option<String>>` — both layers kept | Preserves API-failure vs genuine-no-quote distinction for telemetry + cost accounting. |
 
-Once resolved, I'll make the actual Rust edits + add the tests.
+### 11g. Implementation order (cargo-test checkpoints)
+
+1. **Types** — `TitleCandidate` + `TitlePattern` (~20 lines, no deps, no tests needed)
+2. **JSON utility + tests** — `extract_json_from_markdown` (pure, unit-testable in sandbox) → ✋ checkpoint
+3. **Free money-quote + tests** — `extract_money_quote_free` (pure, reuses ranker constants) → ✋ checkpoint
+4. **BYOK money-quote** — `extract_money_quote_llm` (async, serde JSON parse only is unit-testable)
+5. **Title generator** — `generate_llm_titles` (async) → ✋ final checkpoint
+
+Steps 1–3 fully unit-testable. Steps 4–5 depend on Slug running the app for real LLM validation.
