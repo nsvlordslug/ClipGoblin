@@ -51,16 +51,22 @@ const AUTH_TIMEOUT_SECS: u64 = 120;
 const UPLOAD_CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10 MB per chunk for large files
 const SINGLE_CHUNK_LIMIT: usize = 64 * 1024 * 1024; // Files under 64 MB → single chunk
 
+/// Embedded TikTok OAuth client key — safe to ship in the binary since OAuth
+/// client keys are public identifiers (the actual client *secret* stays in the
+/// Cloudflare Worker). Same value already lives in `worker/wrangler.toml`.
+/// Override with `TIKTOK_CLIENT_KEY` env var for development.
+const DEFAULT_TIKTOK_CLIENT_KEY: &str = "awzco3f3mgjpwjam";
+
 static CLIENT_KEY: Lazy<String> = Lazy::new(|| {
     match std::env::var("TIKTOK_CLIENT_KEY") {
-        Ok(val) => {
+        Ok(val) if !val.is_empty() => {
             let preview = if val.len() > 6 { &val[..6] } else { &val };
-            log::info!("TikTok CLIENT_KEY loaded: '{}...' (len={})", preview, val.len());
+            log::info!("TikTok CLIENT_KEY loaded from env: '{}...' (len={})", preview, val.len());
             val
         }
-        Err(_) => {
-            log::warn!("TIKTOK_CLIENT_KEY environment variable is not set — TikTok OAuth will fail");
-            String::new()
+        _ => {
+            log::info!("Using embedded TikTok CLIENT_KEY");
+            DEFAULT_TIKTOK_CLIENT_KEY.to_string()
         }
     }
 });
