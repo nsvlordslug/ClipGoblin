@@ -40,7 +40,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          GITHUB_BUG_TOKEN: ${{ secrets.GITHUB_BUG_TOKEN }}
+          # Note the secret name (BUG_REPORT_PAT) differs from the env var
+          # (GITHUB_BUG_TOKEN). GitHub Actions forbids secret names starting
+          # with GITHUB_, so we remap on the way into the build. The Rust
+          # code in commands/bug_report.rs still reads option_env!("GITHUB_BUG_TOKEN").
+          GITHUB_BUG_TOKEN: ${{ secrets.BUG_REPORT_PAT }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           # Required for AuthProxy::new() — embeds the proxy key at compile
           # time via option_env! so release builds can talk to the Cloudflare
