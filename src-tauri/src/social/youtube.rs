@@ -43,11 +43,24 @@ const AUTH_TIMEOUT_SECS: u64 = 120;
 /// 5 MB per chunk for resumable uploads.
 const UPLOAD_CHUNK_SIZE: usize = 5 * 1024 * 1024;
 
+/// Embedded YouTube OAuth client ID — safe to ship in the binary since OAuth
+/// client IDs are public identifiers (the actual client *secret* stays in the
+/// Cloudflare Worker). Same value already lives in `worker/wrangler.toml`.
+/// Override with `YOUTUBE_CLIENT_ID` env var for development.
+const DEFAULT_YOUTUBE_CLIENT_ID: &str =
+    "963785158873-iuutl54610isuch1mcaqnbsoc90acrnb.apps.googleusercontent.com";
+
 static CLIENT_ID: Lazy<String> = Lazy::new(|| {
-    std::env::var("YOUTUBE_CLIENT_ID").unwrap_or_else(|_| {
-        log::warn!("YOUTUBE_CLIENT_ID environment variable is not set — YouTube OAuth will fail");
-        String::new()
-    })
+    match std::env::var("YOUTUBE_CLIENT_ID") {
+        Ok(val) if !val.is_empty() => {
+            log::info!("YouTube CLIENT_ID loaded from env (len={})", val.len());
+            val
+        }
+        _ => {
+            log::info!("Using embedded YouTube CLIENT_ID");
+            DEFAULT_YOUTUBE_CLIENT_ID.to_string()
+        }
+    }
 });
 
 fn client_id() -> &'static str {
