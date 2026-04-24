@@ -59,6 +59,16 @@ impl Platform {
         }
     }
 
+    /// Human-readable display name for prompt interpolation + UI.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Platform::TikTok         => "TikTok",
+            Platform::YouTubeShorts  => "YouTube Shorts",
+            Platform::InstagramReels => "Instagram Reels",
+            Platform::Generic        => "a social platform",
+        }
+    }
+
     /// Parse from a string representation (case-insensitive).
     /// Returns [`Platform::Generic`] for unknown inputs.
     pub fn from_str_or_generic(s: &str) -> Self {
@@ -140,5 +150,13 @@ mod tests {
     #[test]
     fn platform_default_is_generic() {
         assert_eq!(Platform::default(), Platform::Generic);
+    }
+
+    #[test]
+    fn platform_display_names_are_human_readable() {
+        assert_eq!(Platform::TikTok.display_name(), "TikTok");
+        assert_eq!(Platform::YouTubeShorts.display_name(), "YouTube Shorts");
+        assert_eq!(Platform::InstagramReels.display_name(), "Instagram Reels");
+        assert_eq!(Platform::Generic.display_name(), "a social platform");
     }
 }

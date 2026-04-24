@@ -1229,14 +1229,16 @@ Wave 3c delivers the `free_title()` function. Actual wiring happens in the Wave 
 - Empty/whitespace title returns None
 - `free_title` falls back to synthesized when community title rejected
 
-### 12d. Open decisions for Slug
+### 12d. Resolved decisions
 
-- [ ] **Split 3a/3b/3c into separate commits** or land as one big Wave 3? Proposal: separate (easier review + rollback).
-- [ ] **`config/` directory location** — new top-level `config/` dir, or inside `src-tauri/assets/`? Proposal: `config/` at repo root (future-proofs for per-game configs in Phase 1).
-- [ ] **Number of starter templates for 3b** — 50? 80? Proposal: aim for 50 covering common cells, ship as-is.
-- [ ] **Slot filling scope for 3b** — `{time_est}` + `{kill_count}` only, or full set (game, streamer, enemy)? Proposal: two slots for Wave 3b, expand in Phase 1 game configs.
-- [ ] **Profanity banlist for 3c** — tight/medium/loose? Proposal: minimal (slurs only) since Twitch already moderates community clips.
-- [ ] **Caller migration timing** — with Wave 3 or as a separate commit after 3a/3b/3c all land? Proposal: separate unified migration commit after 3c.
+| # | Decision | Resolution |
+|---|---|---|
+| 1 | Split 3a/3b/3c into separate commits or one big Wave 3 | **Split** — each sub-wave has its own `cargo test` checkpoint and commit. Preserves the Wave 1/2 rollout pattern. |
+| 2 | `config/` directory location | **New top-level `config/` at repo root** — consistent with Phase 1's `config/games/{game_id}.toml` layout, discoverable, not buried in `src-tauri/assets/`. |
+| 3 | Starter template count for 3b | **~50 covering the top 15–20 cells** (not all 35). Uncovered cells fall through to the existing hardcoded `synthesize_event()` rules — zero-regression risk. Grow incrementally. |
+| 4 | Slot filling scope for 3b | **`{time_est}` + `{kill_count}` only**. Broader slots (game, streamer, enemy, weapon) land with Phase 1 per-game configs when the signal extraction exists. Avoids YAGNI plumbing. |
+| 5 | Profanity banlist for 3c | **Minimal (slurs only — ~5–10 words)**. Twitch moderates its own clips aggressively; false-positive cost of a medium banlist outweighs the rare edge case. |
+| 6 | Caller migration timing | **Separate commit after 3c lands**. All old APIs stay byte-identical through 3a/3b/3c; one unified migration flips `commands/captions.rs` to the new stack at the end. |
 
 ### 12e. Rollout order
 

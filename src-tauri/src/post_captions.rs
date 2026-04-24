@@ -1172,6 +1172,35 @@ pub struct TitleCandidate {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+//  Caption candidate types (Phase 12 Wave 3a)
+// ═══════════════════════════════════════════════════════════════════
+//
+//  Consumed by `generate_llm_caption()`. Each candidate is a two-part
+//  caption: `hook_line` (first ~50 chars, scroll-stopper) + `body` (rest).
+//  Hashtags are NOT part of this struct — they come from the client-side
+//  `build_hashtags_v2()` function per the Wave 1 decision 4.
+
+/// A single caption candidate produced by `generate_llm_caption()`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CaptionCandidate {
+    /// Scroll-stopper — aim for ≤50 chars, client-side truncated if longer.
+    /// Scored by `detection::ranker::score_title` (the ranker is title-shaped
+    /// but the criteria — numbers, brevity, specificity, banlist — apply
+    /// equally to hook lines).
+    pub hook_line: String,
+    /// Remainder of the caption — specifics, context, reaction. ≤230 chars.
+    pub body: String,
+    /// Whether this candidate uses the provided money-quote in its hook.
+    /// Tracked so callers can filter / prefer quote-driven variants.
+    #[serde(default)]
+    pub uses_money_quote: bool,
+    /// Combined score: `hook_score + body_score`. Range roughly 0.0–1.10.
+    /// 0.0 = banlist hit on the hook (hard reject).
+    #[serde(default)]
+    pub score: f32,
+}
+
+// ═══════════════════════════════════════════════════════════════════
 //  LLM-based caption generation (BYOK)
 // ═══════════════════════════════════════════════════════════════════
 //
@@ -1875,6 +1904,293 @@ struct TitlesResponse {
 struct RawTitleCandidate {
     text: String,
     pattern: TitlePattern,
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Caption generation — new API (Phase 12 Wave 3a)
+// ═══════════════════════════════════════════════════════════════════
+//
+//  Produces 3 caption candidates per call. Each candidate is split
+//  into `hook_line` (scroll-stopper, ≤50 chars) + `body` (≤230 chars).
+//  Hashtags are NOT in the output — Wave 1 decision 4, they come from
+//  the client-side `build_hashtags_v2()` function.
+//
+//  The old `generate_llm()` (single-caption output) is left byte-for-byte
+//  identical for Wave 3a. Caller migration is a separate unified commit
+//  after Wave 3c ships per Wave 3 decision 6.
+//
+//  See section 12a of docs/PHASE12_PROMPT_DIFF.md.
+
+/// Generate 3 caption candidates for a clip, ranker-scored and sorted.
+///
+/// Arguments mirror the old `generate_llm()` signature with three
+/// additions:
+/// - `platform` (`Option<Platform>`, `None` defaults to TikTok) — drives
+///   length scoring + prompt-side platform hint.
+/// - `money_quote` — if present, 2 of 3 candidates should use it in the hook.
+/// - `streamer_niche_tags` — passed to the prompt as context (also flows
+///   into `build_hashtags_v2` on the caller side, not here).
+///
+/// Returns candidates sorted descending by `(hook_score + body_score)`.
+/// `score = 0.0` means banlist hit on the hook — caller may choose to
+/// drop those before presenting.
+pub async fn generate_llm_caption(
+    api_key: &str,
+    model: &str,
+    selected_mode: &str,
+    platform: Option<Platform>,
+    event_summary: &str,
+    money_quote: Option<&str>,
+    transcript_quote: Option<&str>,
+    tone_label: &str,
+    tags: &[String],
+    full_transcript: Option<&str>,
+    clip_title: &str,
+    game_name: Option<&str>,
+    streamer_niche_tags: &[String],
+) -> Result<Vec<CaptionCandidate>, AppError> {
+    const TRANSCRIPT_CHAR_LIMIT: usize = 800;
+
+    // ── Assemble prompt sections ──────────────────────────────
+
+    let platform_resolved = platform.unwrap_or(Platform::TikTok);
+    let platform_line = format!("PLATFORM: {}\n", platform_resolved.display_name());
+
+    let game_line = match game_name {
+        Some(name) if !name.is_empty() => format!("GAME: {}\n", name),
+        _ => String::new(),
+    };
+
+    let title_line = if clip_title.is_empty() {
+        String::new()
+    } else {
+        format!("CLIP TITLE: {}\n", clip_title)
+    };
+
+    let transcript_section = match full_transcript.filter(|t| !t.trim().is_empty()) {
+        Some(ft) => {
+            let truncated: String = ft.chars().take(TRANSCRIPT_CHAR_LIMIT).collect();
+            format!("TRANSCRIPT:\n\"{}\"\n\n", truncated)
+        }
+        None => match transcript_quote {
+            Some(q) if !q.trim().is_empty() => format!("The person said: \"{}\"\n\n", q),
+            _ => String::new(),
+        },
+    };
+
+    let money_quote_line = match money_quote {
+        Some(q) if !q.trim().is_empty() => format!(
+            "MONEY QUOTE (use verbatim or close-paraphrase in at least 2 of 3 hooks): \"{}\"\n",
+            q
+        ),
+        _ => String::new(),
+    };
+
+    let tag_line = if tags.is_empty() {
+        String::new()
+    } else {
+        format!("SIGNAL TAGS: {}\n", tags.join(", "))
+    };
+
+    let niche_line = if streamer_niche_tags.is_empty() {
+        String::new()
+    } else {
+        format!("STREAMER NICHE: {}\n", streamer_niche_tags.join(", "))
+    };
+
+    let tone_block = tone_instruction(selected_mode);
+
+    let prompt = format!(
+        r#"Write 3 caption candidates for my gaming clip. Return JSON only.
+
+{platform}{game}GENRE: {tone}
+{title}WHAT HAPPENED: {event}
+{money_quote}{transcript}{tags}{niche}
+MODE: {tone_block}
+
+STRUCTURE - each candidate has two parts:
+- hook_line: first ~50 characters. Active voice. Emotional driver.
+  Scroll-stopper. Must be complete on its own when read alone.
+- body: remainder (<230 chars). Specifics. Context. Reaction.
+
+MONEY-QUOTE PRIORITY (when a money quote is provided):
+- At least 2 of 3 candidates SHOULD use it verbatim or close-paraphrase in the hook_line
+- Never fabricate quotes. Only use the provided quote or transcript fragments.
+
+HARD LIMITS:
+- hook_line: <=50 characters (will be client-side truncated if longer)
+- body: <=230 characters
+- hook_line + body: <=280 characters combined
+- No hashtags in output (generated separately)
+
+BANNED PHRASES (reject candidate):
+this happened, caught on stream, this was crazy, just happened,
+watch this, you need to see this, you won't believe, check this out,
+insane clip, literally, epic
+
+OUTPUT - JSON only, no prose, no markdown fence:
+{{"candidates": [
+  {{"hook_line": "...", "body": "...", "uses_money_quote": true|false}},
+  {{"hook_line": "...", "body": "...", "uses_money_quote": true|false}},
+  {{"hook_line": "...", "body": "...", "uses_money_quote": true|false}}
+]}}"#,
+        platform = platform_line,
+        game = game_line,
+        tone = tone_label,
+        title = title_line,
+        event = event_summary,
+        money_quote = money_quote_line,
+        transcript = transcript_section,
+        tags = tag_line,
+        niche = niche_line,
+        tone_block = tone_block,
+    );
+
+    // ── Send request ──────────────────────────────────────────
+
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "max_tokens": 600,
+        "system": LLM_SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": prompt}],
+    });
+
+    log::debug!(
+        "generate_llm_caption request - model: {}, mode: {}, platform: {:?}, money_quote: {}",
+        model,
+        selected_mode,
+        platform_resolved,
+        money_quote.is_some(),
+    );
+
+    let resp = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| AppError::Api(format!("Claude caption request failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AppError::Api(format!(
+            "Claude API {}: {}",
+            status,
+            &body[..body.len().min(200)]
+        )));
+    }
+
+    let resp_json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| AppError::Api(format!("Failed to parse Claude caption response: {e}")))?;
+
+    let text = resp_json["content"][0]["text"]
+        .as_str()
+        .ok_or_else(|| AppError::Api("No text in Claude caption response".into()))?;
+
+    // ── Parse JSON (raw first, markdown-fence fallback) ───────
+
+    let parsed: CaptionsResponse = match serde_json::from_str(text.trim()) {
+        Ok(p) => p,
+        Err(_) => {
+            let json_str = extract_json_from_markdown(text)?;
+            serde_json::from_str(&json_str)
+                .map_err(|e| AppError::Api(format!("Malformed captions JSON: {e}")))?
+        }
+    };
+
+    if parsed.candidates.is_empty() {
+        return Err(AppError::Api("Claude returned zero caption candidates".into()));
+    }
+
+    // ── Score via the ranker + body heuristic, sort descending ─
+
+    let ctx = crate::detection::ranker::RankerContext {
+        streamer_history: &[],
+        banned_words: crate::detection::ranker::DEFAULT_BANNED_WORDS,
+        target_platform: platform_resolved,
+        has_money_quote: money_quote.is_some(),
+    };
+
+    let mut scored: Vec<CaptionCandidate> = parsed
+        .candidates
+        .into_iter()
+        .map(|c| {
+            let hook_truncated = truncate_hook(&c.hook_line, 50);
+            let hook_score = crate::detection::ranker::score_title(&hook_truncated, &ctx);
+            let body_score = score_caption_body(&c.body);
+            CaptionCandidate {
+                hook_line: hook_truncated,
+                body: c.body,
+                uses_money_quote: c.uses_money_quote,
+                score: hook_score + body_score,
+            }
+        })
+        .collect();
+
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    log::debug!(
+        "generate_llm_caption result - top score: {:.2}, candidates: {}",
+        scored.first().map(|c| c.score).unwrap_or(0.0),
+        scored.len(),
+    );
+
+    Ok(scored)
+}
+
+#[derive(serde::Deserialize)]
+struct CaptionsResponse {
+    candidates: Vec<RawCaptionCandidate>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawCaptionCandidate {
+    hook_line: String,
+    body: String,
+    #[serde(default)]
+    uses_money_quote: bool,
+}
+
+/// Client-side hook truncation. If the model overshoots the 50-char
+/// target, we cut at the last word boundary within the limit and append
+/// an ellipsis. Preserves the scroll-stopper contract.
+fn truncate_hook(hook: &str, max_chars: usize) -> String {
+    let len = hook.chars().count();
+    if len <= max_chars {
+        return hook.to_string();
+    }
+    let truncated: String = hook.chars().take(max_chars.saturating_sub(1)).collect();
+    // Cut at last space if one exists near the end — otherwise hard cut.
+    if let Some(space) = truncated.rfind(' ') {
+        if space >= (max_chars / 2) {
+            return format!("{}…", truncated[..space].trim_end());
+        }
+    }
+    format!("{}…", truncated.trim_end())
+}
+
+/// Lightweight secondary score for the body. Kept small so the hook
+/// score (which can reach 1.0 via the ranker) dominates sort order.
+fn score_caption_body(body: &str) -> f32 {
+    let len = body.chars().count();
+    if len == 0 || len > 230 {
+        return 0.0;
+    }
+    if len < 30 {
+        // Too short — low-information body, hook is carrying everything.
+        return 0.05;
+    }
+    0.10
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -2897,5 +3213,139 @@ mod tests {
     fn w2_titles_response_rejects_unknown_pattern_variant() {
         let json = r#"{"candidates": [{"pattern": "FREEFORM", "text": "whatever"}]}"#;
         assert!(serde_json::from_str::<TitlesResponse>(json).is_err());
+    }
+
+    // ── Wave 3a: CaptionCandidate serde ──────────────────────────
+
+    #[test]
+    fn w3a_caption_candidate_roundtrips() {
+        let original = CaptionCandidate {
+            hook_line: "one-tap through smoke".into(),
+            body: "down 0-12, clutch the round, lobby in shambles.".into(),
+            uses_money_quote: true,
+            score: 0.82,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let back: CaptionCandidate = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.hook_line, original.hook_line);
+        assert_eq!(back.body, original.body);
+        assert_eq!(back.uses_money_quote, original.uses_money_quote);
+        assert!((back.score - original.score).abs() < 1e-6);
+    }
+
+    #[test]
+    fn w3a_caption_candidate_deserializes_with_defaults() {
+        // `uses_money_quote` and `score` are both #[serde(default)] — missing fields ok.
+        let json = r#"{"hook_line": "clean shot", "body": "through the wall, no info."}"#;
+        let c: CaptionCandidate = serde_json::from_str(json).unwrap();
+        assert_eq!(c.hook_line, "clean shot");
+        assert!(!c.uses_money_quote);
+        assert_eq!(c.score, 0.0);
+    }
+
+    // ── Wave 3a: CaptionsResponse JSON parsing ───────────────────
+
+    #[test]
+    fn w3a_captions_response_parses_llm_shape() {
+        let json = r#"{
+            "candidates": [
+                {"hook_line": "Clean shot through smoke", "body": "Down 0-12, clutched it anyway.", "uses_money_quote": false},
+                {"hook_line": "\"I can't miss\" — famous last words", "body": "Then he missed. Then he clutched anyway.", "uses_money_quote": true},
+                {"hook_line": "Speechless", "body": "Triple kill with one bullet left. Still processing this.", "uses_money_quote": false}
+            ]
+        }"#;
+        let r: CaptionsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(r.candidates.len(), 3);
+        assert!(r.candidates[1].uses_money_quote);
+        assert!(!r.candidates[0].uses_money_quote);
+    }
+
+    #[test]
+    fn w3a_captions_response_parses_fenced_json() {
+        let fenced = "```json\n{\"candidates\":[{\"hook_line\":\"a\",\"body\":\"b\"}]}\n```";
+        let extracted = extract_json_from_markdown(fenced).unwrap();
+        let parsed: CaptionsResponse = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(parsed.candidates.len(), 1);
+        assert_eq!(parsed.candidates[0].hook_line, "a");
+        assert_eq!(parsed.candidates[0].body, "b");
+    }
+
+    #[test]
+    fn w3a_captions_response_rejects_missing_required_fields() {
+        // body is required — missing body should fail deserialization
+        let json = r#"{"candidates": [{"hook_line": "just a hook"}]}"#;
+        assert!(serde_json::from_str::<CaptionsResponse>(json).is_err());
+    }
+
+    // ── Wave 3a: truncate_hook ───────────────────────────────────
+
+    #[test]
+    fn w3a_truncate_hook_passes_through_short_input() {
+        assert_eq!(truncate_hook("short", 50), "short");
+    }
+
+    #[test]
+    fn w3a_truncate_hook_cuts_at_word_boundary() {
+        let long = "this is a longer hook line that definitely exceeds fifty characters total";
+        let out = truncate_hook(long, 50);
+        assert!(out.chars().count() <= 50);
+        assert!(out.ends_with('…'));
+        // Output (minus ellipsis) must be a prefix of the input — proves we
+        // cut cleanly at a word boundary, didn't reorder or mangle anything.
+        let before_ellipsis = out.trim_end_matches('…').trim_end();
+        assert!(
+            long.starts_with(before_ellipsis),
+            "output prefix {:?} should appear in input {:?}",
+            before_ellipsis,
+            long,
+        );
+    }
+
+    #[test]
+    fn w3a_truncate_hook_hard_cuts_when_no_space() {
+        // 60 chars of one giant word — no space to cut at.
+        let no_spaces = "a".repeat(60);
+        let out = truncate_hook(&no_spaces, 50);
+        assert!(out.chars().count() <= 50);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn w3a_truncate_hook_respects_unicode() {
+        // Char count, not byte count — emojis shouldn't break truncation.
+        let with_emoji = "test 🎮 test 🎮 test 🎮 test 🎮 test 🎮 test 🎮 test";
+        let out = truncate_hook(with_emoji, 20);
+        assert!(out.chars().count() <= 20);
+    }
+
+    // ── Wave 3a: score_caption_body ──────────────────────────────
+
+    #[test]
+    fn w3a_body_score_zero_for_empty() {
+        assert_eq!(score_caption_body(""), 0.0);
+    }
+
+    #[test]
+    fn w3a_body_score_zero_for_over_limit() {
+        let too_long = "x".repeat(231);
+        assert_eq!(score_caption_body(&too_long), 0.0);
+    }
+
+    #[test]
+    fn w3a_body_score_low_for_short_body() {
+        // 29 chars — below 30 threshold
+        assert!((score_caption_body(&"x".repeat(29)) - 0.05).abs() < 1e-6);
+    }
+
+    #[test]
+    fn w3a_body_score_full_for_reasonable_length() {
+        // 100 chars — comfortable middle ground
+        assert!((score_caption_body(&"x".repeat(100)) - 0.10).abs() < 1e-6);
+    }
+
+    #[test]
+    fn w3a_body_score_full_at_limit() {
+        // Exactly 230 chars — at the ceiling, still full score
+        assert!((score_caption_body(&"x".repeat(230)) - 0.10).abs() < 1e-6);
     }
 }
