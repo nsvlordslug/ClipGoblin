@@ -11,6 +11,7 @@
 use crate::pipeline::CandidateClip;
 use crate::error::AppError;
 use crate::detection::Platform;
+use once_cell::sync::Lazy;
 
 // ═══════════════════════════════════════════════════════════════════
 //  Output
@@ -423,6 +424,157 @@ struct CaptionCtx {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+//  Template matrix (Phase 12 Wave 3b)
+// ═══════════════════════════════════════════════════════════════════
+//
+//  Embedded at compile time via `include_str!` from
+//  `config/caption_templates.toml` at the repo root. Parsed once at
+//  first use (Lazy) and cached for the process lifetime.
+//
+//  Used by `synthesize_event()` as a matrix-first lookup before the
+//  hardcoded fallback rules fire. Uncovered (emotion, context) pairs
+//  return None and fall through unchanged — zero regression risk for
+//  cells not yet seeded.
+//
+//  Supported slot placeholders: `{time_est}`, `{kill_count}`. Broader
+//  slots (game name, streamer, enemy, weapon) land with Phase 1
+//  per-game configs per decision 4 of section 9 in PHASE12_PROMPT_DIFF.md.
+
+#[derive(serde::Deserialize)]
+struct TemplateFile {
+    templates: Vec<TemplateEntry>,
+}
+
+#[derive(serde::Deserialize, Clone, Debug)]
+struct TemplateEntry {
+    emotion: String,
+    context: String,
+    text: String,
+}
+
+/// The caption template matrix, loaded once from the embedded TOML.
+///
+/// Parse failure at compile time via `expect()` — malformed TOML means
+/// the developer catches it before shipping, not testers at runtime.
+static CAPTION_TEMPLATES: Lazy<Vec<TemplateEntry>> = Lazy::new(|| {
+    const TOML: &str = include_str!("../../config/caption_templates.toml");
+    let file: TemplateFile = toml::from_str(TOML)
+        .expect("config/caption_templates.toml must parse at compile time");
+    file.templates
+});
+
+/// Map clip signals (GameType + tags) to a matrix emotion row.
+/// Returns None for uncovered cases — caller should fall through.
+fn infer_emotion(tone: Tone, tags: &[String]) -> Option<&'static str> {
+    let has = |t: &str| tags.iter().any(|x| x == t);
+
+    // Explicit tag signals win — they're the strongest cue.
+    if has("panic") || has("jumpscare") {
+        return Some("panic");
+    }
+    if has("shock") || has("disbelief") {
+        return Some("shock");
+    }
+    if has("celebration") || has("hype") {
+        return Some("hype");
+    }
+    if has("frustration") {
+        return Some("rage");
+    }
+    if has("reaction") {
+        return Some("funny");
+    }
+
+    // Fallback to GameType-based inference for clips with no strong tags.
+    match tone {
+        Tone::Horror  => Some("panic"),
+        Tone::FPS     => Some("hype"),
+        Tone::Social  => Some("funny"),
+        Tone::Cozy    => Some("funny"),
+        Tone::Generic => None, // no strong signal — fall through to hardcoded
+    }
+}
+
+/// Map clip signals (event + tags) to a matrix context column.
+/// Returns None for uncovered cases — caller should fall through.
+fn infer_context(event: Option<&str>, tags: &[String]) -> Option<&'static str> {
+    let has = |t: &str| tags.iter().any(|x| x == t);
+
+    // Event-driven mapping for the common shapes.
+    match event {
+        Some("clutch") => return Some("clutch"),
+        Some("explosion") => return Some("explosion"),
+        Some("ambush") | Some("jumpscare") => return Some("death"),
+        Some("frustration") => return Some("fail"),
+        _ => {}
+    }
+
+    // Compound tag combinations override the weaker event mapping.
+    if has("fight") && has("celebration") {
+        return Some("ace");
+    }
+    if has("fight") && has("frustration") {
+        return Some("fail");
+    }
+    if has("celebration") {
+        return Some("clutch");
+    }
+    if has("shock") || has("disbelief") || has("reaction") {
+        return Some("reaction");
+    }
+    if has("panic") {
+        return Some("chase");
+    }
+
+    // Fight with no other signal → default to reaction (the "something happened" shape).
+    if event == Some("fight") || has("fight") {
+        return Some("reaction");
+    }
+
+    None
+}
+
+/// Replace `{time_est}` and `{kill_count}` placeholders in a template.
+///
+/// Wave 3b only supports two slots — both use defensible placeholder
+/// values ("5" and "3") since we don't yet extract precise numbers from
+/// the signal pipeline. Broader slot extraction lands in Phase 1.
+fn fill_slots(template: &str) -> String {
+    // Using .replace() twice is fine — allocations are ~equal to a single
+    // pass and the code stays readable.
+    template
+        .replace("{time_est}", "5")
+        .replace("{kill_count}", "3")
+}
+
+/// Try to pick a caption template from the matrix for this clip's
+/// (emotion, context) cell. Returns None if either axis can't be inferred
+/// or the cell has no templates — caller falls through to hardcoded rules.
+fn try_matrix_template(
+    event: Option<&str>,
+    tone: Tone,
+    tags: &[String],
+    seed: usize,
+) -> Option<String> {
+    let emotion = infer_emotion(tone, tags)?;
+    let context = infer_context(event, tags)?;
+
+    // Collect matches — `TEMPLATE_MATCH_SCAN` is O(N) over ~50 entries,
+    // trivial cost. No need for a pre-built hashmap.
+    let matches: Vec<&TemplateEntry> = CAPTION_TEMPLATES
+        .iter()
+        .filter(|t| t.emotion == emotion && t.context == context)
+        .collect();
+
+    if matches.is_empty() {
+        return None;
+    }
+
+    let picked = matches[seed % matches.len()];
+    Some(fill_slots(&picked.text))
+}
+
+// ═══════════════════════════════════════════════════════════════════
 //  Event synthesis: tags + tone + event → concrete action sentence
 // ═══════════════════════════════════════════════════════════════════
 //
@@ -431,6 +583,11 @@ struct CaptionCtx {
 //    "got ambushed and panicked"
 //    "the kitchen caught fire"
 //    "teammate sold the round"
+//
+//  Wave 3b inserted a matrix-first lookup before the hardcoded rules:
+//  if (emotion, context) can be inferred AND the matrix has templates
+//  for that cell, use the matrix. Otherwise fall through to the
+//  original hardcoded logic untouched.
 
 /// Build a concrete event summary from available signals.
 /// Returns a short action phrase (no "i", no quotes — just what happened).
@@ -440,6 +597,12 @@ fn synthesize_event(
     tags: &[String],
     seed: usize,
 ) -> String {
+    // Matrix-first (Phase 12 Wave 3b). Falls through to hardcoded rules
+    // below if no matrix template matches.
+    if let Some(from_matrix) = try_matrix_template(event, tone, tags, seed) {
+        return from_matrix;
+    }
+
     let has = |t: &str| tags.iter().any(|x| x == t);
 
     // ── Compound tag combinations → specific events ──
@@ -2652,10 +2815,20 @@ mod tests {
         let mut clip = make_clip(&["ambush", "panic"], 0.8, 0.6, 0.4);
         clip.transcript_excerpt = Some("Oh no oh no".into());
         let summary = generate_event_summary(&clip);
-        // "Oh no" is too short (< 3 words after trim) — falls back to tag synthesis
+        // "Oh no" is too short (< 3 words after trim) — falls back to tag synthesis.
+        // Wave 3b: matrix fires for (panic, death) — output references the panic
+        // scenario ("died", "dead", "wrong", "plan", "sound") instead of raw tag
+        // words. Old hardcoded fallbacks ("ambush" / "panic" / "jumped") still ok
+        // if a non-matrix cell is hit.
+        let lower = summary.to_lowercase();
+        assert!(!summary.trim().is_empty(), "summary must not be empty");
         assert!(
-            summary.contains("ambush") || summary.contains("panic") || summary.contains("jumped"),
-            "should use tag-based synthesis: {}", summary
+            // Matrix (panic, death) vocab
+            lower.contains("died") || lower.contains("dead") || lower.contains("plan")
+            || lower.contains("wrong") || lower.contains("sound") || lower.contains("safe")
+            // OR legacy hardcoded vocab
+            || lower.contains("ambush") || lower.contains("panic") || lower.contains("jumped"),
+            "should reference the panic/ambush scenario: {}", summary
         );
     }
 
@@ -2663,8 +2836,18 @@ mod tests {
     fn event_summary_no_transcript_uses_tags() {
         let clip = make_clip(&["fight", "celebration"], 0.8, 0.5, 0.4);
         let summary = generate_event_summary(&clip);
+        // Wave 3b: matrix fires for (hype, ace) — output uses "round", "dropped",
+        // "lobby", "tap" instead of raw tag words. Old hardcoded vocab still
+        // accepted as a fallback signal.
+        let lower = summary.to_lowercase();
+        assert!(!summary.trim().is_empty(), "summary must not be empty");
         assert!(
-            summary.contains("fight") || summary.contains("clutch") || summary.contains("won") || summary.contains("survived"),
+            // Matrix (hype, ace) vocab
+            lower.contains("round") || lower.contains("dropped") || lower.contains("lobby")
+            || lower.contains("tap") || lower.contains("script")
+            // OR legacy hardcoded vocab
+            || lower.contains("fight") || lower.contains("clutch")
+            || lower.contains("won") || lower.contains("survived"),
             "should reference fight+celebration: {}", summary
         );
     }
@@ -3347,5 +3530,164 @@ mod tests {
     fn w3a_body_score_full_at_limit() {
         // Exactly 230 chars — at the ceiling, still full score
         assert!((score_caption_body(&"x".repeat(230)) - 0.10).abs() < 1e-6);
+    }
+
+    // ── Wave 3b: template matrix ─────────────────────────────────
+
+    #[test]
+    fn w3b_matrix_loads_without_panic() {
+        // Accessing the Lazy forces parse. If the TOML is malformed or uses
+        // unknown fields, this panics with the expect() message.
+        let count = CAPTION_TEMPLATES.len();
+        assert!(count > 0, "matrix must have at least one template");
+    }
+
+    #[test]
+    fn w3b_matrix_has_minimum_coverage() {
+        // Sanity: matrix should have at least 20 templates covering multiple
+        // emotions. Keeps the file from silently regressing to empty.
+        let total = CAPTION_TEMPLATES.len();
+        assert!(total >= 20, "expected >= 20 templates, got {}", total);
+
+        let emotions: std::collections::HashSet<&str> = CAPTION_TEMPLATES
+            .iter()
+            .map(|t| t.emotion.as_str())
+            .collect();
+        assert!(
+            emotions.len() >= 4,
+            "expected templates covering >= 4 emotions, got {:?}",
+            emotions
+        );
+    }
+
+    #[test]
+    fn w3b_infer_emotion_from_explicit_tags() {
+        assert_eq!(infer_emotion(Tone::Generic, &vec!["panic".into()]), Some("panic"));
+        assert_eq!(infer_emotion(Tone::Generic, &vec!["shock".into()]), Some("shock"));
+        assert_eq!(infer_emotion(Tone::Generic, &vec!["celebration".into()]), Some("hype"));
+        assert_eq!(infer_emotion(Tone::Generic, &vec!["frustration".into()]), Some("rage"));
+        assert_eq!(infer_emotion(Tone::Generic, &vec!["reaction".into()]), Some("funny"));
+    }
+
+    #[test]
+    fn w3b_infer_emotion_falls_back_to_game_type() {
+        assert_eq!(infer_emotion(Tone::Horror, &[]), Some("panic"));
+        assert_eq!(infer_emotion(Tone::FPS, &[]), Some("hype"));
+        assert_eq!(infer_emotion(Tone::Social, &[]), Some("funny"));
+        assert_eq!(infer_emotion(Tone::Cozy, &[]), Some("funny"));
+    }
+
+    #[test]
+    fn w3b_infer_emotion_returns_none_for_generic_with_no_tags() {
+        assert_eq!(infer_emotion(Tone::Generic, &[]), None);
+    }
+
+    #[test]
+    fn w3b_infer_context_from_events() {
+        assert_eq!(infer_context(Some("clutch"), &[]), Some("clutch"));
+        assert_eq!(infer_context(Some("explosion"), &[]), Some("explosion"));
+        assert_eq!(infer_context(Some("ambush"), &[]), Some("death"));
+        assert_eq!(infer_context(Some("jumpscare"), &[]), Some("death"));
+        assert_eq!(infer_context(Some("frustration"), &[]), Some("fail"));
+    }
+
+    #[test]
+    fn w3b_infer_context_fight_plus_celebration_is_ace() {
+        // Compound tag overrides the generic "fight" event.
+        let tags = vec!["fight".into(), "celebration".into()];
+        assert_eq!(infer_context(Some("fight"), &tags), Some("ace"));
+    }
+
+    #[test]
+    fn w3b_infer_context_fight_plus_frustration_is_fail() {
+        let tags = vec!["fight".into(), "frustration".into()];
+        assert_eq!(infer_context(Some("fight"), &tags), Some("fail"));
+    }
+
+    #[test]
+    fn w3b_infer_context_returns_none_when_uncovered() {
+        // No event, no useful tags — matrix should bail and let hardcoded take over.
+        assert_eq!(infer_context(None, &[]), None);
+    }
+
+    #[test]
+    fn w3b_fill_slots_replaces_time_est_and_kill_count() {
+        let template = "went from zero to {kill_count} in {time_est} seconds";
+        let filled = fill_slots(template);
+        assert_eq!(filled, "went from zero to 3 in 5 seconds");
+    }
+
+    #[test]
+    fn w3b_fill_slots_preserves_text_without_placeholders() {
+        let template = "took the fight and lost the plan";
+        assert_eq!(fill_slots(template), "took the fight and lost the plan");
+    }
+
+    #[test]
+    fn w3b_try_matrix_template_returns_some_for_covered_cell() {
+        // (hype, ace) is covered in the shipped TOML.
+        let tags = vec!["fight".into(), "celebration".into()];
+        let result = try_matrix_template(Some("fight"), Tone::FPS, &tags, 0);
+        assert!(result.is_some(), "(hype, ace) should have templates");
+        let text = result.unwrap();
+        assert!(!text.trim().is_empty());
+        // Slots should have been filled — no literal `{` in output.
+        assert!(!text.contains('{'), "slots must be filled: {}", text);
+    }
+
+    #[test]
+    fn w3b_try_matrix_template_returns_none_for_uncovered_cell() {
+        // (Generic with no tags, no event) — infer_emotion returns None → None.
+        let result = try_matrix_template(None, Tone::Generic, &[], 0);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn w3b_try_matrix_template_is_seed_deterministic() {
+        // Same seed → same output. Matches the contract of the hardcoded
+        // `pick(seed, &[...])` path.
+        let tags = vec!["celebration".into()];
+        let a = try_matrix_template(Some("clutch"), Tone::FPS, &tags, 42);
+        let b = try_matrix_template(Some("clutch"), Tone::FPS, &tags, 42);
+        assert_eq!(a, b);
+
+        // Different seeds *may* produce different output (not guaranteed if
+        // only one template exists in that cell, but should at least be Some).
+        let c = try_matrix_template(Some("clutch"), Tone::FPS, &tags, 43);
+        assert!(c.is_some());
+    }
+
+    #[test]
+    fn w3b_matrix_wins_over_hardcoded_for_covered_cell() {
+        // Matrix first: (hype, ace) IS covered. synthesize_event should return
+        // something from the matrix, NOT a hardcoded "fight" string.
+        let tags = vec!["fight".into(), "celebration".into()];
+        let out = synthesize_event(Some("fight"), Tone::FPS, &tags, 0);
+        // Matrix (hype, ace) vocab — at least one of these should appear.
+        let lower = out.to_lowercase();
+        assert!(
+            lower.contains("round") || lower.contains("dropped") || lower.contains("lobby")
+            || lower.contains("tap") || lower.contains("script"),
+            "expected matrix (hype, ace) output, got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn w3b_matrix_falls_through_for_uncovered_cell() {
+        // (hype, death) is NOT covered in the shipped TOML. synthesize_event
+        // should fall through to the hardcoded rules.
+        // Tags: fight + ambush → event "ambush", tone FPS → (hype, death) in matrix.
+        let tags = vec!["fight".into(), "ambush".into()];
+        let out = synthesize_event(Some("ambush"), Tone::FPS, &tags, 0);
+        let lower = out.to_lowercase();
+        // Hardcoded ambush-FPS vocab:
+        assert!(
+            lower.contains("rush") || lower.contains("nowhere")
+            || lower.contains("caught") || lower.contains("warning")
+            || lower.contains("guard"),
+            "expected hardcoded ambush output, got: {}",
+            out
+        );
     }
 }

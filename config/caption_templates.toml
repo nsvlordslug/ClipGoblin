@@ -1,0 +1,262 @@
+# ClipGoblin Free-path caption template matrix
+# Phase 12 Wave 3b — emotion × context grid for synthesize_event() matrix lookup.
+#
+# Loaded at compile time via `include_str!` in src-tauri/src/post_captions.rs.
+# Parsed once at first use and cached via Lazy.
+#
+# Emotions (rows):  shock, hype, funny, rage, panic
+# Contexts (cols):  ace, death, clutch, fail, reaction, chase, explosion
+#
+# This file only covers the top ~15 cells that appear commonly in real clips.
+# Uncovered (emotion, context) pairs fall through to the hardcoded rules in
+# synthesize_event() — zero regression risk.
+#
+# Slot placeholders supported in Wave 3b:
+#   {time_est}      — generic short-duration hint, e.g. "5"
+#   {kill_count}    — generic kill count hint, e.g. "3"
+#
+# Broader slots (game name, streamer, enemy, weapon) land with Phase 1
+# per-game TOML configs.
+#
+# To add a template: append `[[templates]]` with emotion, context, text.
+# Emotion + context must be spelled exactly as used by infer_emotion()
+# and infer_context() in post_captions.rs.
+
+# ───────────────────────────────────────────────────────────────
+# SHOCK — disbelief, speechless, "did that really happen"
+# ───────────────────────────────────────────────────────────────
+
+[[templates]]
+emotion = "shock"
+context = "ace"
+text = "went from zero to {kill_count} in {time_est} seconds flat"
+
+[[templates]]
+emotion = "shock"
+context = "ace"
+text = "clean {kill_count}-for-{kill_count} through the smoke, still processing this"
+
+[[templates]]
+emotion = "shock"
+context = "ace"
+text = "didn't think that was possible and then it was"
+
+[[templates]]
+emotion = "shock"
+context = "clutch"
+text = "one bullet left, one clutch won, brain not ready"
+
+[[templates]]
+emotion = "shock"
+context = "clutch"
+text = "somehow pulled it off with everyone watching"
+
+[[templates]]
+emotion = "shock"
+context = "clutch"
+text = "stared at the screen for {time_est} seconds after"
+
+[[templates]]
+emotion = "shock"
+context = "reaction"
+text = "literally couldn't speak for {time_est} seconds"
+
+[[templates]]
+emotion = "shock"
+context = "reaction"
+text = "took a long look at the monitor and said nothing"
+
+[[templates]]
+emotion = "shock"
+context = "reaction"
+text = "the silence after said more than words could"
+
+# ───────────────────────────────────────────────────────────────
+# HYPE — adrenaline, big moment, everyone's hyped
+# ───────────────────────────────────────────────────────────────
+
+[[templates]]
+emotion = "hype"
+context = "ace"
+text = "one tap, two tap, {kill_count} tap — the round ended itself"
+
+[[templates]]
+emotion = "hype"
+context = "ace"
+text = "dropped {kill_count} and the lobby went quiet"
+
+[[templates]]
+emotion = "hype"
+context = "ace"
+text = "read the entire round like the script was in front of them"
+
+[[templates]]
+emotion = "hype"
+context = "clutch"
+text = "last alive, last bullet, last breath — won anyway"
+
+[[templates]]
+emotion = "hype"
+context = "clutch"
+text = "the clutch was so clean it felt rehearsed"
+
+[[templates]]
+emotion = "hype"
+context = "clutch"
+text = "{kill_count} down in {time_est} seconds, nobody saw it coming"
+
+[[templates]]
+emotion = "hype"
+context = "reaction"
+text = "the reaction was louder than the play and the play was loud"
+
+[[templates]]
+emotion = "hype"
+context = "reaction"
+text = "hands-up moment, mic-drop moment, one clean moment"
+
+# ───────────────────────────────────────────────────────────────
+# FUNNY — self-deprecating, absurd, the joke writes itself
+# ───────────────────────────────────────────────────────────────
+
+[[templates]]
+emotion = "funny"
+context = "fail"
+text = "had a plan, executed the plan, the plan was bad"
+
+[[templates]]
+emotion = "funny"
+context = "fail"
+text = "watched the enemy walk past {time_est} times before doing anything"
+
+[[templates]]
+emotion = "funny"
+context = "fail"
+text = "aimed at nothing and hit nothing, truly consistent"
+
+[[templates]]
+emotion = "funny"
+context = "death"
+text = "died in the silliest way possible and that's on brand"
+
+[[templates]]
+emotion = "funny"
+context = "death"
+text = "the cause of death was confidence, the confidence was misplaced"
+
+[[templates]]
+emotion = "funny"
+context = "death"
+text = "rolled into the situation and immediately rolled out of it"
+
+[[templates]]
+emotion = "funny"
+context = "reaction"
+text = "the laugh came from the soul and it came loud"
+
+[[templates]]
+emotion = "funny"
+context = "reaction"
+text = "couldn't breathe for {time_est} seconds, that's how bad it was"
+
+[[templates]]
+emotion = "funny"
+context = "reaction"
+text = "you can actually see the moment the plan collapses"
+
+# ───────────────────────────────────────────────────────────────
+# RAGE — tilted, blaming the game, something's bullshit
+# ───────────────────────────────────────────────────────────────
+
+[[templates]]
+emotion = "rage"
+context = "fail"
+text = "the game decided the outcome before the play even started"
+
+[[templates]]
+emotion = "rage"
+context = "fail"
+text = "explain to me how that was a fair outcome. explain it."
+
+[[templates]]
+emotion = "rage"
+context = "fail"
+text = "lost to something that shouldn't be in the game"
+
+[[templates]]
+emotion = "rage"
+context = "death"
+text = "died to that? really? that?"
+
+[[templates]]
+emotion = "rage"
+context = "death"
+text = "the hitbox was somewhere else entirely and the death happened anyway"
+
+[[templates]]
+emotion = "rage"
+context = "death"
+text = "fought the game for {time_est} seconds, lost, still mad"
+
+# ───────────────────────────────────────────────────────────────
+# PANIC — lost control, everything falling apart at once
+# ───────────────────────────────────────────────────────────────
+
+[[templates]]
+emotion = "panic"
+context = "death"
+text = "the plan survived {time_est} seconds and then it didn't"
+
+[[templates]]
+emotion = "panic"
+context = "death"
+text = "went from safe to dead in the span of one wrong movement"
+
+[[templates]]
+emotion = "panic"
+context = "death"
+text = "heard the sound, saw nothing, died immediately"
+
+[[templates]]
+emotion = "panic"
+context = "chase"
+text = "ran for {time_est} seconds and it felt like {time_est} minutes"
+
+[[templates]]
+emotion = "panic"
+context = "chase"
+text = "every corner was the wrong corner and they kept coming"
+
+[[templates]]
+emotion = "panic"
+context = "chase"
+text = "no direction was safe and all of them were worse than the last"
+
+[[templates]]
+emotion = "panic"
+context = "reaction"
+text = "you can hear the exact moment everything slipped"
+
+[[templates]]
+emotion = "panic"
+context = "reaction"
+text = "the scream was involuntary and it was appropriate"
+
+# ───────────────────────────────────────────────────────────────
+# EXPLOSION — something went boom, chaos, debris
+# ───────────────────────────────────────────────────────────────
+
+[[templates]]
+emotion = "shock"
+context = "explosion"
+text = "the explosion was unprompted and disproportionate"
+
+[[templates]]
+emotion = "funny"
+context = "explosion"
+text = "detonated the plan along with everything else"
+
+[[templates]]
+emotion = "panic"
+context = "explosion"
+text = "one second of peace then {time_est} seconds of debris"
