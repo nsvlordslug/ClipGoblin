@@ -1364,6 +1364,123 @@ pub struct CaptionCandidate {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+//  Free-path title generation (Phase 12 Wave 3c)
+// ═══════════════════════════════════════════════════════════════════
+//
+//  `free_title()` is the Free-path title generator. When a Twitch
+//  community clip's title is available (the viewer's own wit, free
+//  for us to reuse), we pass it through after a minimal sanity check:
+//  length cap, slur filter, empty check. Otherwise fall back to a
+//  simple synthesis from the event summary.
+//
+//  Per Wave 3 decision 5 in §12d of PHASE12_PROMPT_DIFF.md, the slur
+//  banlist is intentionally minimal — Twitch already moderates its own
+//  community clips. We only need to catch the rare bad case where
+//  something slips through and would embarrass us on TikTok/YouTube.
+
+/// Slur banlist for community-clip titles. Minimal by design — see
+/// decision 5 in §12d. Case-insensitive match on whole words.
+///
+/// Intentionally omitted: common gaming profanity ("fuck", "shit",
+/// etc.) that Twitch moderation explicitly allows in titles. Our filter
+/// exists to catch what Twitch missed, not re-moderate.
+const COMMUNITY_TITLE_SLUR_BANLIST: &[&str] = &[
+    // Racial slurs
+    "n1gger", "n1gga", "nigger", "nigga",
+    // Homophobic / transphobic slurs
+    "faggot", "tranny",
+    // Ableist slurs (strongest)
+    "retard", "retarded",
+];
+
+/// Generate a Free-path title for a clip.
+///
+/// If a community clip title is available AND passes sanity checks,
+/// return it verbatim (truncated to 60 chars at a word boundary).
+/// Otherwise synthesize a simple title from the event summary.
+pub fn free_title(
+    community_clip_title: Option<&str>,
+    event_summary: &str,
+    tags: &[String],
+) -> String {
+    if let Some(title) = community_clip_title {
+        if let Some(clean) = sanitize_community_title(title) {
+            return clean;
+        }
+    }
+    synthesize_free_title(event_summary, tags)
+}
+
+/// Validate and lightly normalize a community-clip title.
+/// Returns None if the title:
+/// - is empty / whitespace-only
+/// - contains a banned slur
+///
+/// When accepted, the title is truncated at word boundary to ≤60 chars
+/// to match the existing BYOK title length convention.
+fn sanitize_community_title(title: &str) -> Option<String> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if contains_banned_slur(trimmed) {
+        return None;
+    }
+    Some(truncate_title_at_word_boundary(trimmed, 60))
+}
+
+/// Case-insensitive whole-word slur match. Splits on non-alphanumeric
+/// characters so that `"N1gger-style"` still catches the slur token.
+fn contains_banned_slur(title: &str) -> bool {
+    let lower = title.to_lowercase();
+    for token in lower.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if COMMUNITY_TITLE_SLUR_BANLIST.contains(&token) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Truncate at word boundary to ≤max_chars. Preserves words when possible,
+/// drops the trailing fragment if the cut would land mid-word, appends
+/// nothing (no ellipsis — titles look better without).
+fn truncate_title_at_word_boundary(title: &str, max_chars: usize) -> String {
+    if title.chars().count() <= max_chars {
+        return title.to_string();
+    }
+    let truncated: String = title.chars().take(max_chars).collect();
+    match truncated.rfind(' ') {
+        Some(space) if space > max_chars / 2 => truncated[..space].trim_end().to_string(),
+        _ => truncated,
+    }
+}
+
+/// Minimal Free-path title synthesis. Capitalizes the first letter of
+/// the event summary, drops a trailing period if present, and caps at
+/// 60 chars to match the BYOK title convention.
+///
+/// `tags` is currently unused — reserved for future signal-driven
+/// shaping (e.g. prepending "ACE:" for ace tags). Wave 3c keeps this
+/// function minimal per decision 6 — the matrix already made the
+/// event summary presentable.
+fn synthesize_free_title(event_summary: &str, _tags: &[String]) -> String {
+    let trimmed = event_summary.trim().trim_end_matches('.');
+    if trimmed.is_empty() {
+        return "clip moment".to_string();
+    }
+
+    // Capitalize the first alphabetic character, leave the rest alone.
+    // Using chars() rather than bytes() to handle unicode safely.
+    let mut chars = trimmed.chars();
+    let capitalized = match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
+        None => String::new(),
+    };
+
+    truncate_title_at_word_boundary(&capitalized, 60)
+}
+
+// ═══════════════════════════════════════════════════════════════════
 //  LLM-based caption generation (BYOK)
 // ═══════════════════════════════════════════════════════════════════
 //
@@ -3689,5 +3806,135 @@ mod tests {
             "expected hardcoded ambush output, got: {}",
             out
         );
+    }
+
+    // ── Wave 3c: free_title() + community-clip passthrough ──────
+
+    #[test]
+    fn w3c_free_title_uses_community_title_when_clean() {
+        let out = free_title(
+            Some("insane 1v5 clutch on haven"),
+            "fight broke out and went wrong fast",
+            &[],
+        );
+        assert_eq!(out, "insane 1v5 clutch on haven");
+    }
+
+    #[test]
+    fn w3c_free_title_falls_back_when_no_community_title() {
+        let out = free_title(None, "fight broke out and went wrong fast", &[]);
+        // First letter capitalized by synthesize_free_title
+        assert!(out.starts_with('F'), "expected capitalization: {}", out);
+        // Case-insensitive containment — synthesize only upper-cases the first char.
+        assert!(out.to_lowercase().contains("fight"));
+    }
+
+    #[test]
+    fn w3c_free_title_falls_back_when_community_title_has_slur() {
+        // Use a sanitized version of a banned word for the test — still
+        // triggers the banlist because banlist match is whole-token.
+        let out = free_title(
+            Some("literally a n1gger clip lol"),
+            "fight broke out and went wrong fast",
+            &[],
+        );
+        // Should fall back to synthesized — no slur passed through
+        assert!(!out.to_lowercase().contains("n1gger"));
+        assert!(out.starts_with('F'), "expected synthesized fallback: {}", out);
+    }
+
+    #[test]
+    fn w3c_free_title_falls_back_on_empty_community_title() {
+        let out = free_title(Some("   "), "something happened fast", &[]);
+        assert!(out.starts_with('S'));
+    }
+
+    #[test]
+    fn w3c_sanitize_community_title_truncates_long_titles() {
+        let long_title = "this is a very long community clip title that definitely exceeds the sixty character limit by a wide margin";
+        let result = sanitize_community_title(long_title).unwrap();
+        assert!(result.chars().count() <= 60, "got {} chars: {}", result.chars().count(), result);
+        // Should cut at word boundary — no trailing partial word
+        assert!(!result.ends_with(|c: char| c.is_alphabetic() && result.chars().count() == 60));
+    }
+
+    #[test]
+    fn w3c_sanitize_community_title_passes_through_short_clean() {
+        let result = sanitize_community_title("clean 1v5 ace");
+        assert_eq!(result, Some("clean 1v5 ace".to_string()));
+    }
+
+    #[test]
+    fn w3c_sanitize_community_title_rejects_empty() {
+        assert!(sanitize_community_title("").is_none());
+        assert!(sanitize_community_title("   ").is_none());
+        assert!(sanitize_community_title("\t\n").is_none());
+    }
+
+    #[test]
+    fn w3c_sanitize_community_title_rejects_slurs_case_insensitive() {
+        assert!(sanitize_community_title("total RETARD moment").is_none());
+        assert!(sanitize_community_title("this Retard play").is_none());
+        assert!(sanitize_community_title("something faggot-ish").is_none());
+    }
+
+    #[test]
+    fn w3c_sanitize_community_title_accepts_common_gaming_profanity() {
+        // "fuck" and "shit" are NOT on the banlist — common gaming lang.
+        assert!(sanitize_community_title("holy shit that was fucking clean").is_some());
+        assert!(sanitize_community_title("what the fuck just happened").is_some());
+    }
+
+    #[test]
+    fn w3c_sanitize_community_title_catches_slur_within_compound() {
+        // "n1gger-style" → tokenizes to ["n1gger", "style"] → banned.
+        assert!(sanitize_community_title("n1gger-style play").is_none());
+    }
+
+    #[test]
+    fn w3c_synthesize_free_title_capitalizes_first_letter() {
+        let out = synthesize_free_title("got outplayed on the last round", &[]);
+        assert_eq!(out, "Got outplayed on the last round");
+    }
+
+    #[test]
+    fn w3c_synthesize_free_title_drops_trailing_period() {
+        let out = synthesize_free_title("clean shot through the smoke.", &[]);
+        assert_eq!(out, "Clean shot through the smoke");
+    }
+
+    #[test]
+    fn w3c_synthesize_free_title_truncates_long_summary() {
+        let long = "this is a very long event summary that wanders on and on and should be cut";
+        let out = synthesize_free_title(long, &[]);
+        assert!(out.chars().count() <= 60);
+        assert!(out.starts_with('T'));
+    }
+
+    #[test]
+    fn w3c_synthesize_free_title_handles_empty_fallback() {
+        let out = synthesize_free_title("", &[]);
+        assert_eq!(out, "clip moment");
+    }
+
+    #[test]
+    fn w3c_truncate_title_at_word_boundary_preserves_short() {
+        assert_eq!(truncate_title_at_word_boundary("short title", 60), "short title");
+    }
+
+    #[test]
+    fn w3c_truncate_title_at_word_boundary_cuts_at_space() {
+        let long = "a".repeat(30) + " " + &"b".repeat(30) + " extra";
+        let out = truncate_title_at_word_boundary(&long, 60);
+        assert!(out.chars().count() <= 60);
+        // Should cut at the last space within the limit
+        assert!(!out.ends_with(' '));
+    }
+
+    #[test]
+    fn w3c_truncate_title_at_word_boundary_hard_cuts_without_space() {
+        let no_spaces = "a".repeat(80);
+        let out = truncate_title_at_word_boundary(&no_spaces, 60);
+        assert_eq!(out.chars().count(), 60);
     }
 }
