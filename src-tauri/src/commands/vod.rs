@@ -18,7 +18,7 @@ use crate::commands::auth::try_refresh_twitch_token;
 use crate::clip_selector;
 use crate::whisper;
 use crate::commands::captions::{
-    grounded_highlight_title, compute_confidence,
+    compute_confidence,
     build_highlight_explanation, count_active_signals,
 };
 
@@ -1011,12 +1011,27 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
         }
 
         match result {
-            Ok(highlights) => {
+            Ok(mut highlights) => {
                 let mut clip_thumb_info: Vec<(String, f64)> = Vec::new();
                 // Clip IDs that qualify for auto-ship (confidence >= 0.9), built
                 // alongside the clip-insert loop below. Sorted by confidence desc
                 // so the cap picks the best ones first.
                 let mut auto_ship_candidates: Vec<(String, f64)> = Vec::new();
+
+                // Save-path Wave 3 upgrade: replace heuristic titles with LLM
+                // titles when BYOK + Scope::Titles is enabled. Best-effort —
+                // per-clip failures keep the heuristic title without aborting.
+                let title_resolved = if let Ok(conn) = db.lock() {
+                    crate::ai_provider::resolve(&conn, crate::ai_provider::Scope::Titles)
+                } else {
+                    crate::ai_provider::ResolvedProvider::free()
+                };
+                crate::commands::captions::upgrade_titles_with_llm(
+                    &mut highlights,
+                    &title_resolved,
+                    vod_clone.game_name.as_deref(),
+                )
+                .await;
 
                 if let Ok(conn) = db.lock() {
                     // Clear previous analysis
@@ -1476,9 +1491,10 @@ fn run_analysis_signals(
         let all_tags: Vec<String> = [&c.event_tags[..], &c.emotion_tags[..]].concat();
         let tag_str = if all_tags.is_empty() { "auto".to_string() } else { all_tags.join(",") };
 
-        let title = grounded_highlight_title(
+        let title = crate::commands::captions::save_path_heuristic_title(
             c.transcript_excerpt.as_deref(),
             Some(&tag_str),
+            vod.game_name.as_deref(),
             c.start_time,
         );
 

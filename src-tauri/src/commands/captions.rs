@@ -239,6 +239,179 @@ fn primary_event_from_tags(tags: Option<&str>) -> Option<&'static str> {
     None
 }
 
+// ═══════════════════════════════════════════════════════════════════
+//  Save-path title generation (analyze-time, runs synchronously)
+// ═══════════════════════════════════════════════════════════════════
+//
+//  Called from `vod.rs` inside `run_analysis_signals` for each candidate
+//  clip. This is the title users see immediately after analysis, BEFORE
+//  any LLM upgrade pass runs. Two layers:
+//
+//  1. Wave 3-shaped templates (QuietFlex from a punchy transcript phrase,
+//     AftermathConfession from event tags + game name)
+//  2. Fall back to `grounded_highlight_title` for cases neither matches
+//
+//  After all clips are produced, `upgrade_titles_with_llm` runs in async
+//  context and replaces these heuristic titles with LLM-generated ones
+//  when the user has BYOK + the titles toggle on.
+
+/// Save-path heuristic title. Tries Wave 3-shaped templates first, then
+/// falls back to the legacy grounded heuristic for unmatched cases.
+pub fn save_path_heuristic_title(
+    transcript_excerpt: Option<&str>,
+    tags_str: Option<&str>,
+    game_name: Option<&str>,
+    start_seconds: f64,
+) -> String {
+    let tags = parse_tags(tags_str);
+
+    // Layer 1: QuietFlex via a short transcript phrase. If the transcript has
+    // a 2-5 word non-vague fragment, return it standalone. Maps to real top
+    // performers like "actually clean" / "rip mouse" — short, voice, post-clip.
+    if let Some(excerpt) = transcript_excerpt {
+        if let Some(phrase) = extract_title_phrase(excerpt) {
+            let wc = phrase.split_whitespace().count();
+            if wc >= 2 && wc <= 5 && !is_vague_phrase(&phrase) {
+                return phrase;
+            }
+        }
+    }
+
+    // Layer 2: AftermathConfession from event tags + game name. First-person
+    // past-tense templated lines, anchored on the game when available.
+    if let Some(line) = aftermath_from_tags(&tags, game_name) {
+        return line;
+    }
+
+    // Layer 3: Fall back to the legacy grounded heuristic. Still used when
+    // neither of the above produces something Wave 3-shaped.
+    grounded_highlight_title(transcript_excerpt, tags_str, start_seconds)
+}
+
+/// Pick a Wave 3 AftermathConfession-style template based on event tags.
+/// Anchors on the game name when supplied so titles read "Elden Ring broke me"
+/// rather than the abstract "broke me" version.
+fn aftermath_from_tags(tags: &[String], game_name: Option<&str>) -> Option<String> {
+    let has = |needle: &str| tags.iter().any(|t| t.contains(needle));
+    let game = game_name
+        .map(str::trim)
+        .filter(|g| !g.is_empty());
+
+    if has("ambush") || has("jumpscare") {
+        return Some(match game {
+            Some(g) => format!("{} ambushed me before i could move", g.to_lowercase()),
+            None => "ambushed before i could move".into(),
+        });
+    }
+    if has("fight") && has("panic") {
+        return Some(match game {
+            Some(g) => format!("panicked mid-fight in {}", g.to_lowercase()),
+            None => "panicked mid-fight".into(),
+        });
+    }
+    if has("fight") && has("frustration") {
+        return Some("couldn't survive that fight".into());
+    }
+    if has("celebration") && has("hype") {
+        return Some("clutched it at the last second".into());
+    }
+    if has("death") {
+        return Some(match game {
+            Some(g) => format!("{} broke me before i blinked", g.to_lowercase()),
+            None => "broke me before i blinked".into(),
+        });
+    }
+    if has("explosion") {
+        return Some("blew up before i could react".into());
+    }
+    if has("disbelief") || has("shock") {
+        return Some("didn't see that one coming".into());
+    }
+    None
+}
+
+/// Async LLM upgrade pass. Iterates highlights and replaces each title with
+/// a Wave 3 LLM-generated one when BYOK + titles toggle is on. Per-clip
+/// failures keep the existing heuristic title (not fatal).
+///
+/// Called from `analyze_vod` AFTER `run_analysis_signals` returns highlights
+/// but BEFORE inserting them into the DB.
+pub async fn upgrade_titles_with_llm(
+    highlights: &mut [db::HighlightRow],
+    resolved: &ai_provider::ResolvedProvider,
+    vod_game: Option<&str>,
+) {
+    if !resolved.is_llm() {
+        log::debug!(
+            "Save-path Wave 3 upgrade skipped — provider resolved to Free for Scope::Titles"
+        );
+        return;
+    }
+
+    log::info!(
+        "Save-path Wave 3: upgrading {} title(s) with {:?} (model: {})",
+        highlights.len(),
+        resolved.provider,
+        resolved.model,
+    );
+
+    for h in highlights.iter_mut() {
+        let tags: Vec<String> = h
+            .tags
+            .as_deref()
+            .map(|s| {
+                s.split(',')
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let event_summary = h.event_summary.clone().unwrap_or_default();
+
+        // Use the highlight's stored transcript snippet — it's the relevant
+        // excerpt for this clip range, set during signal fusion.
+        let transcript_for_clip = h.transcript_snippet.as_deref();
+
+        // No money-quote extraction at analyze time — keeps the cost down to
+        // one API call per clip. Money quote still extracts on regenerate.
+        match post_captions::generate_llm_titles(
+            &resolved.api_key,
+            &resolved.model,
+            &event_summary,
+            None,                  // money_quote — skip at analyze
+            transcript_for_clip,
+            &tags,
+            vod_game,
+            None,                  // streamer_history — fresh analyze, no prior titles
+            None,                  // target_platform — defaults to TikTok
+        )
+        .await
+        {
+            Ok(candidates) => {
+                if let Some(top) = candidates.first() {
+                    log::info!(
+                        "Save-path Wave 3 title for highlight {}: \"{}\" (pattern {:?}, score {:.2})",
+                        h.id, top.text, top.pattern, top.score,
+                    );
+                    h.description = Some(top.text.clone());
+                } else {
+                    log::warn!(
+                        "Save-path Wave 3: zero candidates for highlight {} — keeping heuristic",
+                        h.id
+                    );
+                }
+            }
+            Err(e) => {
+                log::warn!(
+                    "Save-path Wave 3 failed for highlight {}: {} — keeping heuristic",
+                    h.id, e
+                );
+            }
+        }
+    }
+}
+
 /// Compute confidence from raw score and signal count,
 /// then applies a piecewise curve matching the pipeline calibration.
 ///
