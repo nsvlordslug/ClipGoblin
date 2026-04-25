@@ -202,6 +202,27 @@ pub fn init_db() -> SqliteResult<Connection> {
     conn.execute("ALTER TABLE scheduled_uploads ADD COLUMN ctr_percent REAL", []).ok();
     conn.execute("ALTER TABLE scheduled_uploads ADD COLUMN stats_updated_at TEXT", []).ok();
 
+    // Phase 6.0: per-call AI usage log for cost tracking and rolling estimates.
+    // Each row is one LLM API call. Used by ai_usage::estimate_cost_per_analyze
+    // to drive the per-VOD cost preview in Settings + the Analyze confirmation modal.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ai_usage_log (
+            id TEXT PRIMARY KEY,
+            timestamp TEXT NOT NULL,
+            feature TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            tokens_in INTEGER NOT NULL,
+            tokens_out INTEGER NOT NULL,
+            cost_usd REAL NOT NULL,
+            vod_id TEXT,
+            clip_id TEXT,
+            context TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_ai_usage_log_ts ON ai_usage_log(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_ai_usage_log_vod ON ai_usage_log(vod_id);"
+    )?;
+
     Ok(conn)
 }
 

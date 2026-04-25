@@ -1,5 +1,6 @@
 mod bin_manager;
 mod ai_provider;
+mod ai_usage;
 mod auth_proxy;
 mod crypto;
 mod audio_signal;

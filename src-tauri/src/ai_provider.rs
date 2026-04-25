@@ -31,6 +31,17 @@ impl Provider {
             _ => Self::Free,
         }
     }
+
+    /// Stable lowercase identifier used as a foreign-key value in the
+    /// `ai_usage_log` table.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Free => "free",
+            Self::OpenAI => "openai",
+            Self::Claude => "claude",
+            Self::Gemini => "gemini",
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
