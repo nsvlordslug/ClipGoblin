@@ -278,8 +278,10 @@ pub fn save_path_heuristic_title(
     }
 
     // Layer 2: AftermathConfession from event tags + game name. First-person
-    // past-tense templated lines, anchored on the game when available.
-    if let Some(line) = aftermath_from_tags(&tags, game_name) {
+    // past-tense templated lines, anchored on the game when available. Picks
+    // from a pool of 5+ variants per tag combo using start_seconds modulo so
+    // multiple clips sharing a dominant tag don't all land on the same line.
+    if let Some(line) = aftermath_from_tags(&tags, game_name, start_seconds) {
         return line;
     }
 
@@ -289,43 +291,120 @@ pub fn save_path_heuristic_title(
 }
 
 /// Pick a Wave 3 AftermathConfession-style template based on event tags.
-/// Anchors on the game name when supplied so titles read "Elden Ring broke me"
-/// rather than the abstract "broke me" version.
-fn aftermath_from_tags(tags: &[String], game_name: Option<&str>) -> Option<String> {
+/// Each tag combo has 5+ phrase variants, picked by `start_seconds % len`
+/// so multiple clips with the same dominant tag don't all collide on the
+/// same title (the bug that made 4 clips share "didn't see that one coming").
+/// Anchors on the game name when supplied for one or two of the variants
+/// per category.
+fn aftermath_from_tags(
+    tags: &[String],
+    game_name: Option<&str>,
+    start_seconds: f64,
+) -> Option<String> {
     let has = |needle: &str| tags.iter().any(|t| t.contains(needle));
     let game = game_name
         .map(str::trim)
-        .filter(|g| !g.is_empty());
+        .filter(|g| !g.is_empty())
+        .map(str::to_lowercase);
+    let idx = start_seconds.max(0.0) as usize;
+
+    // Build a phrase pool, optionally including game-anchored variants.
+    let pick = |base: &[&str], game_templates: &[&str]| -> String {
+        let mut pool: Vec<String> = base.iter().map(|s| (*s).to_string()).collect();
+        if let Some(ref g) = game {
+            for t in game_templates {
+                pool.push(t.replace("{game}", g));
+            }
+        }
+        pool[idx % pool.len()].clone()
+    };
 
     if has("ambush") || has("jumpscare") {
-        return Some(match game {
-            Some(g) => format!("{} ambushed me before i could move", g.to_lowercase()),
-            None => "ambushed before i could move".into(),
-        });
+        return Some(pick(
+            &[
+                "ambushed before i could move",
+                "got caught completely off guard",
+                "had zero seconds to react",
+                "didn't even have my hands on the keys",
+                "blindsided in the worst way",
+            ],
+            &["{game} ambushed me before i could move"],
+        ));
     }
     if has("fight") && has("panic") {
-        return Some(match game {
-            Some(g) => format!("panicked mid-fight in {}", g.to_lowercase()),
-            None => "panicked mid-fight".into(),
-        });
+        return Some(pick(
+            &[
+                "panicked mid-fight",
+                "every option was the wrong one",
+                "lost the plot at the worst time",
+                "had a strategy. then i didn't.",
+                "tried to remember which button does what",
+            ],
+            &["panicked mid-fight in {game}"],
+        ));
     }
     if has("fight") && has("frustration") {
-        return Some("couldn't survive that fight".into());
+        return Some(pick(
+            &[
+                "couldn't survive that fight",
+                "got served mid-combo",
+                "deserved better than this",
+                "everything went wrong at once",
+                "no version of me wins that one",
+            ],
+            &["{game} did not play fair this round"],
+        ));
     }
     if has("celebration") && has("hype") {
-        return Some("clutched it at the last second".into());
+        return Some(pick(
+            &[
+                "clutched it at the last second",
+                "shouldn't have worked but it did",
+                "actually pulled it off somehow",
+                "luck did most of that",
+                "made it out by inches",
+            ],
+            &["{game} let me have one for once"],
+        ));
     }
     if has("death") {
-        return Some(match game {
-            Some(g) => format!("{} broke me before i blinked", g.to_lowercase()),
-            None => "broke me before i blinked".into(),
-        });
+        return Some(pick(
+            &[
+                "broke me before i blinked",
+                "ended my run mid-stride",
+                "showed me the loading screen",
+                "wiped me without saying anything",
+                "made me reconsider my life choices",
+            ],
+            &[
+                "{game} broke me before i blinked",
+                "got dismissed by {game}",
+            ],
+        ));
     }
     if has("explosion") {
-        return Some("blew up before i could react".into());
+        return Some(pick(
+            &[
+                "blew up before i could react",
+                "the explosion arrived first",
+                "fireworks i did not order",
+                "got erased by sudden physics",
+                "vaporized mid-sentence",
+            ],
+            &[],
+        ));
     }
     if has("disbelief") || has("shock") {
-        return Some("didn't see that one coming".into());
+        return Some(pick(
+            &[
+                "didn't see that one coming",
+                "still trying to understand what happened",
+                "had no warning whatsoever",
+                "wasn't ready and it showed",
+                "couldn't process it in time",
+            ],
+            &["{game} pulled something new on me"],
+        ));
     }
     None
 }
