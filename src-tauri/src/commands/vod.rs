@@ -1030,6 +1030,8 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
                     &mut highlights,
                     &title_resolved,
                     vod_clone.game_name.as_deref(),
+                    &vod_id_bg,
+                    &db,
                 )
                 .await;
 

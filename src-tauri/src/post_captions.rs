@@ -45,6 +45,15 @@ pub struct CaptionVariant {
     pub text: String,
 }
 
+/// Token counts from a single LLM API call. Filled in by `generate_llm_*`
+/// functions when the caller passes `Some(&mut TokenUsage)` so they can
+/// log to `ai_usage_log` for cost tracking (Phase 6.0).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TokenUsage {
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  GameType detection
 // ═══════════════════════════════════════════════════════════════════
@@ -2022,6 +2031,7 @@ pub async fn generate_llm_titles(
     game_name: Option<&str>,
     streamer_history: Option<&[String]>,
     target_platform: Option<Platform>,
+    usage_sink: Option<&mut TokenUsage>,
 ) -> Result<Vec<TitleCandidate>, AppError> {
     const TRANSCRIPT_CHAR_LIMIT: usize = 800;
 
@@ -2210,6 +2220,12 @@ OUTPUT — JSON only, no prose, no markdown fence:
         .await
         .map_err(|e| AppError::Api(format!("Failed to parse Claude titles response: {e}")))?;
 
+    // Phase 6.0: extract token counts for usage logging.
+    if let Some(sink) = usage_sink {
+        sink.tokens_in = resp_json["usage"]["input_tokens"].as_u64().unwrap_or(0);
+        sink.tokens_out = resp_json["usage"]["output_tokens"].as_u64().unwrap_or(0);
+    }
+
     let text = resp_json["content"][0]["text"]
         .as_str()
         .ok_or_else(|| AppError::Api("No text in Claude titles response".into()))?;
@@ -2339,6 +2355,7 @@ pub async fn generate_llm_caption(
     game_name: Option<&str>,
     streamer_niche_tags: &[String],
     avoid_caption: Option<&str>,
+    usage_sink: Option<&mut TokenUsage>,
 ) -> Result<Vec<CaptionCandidate>, AppError> {
     const TRANSCRIPT_CHAR_LIMIT: usize = 800;
 
@@ -2501,6 +2518,12 @@ OUTPUT - JSON only, no prose, no markdown fence:
         .await
         .map_err(|e| AppError::Api(format!("Failed to parse Claude caption response: {e}")))?;
 
+    // Phase 6.0: extract token counts for usage logging.
+    if let Some(sink) = usage_sink {
+        sink.tokens_in = resp_json["usage"]["input_tokens"].as_u64().unwrap_or(0);
+        sink.tokens_out = resp_json["usage"]["output_tokens"].as_u64().unwrap_or(0);
+    }
+
     let text = resp_json["content"][0]["text"]
         .as_str()
         .ok_or_else(|| AppError::Api("No text in Claude caption response".into()))?;
@@ -2639,6 +2662,7 @@ pub async fn extract_money_quote_llm(
     event_summary: &str,
     full_transcript: &str,
     tags: &[String],
+    usage_sink: Option<&mut TokenUsage>,
 ) -> Result<Option<String>, AppError> {
     const CONFIDENCE_THRESHOLD: f32 = 0.6;
     const TRANSCRIPT_CHAR_LIMIT: usize = 800;
@@ -2709,6 +2733,12 @@ or
         .json()
         .await
         .map_err(|e| AppError::Api(format!("Failed to parse Claude money-quote response: {e}")))?;
+
+    // Phase 6.0: extract token counts for usage logging.
+    if let Some(sink) = usage_sink {
+        sink.tokens_in = resp_json["usage"]["input_tokens"].as_u64().unwrap_or(0);
+        sink.tokens_out = resp_json["usage"]["output_tokens"].as_u64().unwrap_or(0);
+    }
 
     let text = resp_json["content"][0]["text"]
         .as_str()
