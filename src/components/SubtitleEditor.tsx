@@ -31,7 +31,9 @@ export default memo(function SubtitleEditor({
   const listRef = useRef<HTMLDivElement>(null)
   const activeRef = useRef<HTMLDivElement>(null)
 
-  // Auto-scroll to active segment
+  // Auto-scroll to active segment — scrolls ONLY the list container.
+  // scrollIntoView would bubble up through every scrollable ancestor and drag
+  // the whole editor panel along for the ride, so we compute the delta ourselves.
   useEffect(() => {
     if (activeRef.current && listRef.current) {
       const list = listRef.current
@@ -39,9 +41,10 @@ export default memo(function SubtitleEditor({
       const listRect = list.getBoundingClientRect()
       const activeRect = active.getBoundingClientRect()
 
-      // Only scroll if the active element is outside the visible area
       if (activeRect.top < listRect.top || activeRect.bottom > listRect.bottom) {
-        active.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+        const activeRelativeTop = (activeRect.top - listRect.top) + list.scrollTop
+        const targetTop = activeRelativeTop - (list.clientHeight - active.clientHeight) / 2
+        list.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' })
       }
     }
   }, [activeId])
