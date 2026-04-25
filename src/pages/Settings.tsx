@@ -168,6 +168,9 @@ export default function SettingsPage() {
   const [modelDownloadedMb, setModelDownloadedMb] = useState(0)
   const [confirmDeleteModel, setConfirmDeleteModel] = useState<string | null>(null)
 
+  // Phase 6.0 — AI usage cost summary (populated on mount + after every analyze/regen)
+  const [costSummary, setCostSummary] = useState<{ avgPerAnalyzeUsd: number; total30dUsd: number; vodCount: number } | null>(null)
+
   const ai = useAiStore()
   const ui = useUiStore()
   const { loggedInUser, twitchLogin, twitchLogout, isLoading: twitchLoading } = useAppStore()
@@ -209,6 +212,14 @@ export default function SettingsPage() {
       if (!ai.loaded) {
         await ai.load()
       }
+      // Phase 6.0 — fetch rolling cost summary for Settings display.
+      try {
+        const summary = await invoke<{ avgPerAnalyzeUsd: number; total30dUsd: number; vodCount: number }>(
+          'get_ai_cost_summary',
+          { lookbackVods: 10 },
+        )
+        setCostSummary(summary)
+      } catch (error) { console.error('get_ai_cost_summary failed:', error) }
     }
     load()
   }, [])
@@ -507,6 +518,28 @@ export default function SettingsPage() {
                 className="w-4 h-4 rounded border-surface-600 bg-surface-900 text-violet-500 focus:ring-violet-500" />
               <span className="text-sm text-slate-300">Title generation</span>
             </label>
+
+            {/* Phase 6.0 — rolling cost summary from ai_usage_log */}
+            {costSummary && costSummary.vodCount > 0 && (
+              <div className="flex items-start gap-2 text-xs text-slate-400 pt-2 border-t border-surface-700">
+                <Gauge className="w-3.5 h-3.5 shrink-0 mt-0.5 text-slate-500" />
+                <div>
+                  <div>
+                    <span className="text-slate-300">~${costSummary.avgPerAnalyzeUsd.toFixed(3)}</span> per VOD analyze
+                    <span className="text-slate-500"> (avg of last {costSummary.vodCount})</span>
+                  </div>
+                  <div className="text-slate-500">
+                    ${costSummary.total30dUsd.toFixed(2)} spent in the last 30 days
+                  </div>
+                </div>
+              </div>
+            )}
+            {costSummary && costSummary.vodCount === 0 && (
+              <div className="flex items-center gap-2 text-xs text-slate-500 pt-2 border-t border-surface-700">
+                <Gauge className="w-3.5 h-3.5 shrink-0" />
+                <span>Cost estimate will appear after your first BYOK analyze.</span>
+              </div>
+            )}
 
             {/* Clip detection note */}
             <div className="flex items-center gap-2 text-xs text-slate-500 pt-2 border-t border-surface-700">

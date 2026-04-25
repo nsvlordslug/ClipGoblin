@@ -63,7 +63,7 @@ use commands::scheduled::{
 use commands::settings::{
     save_setting, get_setting, open_url, get_app_info, get_hardware_info,
     list_jobs, get_job, remove_job, pick_download_folder, get_download_dir,
-    get_storage_paths, open_folder, get_detection_stats,
+    get_storage_paths, open_folder, get_detection_stats, get_ai_cost_summary,
 };
 use commands::social::{
     connect_platform, disconnect_platform, get_connected_account,
@@ -143,6 +143,7 @@ pub fn run() {
             get_setting,
             get_app_info,
             get_hardware_info,
+            get_ai_cost_summary,
             list_jobs,
             get_job,
             remove_job,

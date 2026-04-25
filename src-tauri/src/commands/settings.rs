@@ -114,6 +114,23 @@ pub fn get_hardware_info(hw: State<'_, HardwareInfo>) -> Result<HardwareInfo, St
     Ok(hw.inner().clone())
 }
 
+/// Phase 6.0 — return rolling AI usage cost summary for Settings display.
+/// Reads from `ai_usage_log` and computes:
+///   - avg cost per VOD analyze across the last `lookback_vods` (default 10)
+///   - 30-day total spend
+///   - count of distinct VODs in the rolling window
+/// Returns zeros across the board if the log is empty (e.g. user hasn't
+/// run an analyze yet, or BYOK has been off).
+#[tauri::command]
+pub fn get_ai_cost_summary(
+    lookback_vods: Option<u32>,
+    db: State<'_, DbConn>,
+) -> Result<crate::ai_usage::CostSummary, String> {
+    let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
+    let lookback = lookback_vods.unwrap_or(10).clamp(1, 100);
+    Ok(crate::ai_usage::estimate_cost(&conn, lookback))
+}
+
 #[tauri::command]
 pub fn list_jobs(queue: State<'_, JobQueue>) -> Vec<Job> {
     queue.list()

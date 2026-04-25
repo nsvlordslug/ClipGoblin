@@ -117,6 +117,7 @@ pub fn log_usage(conn: &Connection, entry: UsageEntry) -> f64 {
 
 /// Aggregated cost summary returned to the frontend.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CostSummary {
     /// Average cost per VOD analyze across the last N analyses (USD).
     /// 0.0 if no analyses are logged yet.
