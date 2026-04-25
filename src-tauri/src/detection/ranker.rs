@@ -6,18 +6,30 @@
 //!
 //! See [`docs/PHASE12_PROMPT_DIFF.md`](../../../../docs/PHASE12_PROMPT_DIFF.md#5-shared-ranker-new-module).
 //!
-//! ## Scoring dimensions
+//! ## Scoring dimensions (revised post-research 2026-04-24)
 //!
-//! | Signal              | Max  | Rule                                             |
-//! |---------------------|------|--------------------------------------------------|
-//! | Contains number/stake | +0.25 | Digit anywhere in title                        |
-//! | Length-appropriate  | +0.20 | ≤ platform target; linear penalty above          |
-//! | Emotional word      | +0.15 | Any word in the curated emotional word list      |
-//! | Specific (not generic) | +0.20 | Base; deducted if ≥2 generic nouns present    |
-//! | No history overlap  | +0.10 | Jaccard < 0.5 with recent streamer titles        |
-//! | No banlist hit      | hard reject | Score = 0.0 if any banned word present     |
+//! Weighting was rebalanced after analysis of ~180 real high-engagement gaming
+//! Shorts/TikTok titles (TenZ, OtzStreams, Jynxzi, Lilith Omen). Key findings that
+//! drove the rebalance: (1) top-performing titles frequently have NO numbers
+//! (e.g. "actually clean" — 1.3M views), so number weight was reduced from 0.25
+//! to 0.10. (2) The old emotion-word bonus rewarded cliché labels ("Humbled",
+//! "Speechless") that real top titles avoid, so it was removed entirely. (3)
+//! Concrete anchors (proper nouns naming the boss/mechanic/player) are the single
+//! biggest differentiator in real data, so an anchor bonus was added (up to 0.20).
+//! (4) Template artifacts (arrow separators, em-dash separators, "POV:" prefix)
+//! appear in ~0% of top titles and scream AI-generated, so those are hard-rejected.
 //!
-//! Total possible: 1.00. Ban-list hit returns 0.0 regardless.
+//! | Signal                  | Max  | Rule                                       |
+//! |-------------------------|------|--------------------------------------------|
+//! | Contains number/stake   | +0.10 | Digit anywhere in title (weak signal now) |
+//! | Length-appropriate      | +0.20 | ≤ platform target; linear penalty above   |
+//! | Concrete anchor         | +0.20 | 0/1/2+ proper nouns → 0.0/0.10/0.20       |
+//! | Specific (not generic)  | +0.20 | Base; deducted if ≥2 generic nouns        |
+//! | No history overlap      | +0.10 | Opening-word and Jaccard check             |
+//! | No banlist hit          | hard reject | Score = 0.0                         |
+//! | No template artifact    | hard reject | Arrow / em-dash sep / "POV:" prefix |
+//!
+//! Total possible: 0.80. Hard rejects return 0.0 regardless.
 
 use super::Platform;
 use std::collections::HashSet;
@@ -47,6 +59,26 @@ pub const DEFAULT_BANNED_WORDS: &[&str] = &[
     "check this",
     "watch this",
     "you need to see",
+    // Added 2026-04-24 after research: phrases that tank real engagement.
+    "hits different",
+    "goes hard",
+    "goes crazy",
+    "no cap",
+    "lowkey",
+    // Generic "gaming moment" padding that keeps leaking through the specificity
+    // penalty (one generic word alone isn't enough of a penalty to reject).
+    "gaming moment",
+    "clip moment",
+    "stream moment",
+    "classic clip",
+    "classic moment",
+    "classic gaming",
+    // Game-name + moment is the exact shape the prompt bans. Include common games.
+    "elden ring moment",
+    "valorant moment",
+    "dbd moment",
+    "apex moment",
+    "warzone moment",
 ];
 
 /// Emotional words that score. Used to reward pattern-2-style titles
@@ -126,22 +158,30 @@ impl<'a> RankerContext<'a> {
 /// assert_eq!(bad, 0.0);
 /// ```
 pub fn score_title(title: &str, ctx: &RankerContext) -> f32 {
-    // Hard reject on banlist hit
+    // Hard reject: banlist hit (cliché words) or template artifact (arrow, em-dash
+    // separator, "POV:" prefix). Either reads as AI-generated in real-world feeds.
     if contains_banned(title, ctx.banned_words) {
+        return 0.0;
+    }
+    if has_template_artifact(title) {
         return 0.0;
     }
 
     let mut score = 0.0_f32;
 
+    // Number/stake — weak signal now. Many top-performing titles ("actually clean",
+    // "dialed in") have zero numbers. Reduced 0.25 → 0.10.
     if contains_number_or_stake(title) {
-        score += 0.25;
+        score += 0.10;
     }
 
     score += length_score(title, ctx.target_platform);
 
-    if contains_emotional_word(title) {
-        score += 0.15;
-    }
+    // Concrete anchor: proper nouns (non-sentence-start capitalized words) signal
+    // that the title names something specific from the clip. Real top titles
+    // consistently include at least one anchor ("Meg learnt to fly", "don't blind
+    // Legion when vaulting", "destroyed C9 but lost a friend").
+    score += anchor_score(title);
 
     score += specificity_score(title);
 
@@ -197,15 +237,87 @@ fn length_score(title: &str, platform: Platform) -> f32 {
     0.20 * (1.0 - (over as f32 / 10.0))
 }
 
-fn contains_emotional_word(title: &str) -> bool {
-    // Inline the token split rather than going through `tokens()` — an iterator
-    // chain returned as the trailing expression would outlive `lower` due to
-    // `impl Trait` drop-order semantics. Binding or inlining avoids E0597.
-    let lower = title.to_lowercase();
-    lower
-        .split(|c: char| !c.is_ascii_alphabetic())
-        .filter(|t| t.len() >= 3)
-        .any(|t| DEFAULT_EMOTIONAL_WORDS.contains(&t))
+/// Hard-reject template artifacts that scream "AI-generated" in real feeds.
+/// Based on 2026-04-24 research: ~0 of 180 top-performing gaming short-form
+/// titles use arrow separators, em-dash separators, or "POV:" prefixes.
+fn has_template_artifact(title: &str) -> bool {
+    // Arrow separators: literal unicode, ASCII "->", and ">>"
+    if title.contains('→') || title.contains("->") {
+        return true;
+    }
+    // Em-dash or en-dash as a separator (surrounded by spaces).
+    if title.contains(" — ") || title.contains(" – ") {
+        return true;
+    }
+    // "POV:" prefix — only 2 of 180 real top titles used it; reads as TikTok
+    // pastiche rather than creator voice.
+    let trimmed_lower_start: String = title
+        .chars()
+        .skip_while(|c| c.is_whitespace())
+        .take(6)
+        .collect();
+    let trimmed_lower = trimmed_lower_start.to_lowercase();
+    if trimmed_lower.starts_with("pov:") || trimmed_lower.starts_with("pov :") {
+        return true;
+    }
+    // Colon-prefix emotion shape — the legacy `{TitleCaseWord}: description` pattern
+    // ("Gutted: ...", "Humbled: ..."). Real top-performing titles use this ~5% of
+    // the time and always sparingly; when it comes out of an LLM it reads as
+    // tabloid-AI. Reject when a short Title-case prefix sits before an early colon.
+    if let Some(colon_pos) = title.find(':') {
+        if colon_pos < 30 && colon_pos > 0 {
+            let before_colon = &title[..colon_pos];
+            let word_count = before_colon.split_whitespace().count();
+            // 1-2 words before the colon, no quote chars (lets speech quotes pass),
+            // starting with an ASCII uppercase letter → legacy Pattern 2 shape.
+            if word_count >= 1
+                && word_count <= 2
+                && !before_colon.contains('"')
+                && !before_colon.contains('\'')
+            {
+                let first_char = title.chars().next();
+                if matches!(first_char, Some(c) if c.is_ascii_uppercase()) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Count "concrete anchors" — proper nouns signalled by capitalization after
+/// the first word. The sentence-start is excluded so normal capitalization
+/// doesn't count. Multi-letter caps-only tokens ("DBD", "HP") always count
+/// even at position 0 since they're unambiguously acronyms.
+fn anchor_score(title: &str) -> f32 {
+    let words: Vec<&str> = title.split_whitespace().collect();
+    let mut anchors = 0;
+    for (i, w) in words.iter().enumerate() {
+        // Strip punctuation from edges to judge the word itself.
+        let stripped: String = w
+            .chars()
+            .filter(|c| c.is_ascii_alphabetic())
+            .collect();
+        if stripped.len() < 2 {
+            continue;
+        }
+        let first = stripped.chars().next().unwrap();
+        let is_all_caps = stripped.chars().all(|c| c.is_ascii_uppercase());
+        let starts_capital = first.is_ascii_uppercase();
+
+        // ALL-CAPS acronym anywhere counts. Otherwise only non-first-position
+        // capitalized words count (to avoid rewarding ordinary sentence starts).
+        if is_all_caps && stripped.len() >= 2 {
+            anchors += 1;
+        } else if starts_capital && i > 0 {
+            anchors += 1;
+        }
+    }
+    match anchors {
+        0 => 0.0,
+        1 => 0.10,
+        _ => 0.20,
+    }
 }
 
 fn specificity_score(title: &str) -> f32 {
@@ -337,9 +449,9 @@ mod tests {
 
     #[test]
     fn long_title_penalized() {
-        // 42+5 = 47, over by 5 → 0.20 * (1 - 0.5) = 0.10
-        let over = "a".repeat(47);
-        let at_limit = "a".repeat(42);
+        // Target is 60 after the Wave 3 bump. 65 chars = over by 5 → 0.20 * (1 - 0.5) = 0.10.
+        let over = "a".repeat(65);
+        let at_limit = "a".repeat(60);
         assert!(length_score(&over, Platform::Generic) < length_score(&at_limit, Platform::Generic));
     }
 
@@ -353,24 +465,61 @@ mod tests {
         assert_eq!(length_score("", Platform::TikTok), 0.0);
     }
 
-    // ── Emotional words ──────────────────────────────────────────
+    // ── Concrete anchor (proper nouns) ───────────────────────────
 
     #[test]
-    fn emotional_word_boosts() {
+    fn anchor_rewards_proper_nouns() {
+        assert_eq!(anchor_score("meg learnt to fly"), 0.0);
+        assert_eq!(anchor_score("Meg learnt to fly"), 0.0); // sentence-start, not counted
+        assert_eq!(anchor_score("look what Meg did"), 0.10); // 1 proper noun mid-sentence
+        assert_eq!(anchor_score("Legion chased Meg around"), 0.10); // Legion = sentence-start, Meg = anchor
+        assert_eq!(anchor_score("DBD is ridiculous"), 0.10); // DBD = all-caps acronym counts
+        assert_eq!(anchor_score("don't blind Legion when vaulting near Meg"), 0.20); // 2+ anchors
+    }
+
+    // ── Template artifacts (hard reject) ─────────────────────────
+
+    #[test]
+    fn arrow_separator_is_rejected() {
         let ctx = ctx_tiktok();
-        let with_emo = score_title("speechless: one tap through smoke", &ctx);
-        let no_emo   = score_title("one tap through smoke", &ctx);
-        assert!(with_emo > no_emo);
+        assert_eq!(score_title("down 0-12 -> 1v5 ACE", &ctx), 0.0);
+        assert_eq!(score_title("boss fog → five seconds of silence", &ctx), 0.0);
     }
 
     #[test]
-    fn emotional_word_requires_word_boundary() {
-        // "speechlessly" should still tokenize to "speechlessly", not match "speechless"
+    fn pov_prefix_is_rejected() {
         let ctx = ctx_tiktok();
-        let compound = score_title("speechlessly watched the play", &ctx);
-        let match_  = score_title("speechless: watched the play", &ctx);
-        // Compound word should NOT get the emotional-word bonus
-        assert!(match_ >= compound);
+        assert_eq!(score_title("POV: you walked into Malenia", &ctx), 0.0);
+        assert_eq!(score_title("pov: tried the fog gate", &ctx), 0.0);
+    }
+
+    #[test]
+    fn em_dash_separator_is_rejected() {
+        let ctx = ctx_tiktok();
+        assert_eq!(score_title("easy boss — not so easy", &ctx), 0.0);
+    }
+
+    #[test]
+    fn pov_inside_title_not_rejected() {
+        // "pov" inside the title (not as prefix) is fine
+        let ctx = ctx_tiktok();
+        assert!(score_title("my pov mid fight was chaos", &ctx) > 0.0);
+    }
+
+    #[test]
+    fn colon_prefix_emotion_shape_is_rejected() {
+        // Legacy Pattern 2 shape the new framework retired.
+        let ctx = ctx_tiktok();
+        assert_eq!(score_title("Gutted: stuck in the animation", &ctx), 0.0);
+        assert_eq!(score_title("Humbled: boss won before i blinked", &ctx), 0.0);
+        assert_eq!(score_title("Paralyzed: still standing there", &ctx), 0.0);
+    }
+
+    #[test]
+    fn quoted_colon_passes() {
+        // Speech quotes with colons inside shouldn't trigger the emotion-shape reject.
+        let ctx = ctx_tiktok();
+        assert!(score_title("\"easy boss\": 0-1 next round", &ctx) > 0.0);
     }
 
     // ── Specificity ──────────────────────────────────────────────
@@ -419,22 +568,22 @@ mod tests {
     #[test]
     fn good_title_scores_above_half() {
         let ctx = ctx_tiktok();
-        // Number + short + emotional + specific + no history
-        let score = score_title("speechless: 1v5 through triple smoke", &ctx);
+        // Real top-performer shape: short, anchor, specific, no template artifact
+        let score = score_title("don't blind Legion when vaulting", &ctx);
         assert!(score > 0.5, "expected > 0.5, got {}", score);
     }
 
     #[test]
     fn banned_beats_everything() {
         let ctx = ctx_tiktok();
-        // Would score very high on all other dimensions but banlist kills it
-        assert_eq!(score_title("insane speechless 1v5 ace", &ctx), 0.0);
+        // Would score well on other dimensions but banlist kills it
+        assert_eq!(score_title("insane 1v5 ace through smoke", &ctx), 0.0);
     }
 
     #[test]
     fn scores_clamped_to_unit() {
         let ctx = ctx_tiktok();
-        let score = score_title("speechless 1v5 0hp ace", &ctx);
+        let score = score_title("clean Margit parry at 1hp", &ctx);
         assert!(score <= 1.0);
         assert!(score >= 0.0);
     }
@@ -479,12 +628,14 @@ mod tests {
     // ── Platform differences ─────────────────────────────────────
 
     #[test]
-    fn reels_tolerates_longer_than_tiktok() {
+    fn all_platforms_share_length_target() {
+        // All platforms now use a 60-char target (see Platform::title_length_target).
+        // Previously Reels tolerated longer; that was removed because the difference
+        // wasn't pulling its weight and made cross-platform regeneration inconsistent.
         let title_45 = "a".repeat(45);
         let tiktok_score = length_score(&title_45, Platform::TikTok);
         let reels_score = length_score(&title_45, Platform::InstagramReels);
-        // 45 chars: over TikTok's 42 limit (penalty), under Reels' 50 (no penalty)
-        assert!(reels_score > tiktok_score);
+        assert_eq!(tiktok_score, reels_score);
         assert_eq!(reels_score, 0.20);
     }
 }

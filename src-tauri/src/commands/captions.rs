@@ -1,10 +1,45 @@
 //! Caption generation, AI title, and clip naming commands.
 
 use tauri::State;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use crate::db;
 use crate::ai_provider;
 use crate::post_captions;
 use crate::DbConn;
+
+/// In-memory regenerate history keyed by clip_id. Cleared on app restart.
+/// Each clip keeps the last ~10 titles produced so the anti-repeat rule in
+/// `generate_llm_titles` sees the full regen chain, not just the current title.
+/// Without this, regenerates spaced 3-5 clicks apart can produce duplicates
+/// because only the immediately-prior title is in the DB.
+static REGEN_TITLE_HISTORY: OnceLock<Mutex<HashMap<String, Vec<String>>>> = OnceLock::new();
+
+fn title_history() -> &'static Mutex<HashMap<String, Vec<String>>> {
+    REGEN_TITLE_HISTORY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn push_title_history(clip_id: &str, title: &str) {
+    const MAX_HISTORY_PER_CLIP: usize = 10;
+    if let Ok(mut map) = title_history().lock() {
+        let entry = map.entry(clip_id.to_string()).or_default();
+        // Skip duplicates at the head (same as last pushed).
+        if entry.last().map(String::as_str) != Some(title) {
+            entry.push(title.to_string());
+        }
+        if entry.len() > MAX_HISTORY_PER_CLIP {
+            let drop_n = entry.len() - MAX_HISTORY_PER_CLIP;
+            entry.drain(..drop_n);
+        }
+    }
+}
+
+fn read_title_history(clip_id: &str) -> Vec<String> {
+    title_history()
+        .lock()
+        .map(|map| map.get(clip_id).cloned().unwrap_or_default())
+        .unwrap_or_default()
+}
 
 // ── Clip title generation ──
 // Mirrors the TypeScript module at src/lib/clipNaming.ts.
@@ -346,13 +381,34 @@ pub async fn generate_post_captions(
         log::info!("Caption generation: using {:?} (model: {})", resolved.provider, resolved.model);
         log::info!("Caption generation: mode = {}, game = {:?}", mode, game_name);
 
-        match post_captions::generate_llm(
+        // Wave 3: extract a money-quote first (tiny, separate API call). Non-fatal
+        // if it fails — captions still generate without one, just less punchy.
+        let money_quote: Option<String> = match transcript.as_deref().filter(|t| !t.trim().is_empty()) {
+            Some(ft) => match post_captions::extract_money_quote_llm(
+                &resolved.api_key, &resolved.model, &event_summary, ft, &tags,
+            ).await {
+                Ok(q) => q,
+                Err(e) => { log::debug!("Money-quote extraction skipped: {}", e); None }
+            },
+            None => None,
+        };
+
+        match post_captions::generate_llm_caption(
             &resolved.api_key, &resolved.model, &mode,
-            &event_summary, quote.as_deref(), tone_label,
+            None, // platform — defaults to TikTok; a future frontend selector can override
+            &event_summary, money_quote.as_deref(), quote.as_deref(), tone_label,
             &tags, transcript.as_deref(), &title, game_name,
+            &[], // streamer_niche_tags — surface from settings in future work
+            clip.publish_description.as_deref(), // avoid_caption — breaks regen determinism
         ).await {
-            Ok(llm_captions) => {
-                log::info!("LLM generated {} caption(s) for clip {} (mode: {})", llm_captions.len(), clip_id, mode);
+            Ok(candidates) if !candidates.is_empty() => {
+                let top = &candidates[0];
+                log::info!(
+                    "Wave 3: {} caption candidate(s) for clip {} (mode: {}, top score {:.2}, hook \"{}\")",
+                    candidates.len(), clip_id, mode, top.score, top.hook_line,
+                );
+                // Top-scored only. Candidates are pre-sorted descending by score.
+                let llm_captions = vec![post_captions::caption_candidate_to_variant(top, &mode)];
                 let hashtags = post_captions::build_hashtags_pub(&tags, tone);
                 let casual = llm_captions.first().map(|c| c.text.clone()).unwrap_or_default();
                 let funny  = llm_captions.get(1).map(|c| c.text.clone()).unwrap_or_default();
@@ -363,6 +419,13 @@ pub async fn generate_post_captions(
                     source: "llm".into(),
                     casual, funny, hype,
                 });
+            }
+            Ok(_) => {
+                log::warn!("LLM returned zero caption candidates");
+                if !resolved.fallback_to_free {
+                    return Err("Caption generation returned no candidates".into());
+                }
+                log::info!("Falling back to Free mode (pattern-based)");
             }
             Err(e) => {
                 log::warn!("LLM caption generation failed: {}", e);
@@ -394,6 +457,7 @@ pub async fn generate_ai_title(
     clip_id: String,
     transcript_text: Option<String>,
     current_game: Option<String>,
+    current_title: Option<String>,
     db: State<'_, DbConn>,
 ) -> Result<String, String> {
     let (clip, tags, transcript, highlight_scores, resolved) = {
@@ -443,14 +507,64 @@ pub async fn generate_ai_title(
 
         log::info!("AI title generation: using {:?} (model: {})", resolved.provider, resolved.model);
 
-        match post_captions::generate_llm_title(
-            &resolved.api_key, &resolved.model,
-            &event_summary, transcript.as_deref(),
+        // Wave 3: extract a money-quote first so the titles prompt can inherit it
+        // (enables QuoteTwist pattern). Non-fatal on failure.
+        let money_quote: Option<String> = match transcript.as_deref().filter(|t| !t.trim().is_empty()) {
+            Some(ft) => match post_captions::extract_money_quote_llm(
+                &resolved.api_key, &resolved.model, &event_summary, ft, &tags,
+            ).await {
+                Ok(q) => q,
+                Err(e) => { log::debug!("Money-quote extraction skipped: {}", e); None }
+            },
+            None => None,
+        };
+
+        // Regenerate anti-repeat: build a history of all titles the model has
+        // already produced for this clip in this session (REGEN_TITLE_HISTORY),
+        // plus the title the UI is currently showing (may be stale relative to
+        // DB, which is why frontend passes it explicitly). The ">50% token
+        // overlap" prompt rule and the ranker's history check both consume this
+        // list. Without session history, regens spaced N clicks apart can
+        // duplicate each other.
+        let effective_current = current_title
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(clip.title.as_str())
+            .to_string();
+        let mut title_avoid: Vec<String> = read_title_history(&clip_id);
+        if !effective_current.trim().is_empty()
+            && !title_avoid.iter().any(|t| t == &effective_current)
+        {
+            title_avoid.push(effective_current);
+        }
+        let history_slice: Option<&[String]> = if title_avoid.is_empty() {
+            None
+        } else {
+            Some(title_avoid.as_slice())
+        };
+
+        match post_captions::generate_llm_titles(
+            &resolved.api_key, &resolved.model, &event_summary,
+            money_quote.as_deref(), transcript.as_deref(),
             &tags, game_name,
+            history_slice,
+            None, // target_platform — defaults to TikTok
         ).await {
-            Ok(title) => {
-                log::info!("AI generated title for clip {}: {}", clip_id, title);
-                return Ok(title);
+            Ok(candidates) => {
+                if let Some(top) = candidates.first() {
+                    log::info!(
+                        "Wave 3 title for clip {}: \"{}\" (pattern {:?}, score {:.2}, {} candidates)",
+                        clip_id, top.text, top.pattern, top.score, candidates.len(),
+                    );
+                    // Record this regen so subsequent calls on the same clip see
+                    // the full session history, not just the current UI title.
+                    push_title_history(&clip_id, &top.text);
+                    return Ok(top.text.clone());
+                }
+                log::warn!("LLM returned zero title candidates");
+                if !resolved.fallback_to_free {
+                    return Err("Title generation returned no candidates".into());
+                }
             }
             Err(e) => {
                 log::warn!("AI title generation failed: {}", e);

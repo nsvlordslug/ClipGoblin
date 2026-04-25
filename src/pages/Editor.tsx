@@ -1422,6 +1422,7 @@ export default function Editor() {
                           clipId,
                           transcriptText,
                           currentGame: game || null,
+                          currentTitle: title || null,
                         })
                         // If AI returned something different from the current title, use it
                         if (aiTitle && aiTitle !== title) {

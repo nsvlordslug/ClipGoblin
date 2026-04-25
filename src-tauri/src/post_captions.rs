@@ -1305,19 +1305,34 @@ fn sanitize_hashtag(raw: &str) -> String {
 //  re-score with a different platform / history context via
 //  `detection::ranker::score_title`.
 
-/// One of three structural patterns a title candidate must match.
+/// One of six title patterns derived from analysis of ~180 high-engagement gaming
+/// short-form titles (TenZ, OtzStreams, Jynxzi, Lilith Omen + broader discovery).
+/// The earlier 4-pattern framework (StakeArrowOutcome / EmotionColonDetail / QuoteTwist
+/// / NaturalVoice) was replaced after real-world data showed its shapes — arrow
+/// separators in particular — appear in zero high-engagement real titles.
 ///
-/// See `docs/PHASE12_PROMPT_DIFF.md` section 1d for the full rationale
-/// and prompt text.
+/// Priority order by prevalence in real data:
+/// 1. QuietFlex (~25%) — 2–4 word understatement
+/// 2. AftermathConfession (~20%) — first-person past-tense self-deprecation
+/// 3. Observational (~15%) — third-person narration of someone else's moment
+/// 4. TechCallout (~15%) — named mechanic or technique
+/// 5. SpecificSuperlative (~15%) — "worst/fastest/most X ever" pinned to a named thing
+/// 6. CuriosityQuestion (~10%) — specific unanswered question
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TitlePattern {
-    /// `{stake} → {outcome}` — e.g. `"down 0-12 → 1v5 ACE"`.
-    StakeArrowOutcome,
-    /// `{Emotion}: {specific detail}` — e.g. `"Speechless: one-tap through smoke"`.
-    EmotionColonDetail,
-    /// `"{money quote}" {twist}` — e.g. `"\"I can't miss\" — misses next shot"`.
-    QuoteTwist,
+    /// 2–4 word understatement. The clip does the work. E.g. `"actually clean"`.
+    QuietFlex,
+    /// First-person past-tense or resigned present. E.g. `"gonna sleep on the couch again"`.
+    AftermathConfession,
+    /// Third-person narration of a character/enemy/teammate. E.g. `"Meg learnt to fly"`.
+    Observational,
+    /// Named in-game mechanic or technique. E.g. `"don't blind Legion when he's vaulting"`.
+    TechCallout,
+    /// "worst/fastest/most X" pinned to a named mechanic. E.g. `"the WORST hex in DBD"`.
+    SpecificSuperlative,
+    /// Specific unanswered question the clip resolves. E.g. `"why has nobody left the bus?"`.
+    CuriosityQuestion,
 }
 
 /// A single title candidate produced by `generate_llm_titles()`.
@@ -1361,6 +1376,26 @@ pub struct CaptionCandidate {
     /// 0.0 = banlist hit on the hook (hard reject).
     #[serde(default)]
     pub score: f32,
+}
+
+/// Collapse a Wave 3 `CaptionCandidate` (hook + body) into the legacy
+/// `CaptionVariant` (single `text`) shape that frontend + DB currently expect.
+/// Callers that want the new two-part structure should read the candidate
+/// directly; this is the adapter for code paths mid-migration.
+pub fn caption_candidate_to_variant(candidate: &CaptionCandidate, selected_mode: &str) -> CaptionVariant {
+    let hook = candidate.hook_line.trim();
+    let body = candidate.body.trim();
+    let text = match (hook.is_empty(), body.is_empty()) {
+        (false, false) => format!("{} {}", hook, body),
+        (false, true)  => hook.to_string(),
+        (true, false)  => body.to_string(),
+        (true, true)   => String::new(),
+    };
+    CaptionVariant {
+        mode: selected_mode.to_string(),
+        label: mode_label(selected_mode).to_string(),
+        text,
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1967,8 +2002,10 @@ pub fn extract_money_quote_free(
 
 /// Generate 5 title candidates, ranker-scored and sorted.
 ///
-/// `money_quote` (optional): if present, at least 2 of the 5 candidates
-/// should favor `TitlePattern::QuoteTwist`.
+/// `money_quote` (optional): if present, AT MOST 1 of 5 candidates may use it
+/// (post-2026-04 behavior; the original "2 of 5" bias caused regen stickiness).
+/// In the 6-pattern taxonomy, quote-led hooks typically land as
+/// `TitlePattern::AftermathConfession` (self-quote) or `::Observational` (quoted reaction).
 /// `streamer_history` (optional): past titles used for overlap check in
 /// the prompt's "avoid repetition" instruction AND in the ranker's
 /// history-overlap scoring. Pass `None` until Phase 11 populates it.
@@ -2004,7 +2041,7 @@ pub async fn generate_llm_titles(
     };
 
     let money_quote_line = match money_quote {
-        Some(q) if !q.trim().is_empty() => format!("MONEY QUOTE (use in at least 2 of 5): \"{}\"\n", q),
+        Some(q) if !q.trim().is_empty() => format!("MONEY QUOTE (available — use in AT MOST 1 of 5): \"{}\"\n", q),
         _ => String::new(),
     };
 
@@ -2016,56 +2053,114 @@ pub async fn generate_llm_titles(
 
     let history_line = match streamer_history {
         Some(h) if !h.is_empty() => format!(
-            "STREAMER RECENT TITLES (avoid >50% token overlap with these):\n{}\n",
+            "STREAMER RECENT TITLES (STRICT anti-repeat rules — none of your 5 candidates may:\n\
+             - Open with the same word as any of these\n\
+             - Exceed 50% token overlap with any of these\n\
+             - Use the same Emotion word as any of these — if 'Humbled:' appears below, no candidate may open with 'Humbled:'):\n{}\n",
             h.iter().take(10).cloned().collect::<Vec<_>>().join("\n"),
         ),
         _ => "STREAMER RECENT TITLES: none yet\n".into(),
     };
 
     let prompt = format!(
-        r#"Generate 5 SHORT title candidates for a gaming clip. Return JSON only.
+        r#"You are writing titles for a gaming short-form clip (YouTube Shorts / TikTok).
+Produce 5 candidates that a scroll-tired viewer would STOP for. Return JSON only.
 
 {game}WHAT HAPPENED: {event}
 {money_quote}{transcript}{tags}{history}
-STRUCTURE - every candidate MUST follow exactly one of these three patterns:
+HOW REAL HIGH-ENGAGEMENT GAMING TITLES LOOK (from actual top-performing Shorts):
+- "actually clean" — TenZ, 1.3M views (Valorant ace)
+- "gonna sleep on the couch again" — TenZ, 1.2M (duo clip with girlfriend)
+- "dialed in" — TenZ, 492k (aim play)
+- "couldn't help myself" — TenZ, 3.2M (reaction)
+- "destroyed C9 but lost a friend" — TenZ, 2.8M (pro match)
+- "Meg learnt to fly" — OtzStreams, 26k (DBD clip)
+- "Famous last words" — OtzStreams, 66k
+- "The WORST hex in DBD" — OtzStreams, 432k
+- "The FASTEST totem cleanse in DBD" — OtzStreams, 597k
+- "Don't blind Legion when he's vaulting" — OtzStreams, 139k
+- "Why has nobody left the bus?" — Jynxzi, 356k
+- "As soon as he realized" — Jynxzi, 1.1M
+- "streamer discovers Pose 28" — OtzStreams, 32k
+- "Every. Single. Time." — OtzStreams, 49k
 
-1. STAKE_ARROW_OUTCOME - format: "{{stake}} -> {{outcome}}"
-   Examples: "down 0-12 -> 1v5 ACE", "120hp -> one-shot", "last alive -> 4k"
+Notice what they SHARE: lowercase or sentence case, no arrows/em-dashes, no "POV:" prefix,
+concrete anchors (C9, Meg, Legion, DBD, hex, totem), short and confident, post-clip voice.
+They DON'T stuff a metaphor or over-explain. They DON'T rhyme or do parallel structure.
 
-2. EMOTION_COLON_DETAIL - format: "{{Emotion}}: {{specific visual or action}}"
-   Use Title Case for the Emotion word (not ALL CAPS).
-   Examples: "Speechless: one-tap through smoke", "Rattled: smoke into headshot",
-   "Floored: three kills, zero ammo left"
+CONTEXT RULE (non-negotiable):
+Every candidate MUST contain at least ONE concrete anchor from the clip: a named character,
+boss, mechanic, map, weapon, player, or game object. "Elden Ring moment" is NOT an anchor.
+"Margit" / "fog gate" / "mimic tear" / "grab attack" / "broken stance" are anchors.
 
-3. QUOTE_TWIST - format: "\"{{money quote}}\" {{twist or contradiction}}"
-   Examples: "\"I can't miss\" - misses next shot", "\"easy game\" 0-5 next round"
+PICK ONE OF SIX TYPES PER CANDIDATE. Default to types 1 and 2 unless the clip content
+specifically calls for another. Spread across at least 3 different types.
 
-REQUIRED ELEMENTS - every candidate must include AT LEAST ONE:
-- A number or stake (1v5, 0hp, 12s, 3 kills, round 12)
-- An emotional word (Speechless, Rattled, Floored, Stunned, etc.)
-- A specific visual or action detail (through smoke, through the wall)
+1. QUIET_FLEX (DEFAULT for clutch / win / skill clips)
+   2–4 word understatement, usually post-clip. Max 25 characters.
+   Anchor the flex to the moment: "cleanest fog gate entry", "mimic tear actually clean",
+   "that worked", "no notes", "peak elden ring", "dialed in on the parry".
 
-HARD LIMITS:
-- Maximum 40 characters per title
-- Lowercase is fine EXCEPT Title Case for the Emotion word in pattern 2
-- No hashtags. No emojis. No period at end.
+2. AFTERMATH_CONFESSION (DEFAULT for fail / reaction / self-deprecating clips)
+   First-person past-tense or resigned present. 4–9 words. No "POV:" prefix.
+   Include the anchor: "should've trusted the mimic", "ran at Malenia with zero flasks",
+   "gonna uninstall after that grab", "spent all my runes on nothing", "couldn't help myself".
 
-BANNED WORDS (reject any candidate containing these):
-insane, crazy, epic, literally, wild, shocking, unbelievable, omg,
-you won't believe, mind-blowing, must see, check this, watch this
+3. OBSERVATIONAL (when someone/something OTHER than the clipper is the subject)
+   Third-person narration of what that subject did. 4–10 words.
+   Examples: "Meg learnt to fly", "streamer discovers the fog gate",
+   "invader picked the worst hill to die on", "chat realized before i did".
 
-TONE INHERITANCE:
-- If a money quote is provided, at least 2 of 5 candidates MUST use pattern 3
-- If no quote and the event is visual, favor patterns 1 and 2
-- Candidates should span all 3 patterns (not all one shape)
+4. TECH_CALLOUT (only when the clip reveals a technique, bug, or strategy)
+   Imperative or declarative about a named mechanic. 4–10 words.
+   Examples: "don't parry Rykard's second phase", "new bleed tech just dropped",
+   "the jump attack has iframes actually".
 
-OUTPUT - JSON only, no prose, no markdown fence:
+5. SPECIFIC_SUPERLATIVE (only when the clip is genuinely extreme)
+   "worst/fastest/most/cleanest X ever" pinned to a NAMED mechanic or character.
+   Do NOT use if the clip isn't actually extreme.
+   Examples: "the WORST hex in DBD", "fastest Radahn phase 2 i've seen",
+   "cleanest Margit parry on this channel".
+
+6. CURIOSITY_QUESTION (only when the clip has a clear "wait, what?" beat)
+   Specific unanswered question about something in the clip. 5–12 words.
+   Examples: "why is Godrick doing that", "name a worse boss arena",
+   "who told him to do that".
+
+HARD BANS (instant reject):
+- No arrows (->, →). No em-dashes (—) as a separator. No colons as a separator unless
+  quoting direct speech.
+- No "POV:" prefix. Real high-engagement titles do NOT start with "POV:".
+- No title-case "X Moment That Hits Different" / "X Goes Crazy" / "X Is Insane" padding.
+- Banned words: insane, crazy, epic, literally, wild, shocking, unbelievable, omg,
+  you won't believe, mind-blowing, must see, check this, watch this, hits different,
+  goes hard, no cap, lowkey, fr.
+- Banned emotion labels used alone: Speechless, Stunned, Rattled, Shook, Floored,
+  Shocked, Paralyzed, Frozen, Numb, Silenced, Gutted, Wrecked, Broken, Humbled,
+  Mortified, Crushed, Devastated, Defeated. (If you reach for one of these, you're
+  using the wrong pattern. Switch to QUIET_FLEX or AFTERMATH_CONFESSION.)
+
+LENGTH:
+- QUIET_FLEX: max 25 chars. Aim shorter.
+- All other types: max 60 chars. Aim for 30-50.
+- No trailing period. No hashtags. No emojis. No ALL CAPS words except in SPECIFIC_SUPERLATIVE
+  (where "WORST"/"FASTEST"/"BEST" can single-word emphasize).
+
+DIVERSITY (strict — violated output will be rejected):
+- 5 candidates, 5 DIFFERENT opening words, spread across at least 3 different types.
+- At least 1 QUIET_FLEX candidate. At least 1 AFTERMATH_CONFESSION or OBSERVATIONAL candidate.
+- Never produce 5 variations of the same idea. If one candidate is about silence,
+  no other may also be about silence.
+- If a STREAMER RECENT TITLES list is provided above, none of your candidates may open
+  with the same word or follow the same shape as any listed title.
+
+OUTPUT — JSON only, no prose, no markdown fence:
 {{"candidates": [
-  {{"pattern": "STAKE_ARROW_OUTCOME", "text": "..."}},
-  {{"pattern": "EMOTION_COLON_DETAIL", "text": "..."}},
-  {{"pattern": "QUOTE_TWIST", "text": "..."}},
-  {{"pattern": "STAKE_ARROW_OUTCOME", "text": "..."}},
-  {{"pattern": "EMOTION_COLON_DETAIL", "text": "..."}}
+  {{"pattern": "QUIET_FLEX", "text": "..."}},
+  {{"pattern": "AFTERMATH_CONFESSION", "text": "..."}},
+  {{"pattern": "OBSERVATIONAL", "text": "..."}},
+  {{"pattern": "QUIET_FLEX", "text": "..."}},
+  {{"pattern": "TECH_CALLOUT", "text": "..."}}
 ]}}"#,
         game = game_line,
         event = event_summary,
@@ -2150,10 +2245,25 @@ OUTPUT - JSON only, no prose, no markdown fence:
     let mut scored: Vec<TitleCandidate> = parsed
         .candidates
         .into_iter()
-        .map(|c| TitleCandidate {
-            score: crate::detection::ranker::score_title(&c.text, &ctx),
-            text: c.text,
-            pattern: c.pattern,
+        .map(|c| {
+            // Per-pattern length bonus. QuietFlex wants 2-4 word understatements
+            // (~15-25 chars) so the generic length_target (60) would silently
+            // under-reward them; we re-center per pattern. All other patterns
+            // already get a reasonable score from the global length rule.
+            let len = c.text.chars().count();
+            let length_bonus = match c.pattern {
+                TitlePattern::QuietFlex => {
+                    if len <= 25 { 0.15 }
+                    else if len <= 35 { 0.05 }
+                    else { -0.10 }
+                }
+                _ => 0.0,
+            };
+            TitleCandidate {
+                score: crate::detection::ranker::score_title(&c.text, &ctx) + length_bonus,
+                text: c.text,
+                pattern: c.pattern,
+            }
         })
         .collect();
 
@@ -2228,6 +2338,7 @@ pub async fn generate_llm_caption(
     clip_title: &str,
     game_name: Option<&str>,
     streamer_niche_tags: &[String],
+    avoid_caption: Option<&str>,
 ) -> Result<Vec<CaptionCandidate>, AppError> {
     const TRANSCRIPT_CHAR_LIMIT: usize = 800;
 
@@ -2260,7 +2371,7 @@ pub async fn generate_llm_caption(
 
     let money_quote_line = match money_quote {
         Some(q) if !q.trim().is_empty() => format!(
-            "MONEY QUOTE (use verbatim or close-paraphrase in at least 2 of 3 hooks): \"{}\"\n",
+            "MONEY QUOTE (available — use in AT MOST 1 of 3 hooks): \"{}\"\n",
             q
         ),
         _ => String::new(),
@@ -2278,6 +2389,14 @@ pub async fn generate_llm_caption(
         format!("STREAMER NICHE: {}\n", streamer_niche_tags.join(", "))
     };
 
+    let avoid_line = match avoid_caption {
+        Some(prev) if !prev.trim().is_empty() => format!(
+            "AVOID REPEATING (this is the current caption — your output must not be a close variant):\n\"{}\"\n\n",
+            prev.trim()
+        ),
+        _ => String::new(),
+    };
+
     let tone_block = tone_instruction(selected_mode);
 
     let prompt = format!(
@@ -2285,7 +2404,7 @@ pub async fn generate_llm_caption(
 
 {platform}{game}GENRE: {tone}
 {title}WHAT HAPPENED: {event}
-{money_quote}{transcript}{tags}{niche}
+{money_quote}{transcript}{tags}{niche}{avoid}
 MODE: {tone_block}
 
 STRUCTURE - each candidate has two parts:
@@ -2293,9 +2412,21 @@ STRUCTURE - each candidate has two parts:
   Scroll-stopper. Must be complete on its own when read alone.
 - body: remainder (<230 chars). Specifics. Context. Reaction.
 
-MONEY-QUOTE PRIORITY (when a money quote is provided):
-- At least 2 of 3 candidates SHOULD use it verbatim or close-paraphrase in the hook_line
+DIVERSITY (strict — your output will be rejected if violated):
+- The 3 hooks MUST open with 3 DIFFERENT angles AND 3 DIFFERENT opening words.
+- Angle menu: money-quote (AT MOST 1 of 3), observation about the moment,
+  specific stake or detail, reaction framing, self-deprecation, meme/juxtaposition.
+- The 3 bodies must differ in their core beat — not three variations of the same sentence.
 - Never fabricate quotes. Only use the provided quote or transcript fragments.
+- If "AVOID REPEATING" is shown above, none of the 3 candidates may open with the same
+  word, use the same core image, or follow the same sentence shape as that caption.
+
+AVOID (reads as AI filler):
+- Stacking adjectives ("pure silence", "dead silence", "full silence" — pick one)
+- Narrative trilogies ("no words. no plan. no commentary.")
+- Over-explaining emotion ("deeply regretting", "knowing exactly what we signed up for")
+- Recapping what the signal tags already say
+- Starting every candidate with the same sentence shape
 
 HARD LIMITS:
 - hook_line: <=50 characters (will be client-side truncated if longer)
@@ -2323,6 +2454,7 @@ OUTPUT - JSON only, no prose, no markdown fence:
         transcript = transcript_section,
         tags = tag_line,
         niche = niche_line,
+        avoid = avoid_line,
         tone_block = tone_block,
     );
 
@@ -2404,11 +2536,21 @@ OUTPUT - JSON only, no prose, no markdown fence:
             let hook_truncated = truncate_hook(&c.hook_line, 50);
             let hook_score = crate::detection::ranker::score_title(&hook_truncated, &ctx);
             let body_score = score_caption_body(&c.body);
+            // Wave 3 fix: de-prefer money-quote-led candidates. Quote hooks nail the
+            // ranker's brevity/specificity criteria so they would auto-win every regen
+            // unless we put a thumb on the scale. 0.10 is enough to let a non-quote
+            // candidate win when it's even roughly competitive on other dimensions,
+            // but not so much that a genuinely great quote hook gets buried.
+            let money_quote_penalty = if c.uses_money_quote && money_quote.is_some() {
+                0.10
+            } else {
+                0.0
+            };
             CaptionCandidate {
                 hook_line: hook_truncated,
                 body: c.body,
                 uses_money_quote: c.uses_money_quote,
-                score: hook_score + body_score,
+                score: hook_score + body_score - money_quote_penalty,
             }
         })
         .collect();
@@ -3213,38 +3355,50 @@ mod tests {
         assert_ne!(tiktok, shorts);
     }
 
-    // ── Wave 2: TitlePattern / TitleCandidate serde ──────────────
+    // ── TitlePattern / TitleCandidate serde (6-pattern taxonomy) ─
 
     #[test]
-    fn w2_title_pattern_serializes_screaming_snake() {
+    fn title_pattern_serializes_screaming_snake() {
         assert_eq!(
-            serde_json::to_string(&TitlePattern::StakeArrowOutcome).unwrap(),
-            "\"STAKE_ARROW_OUTCOME\"",
+            serde_json::to_string(&TitlePattern::QuietFlex).unwrap(),
+            "\"QUIET_FLEX\"",
         );
         assert_eq!(
-            serde_json::to_string(&TitlePattern::EmotionColonDetail).unwrap(),
-            "\"EMOTION_COLON_DETAIL\"",
+            serde_json::to_string(&TitlePattern::AftermathConfession).unwrap(),
+            "\"AFTERMATH_CONFESSION\"",
         );
         assert_eq!(
-            serde_json::to_string(&TitlePattern::QuoteTwist).unwrap(),
-            "\"QUOTE_TWIST\"",
+            serde_json::to_string(&TitlePattern::Observational).unwrap(),
+            "\"OBSERVATIONAL\"",
+        );
+        assert_eq!(
+            serde_json::to_string(&TitlePattern::TechCallout).unwrap(),
+            "\"TECH_CALLOUT\"",
+        );
+        assert_eq!(
+            serde_json::to_string(&TitlePattern::SpecificSuperlative).unwrap(),
+            "\"SPECIFIC_SUPERLATIVE\"",
+        );
+        assert_eq!(
+            serde_json::to_string(&TitlePattern::CuriosityQuestion).unwrap(),
+            "\"CURIOSITY_QUESTION\"",
         );
     }
 
     #[test]
-    fn w2_title_candidate_deserializes_from_llm_shape() {
-        let json = r#"{"text": "1v5 ACE", "pattern": "STAKE_ARROW_OUTCOME"}"#;
+    fn title_candidate_deserializes_from_llm_shape() {
+        let json = r#"{"text": "actually clean", "pattern": "QUIET_FLEX"}"#;
         let c: TitleCandidate = serde_json::from_str(json).unwrap();
-        assert_eq!(c.text, "1v5 ACE");
-        assert_eq!(c.pattern, TitlePattern::StakeArrowOutcome);
+        assert_eq!(c.text, "actually clean");
+        assert_eq!(c.pattern, TitlePattern::QuietFlex);
         assert_eq!(c.score, 0.0); // default when absent
     }
 
     #[test]
-    fn w2_title_candidate_roundtrips() {
+    fn title_candidate_roundtrips() {
         let original = TitleCandidate {
-            text: "Speechless: through smoke".into(),
-            pattern: TitlePattern::EmotionColonDetail,
+            text: "gonna sleep on the couch again".into(),
+            pattern: TitlePattern::AftermathConfession,
             score: 0.75,
         };
         let json = serde_json::to_string(&original).unwrap();
@@ -3472,41 +3626,41 @@ mod tests {
     // ── Wave 2: TitlesResponse JSON parsing ──────────────────────
 
     #[test]
-    fn w2_titles_response_parses_llm_shape() {
+    fn titles_response_parses_llm_shape() {
         let json = r#"{
             "candidates": [
-                {"pattern": "STAKE_ARROW_OUTCOME", "text": "down 0-12 -> 1v5 ACE"},
-                {"pattern": "EMOTION_COLON_DETAIL", "text": "Speechless: one-tap through smoke"},
-                {"pattern": "QUOTE_TWIST", "text": "\"I can't miss\" - misses next shot"},
-                {"pattern": "STAKE_ARROW_OUTCOME", "text": "last alive -> 4k"},
-                {"pattern": "EMOTION_COLON_DETAIL", "text": "Rattled: clutch play"}
+                {"pattern": "QUIET_FLEX", "text": "actually clean"},
+                {"pattern": "AFTERMATH_CONFESSION", "text": "gonna sleep on the couch again"},
+                {"pattern": "OBSERVATIONAL", "text": "Meg learnt to fly"},
+                {"pattern": "TECH_CALLOUT", "text": "don't blind Legion when vaulting"},
+                {"pattern": "SPECIFIC_SUPERLATIVE", "text": "the WORST hex in DBD"}
             ]
         }"#;
         let r: TitlesResponse = serde_json::from_str(json).unwrap();
         assert_eq!(r.candidates.len(), 5);
-        assert_eq!(r.candidates[0].pattern, TitlePattern::StakeArrowOutcome);
-        assert_eq!(r.candidates[1].pattern, TitlePattern::EmotionColonDetail);
-        assert_eq!(r.candidates[2].pattern, TitlePattern::QuoteTwist);
+        assert_eq!(r.candidates[0].pattern, TitlePattern::QuietFlex);
+        assert_eq!(r.candidates[1].pattern, TitlePattern::AftermathConfession);
+        assert_eq!(r.candidates[2].pattern, TitlePattern::Observational);
+        assert_eq!(r.candidates[3].pattern, TitlePattern::TechCallout);
+        assert_eq!(r.candidates[4].pattern, TitlePattern::SpecificSuperlative);
     }
 
     #[test]
-    fn w2_titles_response_parses_markdown_fenced_shape() {
-        // Simulate the model wrapping the output in a fence, then the
-        // full extract-then-parse flow the async function uses.
-        let fenced = "```json\n{\"candidates\":[{\"pattern\":\"STAKE_ARROW_OUTCOME\",\"text\":\"1v5 ACE\"}]}\n```";
+    fn titles_response_parses_markdown_fenced_shape() {
+        let fenced = "```json\n{\"candidates\":[{\"pattern\":\"QUIET_FLEX\",\"text\":\"dialed in\"}]}\n```";
         let extracted = extract_json_from_markdown(fenced).unwrap();
         let parsed: TitlesResponse = serde_json::from_str(&extracted).unwrap();
         assert_eq!(parsed.candidates.len(), 1);
-        assert_eq!(parsed.candidates[0].text, "1v5 ACE");
+        assert_eq!(parsed.candidates[0].text, "dialed in");
     }
 
     #[test]
-    fn w2_titles_response_parses_with_surrounding_prose() {
-        let text = "Sure, here are your candidates:\n{\"candidates\":[{\"pattern\":\"QUOTE_TWIST\",\"text\":\"yeah nah\"}]}\nLet me know if you need more.";
+    fn titles_response_parses_with_surrounding_prose() {
+        let text = "Sure, here are your candidates:\n{\"candidates\":[{\"pattern\":\"CURIOSITY_QUESTION\",\"text\":\"why has nobody left the bus\"}]}\nLet me know if you need more.";
         let extracted = extract_json_from_markdown(text).unwrap();
         let parsed: TitlesResponse = serde_json::from_str(&extracted).unwrap();
         assert_eq!(parsed.candidates.len(), 1);
-        assert_eq!(parsed.candidates[0].pattern, TitlePattern::QuoteTwist);
+        assert_eq!(parsed.candidates[0].pattern, TitlePattern::CuriosityQuestion);
     }
 
     #[test]

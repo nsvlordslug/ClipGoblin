@@ -37,13 +37,21 @@ pub enum Platform {
 }
 
 impl Platform {
-    /// Max title char count before this platform's mobile UI truncates.
+    /// Preferred title char count. Titles at or under this get full length score;
+    /// longer titles get a linear penalty (ranker::length_score).
+    ///
+    /// Originally set to the feed-view truncation points (~42 for TikTok/Shorts,
+    /// ~50 for Reels) but that starved the model on reaction/story clips where
+    /// real context requires a full sentence. Raised to 60 across the board:
+    /// enough room for a complete sentence, still short enough that the clip-page
+    /// view renders cleanly. The feed-view truncation is a separate visual concern
+    /// that matters less than whether the title communicates anything at all.
     pub fn title_length_target(self) -> usize {
         match self {
-            Platform::TikTok         => 42,
-            Platform::YouTubeShorts  => 42,
-            Platform::InstagramReels => 50,
-            Platform::Generic        => 42,
+            Platform::TikTok         => 60,
+            Platform::YouTubeShorts  => 60,
+            Platform::InstagramReels => 60,
+            Platform::Generic        => 60,
         }
     }
 
@@ -93,9 +101,9 @@ mod tests {
 
     #[test]
     fn title_length_targets() {
-        assert_eq!(Platform::TikTok.title_length_target(), 42);
-        assert_eq!(Platform::InstagramReels.title_length_target(), 50);
-        assert_eq!(Platform::Generic.title_length_target(), 42);
+        assert_eq!(Platform::TikTok.title_length_target(), 60);
+        assert_eq!(Platform::InstagramReels.title_length_target(), 60);
+        assert_eq!(Platform::Generic.title_length_target(), 60);
     }
 
     #[test]
