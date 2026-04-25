@@ -661,7 +661,17 @@ pub async fn generate_post_captions(
                 );
                 // Top-scored only. Candidates are pre-sorted descending by score.
                 let llm_captions = vec![post_captions::caption_candidate_to_variant(top, &mode)];
-                let hashtags = post_captions::build_hashtags_pub(&tags, tone);
+                // Wave 1 platform-aware hashtags: TikTok evergreen tags differ from
+                // YouTube Shorts (fyp vs shorts), and the v2 builder reserves a slot
+                // for the game name when provided. streamer_niche_tags stays empty
+                // until Settings exposes it (future work).
+                let hashtags = post_captions::build_hashtags_v2(
+                    &tags,
+                    tone,
+                    crate::detection::Platform::TikTok,
+                    &[],
+                    game_name,
+                );
                 let casual = llm_captions.first().map(|c| c.text.clone()).unwrap_or_default();
                 let funny  = llm_captions.get(1).map(|c| c.text.clone()).unwrap_or_default();
                 let hype   = llm_captions.get(2).map(|c| c.text.clone()).unwrap_or_default();

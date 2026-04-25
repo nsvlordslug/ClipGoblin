@@ -2844,9 +2844,10 @@ pub fn strong_quote_pub(transcript: Option<&str>) -> Option<String> {
     strong_quote(transcript)
 }
 
-pub fn build_hashtags_pub(tags: &[String], tone: Tone) -> Vec<String> {
-    build_hashtags(tags, tone)
-}
+// `build_hashtags_pub` was deleted 2026-04-24 — all external callers were
+// migrated to `build_hashtags_v2` directly so they can pass platform / niche.
+// The internal `build_hashtags(tags, tone)` helper still exists for the
+// Free-path generate_from_parts callers that don't have platform context.
 
 // ═══════════════════════════════════════════════════════════════════
 //  Tests
