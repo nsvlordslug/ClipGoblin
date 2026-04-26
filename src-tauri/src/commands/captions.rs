@@ -251,6 +251,17 @@ fn save_outcome_title(tag_list: &[String]) -> Option<String> {
 fn extract_title_phrase(excerpt: &str) -> Option<String> {
     let trimmed = excerpt.trim();
     if trimmed.len() < 3 { return None; }
+    // Reject signal-stat placeholder strings — chat-only and emote-only
+    // candidates inject these as fake "transcripts" (see vod.rs around
+    // lines 1900-1955) so the analysis stage has SOMETHING to put in
+    // the transcript_snippet field. They're useful for downstream signal
+    // attribution but disastrous as title basis: every chat-spike clip
+    // ends up titled "N chat messages in this..." which (a) reads like
+    // a debug log and (b) collapses to a near-duplicate template across
+    // every chat-derived clip.
+    if is_signal_placeholder(trimmed) {
+        return None;
+    }
     let filler = ["like", "so", "um", "uh", "okay", "ok", "well", "and", "but"];
     let words: Vec<&str> = trimmed.split_whitespace()
         .skip_while(|w| filler.iter().any(|f| w.to_lowercase() == *f))
@@ -258,6 +269,18 @@ fn extract_title_phrase(excerpt: &str) -> Option<String> {
         .collect();
     if words.len() < 2 { return None; }
     Some(words.join(" "))
+}
+
+/// Detect signal-stat placeholder strings injected as fake transcripts
+/// for chat-rate / emote-burst candidates. These should never reach the
+/// title generator. Match is substring-based on lowercase to catch
+/// variations ("11 chat messages in this window", "120 chat messages
+/// in this 30s window", etc.).
+fn is_signal_placeholder(s: &str) -> bool {
+    let lower = s.to_lowercase();
+    lower.contains("chat messages in this")
+        || lower.contains("emote occurrences")
+        || lower.contains("emote occurrences in this")
 }
 
 fn is_vague_phrase(s: &str) -> bool {
@@ -395,6 +418,11 @@ fn aftermath_from_tags(
         pick_least_used(&pool, usage, idx)
     };
 
+    // Each category has 15 base variants + 3 game-anchored variants when a
+    // game name is available, giving an 18-deep pool per category. Sized
+    // so a typical 17-clip Otzdarva-tier VOD can produce 0 in-category
+    // duplicates even when 12+ clips collapse onto the same dominant tag
+    // (the worst case observed in real validation runs).
     if has("ambush") || has("jumpscare") {
         return Some(pick(
             &[
@@ -403,8 +431,22 @@ fn aftermath_from_tags(
                 "had zero seconds to react",
                 "didn't even have my hands on the keys",
                 "blindsided in the worst way",
+                "never saw it coming",
+                "thought i was alone. i wasn't.",
+                "looked away for one second",
+                "no chance to even flinch",
+                "got jumped from behind nothing",
+                "didn't even hear footsteps",
+                "the second i stopped checking corners",
+                "they were waiting for that exact moment",
+                "let my guard down once",
+                "should have been paying attention",
             ],
-            &["{game} ambushed me before i could move"],
+            &[
+                "{game} ambushed me before i could move",
+                "{game} doesn't believe in fair fights",
+                "got jumped in {game} for the hundredth time",
+            ],
         ));
     }
     if has("fight") && has("panic") {
@@ -415,8 +457,22 @@ fn aftermath_from_tags(
                 "lost the plot at the worst time",
                 "had a strategy. then i didn't.",
                 "tried to remember which button does what",
+                "brain went somewhere else",
+                "could not pick a button to save my life",
+                "knew what to do. did the opposite.",
+                "muscle memory abandoned me",
+                "started pressing things at random",
+                "couldn't think and play at the same time",
+                "ran out of plans mid-execution",
+                "forgot how the game works",
+                "panic took the wheel",
+                "the controls were against me",
             ],
-            &["panicked mid-fight in {game}"],
+            &[
+                "panicked mid-fight in {game}",
+                "{game} found my panic button",
+                "{game} broke my brain in real time",
+            ],
         ));
     }
     if has("fight") && has("frustration") {
@@ -427,8 +483,22 @@ fn aftermath_from_tags(
                 "deserved better than this",
                 "everything went wrong at once",
                 "no version of me wins that one",
+                "did everything right and still lost",
+                "the game decided i was losing today",
+                "my best wasn't close to enough",
+                "got read like a book",
+                "outplayed in real time",
+                "no recovery from that one",
+                "stat-checked into oblivion",
+                "this fight was over before it started",
+                "earned the loss honestly",
+                "ran out of answers fast",
             ],
-            &["{game} did not play fair this round"],
+            &[
+                "{game} did not play fair this round",
+                "{game} won that fair and square",
+                "{game} ate my lunch this round",
+            ],
         ));
     }
     if has("celebration") && has("hype") {
@@ -439,8 +509,22 @@ fn aftermath_from_tags(
                 "actually pulled it off somehow",
                 "luck did most of that",
                 "made it out by inches",
+                "no idea how i won that",
+                "did not deserve that win",
+                "stole that one fair and square",
+                "luck carried, not skill",
+                "got it on the last frame",
+                "the universe owed me one",
+                "looked planned. wasn't planned.",
+                "this is going on the highlight reel",
+                "won and i'm taking it",
+                "ugly but it counts",
             ],
-            &["{game} let me have one for once"],
+            &[
+                "{game} let me have one for once",
+                "stole one back from {game}",
+                "{game} owed me that round",
+            ],
         ));
     }
     if has("death") {
@@ -451,10 +535,21 @@ fn aftermath_from_tags(
                 "showed me the loading screen",
                 "wiped me without saying anything",
                 "made me reconsider my life choices",
+                "the run ends here",
+                "got humbled in record time",
+                "had hopes. they're dead now.",
+                "back to the menu i go",
+                "death came quietly",
+                "lasted exactly long enough to fail",
+                "the game stopped letting me play",
+                "ran out of healthbar",
+                "knew the risks. did them anyway.",
+                "made it pretty far i guess",
             ],
             &[
                 "{game} broke me before i blinked",
                 "got dismissed by {game}",
+                "{game} took my run home",
             ],
         ));
     }
@@ -466,8 +561,22 @@ fn aftermath_from_tags(
                 "fireworks i did not order",
                 "got erased by sudden physics",
                 "vaporized mid-sentence",
+                "physics had other plans",
+                "everything became confetti",
+                "got launched without warning",
+                "deleted by mistake",
+                "sent into the next zip code",
+                "the kaboom was too much for me",
+                "removed from the situation entirely",
+                "rocket-jumped against my will",
+                "exited the building, immediately",
+                "got returned to sender",
             ],
-            &[],
+            &[
+                "{game} skipped me to the explosion part",
+                "blown out of {game} entirely",
+                "{game}'s physics chose violence",
+            ],
         ));
     }
     if has("disbelief") || has("shock") {
@@ -478,8 +587,22 @@ fn aftermath_from_tags(
                 "had no warning whatsoever",
                 "wasn't ready and it showed",
                 "couldn't process it in time",
+                "what just happened",
+                "the brain hadn't caught up yet",
+                "took me a second to register that",
+                "wait — what?",
+                "is that legal",
+                "no one was prepared for that",
+                "still parsing this in real time",
+                "the disbelief is real",
+                "looked at the screen like it betrayed me",
+                "missed the part where that became possible",
             ],
-            &["{game} pulled something new on me"],
+            &[
+                "{game} pulled something new on me",
+                "{game} just invented a new way to humble me",
+                "didn't know {game} could do that",
+            ],
         ));
     }
     None
