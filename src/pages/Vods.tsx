@@ -186,7 +186,10 @@ export default function Vods() {
           if (vod.analysis_status === 'completed') {
             clearInterval(poll)
             if (loggedInUser) refreshVods(loggedInUser.id)
-            navigate('/clips')
+            // Pass the just-completed VOD's id through navigation state so the
+            // Clips page can scroll directly to its section instead of landing
+            // somewhere in the middle of the (potentially long) clip list.
+            navigate('/clips', { state: { focusVodId: vodId } })
           } else if (vod.analysis_status === 'failed') {
             clearInterval(poll)
             if (loggedInUser) refreshVods(loggedInUser.id)

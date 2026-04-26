@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import {
   Scissors, Trash2, Pencil, Film, CheckSquare, Square, Upload, X, Clock,
   ChevronDown, ChevronRight, ArrowUp, LocateFixed, SlidersHorizontal,
@@ -291,6 +291,14 @@ function UndoToast({ count, onUndo, secondsLeft }: {
 
 export default function Clips() {
   const navigate = useNavigate()
+  const location = useLocation()
+  // VOD id passed from Vods.tsx when an analysis just finished. We scroll to
+  // this VOD's section once the clips list is rendered so the user lands
+  // directly on the freshly-generated clips (instead of mid-list, which was
+  // the bug — react-router default scroll behavior puts them at the top of
+  // the previous page's scroll position which makes no sense for a fresh
+  // analysis result that just appeared at a different point in the list).
+  const focusVodId = (location.state as { focusVodId?: string } | null)?.focusVodId ?? null
   const { clips, highlights, fetchClips, fetchHighlights, refreshVods, loggedInUser } = useAppStore()
   const { uploads: scheduledUploads, load: loadSchedules } = useScheduleStore()
   const [vodMap, setVodMap] = useState<Record<string, Vod>>({})
@@ -363,6 +371,31 @@ export default function Clips() {
     })
     return () => cancelAnimationFrame(raf)
   }, [clips.length])
+
+  // ── Scroll-to-VOD on arrival from a just-completed analysis ──
+  // When Vods.tsx navigates here after an analysis finishes, it stuffs the
+  // VOD's id into location.state.focusVodId. We watch clips.length so the
+  // scroll fires once the list has rendered the section we're looking for
+  // (initial mount has 0 clips while fetchClips() is in flight). Once we
+  // scroll successfully, we replace the navigation entry with empty state
+  // so a back-button bounce or page refresh doesn't re-trigger the scroll.
+  useEffect(() => {
+    if (!focusVodId) return
+    if (clips.length === 0) return
+    const raf = requestAnimationFrame(() => {
+      const el = document.querySelector<HTMLElement>(`[data-vod-id="${focusVodId}"]`)
+      if (el) {
+        el.scrollIntoView({ block: 'start', behavior: 'instant' as ScrollBehavior })
+        // Same brief highlight pulse as the editor-return flow, so the user
+        // can confirm visually that this is where their fresh clips landed.
+        el.classList.add('ring-2', 'ring-violet-500/60')
+        setTimeout(() => el.classList.remove('ring-2', 'ring-violet-500/60'), 1200)
+        // Clear the navigation state so it doesn't re-fire on back/forward.
+        navigate(location.pathname, { replace: true, state: null })
+      }
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [clips.length, focusVodId, navigate, location.pathname])
 
   // ── Track scroll for floating button ──
   useEffect(() => {
@@ -812,11 +845,18 @@ export default function Clips() {
           const isCollapsed = collapsedVods.has(group.title)
           const stats = vodStats(group.clips)
 
+          // VOD ID is consistent across all clips in a group (grouping key
+          // is the VOD), so we can derive it from any clip. Used as a stable
+          // attribute selector for the post-analysis scroll-to-section
+          // effect — titles can change after re-analysis but VOD IDs don't.
+          const groupVodId = group.clips[0]?.vod_id ?? ''
+
           return (
             <div
               key={group.title}
               className="space-y-3"
               ref={(el) => { vodSectionRefs.current[group.title] = el }}
+              data-vod-id={groupVodId}
             >
               {/* Collapsible VOD header */}
               <button
