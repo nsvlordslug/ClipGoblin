@@ -909,6 +909,98 @@ pub struct DetectionStats {
     pub sensitivity: String,
 }
 
+/// Pre-selector: identify audio time ranges worth transcribing.
+///
+/// Used by the two-pass analysis flow to skip transcribing non-interesting
+/// stretches of long VODs. A 7h VOD on CPU base-model whisper takes ~7 hours
+/// to transcribe in full — but 90% of the runtime is on stretches the audio,
+/// chat, and emote signals already flagged as low-interest. This function
+/// returns the time windows that DO carry signal so the caller can transcribe
+/// only those (typically 5-15% of the total VOD by duration).
+///
+/// Each input signal contributes a window centered on its peak with ±30s
+/// padding for transcript context — so the transcribed text doesn't get
+/// truncated mid-sentence around the actual moment of interest. Adjacent
+/// windows within 60s of each other are merged so we don't run dozens of
+/// tiny whisper sessions back-to-back (each session has model-load and
+/// state-init overhead).
+///
+/// Trade-off: this loses "transcript-only discovery" — clips that would be
+/// found purely from interesting things the streamer says when audio and
+/// chat are both quiet. For gaming streamers with reactive chat (the bulk
+/// of the user base) this is fine; for narrative streamers it could miss
+/// some clips. Mitigation for that case is a separate follow-up (sample
+/// exploratory windows from "quiet" stretches).
+///
+/// Returns an empty vec if no signals fired — caller should fall back to
+/// full-VOD transcription in that case (short VODs, dead-chat streams,
+/// audio-uniform content where no spikes exist).
+pub fn select_candidate_windows(
+    audio: Option<&AudioContext>,
+    chat_peaks: &[db::HighlightRow],
+    emote_peaks: &[db::HighlightRow],
+    community_clips: &[CommunityClip],
+    duration: f64,
+) -> Vec<(f64, f64)> {
+    const PADDING_SECS: f64 = 30.0;
+    const MERGE_GAP_SECS: f64 = 60.0;
+
+    let mut raw: Vec<(f64, f64)> = Vec::new();
+
+    // Audio peaks: each spike-second contributes a ±30s window.
+    if let Some(audio_ctx) = audio {
+        for &spike in &audio_ctx.spike_seconds {
+            let start = ((spike as f64) - PADDING_SECS).max(0.0);
+            let end = ((spike as f64) + PADDING_SECS).min(duration);
+            raw.push((start, end));
+        }
+    }
+
+    // Chat-rate peaks: window around the peak start time.
+    for peak in chat_peaks {
+        let center = peak.start_seconds;
+        let start = (center - PADDING_SECS).max(0.0);
+        let end = (center + PADDING_SECS).min(duration);
+        raw.push((start, end));
+    }
+
+    // Emote-burst peaks: same treatment.
+    for peak in emote_peaks {
+        let center = peak.start_seconds;
+        let start = (center - PADDING_SECS).max(0.0);
+        let end = (center + PADDING_SECS).min(duration);
+        raw.push((start, end));
+    }
+
+    // Community clips: use the clipper's chosen span with padding.
+    for cc in community_clips {
+        let start = (cc.vod_offset_seconds - PADDING_SECS).max(0.0);
+        let end = (cc.vod_offset_seconds + cc.duration_seconds + PADDING_SECS).min(duration);
+        raw.push((start, end));
+    }
+
+    if raw.is_empty() {
+        return Vec::new();
+    }
+
+    // Sort by start time, then merge ranges that overlap or sit within
+    // MERGE_GAP_SECS of each other. The merge is in-place: each iteration
+    // either extends the last accepted range or starts a new one.
+    raw.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut merged: Vec<(f64, f64)> = Vec::new();
+    for w in raw {
+        if let Some(last) = merged.last_mut() {
+            if w.0 - last.1 <= MERGE_GAP_SECS {
+                last.1 = w.1.max(last.1);
+                continue;
+            }
+        }
+        merged.push(w);
+    }
+
+    merged
+}
+
 pub fn select_clips(
     audio: Option<&AudioContext>,
     transcript: Option<&TranscriptResult>,

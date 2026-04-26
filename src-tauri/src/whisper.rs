@@ -275,6 +275,206 @@ where
     })
 }
 
+/// Two-pass transcription: only transcribe specific time windows, not the
+/// whole VOD. Used by the analysis pipeline to skip long stretches that
+/// the audio + chat + emote pre-selector already determined are not clip-
+/// worthy. For a 7h gaming VOD where ~10% of the duration carries signal,
+/// this is a ~10× speedup vs full-VOD transcription with identical accuracy
+/// on the windows that matter.
+///
+/// `windows` is a slice of `(start_seconds, end_seconds)` pairs in original
+/// VOD time. The returned `TranscriptResult.segments` have timestamps in
+/// the SAME original-VOD reference frame (the slice-local timestamps
+/// whisper returns are added to each window's start before being recorded),
+/// so downstream code that queries the transcript by VOD time works
+/// without modification.
+///
+/// Implementation note: we extract full PCM once and slice in memory rather
+/// than re-running ffmpeg per window. The PCM extraction is fast (<1 min
+/// for 7h on SSD) and per-window ffmpeg invocations would have >2× the
+/// overhead for typical 5-30 window counts. Memory cost: ~1.5 GB for a 7h
+/// VOD (16kHz × 4 bytes × 7h × 3600s) — same as the existing single-pass
+/// `transcribe` function.
+///
+/// Falls back gracefully on empty input (returns Err so caller can decide
+/// whether to retry with full-VOD transcription).
+pub fn transcribe_windows<F>(
+    audio_path: &str,
+    windows: &[(f64, f64)],
+    model: WhisperModel,
+    use_gpu: bool,
+    on_progress: F,
+) -> Result<TranscriptResult, String>
+where
+    F: Fn(u32) + Send + Sync + 'static,
+{
+    if windows.is_empty() {
+        return Err("transcribe_windows called with empty window list".to_string());
+    }
+
+    let progress_fn = Arc::new(on_progress);
+
+    // 1. Verify model exists
+    let mpath = model_path(model)?;
+    if !mpath.exists() {
+        return Err(format!(
+            "Model {} not downloaded. Expected at: {}",
+            model.label(),
+            mpath.display()
+        ));
+    }
+    progress_fn(2);
+
+    // 2. Extract full PCM via ffmpeg (single pass, ~1 min for 7h on SSD)
+    let ffmpeg = find_ffmpeg()?;
+    log::info!(
+        "[Whisper] Two-pass: extracting full PCM from {} ({} window(s) to transcribe)",
+        audio_path,
+        windows.len()
+    );
+    progress_fn(5);
+
+    let samples = extract_pcm_audio(audio_path, &ffmpeg)?;
+    let total_duration = samples.len() as f64 / 16000.0;
+
+    // Compute total samples we'll actually transcribe (sum of window sizes,
+    // clipped to actual sample count). This is what we use for the speedup
+    // log and as the denominator for progress mapping.
+    let total_window_samples: usize = windows
+        .iter()
+        .map(|&(s, e)| {
+            let start_idx = (s * 16000.0).max(0.0) as usize;
+            let end_idx = ((e * 16000.0) as usize).min(samples.len());
+            end_idx.saturating_sub(start_idx)
+        })
+        .sum();
+
+    let coverage_pct = if !samples.is_empty() {
+        (total_window_samples as f64 / samples.len() as f64) * 100.0
+    } else {
+        0.0
+    };
+    log::info!(
+        "[Whisper] Two-pass: transcribing {:.1}s of {:.1}s total ({:.1}% coverage, {:.1}% reduction vs full-VOD)",
+        total_window_samples as f64 / 16000.0,
+        total_duration,
+        coverage_pct,
+        100.0 - coverage_pct,
+    );
+    progress_fn(15);
+
+    // 3. Load whisper model ONCE — reuse across all windows
+    log::info!(
+        "[Whisper] Loading model: {} (GPU={})",
+        mpath.display(),
+        if use_gpu { "enabled" } else { "disabled" },
+    );
+    let mut ctx_params = WhisperContextParameters::default();
+    ctx_params.use_gpu = use_gpu;
+    let ctx = WhisperContext::new_with_params(
+        mpath.to_str().ok_or("Invalid model path encoding")?,
+        ctx_params,
+    )
+    .map_err(|e| format!("Failed to load whisper model: {}", e))?;
+
+    progress_fn(20);
+
+    // 4. Run inference per window, mapping each segment's timestamps back
+    //    into the original-VOD reference frame.
+    let mut all_segments: Vec<TranscriptSegment> = Vec::new();
+    let mut samples_processed: usize = 0;
+
+    for (i, &(window_start_secs, window_end_secs)) in windows.iter().enumerate() {
+        let start_idx = (window_start_secs * 16000.0).max(0.0) as usize;
+        let end_idx = ((window_end_secs * 16000.0) as usize).min(samples.len());
+        if start_idx >= end_idx {
+            log::warn!(
+                "[Whisper] Window {}/{} ({:.1}-{:.1}s) is empty after sample mapping, skipping",
+                i + 1,
+                windows.len(),
+                window_start_secs,
+                window_end_secs
+            );
+            continue;
+        }
+
+        let slice = &samples[start_idx..end_idx];
+        log::debug!(
+            "[Whisper] Window {}/{}: {:.1}-{:.1}s ({} samples)",
+            i + 1,
+            windows.len(),
+            window_start_secs,
+            window_end_secs,
+            slice.len()
+        );
+
+        // Per-window inference params — set fresh each time because progress
+        // callback closure captures the running totals at call time.
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_language(Some("en"));
+        params.set_token_timestamps(true);
+        params.set_n_threads(optimal_thread_count());
+
+        // Map per-window progress to the overall (20-95%) range, weighted by
+        // how many samples this window represents in the total transcription
+        // workload. So the bar moves in proportion to actual work done, not
+        // window count (a 60s window contributes 6× as much as a 10s window).
+        let progress_fn_clone = Arc::clone(&progress_fn);
+        let samples_so_far = samples_processed;
+        let slice_size = slice.len();
+        let total_size = total_window_samples.max(1);
+        params.set_progress_callback_safe(move |inner_progress: i32| {
+            let inner_done = (slice_size * inner_progress.max(0) as usize) / 100;
+            let overall_frac = (samples_so_far + inner_done) as f64 / total_size as f64;
+            let mapped = 20 + (overall_frac * 75.0) as u32;
+            progress_fn_clone(mapped.min(95));
+        });
+
+        let mut state = ctx
+            .create_state()
+            .map_err(|e| format!("Failed to create whisper state: {}", e))?;
+
+        state
+            .full(params, slice)
+            .map_err(|e| format!("Whisper inference failed on window {}: {}", i + 1, e))?;
+
+        // Map slice-local segment timestamps back to original VOD time.
+        let num_segments = state.full_n_segments();
+        for j in 0..num_segments {
+            if let Some(segment) = state.get_segment(j) {
+                // whisper-rs reports timestamps in centiseconds (10ms units)
+                let local_start = segment.start_timestamp() as f64 / 100.0;
+                let local_end = segment.end_timestamp() as f64 / 100.0;
+                let text = segment.to_str().unwrap_or("").trim().to_string();
+                if !text.is_empty() {
+                    all_segments.push(TranscriptSegment {
+                        start: window_start_secs + local_start,
+                        end: window_start_secs + local_end,
+                        text,
+                    });
+                }
+            }
+        }
+
+        samples_processed += slice.len();
+    }
+
+    progress_fn(100);
+
+    log::info!(
+        "[Whisper] Two-pass transcription complete: {} segments across {} windows ({:.1}s of audio)",
+        all_segments.len(),
+        windows.len(),
+        total_window_samples as f64 / 16000.0,
+    );
+
+    Ok(TranscriptResult {
+        segments: all_segments,
+        language: "en".to_string(),
+        duration: total_duration,
+    })
+}
+
 /// Determine optimal thread count for whisper inference.
 /// Uses physical cores (not logical/hyperthreaded) minus 1 to keep the UI responsive.
 fn optimal_thread_count() -> i32 {
