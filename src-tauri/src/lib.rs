@@ -23,6 +23,7 @@ mod post_captions;
 mod scene_signal;
 mod transcript_signal;
 mod twitch;
+mod twitch_chat_replay;
 mod log_scrubber;
 mod social;
 mod vertical_crop;
@@ -112,11 +113,26 @@ pub fn run() {
     }
 
     let mut builder = tauri::Builder::default()
-        .plugin(tauri_plugin_log::Builder::default().level(if cfg!(debug_assertions) {
-            log::LevelFilter::Debug
-        } else {
-            log::LevelFilter::Info
-        }).build())
+        .plugin({
+            // Explicit log config (was Builder::default() which truncated the
+            // log file on each app restart, losing analyze-time context for
+            // debugging). Now: keep-all rotation, 50MB per file, three targets
+            // (stdout for cargo tauri dev, LogDir for the persistent file,
+            // Webview so Rust logs ALSO show up in DevTools Console).
+            use tauri_plugin_log::{Builder, RotationStrategy, Target, TargetKind};
+            Builder::default()
+                .level(if cfg!(debug_assertions) {
+                    log::LevelFilter::Debug
+                } else {
+                    log::LevelFilter::Info
+                })
+                .target(Target::new(TargetKind::Stdout))
+                .target(Target::new(TargetKind::LogDir { file_name: None }))
+                .target(Target::new(TargetKind::Webview))
+                .max_file_size(50_000_000) // 50MB
+                .rotation_strategy(RotationStrategy::KeepAll)
+                .build()
+        })
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())

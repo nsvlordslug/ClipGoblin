@@ -965,6 +965,24 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
 
         let mut result: Result<Vec<db::HighlightRow>, String> = Err("No analysis method available".into());
 
+        // ── Twitch chat replay (used by both tiers) ──
+        // Hits Twitch GQL directly. yt-dlp's `--write-subs --sub-lang
+        // live_chat` doesn't work for Twitch (YouTube-only) so we bypass
+        // it. Fetched once here in async context, passed into both tiers
+        // via spawn_blocking. Failures are non-fatal.
+        let chat_messages = match crate::twitch_chat_replay::fetch_chat_replay(
+            &vod_clone.twitch_video_id,
+        ).await {
+            Ok(msgs) => {
+                log::info!("[chat-replay] {} message(s) for VOD {}", msgs.len(), vod_id_bg);
+                msgs
+            }
+            Err(e) => {
+                log::warn!("[chat-replay] fetch failed: {} — continuing without chat", e);
+                Vec::new()
+            }
+        };
+
         // Tier 1: Signal-driven (audio + transcript + chat) â€” fully local
         if has_ffmpeg && has_local_file {
             log::info!("Running signal-driven analysis for VOD {}", vod_id_bg);
@@ -980,7 +998,8 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
             let vod_for_sync = vod_clone.clone();
             let hw_for_sync = hw_info.clone();
             let sens = sensitivity.clone();
-            match tokio::task::spawn_blocking(move || run_analysis_signals(&vod_for_sync, &hw_for_sync, &sens, &community_clips)).await {
+            let chat_for_sync = chat_messages.clone();
+            match tokio::task::spawn_blocking(move || run_analysis_signals(&vod_for_sync, &hw_for_sync, &sens, &community_clips, &chat_for_sync)).await {
                 Ok(Ok(highlights)) => { result = Ok(highlights); }
                 Ok(Err(e)) => {
                     log::warn!("Signal analysis failed, falling back to position heuristic: {e}");
@@ -999,7 +1018,8 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
                 db::update_vod_analysis_progress(&conn, &vod_id_bg, 10).ok();
             }
             let vod_for_sync = vod_clone.clone();
-            match tokio::task::spawn_blocking(move || run_analysis(&vod_for_sync)).await {
+            let chat_for_sync = chat_messages.clone();
+            match tokio::task::spawn_blocking(move || run_analysis(&vod_for_sync, &chat_for_sync)).await {
                 Ok(r) => { result = r; }
                 Err(e) => { result = Err(format!("Task error: {e}")); }
             }
@@ -1400,6 +1420,7 @@ fn run_analysis_signals(
     _hw: &HardwareInfo,
     sensitivity: &str,
     community_clips: &[clip_selector::CommunityClip],
+    chat_messages: &[crate::twitch_chat_replay::ChatMessage],
 ) -> Result<Vec<db::HighlightRow>, String> {
     let ffmpeg = find_ffmpeg()?;
     let vod_path = vod.local_path.clone()
@@ -1449,21 +1470,24 @@ fn run_analysis_signals(
     set_analysis_progress(vod_id, 40);
 
     // â”€â”€ Stage 3: Chat analysis (40-50%) â”€â”€
-    // Single yt-dlp pull, two analyses: 30s rate windows + 10s emote-burst windows.
+    // Operates on pre-fetched chat replay (fetched in async context by
+    // analyze_vod). Two analyses on the same input: 30s rate windows +
+    // 10s emote-burst windows. No I/O here.
     log::info!("Signal analysis: analyzing chat activity...");
     set_analysis_progress(vod_id, 42);
     let (chat_peaks, emote_peaks): (Vec<db::HighlightRow>, Vec<db::HighlightRow>) =
-        match analyze_via_chat(vod) {
+        match analyze_via_chat(chat_messages, duration, &vod.id) {
             Ok(r) => {
                 log::info!(
-                    "Chat analysis: {} rate peak(s), {} emote-burst peak(s)",
+                    "Chat analysis: {} rate peak(s), {} emote-burst peak(s) from {} messages",
                     r.rate_peaks.len(),
                     r.emote_peaks.len(),
+                    chat_messages.len(),
                 );
                 (r.rate_peaks, r.emote_peaks)
             }
             Err(e) => {
-                log::info!("Chat analysis skipped: {}", e);
+                log::info!("Chat analysis skipped: {} ({} messages available)", e, chat_messages.len());
                 (Vec::new(), Vec::new())
             }
         };
@@ -1496,7 +1520,7 @@ fn run_analysis_signals(
     if selected.is_empty() {
         log::warn!("Signal analysis: selector returned no clips, falling back to position heuristic");
         set_analysis_progress(vod_id, 55);
-        return run_analysis(vod);
+        return run_analysis(vod, chat_messages);
     }
 
     // â”€â”€ Stage 5: Scoring and ranking (60-75%) â”€â”€
@@ -1597,14 +1621,17 @@ fn run_analysis_signals(
 
 /// Position-based fallback â€” last resort when no signals are available.
 /// Only used when VOD is not downloaded or ffmpeg is missing.
-fn run_analysis(vod: &db::VodRow) -> Result<Vec<db::HighlightRow>, String> {
+fn run_analysis(
+    vod: &db::VodRow,
+    chat_messages: &[crate::twitch_chat_replay::ChatMessage],
+) -> Result<Vec<db::HighlightRow>, String> {
     let duration = vod.duration_seconds as f64;
     let vod_id = &vod.id;
     let now = chrono::Utc::now().to_rfc3339();
 
     // Try chat-based analysis first. Tier-2 fallback combines rate + emote
     // peaks into one set of highlights (no fusion stage available here).
-    if let Ok(r) = analyze_via_chat(vod) {
+    if let Ok(r) = analyze_via_chat(chat_messages, duration, vod_id) {
         let mut combined = r.rate_peaks;
         combined.extend(r.emote_peaks);
         if !combined.is_empty() {
@@ -1675,49 +1702,26 @@ fn run_analysis(vod: &db::VodRow) -> Result<Vec<db::HighlightRow>, String> {
 }
 
 /// Try to analyze a VOD using Twitch chat replay (downloaded via yt-dlp).
-/// Result of one chat-replay download. Both rate peaks and emote-burst
-/// peaks come from the same yt-dlp pull — running them as one analysis
-/// avoids re-downloading the chat file.
+/// Result of one chat replay analysis. Both rate peaks and emote-burst
+/// peaks come from the same fetched message stream — single API pull,
+/// dual analysis.
 struct ChatAnalysisResult {
     rate_peaks: Vec<db::HighlightRow>,
     emote_peaks: Vec<db::HighlightRow>,
 }
 
-fn analyze_via_chat(vod: &db::VodRow) -> Result<ChatAnalysisResult, String> {
-    let ytdlp = find_ytdlp()?;
-    let temp_dir = std::env::temp_dir().join("clipviral_chat");
-    std::fs::create_dir_all(&temp_dir).ok();
-
-    let out_template = temp_dir.join(&vod.twitch_video_id).to_string_lossy().to_string();
-
-    let mut cmd = std::process::Command::new(&ytdlp);
-    cmd.arg("--write-subs")
-        .arg("--sub-lang").arg("live_chat")
-        .arg("--skip-download")
-        .arg("--no-warnings")
-        .arg("-o").arg(&out_template)
-        .arg(&vod.vod_url)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
+/// Analyze pre-fetched chat replay messages for both rate spikes and
+/// emote-burst windows. The fetch happens in async context (see
+/// `crate::twitch_chat_replay::fetch_chat_replay`); this function is
+/// pure CPU work and can run inside `spawn_blocking`.
+fn analyze_via_chat(
+    messages: &[crate::twitch_chat_replay::ChatMessage],
+    duration: f64,
+    vod_id: &str,
+) -> Result<ChatAnalysisResult, String> {
+    if messages.is_empty() {
+        return Err("No chat messages available".to_string());
     }
-
-    let status = cmd.status().map_err(|e| format!("yt-dlp chat: {}", e))?;
-    if !status.success() {
-        return Err("Chat download failed".to_string());
-    }
-
-    let chat_path = temp_dir.join(format!("{}.live_chat.json", vod.twitch_video_id));
-    if !chat_path.exists() {
-        return Err("No chat file found".to_string());
-    }
-
-    let content = std::fs::read_to_string(&chat_path).map_err(|e| format!("Read chat: {}", e))?;
-    let duration = vod.duration_seconds as f64;
 
     // Two parallel windowings:
     //   - Rate: 30s windows (legacy chat-rate detection — coarse, robust)
@@ -1732,34 +1736,25 @@ fn analyze_via_chat(vod: &db::VodRow) -> Result<ChatAnalysisResult, String> {
     let mut total_messages = 0u32;
     let mut total_emotes = 0u32;
 
-    for line in content.lines() {
-        let val: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let offset = val.get("time_in_seconds")
-            .or_else(|| val.get("content_offset_seconds"))
-            .and_then(|v| v.as_f64());
-        let Some(t) = offset else { continue };
+    for msg in messages {
+        let t = msg.time_seconds;
+        if t < 0.0 || t > duration {
+            continue;
+        }
 
-        // Bucket the message itself
+        // Rate-peak bucket: count this message
         let rate_idx = ((t / rate_window_size) as usize).min(num_rate_windows - 1);
         rate_counts[rate_idx] += 1;
         total_messages += 1;
 
-        // Bucket the emote count for this message. Whole-line scan is robust
-        // to varying chat JSON shapes (Twitch's `message.body` vs YouTube's
-        // various nestings) since the emote substring will appear regardless
-        // of where in the JSON the text lives.
-        let emote_count = crate::emote_signal::count_emotes(line);
+        // Emote-density bucket: count emotes in the message body
+        let emote_count = crate::emote_signal::count_emotes(&msg.body);
         if emote_count > 0 {
             let emote_idx = ((t / emote_window_size) as usize).min(num_emote_windows - 1);
             emote_counts[emote_idx] += emote_count;
             total_emotes += emote_count;
         }
     }
-
-    std::fs::remove_file(&chat_path).ok();
 
     if total_messages < 5 {
         return Err("Not enough chat data".to_string());
@@ -1788,7 +1783,7 @@ fn analyze_via_chat(vod: &db::VodRow) -> Result<ChatAnalysisResult, String> {
             let secs = (start as u32) % 60;
             rate_peaks.push(db::HighlightRow {
                 id: uuid::Uuid::new_v4().to_string(),
-                vod_id: vod.id.clone(),
+                vod_id: vod_id.to_string(),
                 start_seconds: start,
                 end_seconds: end,
                 virality_score: virality,
@@ -1835,7 +1830,7 @@ fn analyze_via_chat(vod: &db::VodRow) -> Result<ChatAnalysisResult, String> {
                 let secs = (start as u32) % 60;
                 emote_peaks.push(db::HighlightRow {
                     id: uuid::Uuid::new_v4().to_string(),
-                    vod_id: vod.id.clone(),
+                    vod_id: vod_id.to_string(),
                     start_seconds: start,
                     end_seconds: end,
                     virality_score: virality,
