@@ -374,28 +374,70 @@ export default function Clips() {
 
   // ── Scroll-to-VOD on arrival from a just-completed analysis ──
   // When Vods.tsx navigates here after an analysis finishes, it stuffs the
-  // VOD's id into location.state.focusVodId. We watch clips.length so the
-  // scroll fires once the list has rendered the section we're looking for
-  // (initial mount has 0 clips while fetchClips() is in flight). Once we
-  // scroll successfully, we replace the navigation entry with empty state
-  // so a back-button bounce or page refresh doesn't re-trigger the scroll.
+  // VOD's id into location.state.focusVodId. The scroll fires once the
+  // target VOD's title has loaded into vodMap (so the section renders with
+  // a real title, not the raw VOD-ID fallback) AND the target section
+  // exists in the DOM. We use explicit scroll-container detection rather
+  // than relying on `scrollIntoView`'s magic ancestor walk because the
+  // app uses a non-window scrollable container (the main content pane is
+  // `overflow-auto`, which scrollIntoView handles correctly but makes
+  // `window.scrollY` confusing for diagnosis).
   useEffect(() => {
     if (!focusVodId) return
     if (clips.length === 0) return
+
+    // Wait for vodMap to include the focused VOD so the section renders
+    // with its real title instead of the raw VOD-ID fallback. Without this
+    // gate, `groupedClips` produces a group whose title is the UUID, which
+    // (a) sorts to a weird position via the stream_date='1970-01-01'
+    // fallback, and (b) makes the section visually unrecognizable.
+    if (!vodMap[focusVodId]) {
+      // vodMap will populate via the existing fetch effect; this useEffect
+      // re-runs when vodMap changes (it's in the dep array), so we'll get
+      // another chance soon.
+      return
+    }
+
     const raf = requestAnimationFrame(() => {
       const el = document.querySelector<HTMLElement>(`[data-vod-id="${focusVodId}"]`)
-      if (el) {
-        el.scrollIntoView({ block: 'start', behavior: 'instant' as ScrollBehavior })
-        // Same brief highlight pulse as the editor-return flow, so the user
-        // can confirm visually that this is where their fresh clips landed.
-        el.classList.add('ring-2', 'ring-violet-500/60')
-        setTimeout(() => el.classList.remove('ring-2', 'ring-violet-500/60'), 1200)
-        // Clear the navigation state so it doesn't re-fire on back/forward.
-        navigate(location.pathname, { replace: true, state: null })
+      if (!el) return
+
+      // Find the actual scrollable ancestor. The app's main content pane
+      // is `overflow-y-auto`, so window-level scrollTo is a no-op and
+      // scrollIntoView's "nearest scrollable ancestor" is what actually
+      // moves. We replicate that detection explicitly so we can call
+      // scrollTo on the right container with the right offset.
+      const findScrollableAncestor = (start: HTMLElement): HTMLElement => {
+        let p: HTMLElement | null = start.parentElement
+        while (p) {
+          const oy = window.getComputedStyle(p).overflowY
+          if (oy === 'auto' || oy === 'scroll') return p
+          p = p.parentElement
+        }
+        return (document.scrollingElement as HTMLElement) || document.documentElement
       }
+      const container = findScrollableAncestor(el)
+      const elRect = el.getBoundingClientRect()
+      const containerRect = container.getBoundingClientRect()
+      const targetTop =
+        container === document.scrollingElement || container === document.documentElement
+          ? elRect.top + window.scrollY
+          : container.scrollTop + (elRect.top - containerRect.top)
+      container.scrollTo({ top: Math.max(0, targetTop), behavior: 'instant' as ScrollBehavior })
+
+      // Brief highlight pulse so the user can confirm visually where they
+      // landed. Matches the editor-return flow's pulse.
+      el.classList.add('ring-2', 'ring-violet-500/60')
+      setTimeout(() => el.classList.remove('ring-2', 'ring-violet-500/60'), 1200)
+
+      // Clear the navigation state so back/forward navigation doesn't
+      // re-trigger the scroll. Using window.history.replaceState directly
+      // avoids triggering a react-router re-render (and another effect run).
+      window.history.replaceState(null, '', location.pathname)
     })
     return () => cancelAnimationFrame(raf)
-  }, [clips.length, focusVodId, navigate, location.pathname])
+    // location.state intentionally excluded (focusVodId is derived from it).
+  }, [clips.length, focusVodId, vodMap, location.pathname])
 
   // ── Track scroll for floating button ──
   useEffect(() => {
