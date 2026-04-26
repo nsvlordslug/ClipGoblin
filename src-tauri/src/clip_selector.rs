@@ -28,7 +28,7 @@ pub struct RawSignal {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum SignalSource { Audio, Transcript, Chat, Community }
+pub enum SignalSource { Audio, Transcript, Chat, Community, EmoteBurst }
 
 /// A community-created Twitch clip associated with this VOD. Used as a
 /// human-curated detection signal: if multiple viewers clipped a moment,
@@ -291,6 +291,27 @@ pub fn generate_transcript_candidates(keywords: &[TranscriptKeyword]) -> Vec<Raw
 pub fn generate_chat_candidates(chat_peaks: &[db::HighlightRow]) -> Vec<RawSignal> {
     chat_peaks.iter().map(|ch| {
         RawSignal { center: (ch.start_seconds + ch.end_seconds) / 2.0, intensity: ch.chat_score * 0.8 + 0.2, source: SignalSource::Chat, tags: vec!["chat-peak".to_string(), "reaction".to_string()], transcript_snippet: ch.transcript_snippet.clone(), spike_delta: 0.0 }
+    }).collect()
+}
+
+/// Convert emote-burst windows into RawSignals. Emote bursts use shorter
+/// windows than chat-rate peaks (10s vs 30s) and trigger on cleaner thresholds
+/// because the signal is sharper — a 5-emote spike in 2 seconds is hard to
+/// fake. Centered mid-window so the fusion catches nearby audio/transcript.
+///
+/// `chat_score` on the input HighlightRow carries the normalized emote-density
+/// (peak / max_peak across the VOD), so it maps directly to intensity here.
+pub fn generate_emote_candidates(emote_peaks: &[db::HighlightRow]) -> Vec<RawSignal> {
+    emote_peaks.iter().map(|ch| {
+        RawSignal {
+            center: (ch.start_seconds + ch.end_seconds) / 2.0,
+            // Same shape as chat: floor at 0.2, scale up to 1.0 with the chat_score.
+            intensity: ch.chat_score * 0.8 + 0.2,
+            source: SignalSource::EmoteBurst,
+            tags: vec!["emote-burst".to_string(), "reaction".to_string()],
+            transcript_snippet: ch.transcript_snippet.clone(),
+            spike_delta: 0.0,
+        }
     }).collect()
 }
 
@@ -892,6 +913,7 @@ pub fn select_clips(
     audio: Option<&AudioContext>,
     transcript: Option<&TranscriptResult>,
     chat_peaks: &[db::HighlightRow],
+    emote_peaks: &[db::HighlightRow],
     community_clips: &[CommunityClip],
     duration: f64,
     sensitivity: &str,
@@ -913,6 +935,9 @@ pub fn select_clips(
     let cs = generate_chat_candidates(chat_peaks);
     if !cs.is_empty() { log::info!("Clip selector: {} chat candidates", cs.len()); }
     all_signals.extend(cs);
+    let es = generate_emote_candidates(emote_peaks);
+    if !es.is_empty() { log::info!("Clip selector: {} emote-burst candidates", es.len()); }
+    all_signals.extend(es);
     let community = generate_community_candidates(community_clips);
     if !community.is_empty() {
         log::info!("Clip selector: {} community clip candidates", community.len());

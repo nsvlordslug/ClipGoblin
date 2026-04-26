@@ -1449,9 +1449,24 @@ fn run_analysis_signals(
     set_analysis_progress(vod_id, 40);
 
     // â”€â”€ Stage 3: Chat analysis (40-50%) â”€â”€
+    // Single yt-dlp pull, two analyses: 30s rate windows + 10s emote-burst windows.
     log::info!("Signal analysis: analyzing chat activity...");
     set_analysis_progress(vod_id, 42);
-    let chat_peaks: Vec<db::HighlightRow> = analyze_via_chat(vod).unwrap_or_default();
+    let (chat_peaks, emote_peaks): (Vec<db::HighlightRow>, Vec<db::HighlightRow>) =
+        match analyze_via_chat(vod) {
+            Ok(r) => {
+                log::info!(
+                    "Chat analysis: {} rate peak(s), {} emote-burst peak(s)",
+                    r.rate_peaks.len(),
+                    r.emote_peaks.len(),
+                );
+                (r.rate_peaks, r.emote_peaks)
+            }
+            Err(e) => {
+                log::info!("Chat analysis skipped: {}", e);
+                (Vec::new(), Vec::new())
+            }
+        };
     set_analysis_progress(vod_id, 50);
 
     // â”€â”€ Stage 4: Clip selection pipeline (50-65%) â”€â”€
@@ -1463,6 +1478,7 @@ fn run_analysis_signals(
         audio_ctx.as_ref(),
         transcript.as_ref(),
         &chat_peaks,
+        &emote_peaks,
         community_clips,
         duration,
         sensitivity,
@@ -1586,10 +1602,13 @@ fn run_analysis(vod: &db::VodRow) -> Result<Vec<db::HighlightRow>, String> {
     let vod_id = &vod.id;
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Try chat-based analysis first
-    if let Ok(chat_highlights) = analyze_via_chat(vod) {
-        if !chat_highlights.is_empty() {
-            return Ok(chat_highlights);
+    // Try chat-based analysis first. Tier-2 fallback combines rate + emote
+    // peaks into one set of highlights (no fusion stage available here).
+    if let Ok(r) = analyze_via_chat(vod) {
+        let mut combined = r.rate_peaks;
+        combined.extend(r.emote_peaks);
+        if !combined.is_empty() {
+            return Ok(combined);
         }
     }
 
@@ -1656,7 +1675,15 @@ fn run_analysis(vod: &db::VodRow) -> Result<Vec<db::HighlightRow>, String> {
 }
 
 /// Try to analyze a VOD using Twitch chat replay (downloaded via yt-dlp).
-fn analyze_via_chat(vod: &db::VodRow) -> Result<Vec<db::HighlightRow>, String> {
+/// Result of one chat-replay download. Both rate peaks and emote-burst
+/// peaks come from the same yt-dlp pull — running them as one analysis
+/// avoids re-downloading the chat file.
+struct ChatAnalysisResult {
+    rate_peaks: Vec<db::HighlightRow>,
+    emote_peaks: Vec<db::HighlightRow>,
+}
+
+fn analyze_via_chat(vod: &db::VodRow) -> Result<ChatAnalysisResult, String> {
     let ytdlp = find_ytdlp()?;
     let temp_dir = std::env::temp_dir().join("clipviral_chat");
     std::fs::create_dir_all(&temp_dir).ok();
@@ -1691,22 +1718,44 @@ fn analyze_via_chat(vod: &db::VodRow) -> Result<Vec<db::HighlightRow>, String> {
 
     let content = std::fs::read_to_string(&chat_path).map_err(|e| format!("Read chat: {}", e))?;
     let duration = vod.duration_seconds as f64;
-    let window_size = 30.0_f64.max(duration * 0.05);
 
-    let num_windows = ((duration / window_size).ceil() as usize).max(1);
-    let mut window_counts = vec![0u32; num_windows];
+    // Two parallel windowings:
+    //   - Rate: 30s windows (legacy chat-rate detection — coarse, robust)
+    //   - Emote: 10s windows (sharper, since emote bursts are quick)
+    let rate_window_size = 30.0_f64.max(duration * 0.05);
+    let emote_window_size = 10.0_f64;
+
+    let num_rate_windows = ((duration / rate_window_size).ceil() as usize).max(1);
+    let num_emote_windows = ((duration / emote_window_size).ceil() as usize).max(1);
+    let mut rate_counts = vec![0u32; num_rate_windows];
+    let mut emote_counts = vec![0u32; num_emote_windows];
     let mut total_messages = 0u32;
+    let mut total_emotes = 0u32;
 
     for line in content.lines() {
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
-            let offset = val.get("time_in_seconds")
-                .or_else(|| val.get("content_offset_seconds"))
-                .and_then(|v| v.as_f64());
-            if let Some(t) = offset {
-                let idx = ((t / window_size) as usize).min(num_windows - 1);
-                window_counts[idx] += 1;
-                total_messages += 1;
-            }
+        let val: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let offset = val.get("time_in_seconds")
+            .or_else(|| val.get("content_offset_seconds"))
+            .and_then(|v| v.as_f64());
+        let Some(t) = offset else { continue };
+
+        // Bucket the message itself
+        let rate_idx = ((t / rate_window_size) as usize).min(num_rate_windows - 1);
+        rate_counts[rate_idx] += 1;
+        total_messages += 1;
+
+        // Bucket the emote count for this message. Whole-line scan is robust
+        // to varying chat JSON shapes (Twitch's `message.body` vs YouTube's
+        // various nestings) since the emote substring will appear regardless
+        // of where in the JSON the text lives.
+        let emote_count = crate::emote_signal::count_emotes(line);
+        if emote_count > 0 {
+            let emote_idx = ((t / emote_window_size) as usize).min(num_emote_windows - 1);
+            emote_counts[emote_idx] += emote_count;
+            total_emotes += emote_count;
         }
     }
 
@@ -1716,51 +1765,101 @@ fn analyze_via_chat(vod: &db::VodRow) -> Result<Vec<db::HighlightRow>, String> {
         return Err("Not enough chat data".to_string());
     }
 
-    let avg = total_messages as f64 / num_windows as f64;
-    let mut peaks: Vec<(usize, u32)> = window_counts.iter().enumerate()
-        .filter(|(_, &count)| count as f64 > avg * 1.3)
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // ── Rate peaks (legacy 30s window logic, unchanged behavior) ──
+    let rate_avg = total_messages as f64 / num_rate_windows as f64;
+    let mut rate_peak_idxs: Vec<(usize, u32)> = rate_counts.iter().enumerate()
+        .filter(|(_, &count)| count as f64 > rate_avg * 1.3)
         .map(|(i, &count)| (i, count))
         .collect();
-    peaks.sort_by(|a, b| b.1.cmp(&a.1));
-    peaks.truncate(5);
+    rate_peak_idxs.sort_by(|a, b| b.1.cmp(&a.1));
+    rate_peak_idxs.truncate(5);
 
-    if peaks.is_empty() {
+    let mut rate_peaks = Vec::new();
+    if !rate_peak_idxs.is_empty() {
+        let max_count = rate_peak_idxs[0].1 as f64;
+        for (idx, count) in &rate_peak_idxs {
+            let start = (*idx as f64 * rate_window_size).max(0.0);
+            let end = (start + rate_window_size).min(duration);
+            let chat_score = *count as f64 / max_count;
+            let virality = 0.5 + chat_score * 0.45;
+            let mins = (start as u32) / 60;
+            let secs = (start as u32) % 60;
+            rate_peaks.push(db::HighlightRow {
+                id: uuid::Uuid::new_v4().to_string(),
+                vod_id: vod.id.clone(),
+                start_seconds: start,
+                end_seconds: end,
+                virality_score: virality,
+                audio_score: virality * 0.9,
+                visual_score: virality * 0.85,
+                chat_score,
+                transcript_snippet: Some(format!("{} chat messages in this window", count)),
+                description: Some(format!("Chat spike ({} msgs) at {}:{:02}", count, mins, secs)),
+                tags: Some("chat-peak,reaction,auto".to_string()),
+                thumbnail_path: None,
+                created_at: now.clone(),
+                confidence_score: Some(compute_confidence(virality, 1)),
+                explanation: Some(format!("1 signal — chat {:.0}% ({} messages)", chat_score * 100.0, count)),
+                event_summary: Some(format!("chat went off with {} messages", count)),
+            });
+        }
+    }
+
+    // ── Emote-burst peaks (10s windows, stricter threshold) ──
+    // Threshold is 2.0× the per-window emote-rate average (vs chat's 1.3×).
+    // Emote bursts should be sharper than message-rate peaks; an emote
+    // density that's barely above average is just baseline reactivity, not
+    // a moment. Cap at 8 peaks so the fusion stage doesn't get flooded
+    // (chat-emote bursts often cluster around the same in-game beat).
+    let mut emote_peaks = Vec::new();
+    if total_emotes >= 5 {
+        let emote_avg = total_emotes as f64 / num_emote_windows as f64;
+        let threshold = (emote_avg * 2.0).max(3.0);
+        let mut emote_peak_idxs: Vec<(usize, u32)> = emote_counts.iter().enumerate()
+            .filter(|(_, &count)| count as f64 > threshold)
+            .map(|(i, &count)| (i, count))
+            .collect();
+        emote_peak_idxs.sort_by(|a, b| b.1.cmp(&a.1));
+        emote_peak_idxs.truncate(8);
+
+        if !emote_peak_idxs.is_empty() {
+            let max_count = emote_peak_idxs[0].1 as f64;
+            for (idx, count) in &emote_peak_idxs {
+                let start = (*idx as f64 * emote_window_size).max(0.0);
+                let end = (start + emote_window_size).min(duration);
+                let chat_score = (*count as f64 / max_count).clamp(0.0, 1.0);
+                let virality = 0.55 + chat_score * 0.40;
+                let mins = (start as u32) / 60;
+                let secs = (start as u32) % 60;
+                emote_peaks.push(db::HighlightRow {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    vod_id: vod.id.clone(),
+                    start_seconds: start,
+                    end_seconds: end,
+                    virality_score: virality,
+                    audio_score: virality * 0.85,
+                    visual_score: virality * 0.85,
+                    chat_score,
+                    transcript_snippet: Some(format!("{} emote occurrences in this 10s window", count)),
+                    description: Some(format!("Emote burst ({} emotes) at {}:{:02}", count, mins, secs)),
+                    tags: Some("emote-burst,reaction,auto".to_string()),
+                    thumbnail_path: None,
+                    created_at: now.clone(),
+                    confidence_score: Some(compute_confidence(virality, 1)),
+                    explanation: Some(format!("1 signal — emote burst {:.0}% ({} emotes)", chat_score * 100.0, count)),
+                    event_summary: Some(format!("chat hit with {} emotes in 10s", count)),
+                });
+            }
+        }
+    }
+
+    if rate_peaks.is_empty() && emote_peaks.is_empty() {
         return Err("No engagement peaks found".to_string());
     }
 
-    let max_count = peaks[0].1 as f64;
-    let now = chrono::Utc::now().to_rfc3339();
-    let mut highlights = Vec::new();
-
-    for (idx, count) in &peaks {
-        let start = (*idx as f64 * window_size).max(0.0);
-        let end = (start + window_size).min(duration);
-        let chat_score = *count as f64 / max_count;
-        let virality = 0.5 + chat_score * 0.45;
-
-        let mins = (start as u32) / 60;
-        let secs = (start as u32) % 60;
-        highlights.push(db::HighlightRow {
-            id: uuid::Uuid::new_v4().to_string(),
-            vod_id: vod.id.clone(),
-            start_seconds: start,
-            end_seconds: end,
-            virality_score: virality,
-            audio_score: virality * 0.9,
-            visual_score: virality * 0.85,
-            chat_score,
-            transcript_snippet: Some(format!("{} chat messages in this window", count)),
-            description: Some(format!("Chat spike ({} msgs) at {}:{:02}", count, mins, secs)),
-            tags: Some("chat-peak,reaction,auto".to_string()),
-            thumbnail_path: None,
-            created_at: now.clone(),
-            confidence_score: Some(compute_confidence(virality, 1)),
-            explanation: Some(format!("1 signal â€” chat {:.0}% ({} messages)", chat_score * 100.0, count)),
-            event_summary: Some(format!("chat went off with {} messages", count)),
-        });
-    }
-
-    Ok(highlights)
+    Ok(ChatAnalysisResult { rate_peaks, emote_peaks })
 }
 
 // â”€â”€ VOD info / list commands â”€â”€
