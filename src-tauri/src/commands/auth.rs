@@ -90,12 +90,33 @@ pub async fn twitch_login(app: AppHandle, db: State<'_, DbConn>) -> Result<db::C
     Ok(channel)
 }
 
-/// Check if the user is currently logged in (has a saved channel).
+/// Check if the user is currently logged in.
+///
+/// Anchors identity to the `twitch_user_id` setting (which is only written
+/// during the OAuth login flow and cleared on logout) rather than to channel
+/// row recency. Picking "most recent channel" is wrong because dev-only
+/// `import_vod_by_url` creates stub channels for foreign streamers, and those
+/// stubs would otherwise hijack the displayed-as-logged-in identity.
+///
+/// Behavior:
+/// - Setting empty / missing → not logged in (None)
+/// - Setting present and matches a channel row → return that channel
+/// - Setting present but no matching channel → not logged in (treated as
+///   logged out; the channel was deleted but the setting was orphaned).
 #[tauri::command]
 pub fn get_logged_in_user(db: State<'_, DbConn>) -> Result<Option<db::ChannelRow>, String> {
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
+
+    let logged_in_twitch_user_id = db::get_setting(&conn, "twitch_user_id")
+        .map_err(|e| format!("DB error: {}", e))?
+        .unwrap_or_default();
+
+    if logged_in_twitch_user_id.is_empty() {
+        return Ok(None);
+    }
+
     let channels = db::get_all_channels(&conn).map_err(|e| format!("DB error: {}", e))?;
-    Ok(channels.into_iter().next())
+    Ok(channels.into_iter().find(|c| c.twitch_user_id == logged_in_twitch_user_id))
 }
 
 /// Log out — clear saved tokens and channel.

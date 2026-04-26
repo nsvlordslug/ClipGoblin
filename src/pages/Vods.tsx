@@ -171,7 +171,13 @@ export default function Vods() {
       // so even slow transcription will show incremental progress updates.
       // Audio extraction on 4-hour VODs can run ~3 minutes without emitting
       // progress, so a 10-minute floor prevents false stall alerts.
-      const STALE_TIMEOUT_MS = 10 * 60 * 1000
+      // 30 min of zero progress change = backend likely crashed.
+      // Long VODs (e.g. 7h Otzdarva streams) transcribe in the 20-38% range
+      // over 60-90 min on CPU — progress only moves ~1% every 3-5 min during
+      // that stage, so the old 10 min threshold falsely fired on legitimate
+      // long analyses. 30 min keeps genuine-crash detection while allowing
+      // honest long transcriptions to finish.
+      const STALE_TIMEOUT_MS = 30 * 60 * 1000
 
       const poll = setInterval(async () => {
         try {
@@ -192,7 +198,7 @@ export default function Vods() {
               lastProgress = currentProgress
               lastActivityTime = Date.now()
             } else if (Date.now() - lastActivityTime > STALE_TIMEOUT_MS) {
-              // No progress change for 5 minutes — backend likely crashed
+              // No progress change for 30 minutes — backend likely crashed
               clearInterval(poll)
               console.warn(`[Vods] Analysis stale for ${vodId} at ${currentProgress}% for ${STALE_TIMEOUT_MS/1000}s — marking as failed`)
               try {
@@ -365,13 +371,19 @@ export default function Vods() {
           </div>
         </div>
         <div className="v4-page-actions">
-          <button
-            onClick={() => setShowImportDialog(true)}
-            className="v4-btn primary"
-            title="Import a Twitch VOD by pasting its URL"
-          >
-            📥 Import VOD
-          </button>
+          {/* Import-by-URL is dev-only. Shipping it would let users grab any
+              public Twitch VOD, which violates Twitch ToS and exposes the
+              project to DMCA / streamer disputes. Vite gates `DEV` to true
+              for `cargo tauri dev` and false for `cargo tauri build`. */}
+          {import.meta.env.DEV && (
+            <button
+              onClick={() => setShowImportDialog(true)}
+              className="v4-btn primary"
+              title="Import a Twitch VOD by pasting its URL (dev builds only)"
+            >
+              📥 Import VOD
+            </button>
+          )}
           <button
             onClick={handleRestoreDeletedVods}
             disabled={restoringVods}

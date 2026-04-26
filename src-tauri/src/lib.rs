@@ -103,6 +103,15 @@ pub fn run() {
     // Recover any clips that were stuck mid-render when the app last closed
     db::recover_stale_rendering(&conn).ok();
 
+    // Recover any VODs that were stuck mid-analysis when the app last closed.
+    // `cargo tauri dev`'s file-watcher auto-rebuild is the most common offender:
+    // a Rust source edit during an in-progress analysis kills the pipeline
+    // mid-flight, leaving the DB row in `analysis_status='analyzing'` with no
+    // backing process. The user sees a frozen "5% Extracting audio..." UI
+    // forever. This routine flips those rows to `failed` so the Retry button
+    // surfaces and the leftover progress bar disappears.
+    db::recover_stale_analysis(&conn).ok();
+
     let hw = hardware::detect_hardware();
 
     #[cfg(feature = "steam")]

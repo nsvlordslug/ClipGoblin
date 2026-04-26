@@ -226,10 +226,16 @@ pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>)
 }
 
 /// Get cached VODs from DB only (no Twitch API call). Used for polling status.
+///
+/// Returns EVERY VOD in the library, including ones imported via
+/// `import_vod_by_url` (which live under stub channels). The `channel_id` param
+/// is retained for API compatibility but no longer filters — the library is
+/// a single-user surface and imported VODs should appear alongside owned ones.
 #[tauri::command]
 pub fn get_cached_vods(channel_id: String, db: State<'_, DbConn>) -> Result<Vec<db::VodRow>, String> {
+    let _ = channel_id; // retained for API compat; see doc comment
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
-    db::get_vods_by_channel(&conn, &channel_id).map_err(|e| format!("DB error: {}", e))
+    db::get_all_vods(&conn).map_err(|e| format!("DB error: {}", e))
 }
 
 // â”€â”€ AI Analysis â”€â”€
@@ -710,14 +716,21 @@ fn run_transcription_with_script(
             for line in reader.lines() {
                 match line {
                     Ok(line) => {
-                        // Try to parse heartbeat JSON
+                        // ANY output from whisper.py proves the process is alive,
+                        // not just heartbeat JSON. Multi-hour CPU transcriptions
+                        // emit ffmpeg progress, segment text, and warnings between
+                        // explicit heartbeat lines — treating those as "silence"
+                        // would falsely trigger the watchdog on long VODs (e.g.
+                        // 7h Otzdarva streams take 1-2h on CPU; a single quiet
+                        // ffmpeg pipe stretch can exceed the heartbeat interval).
+                        heartbeat_tx.send(()).ok();
+
+                        // Try to parse heartbeat JSON for progress % update
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
                             if json.get("heartbeat").and_then(|v| v.as_bool()).unwrap_or(false) {
                                 let pct = json.get("approx_pct").and_then(|v| v.as_i64()).unwrap_or(0);
                                 let segs = json.get("segments_so_far").and_then(|v| v.as_i64()).unwrap_or(0);
                                 log::info!("Transcription heartbeat: ~{}% done, {} segments", pct, segs);
-                                // Signal the main thread that we're still alive
-                                heartbeat_tx.send(()).ok();
                                 // Update analysis progress (20-38% range maps to transcription)
                                 if let Some(ref vid) = vod_id_for_thread {
                                     let mapped = 20 + (pct as i64 * 18 / 100).min(17);
@@ -726,7 +739,7 @@ fn run_transcription_with_script(
                                 continue;
                             }
                         }
-                        // Not a heartbeat â€” collect as regular stderr
+                        // Not a heartbeat — collect as regular stderr
                         buf.extend_from_slice(line.as_bytes());
                         buf.push(b'\n');
                     }
@@ -737,10 +750,13 @@ fn run_transcription_with_script(
         buf
     });
 
-    // Wait for the process with a generous timeout.
-    // The base timeout is 30 minutes, but resets on each heartbeat.
-    // If we get no heartbeat AND no process exit for 5 minutes, assume hung.
-    let no_heartbeat_timeout = std::time::Duration::from_secs(300); // 5 min with no heartbeat = stuck
+    // Wait for the process. Watchdog fires only on TOTAL silence —
+    // any whisper output (heartbeat OR raw stderr) resets the timer.
+    // 15 min of true silence = genuinely stuck (process crashed, OOM, etc).
+    // Old value was 5 min and only counted heartbeat JSON, which falsely
+    // killed long CPU transcriptions where heartbeat cadence could exceed 5 min
+    // during heavy ffmpeg pipe activity on multi-hour VODs.
+    let no_heartbeat_timeout = std::time::Duration::from_secs(900); // 15 min total silence = stuck
     let mut last_activity = std::time::Instant::now();
 
     let status = loop {
@@ -1970,8 +1986,10 @@ pub async fn get_vods(
     }
 
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
-    let result = db::get_vods_by_channel(&conn, &channel_id).map_err(|e| format!("DB error: {}", e))?;
-    log::info!("[get_vods] get_vods_by_channel returned {} VODs", result.len());
+    // Return all VODs (own + imported via import_vod_by_url) so foreign-channel
+    // imports appear in the same library list. See get_all_vods doc comment.
+    let result = db::get_all_vods(&conn).map_err(|e| format!("DB error: {}", e))?;
+    log::info!("[get_vods] get_all_vods returned {} VODs", result.len());
     Ok(result)
 }
 
@@ -2511,6 +2529,17 @@ pub async fn import_vod_by_url(
     url: String,
     db: State<'_, DbConn>,
 ) -> Result<db::VodRow, String> {
+    // ── Dev-only command ──
+    // Importing arbitrary public Twitch VODs is allowed in `cargo tauri dev`
+    // (so we can test signal pipelines on chatty/popular streamer chats), but
+    // shipped builds must refuse. Letting end users pull any streamer's content
+    // violates Twitch ToS and risks DMCA / direct legal action from creators.
+    // The UI button is also gated on `import.meta.env.DEV`, but we double-gate
+    // here in case the command is ever invoked directly via DevTools or tooling.
+    if cfg!(not(debug_assertions)) {
+        return Err("VOD import by URL is disabled in this build.".to_string());
+    }
+
     let twitch_video_id = parse_twitch_vod_id(&url)
         .ok_or_else(|| format!("Couldn't find a Twitch VOD ID in: {}", url))?;
 

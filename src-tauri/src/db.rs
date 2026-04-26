@@ -492,6 +492,39 @@ pub fn get_vods_by_channel(conn: &Connection, channel_id: &str) -> SqliteResult<
     rows.collect()
 }
 
+/// Return EVERY VOD in the library regardless of channel.
+///
+/// Used by the Vods page so imported VODs (from `import_vod_by_url`, which creates
+/// a stub channel for the foreign streamer) appear alongside the user's own VODs.
+/// Single-user desktop app — there's no privacy concern about cross-channel listing.
+pub fn get_all_vods(conn: &Connection) -> SqliteResult<Vec<VodRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress, game_name
+         FROM vods ORDER BY stream_date DESC"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(VodRow {
+            id: row.get(0)?,
+            channel_id: row.get(1)?,
+            twitch_video_id: row.get(2)?,
+            title: row.get(3)?,
+            duration_seconds: row.get(4)?,
+            stream_date: row.get(5)?,
+            thumbnail_url: row.get(6)?,
+            vod_url: row.get(7)?,
+            download_status: row.get(8)?,
+            local_path: row.get(9)?,
+            file_size_bytes: row.get(10)?,
+            analysis_status: row.get(11)?,
+            created_at: row.get(12)?,
+            download_progress: row.get(13)?,
+            analysis_progress: row.get::<_, Option<i64>>(14)?.unwrap_or(0),
+            game_name: row.get(15)?,
+        })
+    })?;
+    rows.collect()
+}
+
 pub fn get_vod_by_id(conn: &Connection, id: &str) -> SqliteResult<Option<VodRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress, game_name
@@ -741,6 +774,29 @@ pub fn recover_stale_rendering(conn: &Connection) -> SqliteResult<usize> {
     )?;
     if count > 0 {
         log::warn!("Recovered {} clip(s) stuck in 'rendering' status", count);
+    }
+    Ok(count)
+}
+
+/// Reset any VODs stuck in "analyzing" status back to "failed".
+///
+/// Called once at startup to recover from any analysis run that died mid-flight
+/// without writing a terminal status (app crash, OS sleep, `cargo tauri dev`
+/// auto-rebuild killing the running pipeline, manual `Stop-Process`, etc.).
+///
+/// We pick "failed" rather than "pending" so the user sees a Retry button on
+/// the card — that's the right UX signal: "this didn't finish, try again"
+/// — instead of silently appearing as if no analysis was ever requested.
+/// Resetting `analysis_progress` to 0 also clears the leftover percentage
+/// from the killed run so the UI doesn't display a stale "5%" sliver.
+pub fn recover_stale_analysis(conn: &Connection) -> SqliteResult<usize> {
+    let count = conn.execute(
+        "UPDATE vods SET analysis_status = 'failed', analysis_progress = 0 \
+         WHERE analysis_status = 'analyzing'",
+        [],
+    )?;
+    if count > 0 {
+        log::warn!("Recovered {} VOD(s) stuck in 'analyzing' status", count);
     }
     Ok(count)
 }

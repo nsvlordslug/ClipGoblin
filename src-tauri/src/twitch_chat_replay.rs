@@ -6,11 +6,15 @@
 //! query hash that every Twitch chat downloader and the Twitch web client use.
 //!
 //! No OAuth required — chat replay on archived public VODs is unauthenticated.
-//! The `Client-Id` we send is the public web client ID, identical to the value
-//! the Twitch web app sends in its browser. If Twitch ever rotates the
-//! persisted-query hash, this module breaks loudly and we'll need to re-pin it
-//! against the latest hash from a chat downloader (TwitchDownloaderCLI keeps
-//! theirs current).
+//! The `Client-Id` we send is the public iOS-app client ID; we deliberately
+//! avoid the web client ID because Twitch's integrity-check anti-bot protection
+//! gates cursor-based pagination on web Client-Ids only. See `PUBLIC_CLIENT_ID`
+//! doc comment for the full breakdown.
+//!
+//! If Twitch ever rotates the persisted-query hash OR locks down mobile
+//! Client-Ids the same way they did web, this module breaks loudly and we'll
+//! need to either re-pin the hash or implement the integrity-token dance
+//! against `https://gql.twitch.tv/integrity`.
 //!
 //! Pagination: Twitch returns up to 100 messages per page with cursor-based
 //! continuation. We loop through cursors until `pageInfo.hasNextPage` is false
@@ -21,18 +25,43 @@ use serde::Deserialize;
 
 const GQL_URL: &str = "https://gql.twitch.tv/gql";
 
-/// Public Twitch web Client-Id. Used by every chat replay tool and by
-/// twitch.tv itself when serving anonymous video pages.
-const PUBLIC_CLIENT_ID: &str = "kimne78kx3ncx6brgo4mv6wki5h1ko";
+/// Public Twitch iOS-app Client-Id.
+///
+/// We deliberately use the iOS app's public Client-Id instead of the web
+/// Client-Id (`kimne78kx3ncx6brgo4mv6wki5h1ko`). The web Client-Id triggers
+/// Twitch's integrity-check anti-bot protection on cursor-based pagination:
+/// page 1 returns fine, but every paginated follow-up request fails with
+/// `{"message":"failed integrity check","challenge":{"type":"integrity"}}`,
+/// causing our chat fetch to silently truncate to ~30-60 messages no matter
+/// how chatty the stream actually was.
+///
+/// Mobile Client-Ids (iOS / Android) are NOT subject to integrity checks —
+/// confirmed empirically against `gql.twitch.tv`: the same VOD that returns
+/// 59 messages with the web Client-Id returns the full multi-thousand-message
+/// chat history when paginated with the iOS Client-Id. This is the same
+/// approach used by long-lived Twitch chat tooling (TwitchDownloaderCLI,
+/// streamlink, twitch-graphql-api) to avoid the integrity dance.
+///
+/// This Client-Id is the public one shipped in the iOS Twitch app binary —
+/// no OAuth required, no scraping concerns, just chat replay on already-public
+/// archived VODs.
+const PUBLIC_CLIENT_ID: &str = "kd1unb4b3q4t58fwlpcbzcbnm76a8fp";
 
 /// Persisted-query hash for `VideoCommentsByOffsetOrCursor`. This is the same
 /// hash TwitchDownloaderCLI and the in-browser chat replay use. If it rotates,
 /// pull the new value from any maintained Twitch chat downloader.
 const VIDEO_COMMENTS_HASH: &str = "b70a3591ff0f4e0313d126c6a1502d79a1c02baebb288227c582044aa76adf6a";
 
-/// Per-VOD pagination cap. ~100 messages per page → 50,000 messages.
-/// Sufficient for any normal stream length; aborts cleanly on hostile input.
-const MAX_PAGES: usize = 500;
+/// Per-VOD pagination cap. ~100 messages per page → 200,000 messages.
+///
+/// Sized for "Otzdarva-tier" streamers: a busy 7-hour Twitch VOD with active
+/// chat can produce 100k-250k messages. A 50k cap (the original value) clipped
+/// the second half of the stream, biasing emote-burst signal toward early-
+/// stream content. The pagination loop already breaks early when the GQL
+/// server says `hasNextPage == false`, so this only affects pathological inputs.
+/// 200k headroom gives us an order-of-magnitude buffer over any realistic
+/// streaming chat density without making honest VODs hit the cap.
+const MAX_PAGES: usize = 2000;
 
 /// One chat replay message at a specific VOD offset.
 ///

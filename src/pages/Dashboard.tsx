@@ -303,12 +303,15 @@ export default function Dashboard() {
             >
               {hunting ? '⏳ Hunting...' : '⚡ Auto-Hunt New VODs'}
             </button>
-            <button
-              onClick={() => setShowImportDialog(true)}
-              className="px-4 py-2.5 rounded-[10px] font-semibold text-sm bg-surface-800 border border-surface-700 text-white cursor-pointer"
-            >
-              📥 Import VOD
-            </button>
+            {/* Dev-only — see Vods.tsx Import VOD button comment for rationale. */}
+            {import.meta.env.DEV && (
+              <button
+                onClick={() => setShowImportDialog(true)}
+                className="px-4 py-2.5 rounded-[10px] font-semibold text-sm bg-surface-800 border border-surface-700 text-white cursor-pointer"
+              >
+                📥 Import VOD
+              </button>
+            )}
             <button
               onClick={() => navigate('/montage')}
               className="px-4 py-2.5 rounded-[10px] font-semibold text-sm bg-surface-800 border border-surface-700 text-white cursor-pointer"
