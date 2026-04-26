@@ -47,6 +47,70 @@ pub(crate) fn find_ffmpeg() -> Result<std::path::PathBuf, AppError> {
 
 // â”€â”€ Download helpers â”€â”€
 
+/// Ensure the file at `path` is a real MP4 with the moov atom at the front
+/// (faststart), not a TS-in-MP4 container that the webview can't play.
+///
+/// **Why this exists:** yt-dlp's `--remux-video mp4` flag often produces a
+/// file with the `.mp4` extension whose audio stream still carries MPEG-TS
+/// packetization (visible in ffprobe as `ts_packetsize=188` and
+/// `codec_tag_string=[15][0][0][0]` instead of `mp4a`). Tauri's webview
+/// (Chromium-based webview2) cannot play these — clip preview shows
+/// "Cannot play video." Until this fix, every Twitch download produced an
+/// unplayable file and users had to manually `ffmpeg -c copy` it.
+///
+/// **What this does:** Stream-copy ffmpeg pass — no transcoding, just rewraps
+/// streams in proper MP4 boxes and moves the moov atom to the front for
+/// streaming-friendly seeking. Fast (mostly disk I/O bound, ~1-3 min on
+/// SSD for a 7-hour VOD).
+///
+/// **Idempotent:** if the file is already a proper MP4, the remux still
+/// completes — it just produces a byte-equivalent output. Safe to run on
+/// already-correct files (the cost is the wasted I/O, but we'd rather pay
+/// that cost than risk a broken playback experience).
+///
+/// **Failure mode:** if ffmpeg fails or the rename fails, we leave the
+/// original file in place and surface a warning. The download isn't lost,
+/// it just may not play in the webview — same state as before this fix.
+fn ensure_proper_mp4(path: &std::path::Path) -> Result<(), String> {
+    let ffmpeg = find_ffmpeg().map_err(|e| format!("ffmpeg lookup: {}", e))?;
+    let tmp = path.with_extension("remuxing.mp4");
+
+    let mut cmd = std::process::Command::new(&ffmpeg);
+    cmd.arg("-i").arg(path)
+       .arg("-c").arg("copy")
+       .arg("-movflags").arg("+faststart")
+       .arg("-y").arg(&tmp);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    let status = cmd
+        .status()
+        .map_err(|e| format!("ffmpeg spawn: {}", e))?;
+
+    if !status.success() {
+        // Best-effort cleanup of partial output
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!(
+            "ffmpeg exit code: {:?}",
+            status.code()
+        ));
+    }
+
+    // Atomic-ish replace. On Windows this fails if the destination is open
+    // by another process, so we tolerate that and keep the original in place.
+    std::fs::rename(&tmp, path).map_err(|e| {
+        // Cleanup the temp on rename failure so it doesn't accumulate
+        let _ = std::fs::remove_file(&tmp);
+        format!("rename remuxed file into place: {}", e)
+    })?;
+
+    Ok(())
+}
+
 /// Parse yt-dlp progress output to extract download percentage.
 fn parse_ytdlp_progress(line: &str) -> Option<u8> {
     if !line.contains("[download]") {
@@ -189,12 +253,36 @@ pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>)
                         if name.starts_with(&twitch_video_id)
                             && !name.ends_with(".part")
                             && !name.ends_with(".ytdl")
+                            && !name.ends_with(".remuxing.mp4")
+                            && !name.contains(".ts-original.")
                         {
                             found_path = Some(entry.path());
                             break;
                         }
                     }
                 }
+
+                // Post-yt-dlp remux: yt-dlp's `--remux-video mp4` often leaves
+                // MPEG-TS packetization in the audio stream, producing files
+                // the webview can't play. We do a guaranteed stream-copy pass
+                // here to ensure every download is webview-playable. See
+                // `ensure_proper_mp4` doc comment for the full breakdown.
+                if let Some(ref p) = found_path {
+                    log::info!("[download_vod] Post-yt-dlp remux: {}", p.display());
+                    let remux_started = std::time::Instant::now();
+                    match ensure_proper_mp4(p) {
+                        Ok(()) => log::info!(
+                            "[download_vod] Remux complete in {:.1}s",
+                            remux_started.elapsed().as_secs_f64()
+                        ),
+                        Err(e) => log::warn!(
+                            "[download_vod] Remux failed (file may not play in webview): {}",
+                            e
+                        ),
+                    }
+                }
+
+                // Re-stat post-remux so we record the new file size in the DB.
                 let (path_str, file_size) = match &found_path {
                     Some(p) => (
                         Some(p.to_string_lossy().to_string()),
