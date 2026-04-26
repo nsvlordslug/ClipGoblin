@@ -86,6 +86,50 @@ pub(crate) fn classify(tags: &[String], vocab: &[(&str, &str)]) -> Vec<String> {
 //  These replace the hype-title generator for newly saved highlights.
 // ═══════════════════════════════════════════════════════════════════
 
+/// Per-batch usage counter for save-path title variants.
+///
+/// Threaded through every per-clip title call within a single VOD analysis
+/// run. Each title-picking helper consults this map to prefer variants that
+/// haven't been used yet, so 17 clips sharing the same dominant tag don't
+/// all land on the same template line. Caller (run_analysis_signals) is
+/// responsible for creating one fresh map per VOD and incrementing the
+/// count at the outermost title return site (`save_path_heuristic_title`).
+pub type TitleUsage = std::collections::HashMap<String, usize>;
+
+/// Pick the least-used variant from `pool`, breaking ties deterministically
+/// using `seed` (typically `start_seconds as usize`) so the same clip
+/// resolves to the same title within a batch (i.e. analysis is idempotent
+/// — re-running the same VOD produces the same titles).
+///
+/// Pure: does NOT mutate `usage`. The caller (`save_path_heuristic_title`)
+/// is responsible for incrementing the count exactly once per clip after
+/// the final title is locked in. This single-site increment avoids the
+/// double-counting trap where multiple internal helpers might each bump
+/// the count for the same clip.
+///
+/// Empty pools return an empty string — callers must ensure non-empty pools.
+fn pick_least_used(pool: &[String], usage: &TitleUsage, seed: usize) -> String {
+    if pool.is_empty() {
+        return String::new();
+    }
+    // Find the minimum usage count across all variants in this pool.
+    let min_count = pool
+        .iter()
+        .map(|s| usage.get(s).copied().unwrap_or(0))
+        .min()
+        .unwrap_or(0);
+    // Collect indices of all variants tied at that minimum count.
+    let candidates: Vec<usize> = pool
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| usage.get(*s).copied().unwrap_or(0) == min_count)
+        .map(|(i, _)| i)
+        .collect();
+    // Tiebreak deterministically — same `seed` always picks the same variant.
+    let chosen_idx = candidates[seed % candidates.len()];
+    pool[chosen_idx].clone()
+}
+
 /// 2-stage title: ground truth → hook formatting.
 ///
 /// Same logic as clip_labeler but adapted for the save path which
@@ -94,6 +138,7 @@ pub(crate) fn grounded_highlight_title(
     transcript_snippet: Option<&str>,
     tags: Option<&str>,
     start_seconds: f64,
+    usage: &TitleUsage,
 ) -> String {
     let phrase = extract_title_phrase(transcript_snippet.unwrap_or(""));
     let event = primary_event_from_tags(tags);
@@ -134,7 +179,9 @@ pub(crate) fn grounded_highlight_title(
         }
     }
 
-    // 4. Event + Tension (verb-forward, timing-aware)
+    // 4. Event + Tension (verb-forward, timing-aware).
+    // Per-event variant pool, picked least-used so multiple clips with the
+    // same event tag don't all land on the same line.
     if let Some(ev) = event {
         let phrases: &[&str] = match ev {
             "jumpscare" | "ambush" => &["Ambush comes out of nowhere", "Caught off guard instantly", "Jumpscare hits with no warning"],
@@ -148,7 +195,8 @@ pub(crate) fn grounded_highlight_title(
             "reaction" => &["Reaction says it all", "Reacts instantly"],
             _ => &["Happens out of nowhere"],
         };
-        return phrases[idx % phrases.len()].to_string();
+        let pool: Vec<String> = phrases.iter().map(|s| (*s).to_string()).collect();
+        return pick_least_used(&pool, usage, idx);
     }
 
     // 5. Tag summary fallback
@@ -262,44 +310,70 @@ pub fn save_path_heuristic_title(
     tags_str: Option<&str>,
     game_name: Option<&str>,
     start_seconds: f64,
+    usage: &mut TitleUsage,
 ) -> String {
     let tags = parse_tags(tags_str);
 
-    // Layer 1: QuietFlex via a short transcript phrase. If the transcript has
-    // a 2-5 word non-vague fragment, return it standalone. Maps to real top
-    // performers like "actually clean" / "rip mouse" — short, voice, post-clip.
-    if let Some(excerpt) = transcript_excerpt {
-        if let Some(phrase) = extract_title_phrase(excerpt) {
-            let wc = phrase.split_whitespace().count();
-            if wc >= 2 && wc <= 5 && !is_vague_phrase(&phrase) {
-                return phrase;
+    // Compute the title via the layer cascade WITHOUT incrementing `usage`
+    // intermediately. Internal helpers (`aftermath_from_tags`,
+    // `grounded_highlight_title`) read the map to prefer least-used variants
+    // but never mutate it. We increment exactly once at the bottom of this
+    // function, after the final title is locked in. This single-site
+    // increment prevents the double-counting that would otherwise happen
+    // if multiple layers participated in selection for the same clip.
+    let title = (|| -> String {
+        // Layer 1: QuietFlex via a short transcript phrase. If the transcript has
+        // a 2-5 word non-vague fragment, return it standalone. Maps to real top
+        // performers like "actually clean" / "rip mouse" — short, voice, post-clip.
+        if let Some(excerpt) = transcript_excerpt {
+            if let Some(phrase) = extract_title_phrase(excerpt) {
+                let wc = phrase.split_whitespace().count();
+                if wc >= 2 && wc <= 5 && !is_vague_phrase(&phrase) {
+                    return phrase;
+                }
             }
         }
-    }
 
-    // Layer 2: AftermathConfession from event tags + game name. First-person
-    // past-tense templated lines, anchored on the game when available. Picks
-    // from a pool of 5+ variants per tag combo using start_seconds modulo so
-    // multiple clips sharing a dominant tag don't all land on the same line.
-    if let Some(line) = aftermath_from_tags(&tags, game_name, start_seconds) {
-        return line;
-    }
+        // Layer 2: AftermathConfession from event tags + game name. First-person
+        // past-tense templated lines, anchored on the game when available. Picks
+        // the least-used variant per tag combo so multiple clips sharing a
+        // dominant tag don't collide on the same line within a batch.
+        if let Some(line) = aftermath_from_tags(&tags, game_name, start_seconds, usage) {
+            return line;
+        }
 
-    // Layer 3: Fall back to the legacy grounded heuristic. Still used when
-    // neither of the above produces something Wave 3-shaped.
-    grounded_highlight_title(transcript_excerpt, tags_str, start_seconds)
+        // Layer 3: Fall back to the legacy grounded heuristic. Still used when
+        // neither of the above produces something Wave 3-shaped.
+        grounded_highlight_title(transcript_excerpt, tags_str, start_seconds, usage)
+    })();
+
+    // Single-site usage increment — see closure preamble for rationale.
+    *usage.entry(title.clone()).or_insert(0) += 1;
+    title
 }
 
 /// Pick a Wave 3 AftermathConfession-style template based on event tags.
-/// Each tag combo has 5+ phrase variants, picked by `start_seconds % len`
-/// so multiple clips with the same dominant tag don't all collide on the
-/// same title (the bug that made 4 clips share "didn't see that one coming").
-/// Anchors on the game name when supplied for one or two of the variants
-/// per category.
+///
+/// Each tag combo has 5+ phrase variants. Picks the least-used variant
+/// according to `usage` (with `start_seconds` as the deterministic
+/// tiebreaker), so multiple clips sharing a dominant tag in the same VOD
+/// batch produce different titles. Previous behavior (`start_seconds %
+/// pool.len()`) deterministically chose the same index when start times
+/// happened to share a residue — this is what produced the bug where
+/// 4 clips all landed on "had no warning whatsoever" because their
+/// start_seconds all hit `% 5 == 2`.
+///
+/// Game-anchored variants (where `{game}` is templated in) are added to
+/// the pool when a game name is available, expanding the pool from 5 to
+/// ~6-7 entries and giving more headroom before duplicates start showing.
+///
+/// Returns `None` if no tag combo matches — caller should fall through
+/// to `grounded_highlight_title`.
 fn aftermath_from_tags(
     tags: &[String],
     game_name: Option<&str>,
     start_seconds: f64,
+    usage: &TitleUsage,
 ) -> Option<String> {
     let has = |needle: &str| tags.iter().any(|t| t.contains(needle));
     let game = game_name
@@ -308,7 +382,9 @@ fn aftermath_from_tags(
         .map(str::to_lowercase);
     let idx = start_seconds.max(0.0) as usize;
 
-    // Build a phrase pool, optionally including game-anchored variants.
+    // Build a phrase pool, optionally including game-anchored variants,
+    // and pick the least-used variant. `usage` is read-only here — the
+    // outer `save_path_heuristic_title` increments after committing.
     let pick = |base: &[&str], game_templates: &[&str]| -> String {
         let mut pool: Vec<String> = base.iter().map(|s| (*s).to_string()).collect();
         if let Some(ref g) = game {
@@ -316,7 +392,7 @@ fn aftermath_from_tags(
                 pool.push(t.replace("{game}", g));
             }
         }
-        pool[idx % pool.len()].clone()
+        pick_least_used(&pool, usage, idx)
     };
 
     if has("ambush") || has("jumpscare") {

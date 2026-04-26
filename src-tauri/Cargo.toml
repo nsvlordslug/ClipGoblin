@@ -1,6 +1,6 @@
 [package]
 name = "clipviral"
-version = "1.3.1"
+version = "1.3.2"
 description = "AI-powered Twitch stream clip generator"
 authors = ["ClipViral"]
 license = "MIT"

@@ -1633,6 +1633,14 @@ fn run_analysis_signals(
     let mut highlights: Vec<db::HighlightRow> = Vec::new();
     let total_candidates = selected.len();
 
+    // Per-batch title-variant usage tracker. Threaded through every per-clip
+    // title call below so multiple clips sharing the same dominant tag pick
+    // different template variants instead of all colliding on the same line
+    // (the bug that made 4 clips share "had no warning whatsoever" on the
+    // 7h validation VOD). Fresh map per analysis run — stays scoped to a
+    // single VOD's batch, so analysis on a different VOD starts clean.
+    let mut title_usage: crate::commands::captions::TitleUsage = Default::default();
+
     for (i, c) in selected.iter().enumerate() {
         let all_tags: Vec<String> = [&c.event_tags[..], &c.emotion_tags[..]].concat();
         let tag_str = if all_tags.is_empty() { "auto".to_string() } else { all_tags.join(",") };
@@ -1642,6 +1650,7 @@ fn run_analysis_signals(
             Some(&tag_str),
             vod.game_name.as_deref(),
             c.start_time,
+            &mut title_usage,
         );
 
         let kw_boost = if let Some(ref t) = transcript {
