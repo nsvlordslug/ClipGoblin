@@ -39,13 +39,13 @@ jobs:
         uses: tauri-apps/tauri-action@v0.5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signing uses the passwordless v3 keypair (clipgoblin-nopass.key,
+          # key ID 8DD0C3CC61AA1D43). The earlier v2 keypair (5319EC36) was
+          # protected by a password we no longer have, which broke the
+          # v1.3.7/v1.3.8 release builds at the updater-sign step. Switching
+          # back to the nopass key removes the password failure mode entirely.
+          # Pubkey in tauri.conf.json is the matching public counterpart.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          # Password for the encrypted v2 signing key (clipgoblin-v2.key).
-          # Without this, tauri-action either fails or silently signs with
-          # a different (wrong) key — which is what caused the v1.3.6/v1.3.7
-          # auto-updater "signature was created with a different key"
-          # rejection. See commit history around April 2026 for context.
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # Note the secret name (BUG_REPORT_PAT) differs from the env var
           # (GITHUB_BUG_TOKEN). GitHub Actions forbids secret names starting
           # with GITHUB_, so we remap on the way into the build. The Rust
