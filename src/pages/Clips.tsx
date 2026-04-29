@@ -3,7 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom'
 import {
   Scissors, Trash2, Pencil, Film, CheckSquare, Square, Upload, X, Clock,
   ChevronDown, ChevronRight, ArrowUp, LocateFixed, SlidersHorizontal,
-  ArrowUpDown, Eye, EyeOff, Undo2,
+  ArrowUpDown, Eye, EyeOff, Undo2, Loader2,
 } from 'lucide-react'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import { useAppStore } from '../stores/appStore'
@@ -302,6 +302,21 @@ export default function Clips() {
   const { clips, highlights, fetchClips, fetchHighlights, refreshVods, loggedInUser } = useAppStore()
   const { uploads: scheduledUploads, load: loadSchedules } = useScheduleStore()
   const [vodMap, setVodMap] = useState<Record<string, Vod>>({})
+
+  // "Preparing clip previews..." banner state. When the user lands on /clips
+  // right after an analysis completes (focusVodId set in location.state), we
+  // show a brief banner inside that VOD's section explaining first-time
+  // playback may take a few seconds. Without this, fresh-install users hit
+  // a cold-cache window where the OS file metadata + webview asset:// handler
+  // haven't warmed up yet — clicks on play silently fail and look like the
+  // app crashed. Initial state reads focusVodId once at mount; effect dismisses
+  // after a fixed window so the banner doesn't linger past the cold-cache phase.
+  const [preparingVodId, setPreparingVodId] = useState<string | null>(focusVodId)
+  useEffect(() => {
+    if (!preparingVodId) return
+    const t = setTimeout(() => setPreparingVodId(null), 5000)
+    return () => clearTimeout(t)
+  }, [preparingVodId])
 
   // Multi-select state
   const [selectMode, setSelectMode] = useState(false)
@@ -893,6 +908,11 @@ export default function Clips() {
           // effect — titles can change after re-analysis but VOD IDs don't.
           const groupVodId = group.clips[0]?.vod_id ?? ''
 
+          // Show the "preparing previews" banner inside the just-analyzed
+          // VOD's section. Banner self-dismisses after 5 seconds (see the
+          // preparingVodId useEffect at top of component).
+          const isPreparingThis = preparingVodId === groupVodId
+
           return (
             <div
               key={group.title}
@@ -900,6 +920,23 @@ export default function Clips() {
               ref={(el) => { vodSectionRefs.current[group.title] = el }}
               data-vod-id={groupVodId}
             >
+              {/* "Preparing previews..." banner — visible only on the freshly-
+                  analyzed VOD's section for ~5s. Bridges the cold-cache window
+                  where the source VOD file is technically downloaded + analyzed
+                  but the webview asset:// handler / OS file metadata cache
+                  hasn't warmed up yet, so first-click playback silently fails. */}
+              {isPreparingThis && (
+                <div className="bg-violet-500/10 border border-violet-500/30 rounded-lg px-4 py-3 mb-3 flex items-center gap-3">
+                  <Loader2 className="w-4 h-4 animate-spin text-violet-300 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-semibold text-violet-200">Preparing clip previews...</div>
+                    <div className="text-xs text-violet-300/70">
+                      First-time playback may take a few seconds while the source video file finishes processing.
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Collapsible VOD header */}
               <button
                 onClick={() => {
