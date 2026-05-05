@@ -24,17 +24,38 @@ function formatDate(dateStr: string) {
   }
 }
 
+// Maps the backend's analysis_progress percentage to a human-readable stage
+// label. Keep these ranges in sync with set_analysis_progress() calls in
+// commands/vod.rs::run_analysis_signals — the order changed in v1.3.4 when
+// the two-pass refactor moved chat analysis ahead of transcription. Old
+// labels were stale post-refactor and showed misleading text like "Analyzing
+// chat activity" at 45% when the backend was actually finishing transcription.
+//
+// Current pipeline (matches vod.rs as of v1.3.10):
+//   5-15%   Audio RMS extraction (Stage 1)
+//   15-18%  Chat-rate + emote-burst analysis (Stage 2)
+//   18-22%  Candidate-window pre-selection (Stage 3, two-pass core)
+//   22-40%  Whisper transcription on candidate windows (Stage 4)
+//   40-65%  Final clip selector (Stage 5)
+//   65-75%  Per-clip scoring + title generation (Stage 6)
+//   75-83%  Caption generation (Stage 7)
+//   83-100% Clip file output + thumbnails (Stage 8)
+//
+// The "(this may take several minutes)" parenthetical on the transcription
+// label is intentional — that stage genuinely can run 5-30+ min on chatty
+// VODs (transcription work scales with candidate-window count, not VOD
+// length). Users were interpreting the slow-moving bar as a crash; the
+// inline expectation-setting reduces support traffic.
 function analysisStageText(progress: number): string {
   if (progress < 5) return 'Starting analysis...'
   if (progress < 15) return 'Extracting audio...'
-  if (progress < 20) return 'Audio extracted'
-  if (progress < 40) return 'Transcribing audio...'
-  if (progress < 50) return 'Analyzing chat activity...'
-  if (progress < 60) return 'Selecting clip candidates...'
-  if (progress < 75) return 'Scoring highlights...'
-  if (progress < 83) return 'Generating captions...'
-  if (progress < 88) return 'Creating clips...'
-  if (progress < 98) return 'Generating thumbnails...'
+  if (progress < 18) return 'Analyzing chat activity...'
+  if (progress < 22) return 'Selecting moments to transcribe...'
+  if (progress < 40) return 'Transcribing audio (this may take several minutes)...'
+  if (progress < 65) return 'Selecting clip candidates...'
+  if (progress < 75) return 'Scoring and ranking clips...'
+  if (progress < 83) return 'Generating titles and captions...'
+  if (progress < 95) return 'Creating clip files...'
   return 'Finishing up...'
 }
 
