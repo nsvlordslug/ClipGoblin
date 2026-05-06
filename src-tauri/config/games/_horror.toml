@@ -1,0 +1,11 @@
+# Horror genre — sudden audio peaks (screams), emote-spammy chat, less narration.
+# Sparse override: only declare knobs that DIFFER from default.toml.
+
+[audio]
+spike_threshold = 0.45
+
+[chat]
+emote_burst_threshold = 5
+
+[transcript]
+weight = 0.7

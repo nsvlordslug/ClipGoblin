@@ -226,8 +226,17 @@ impl ResolvedConfig {
         // Layer 1: Default
         let mut config = parse_default();
 
-        // Layers 2-3 will be added in subsequent tasks.
-        let _ = game_name;
+        // Layer 2: Genre file (if game is in _known_games.toml)
+        if let Some(genre) = genre_for_game(game_name) {
+            if let Some(genre_toml) = bundled_genre_toml(&genre) {
+                if let Err(e) = apply_partial(&mut config, genre_toml) {
+                    log::warn!(
+                        "[game-config] Skipping malformed genre file '{}': {}",
+                        genre, e
+                    );
+                }
+            }
+        }
 
         // Layer 4 (sensitivity multiplier) will be added in a later task.
         let _ = sensitivity;
@@ -297,6 +306,23 @@ pub(crate) fn genre_for_game(game_name: Option<&str>) -> Option<String> {
     let known: KnownGames = toml::from_str(KNOWN_GAMES_TOML)
         .expect("_known_games.toml must be valid TOML");
     known.games.get(name).map(|e| e.genre.clone())
+}
+
+/// Look up the bundled genre TOML by slug. Returns `None` if no genre file
+/// exists for that slug — caller falls through (no error, just skip layer).
+///
+/// Genre files are bundled at compile time via include_str! so this is
+/// just a static dispatch on the slug.
+fn bundled_genre_toml(genre: &str) -> Option<&'static str> {
+    match genre {
+        "horror"   => Some(include_str!("../config/games/_horror.toml")),
+        "fps"      => Some(include_str!("../config/games/_fps.toml")),
+        "rpg"      => Some(include_str!("../config/games/_rpg.toml")),
+        "cozy"     => Some(include_str!("../config/games/_cozy.toml")),
+        "talking"  => Some(include_str!("../config/games/_talking.toml")),
+        "strategy" => Some(include_str!("../config/games/_strategy.toml")),
+        _          => None,
+    }
 }
 
 // ── Tests ──
@@ -395,5 +421,20 @@ weight = 0.7
         let resolved = ResolvedConfig::resolve(None, Sensitivity::Medium);
         let baseline = parse_default();
         assert!((resolved.audio.spike_threshold - baseline.audio.spike_threshold).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_horror_game_applies_genre_override() {
+        let resolved = ResolvedConfig::resolve(
+            Some("Dead by Daylight"),
+            Sensitivity::Medium,
+        );
+        // _horror.toml overrides:
+        assert!((resolved.audio.spike_threshold - 0.45).abs() < 1e-6);
+        assert_eq!(resolved.chat.emote_burst_threshold, 5);
+        assert!((resolved.transcript.weight - 0.7).abs() < 1e-6);
+        // Knobs not in _horror.toml stay at default:
+        assert_eq!(resolved.chat.rate_min_msgs_per_window, 5);
+        assert_eq!(resolved.selector.min_clip_duration, 15);
     }
 }
