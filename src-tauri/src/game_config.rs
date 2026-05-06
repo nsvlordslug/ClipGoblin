@@ -42,10 +42,12 @@ impl Sensitivity {
     /// Parse from a database/string value (case-insensitive).
     /// Falls back to Medium for any unrecognized value.
     pub fn from_str_or_default(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "low" => Sensitivity::Low,
-            "high" => Sensitivity::High,
-            _ => Sensitivity::Medium,
+        if s.eq_ignore_ascii_case("low") {
+            Sensitivity::Low
+        } else if s.eq_ignore_ascii_case("high") {
+            Sensitivity::High
+        } else {
+            Sensitivity::Medium
         }
     }
 }
@@ -54,35 +56,46 @@ impl Sensitivity {
 // These are what the analysis pipeline consumes. Every field is non-Option:
 // the resolver guarantees defaults are filled before returning.
 
+/// Audio detection thresholds. Resolved per-game from default + genre + override layers.
 #[derive(Debug, Clone)]
 pub struct AudioConfig {
     pub spike_threshold: f64,
 }
 
+/// Chat-rate and emote-burst detection thresholds. Resolved per-game.
 #[derive(Debug, Clone)]
 pub struct ChatConfig {
     pub rate_min_msgs_per_window: u32,
     pub emote_burst_threshold: u32,
 }
 
+/// Transcript signal weighting. Resolved per-game (cozy/talky games boost the weight).
 #[derive(Debug, Clone)]
 pub struct TranscriptConfig {
     pub weight: f64,
 }
 
+/// Final clip selection parameters — durations and pacing. Resolved per-game.
 #[derive(Debug, Clone)]
 pub struct SelectorConfig {
+    /// Minimum clip length in seconds. Selected clips shorter than this are extended around their peak.
     pub min_clip_duration: u32,
+    /// Maximum clip length in seconds. Selected clips longer than this are trimmed around their peak.
     pub max_clip_duration: u32,
+    /// Minimum seconds between any two selected clips. Used as the floor on the dynamic cooldown window.
     pub min_gap_between_clips: u32,
 }
 
+/// Title generation preferences — which AftermathConfession categories to favor or disable.
 #[derive(Debug, Clone, Default)]
 pub struct TitleConfig {
     pub preferred_categories: Vec<String>,
     pub disabled_categories: Vec<String>,
 }
 
+/// Fully-resolved per-VOD detection config. Built once at the start of analysis
+/// by walking the layer hierarchy: default.toml → _<genre>.toml → <game>.toml →
+/// sensitivity multiplier. Passed by reference to each pipeline stage.
 #[derive(Debug, Clone)]
 pub struct ResolvedConfig {
     pub audio: AudioConfig,
@@ -99,43 +112,46 @@ pub struct ResolvedConfig {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct PartialAudio {
-    pub spike_threshold: Option<f64>,
+    pub(crate) spike_threshold: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct PartialChat {
-    pub rate_min_msgs_per_window: Option<u32>,
-    pub emote_burst_threshold: Option<u32>,
+    pub(crate) rate_min_msgs_per_window: Option<u32>,
+    pub(crate) emote_burst_threshold: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct PartialTranscript {
-    pub weight: Option<f64>,
+    pub(crate) weight: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct PartialSelector {
-    pub min_clip_duration: Option<u32>,
-    pub max_clip_duration: Option<u32>,
-    pub min_gap_between_clips: Option<u32>,
+    /// Minimum clip length in seconds.
+    pub(crate) min_clip_duration: Option<u32>,
+    /// Maximum clip length in seconds.
+    pub(crate) max_clip_duration: Option<u32>,
+    /// Minimum seconds between any two selected clips.
+    pub(crate) min_gap_between_clips: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct PartialTitles {
-    pub preferred_categories: Option<Vec<String>>,
-    pub disabled_categories: Option<Vec<String>>,
+    pub(crate) preferred_categories: Option<Vec<String>>,
+    pub(crate) disabled_categories: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct PartialConfig {
     #[serde(default)]
-    pub audio: PartialAudio,
+    pub(crate) audio: PartialAudio,
     #[serde(default)]
-    pub chat: PartialChat,
+    pub(crate) chat: PartialChat,
     #[serde(default)]
-    pub transcript: PartialTranscript,
+    pub(crate) transcript: PartialTranscript,
     #[serde(default)]
-    pub selector: PartialSelector,
+    pub(crate) selector: PartialSelector,
     #[serde(default)]
-    pub titles: PartialTitles,
+    pub(crate) titles: PartialTitles,
 }
