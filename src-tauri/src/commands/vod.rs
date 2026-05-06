@@ -1612,6 +1612,31 @@ fn run_analysis_signals(
     let vod_id = &vod.id;
     let now = chrono::Utc::now().to_rfc3339();
 
+    // Resolve per-game detection config. Walks 4 layers:
+    //   default.toml -> _<genre>.toml -> <game_name>.toml -> sensitivity multiplier
+    // See game_config.rs for the resolver and docs/superpowers/specs/ for design.
+    let game_config = crate::game_config::ResolvedConfig::resolve(
+        vod.game_name.as_deref(),
+        crate::game_config::Sensitivity::from_str_or_default(sensitivity),
+    );
+
+    log::info!(
+        "[game-config] Resolved for {:?}: \
+         audio.spike={:.2} chat.emote_burst={} chat.rate_min_msgs={} \
+         transcript.weight={:.2} selector.min_clip={} max_clip={} min_gap={} \
+         titles.preferred={:?} titles.disabled={:?}",
+        vod.game_name.as_deref().unwrap_or("(unknown game)"),
+        game_config.audio.spike_threshold,
+        game_config.chat.emote_burst_threshold,
+        game_config.chat.rate_min_msgs_per_window,
+        game_config.transcript.weight,
+        game_config.selector.min_clip_duration,
+        game_config.selector.max_clip_duration,
+        game_config.selector.min_gap_between_clips,
+        game_config.titles.preferred_categories,
+        game_config.titles.disabled_categories,
+    );
+
     // â”€â”€ Stage 1: Audio analysis (5-15%) â”€â”€
     log::info!("Signal analysis: extracting audio profile...");
     set_analysis_progress(vod_id, 5);
