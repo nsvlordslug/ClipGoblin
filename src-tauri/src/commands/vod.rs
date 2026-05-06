@@ -333,6 +333,7 @@ pub fn get_cached_vods(channel_id: String, db: State<'_, DbConn>) -> Result<Vec<
 fn analyze_audio_intensity(
     vod_path: &str,
     ffmpeg: &std::path::Path,
+    audio_config: &crate::game_config::AudioConfig,
 ) -> Result<AudioProfile, AppError> {
     // Use ffmpeg's volumedetect + astats to get per-second RMS levels
     // We extract audio as raw PCM and analyze volume in 1-second windows
@@ -442,7 +443,10 @@ fn analyze_audio_intensity(
 
     // Detect spikes: seconds where volume > 1.5x the rolling average
     let avg: f64 = rms_values.iter().sum::<f64>() / rms_values.len() as f64;
-    let spike_threshold = (avg * 1.5).max(0.3); // At least 0.3 to avoid noise
+    // Threshold floor comes from the per-game config; the avg*1.5 dynamic
+    // component continues to scale with the VOD's actual audio level so we
+    // don't fire on quiet content. Floor + dynamic = best of both.
+    let spike_threshold = (avg * 1.5).max(audio_config.spike_threshold);
     let spike_seconds: Vec<usize> = rms_values.iter().enumerate()
         .filter(|(_, &v)| v > spike_threshold)
         .map(|(i, _)| i)
@@ -1640,7 +1644,7 @@ fn run_analysis_signals(
     // â”€â”€ Stage 1: Audio analysis (5-15%) â”€â”€
     log::info!("Signal analysis: extracting audio profile...");
     set_analysis_progress(vod_id, 5);
-    let audio_profile = analyze_audio_intensity(&vod_path, &ffmpeg).ok();
+    let audio_profile = analyze_audio_intensity(&vod_path, &ffmpeg, &game_config.audio).ok();
     let audio_ctx = audio_profile.as_ref().map(|a| {
         clip_selector::AudioContext::new(a.rms_per_second.clone(), a.spike_seconds.clone())
     });
