@@ -1772,6 +1772,7 @@ fn run_analysis_signals(
         community_clips,
         duration,
         sensitivity,
+        &game_config.selector,
     );
     set_analysis_progress(vod_id, 60);
 

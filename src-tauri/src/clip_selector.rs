@@ -123,7 +123,11 @@ impl CurationConfig {
     /// Clip count target:
     ///   ~4-6 for 30 min, ~8-12 for 1h, ~15-25 for 2h, ~20-35 for 3h+
     /// Formula: max(6, min(35, duration_minutes / 6))
-    pub fn for_duration(duration_secs: f64, sensitivity: &str) -> Self {
+    pub fn for_duration(
+        duration_secs: f64,
+        sensitivity: &str,
+        selector_config: &crate::game_config::SelectorConfig,
+    ) -> Self {
         let duration_min = (duration_secs / 60.0).max(1.0);
         let duration_hrs = duration_min / 60.0;
 
@@ -152,9 +156,11 @@ impl CurationConfig {
         let min_emotion     = (0.28 * threshold_scale).clamp(0.18, 0.35);
 
         // ── Cooldown scaling ──
-        // Shorter cooldown for longer VODs (more content spread out).
-        // But never below 30s to prevent same-fight clustering.
-        let cooldown = (120.0 - (duration_hrs * 15.0)).clamp(45.0, 120.0);
+        // Shorter cooldown for longer VODs (more content spread out). Floor
+        // is the per-game min_gap_between_clips so cozy/RPG games get the
+        // longer gaps they need even on short VODs.
+        let dynamic_cooldown = (120.0 - (duration_hrs * 15.0)).clamp(45.0, 120.0);
+        let cooldown = dynamic_cooldown.max(selector_config.min_gap_between_clips as f64);
 
         // ── Same-type cap scales with clip count ──
         let max_same_type = ((max_clips as f64 * 0.35).ceil() as usize).clamp(2, 6);
@@ -1009,8 +1015,9 @@ pub fn select_clips(
     community_clips: &[CommunityClip],
     duration: f64,
     sensitivity: &str,
+    selector_config: &crate::game_config::SelectorConfig,
 ) -> (Vec<ClipCandidate>, DetectionStats) {
-    let cfg = CurationConfig::for_duration(duration, sensitivity);
+    let cfg = CurationConfig::for_duration(duration, sensitivity, selector_config);
 
     // ── Stage 1: Generate candidates ──
     let mut all_signals: Vec<RawSignal> = Vec::new();
@@ -1119,11 +1126,31 @@ pub fn select_clips(
     log::info!("Clip selector: cooldown={}s distinctness={:.2} penalty={:.2} max_type={} max_clips={}",
         cfg.cooldown_window, cfg.cooldown_distinctness_threshold, cfg.cooldown_penalty,
         cfg.max_same_type, cfg.max_clips);
-    let final_clips = diversify_final_selection(&candidates, duration, &cfg);
+    let mut final_clips = diversify_final_selection(&candidates, duration, &cfg);
 
     log::info!("Clip selector: final {} clips from {} candidates (scores: {})",
         final_clips.len(), candidates_found,
         final_clips.iter().map(|c| format!("{:.0}%", c.total_score * 100.0)).collect::<Vec<_>>().join(", "));
+
+    // Apply per-game duration clamps from selector_config.
+    // Centered on peak_time so the clip stays focused on the moment of interest.
+    for clip in final_clips.iter_mut() {
+        let current = clip.end_time - clip.start_time;
+        let target_min = selector_config.min_clip_duration as f64;
+        let target_max = selector_config.max_clip_duration as f64;
+
+        if current < target_min {
+            // Extend symmetrically around peak_time
+            let half = target_min / 2.0;
+            clip.start_time = (clip.peak_time - half).max(0.0);
+            clip.end_time = (clip.start_time + target_min).min(duration);
+        } else if current > target_max {
+            // Trim symmetrically around peak_time
+            let half = target_max / 2.0;
+            clip.start_time = (clip.peak_time - half).max(0.0);
+            clip.end_time = (clip.start_time + target_max).min(duration);
+        }
+    }
 
     let stats = DetectionStats {
         candidates_found,
