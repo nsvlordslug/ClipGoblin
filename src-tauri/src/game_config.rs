@@ -212,6 +212,30 @@ pub(crate) fn parse_default() -> ResolvedConfig {
     }
 }
 
+impl ResolvedConfig {
+    /// Resolve detection config for a VOD by walking the layer hierarchy:
+    ///
+    ///   1. default.toml — universal baseline
+    ///   2. _<genre>.toml — genre file (if game is in _known_games.toml)
+    ///   3. <game_name>.toml — per-game override (if a file exists)
+    ///   4. Sensitivity multiplier on threshold-style knobs
+    ///
+    /// Unknown games skip layers 2 and 3 → behavior identical to pre-v1.3.11
+    /// hardcoded defaults.
+    pub fn resolve(game_name: Option<&str>, sensitivity: Sensitivity) -> Self {
+        // Layer 1: Default
+        let mut config = parse_default();
+
+        // Layers 2-3 will be added in subsequent tasks.
+        let _ = game_name;
+
+        // Layer 4 (sensitivity multiplier) will be added in a later task.
+        let _ = sensitivity;
+
+        config
+    }
+}
+
 /// Apply a partial config (sparse — most fields Optional) onto an existing
 /// ResolvedConfig. Only fields present in the partial replace the resolved
 /// values. Used for layering genre / per-game files onto the default.
@@ -350,5 +374,26 @@ weight = 0.7
         assert_eq!(genre_for_game(Some("Some Indie Game That Doesnt Exist")), None);
         assert_eq!(genre_for_game(Some("")), None);
         assert_eq!(genre_for_game(None), None);
+    }
+
+    #[test]
+    fn resolve_unknown_game_returns_default_unmodified() {
+        let resolved = ResolvedConfig::resolve(
+            Some("Totally Made Up Game"),
+            Sensitivity::Medium,
+        );
+        // Should match parse_default() output exactly.
+        let baseline = parse_default();
+        assert!((resolved.audio.spike_threshold - baseline.audio.spike_threshold).abs() < 1e-6);
+        assert_eq!(resolved.chat.rate_min_msgs_per_window, baseline.chat.rate_min_msgs_per_window);
+        assert_eq!(resolved.chat.emote_burst_threshold, baseline.chat.emote_burst_threshold);
+        assert_eq!(resolved.selector.min_clip_duration, baseline.selector.min_clip_duration);
+    }
+
+    #[test]
+    fn resolve_with_none_game_returns_default() {
+        let resolved = ResolvedConfig::resolve(None, Sensitivity::Medium);
+        let baseline = parse_default();
+        assert!((resolved.audio.spike_threshold - baseline.audio.spike_threshold).abs() < 1e-6);
     }
 }
