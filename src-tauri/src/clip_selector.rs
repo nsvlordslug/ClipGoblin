@@ -109,12 +109,6 @@ pub struct CurationConfig {
     pub min_emotion: f64,
 }
 
-impl Default for CurationConfig {
-    fn default() -> Self {
-        Self::for_duration(30.0 * 60.0, "medium")
-    }
-}
-
 impl CurationConfig {
     /// Build a config scaled to VOD duration and sensitivity.
     ///
