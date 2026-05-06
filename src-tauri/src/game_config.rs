@@ -155,3 +155,68 @@ pub(crate) struct PartialConfig {
     #[serde(default)]
     pub(crate) titles: PartialTitles,
 }
+
+// ── Bundled config files (embedded at compile time) ──
+
+const DEFAULT_TOML: &str = include_str!("../config/games/default.toml");
+
+// ── Resolver ──
+
+/// Parse the universal baseline `default.toml` into a fully-populated
+/// ResolvedConfig. Panics at startup if `default.toml` is malformed or
+/// missing any required field — those would be developer bugs in the
+/// bundled config that ship with the binary, not user errors.
+pub(crate) fn parse_default() -> ResolvedConfig {
+    let partial: PartialConfig = toml::from_str(DEFAULT_TOML)
+        .expect("default.toml must be valid TOML");
+
+    ResolvedConfig {
+        audio: AudioConfig {
+            spike_threshold: partial.audio.spike_threshold
+                .expect("default.toml must define audio.spike_threshold"),
+        },
+        chat: ChatConfig {
+            rate_min_msgs_per_window: partial.chat.rate_min_msgs_per_window
+                .expect("default.toml must define chat.rate_min_msgs_per_window"),
+            emote_burst_threshold: partial.chat.emote_burst_threshold
+                .expect("default.toml must define chat.emote_burst_threshold"),
+        },
+        transcript: TranscriptConfig {
+            weight: partial.transcript.weight
+                .expect("default.toml must define transcript.weight"),
+        },
+        selector: SelectorConfig {
+            min_clip_duration: partial.selector.min_clip_duration
+                .expect("default.toml must define selector.min_clip_duration"),
+            max_clip_duration: partial.selector.max_clip_duration
+                .expect("default.toml must define selector.max_clip_duration"),
+            min_gap_between_clips: partial.selector.min_gap_between_clips
+                .expect("default.toml must define selector.min_gap_between_clips"),
+        },
+        titles: TitleConfig {
+            preferred_categories: partial.titles.preferred_categories.unwrap_or_default(),
+            disabled_categories: partial.titles.disabled_categories.unwrap_or_default(),
+        },
+    }
+}
+
+// ── Tests ──
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_toml_parses_with_all_required_fields() {
+        let config = parse_default();
+        assert!((config.audio.spike_threshold - 0.55).abs() < 1e-6);
+        assert_eq!(config.chat.rate_min_msgs_per_window, 5);
+        assert_eq!(config.chat.emote_burst_threshold, 3);
+        assert!((config.transcript.weight - 1.0).abs() < 1e-6);
+        assert_eq!(config.selector.min_clip_duration, 15);
+        assert_eq!(config.selector.max_clip_duration, 30);
+        assert_eq!(config.selector.min_gap_between_clips, 30);
+        assert!(config.titles.preferred_categories.is_empty());
+        assert!(config.titles.disabled_categories.is_empty());
+    }
+}

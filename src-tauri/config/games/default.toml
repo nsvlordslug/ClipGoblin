@@ -1,0 +1,42 @@
+# Universal baseline detection config.
+# All other config layers (genre files, per-game overrides) inherit from this
+# and only declare knobs that DIFFER from these defaults.
+#
+# See game_config.rs and the v1.3.11 design doc for context.
+
+[audio]
+# RMS level (0.0–1.0) above which a moment is considered an audio peak.
+# Lower = more sensitive (more audio-driven clips).
+spike_threshold = 0.55
+
+[chat]
+# Min chat messages in a 30-second window to count as a chat-rate peak.
+# Lower for slow chats, higher for spammy gaming chats.
+rate_min_msgs_per_window = 5
+
+# Min emote occurrences in a 10-second window to count as an emote burst.
+# Higher for chats that constantly spam emotes (DBD/horror community).
+emote_burst_threshold = 3
+
+[transcript]
+# Weight (0.0–2.0) applied to transcript signal during clip selection.
+# 1.0 = baseline. Higher for talky/narrative games (cozy, RPGs).
+# Lower for action games where transcript matters less.
+weight = 1.0
+
+[selector]
+# Min/max clip duration in seconds.
+min_clip_duration = 15
+max_clip_duration = 30
+
+# Minimum seconds between selected clips. Prevents adjacent overlaps.
+min_gap_between_clips = 30
+
+[titles]
+# AftermathConfession categories to PREFER for this game/genre.
+# Empty list = all categories equally weighted.
+preferred_categories = []
+
+# Categories to DISABLE entirely. Useful for cozy games where templates
+# like "explosion" / "death" / "ambush" don't fit the content.
+disabled_categories = []
