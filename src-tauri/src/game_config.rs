@@ -160,6 +160,18 @@ pub(crate) struct PartialConfig {
 
 const DEFAULT_TOML: &str = include_str!("../config/games/default.toml");
 
+const KNOWN_GAMES_TOML: &str = include_str!("../config/games/_known_games.toml");
+
+#[derive(Debug, Deserialize)]
+struct GameEntry {
+    genre: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct KnownGames {
+    games: std::collections::HashMap<String, GameEntry>,
+}
+
 // ── Resolver ──
 
 /// Parse the universal baseline `default.toml` into a fully-populated
@@ -243,6 +255,26 @@ pub(crate) fn apply_partial(
     Ok(())
 }
 
+/// Look up `game_name` in the bundled `_known_games.toml` and return the
+/// corresponding genre slug (e.g., "horror", "fps"). Returns `None` if the
+/// game is not in the list — caller should skip layer-2/3 lookups and use
+/// the default config only.
+///
+/// Match is exact + case-sensitive to avoid false matches between similarly-
+/// named games. Twitch's API returns canonical capitalization.
+pub(crate) fn genre_for_game(game_name: Option<&str>) -> Option<String> {
+    let name = game_name?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    // Parse the known-games file lazily on each call. Cheap (~30-50 entries)
+    // and avoids the complexity of OnceLock / lazy_static for v1.3.11. Can
+    // optimize later if profiling shows it matters.
+    let known: KnownGames = toml::from_str(KNOWN_GAMES_TOML)
+        .expect("_known_games.toml must be valid TOML");
+    known.games.get(name).map(|e| e.genre.clone())
+}
+
 // ── Tests ──
 
 #[cfg(test)]
@@ -304,5 +336,19 @@ weight = 0.7
         // Untouched knobs remain at default:
         assert_eq!(config.chat.rate_min_msgs_per_window, 5);
         assert_eq!(config.selector.min_clip_duration, 15);
+    }
+
+    #[test]
+    fn known_game_resolves_to_genre() {
+        assert_eq!(genre_for_game(Some("Dead by Daylight")), Some("horror".to_string()));
+        assert_eq!(genre_for_game(Some("VALORANT")), Some("fps".to_string()));
+        assert_eq!(genre_for_game(Some("Stardew Valley")), Some("cozy".to_string()));
+    }
+
+    #[test]
+    fn unknown_game_returns_none() {
+        assert_eq!(genre_for_game(Some("Some Indie Game That Doesnt Exist")), None);
+        assert_eq!(genre_for_game(Some("")), None);
+        assert_eq!(genre_for_game(None), None);
     }
 }

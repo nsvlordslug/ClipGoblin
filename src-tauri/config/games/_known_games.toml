@@ -1,0 +1,48 @@
+# Maps Twitch game_name strings (exact, case-sensitive) to a genre.
+# Add new entries here when patching releases — no Rust code change needed.
+# Genre names must match the corresponding _<genre>.toml file.
+
+[games]
+# Horror
+"Dead by Daylight"                = { genre = "horror" }
+"Phasmophobia"                    = { genre = "horror" }
+"Resident Evil 4"                 = { genre = "horror" }
+"Outlast Trials"                  = { genre = "horror" }
+"Lethal Company"                  = { genre = "horror" }
+
+# FPS
+"VALORANT"                        = { genre = "fps" }
+"Counter-Strike 2"                = { genre = "fps" }
+"Apex Legends"                    = { genre = "fps" }
+"Call of Duty: Warzone"           = { genre = "fps" }
+"Fortnite"                        = { genre = "fps" }
+"Marvel Rivals"                   = { genre = "fps" }
+
+# RPG
+"ELDEN RING"                      = { genre = "rpg" }
+"Baldur's Gate 3"                 = { genre = "rpg" }
+"Cyberpunk 2077"                  = { genre = "rpg" }
+"World of Warcraft"               = { genre = "rpg" }
+"Path of Exile 2"                 = { genre = "rpg" }
+"Dragon Age: The Veilguard"       = { genre = "rpg" }
+
+# Cozy
+"Stardew Valley"                  = { genre = "cozy" }
+"Minecraft"                       = { genre = "cozy" }
+"Animal Crossing: New Horizons"   = { genre = "cozy" }
+"Palworld"                        = { genre = "cozy" }
+"Schedule I"                      = { genre = "cozy" }
+
+# Talking
+"Just Chatting"                   = { genre = "talking" }
+"IRL"                             = { genre = "talking" }
+"ASMR"                            = { genre = "talking" }
+"Music"                           = { genre = "talking" }
+"Talk Shows & Podcasts"           = { genre = "talking" }
+
+# Strategy
+"League of Legends"               = { genre = "strategy" }
+"Dota 2"                          = { genre = "strategy" }
+"Hearthstone"                     = { genre = "strategy" }
+"Magic: The Gathering"            = { genre = "strategy" }
+"Teamfight Tactics"               = { genre = "strategy" }
