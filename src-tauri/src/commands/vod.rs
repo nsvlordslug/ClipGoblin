@@ -1814,6 +1814,7 @@ fn run_analysis_signals(
             vod.game_name.as_deref(),
             c.start_time,
             &mut title_usage,
+            &game_config.titles,
         );
 
         let kw_boost = if let Some(ref t) = transcript {

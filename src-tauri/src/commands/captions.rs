@@ -334,6 +334,7 @@ pub fn save_path_heuristic_title(
     game_name: Option<&str>,
     start_seconds: f64,
     usage: &mut TitleUsage,
+    title_config: &crate::game_config::TitleConfig,
 ) -> String {
     let tags = parse_tags(tags_str);
 
@@ -361,7 +362,7 @@ pub fn save_path_heuristic_title(
         // past-tense templated lines, anchored on the game when available. Picks
         // the least-used variant per tag combo so multiple clips sharing a
         // dominant tag don't collide on the same line within a batch.
-        if let Some(line) = aftermath_from_tags(&tags, game_name, start_seconds, usage) {
+        if let Some(line) = aftermath_from_tags(&tags, game_name, start_seconds, usage, title_config) {
             return line;
         }
 
@@ -397,6 +398,7 @@ fn aftermath_from_tags(
     game_name: Option<&str>,
     start_seconds: f64,
     usage: &TitleUsage,
+    title_config: &crate::game_config::TitleConfig,
 ) -> Option<String> {
     let has = |needle: &str| tags.iter().any(|t| t.contains(needle));
     let game = game_name
@@ -418,12 +420,25 @@ fn aftermath_from_tags(
         pick_least_used(&pool, usage, idx)
     };
 
+    // Helper: check if a category is allowed by title_config.disabled_categories.
+    let is_category_enabled = |category: &str| -> bool {
+        !title_config.disabled_categories.iter().any(|c| c == category)
+    };
+
+    // TODO(v1.3.x): preferred_categories ordering is not yet implemented in
+    // the if-chain — the chain returns on first match in source order. To
+    // honor preferred_categories we'd need to either: (a) reorder branches
+    // based on the list, or (b) collect all matching branches and pick by
+    // preference. For v1.3.11, preferred_categories is captured in the
+    // config but applied only via the "extras" mechanism (no-op for now).
+    let _ = title_config.preferred_categories;
+
     // Each category has 15 base variants + 3 game-anchored variants when a
     // game name is available, giving an 18-deep pool per category. Sized
     // so a typical 17-clip Otzdarva-tier VOD can produce 0 in-category
     // duplicates even when 12+ clips collapse onto the same dominant tag
     // (the worst case observed in real validation runs).
-    if has("ambush") || has("jumpscare") {
+    if (has("ambush") || has("jumpscare")) && is_category_enabled("ambush") {
         return Some(pick(
             &[
                 "ambushed before i could move",
@@ -449,7 +464,7 @@ fn aftermath_from_tags(
             ],
         ));
     }
-    if has("fight") && has("panic") {
+    if has("fight") && has("panic") && is_category_enabled("fight+panic") {
         return Some(pick(
             &[
                 "panicked mid-fight",
@@ -475,7 +490,7 @@ fn aftermath_from_tags(
             ],
         ));
     }
-    if has("fight") && has("frustration") {
+    if has("fight") && has("frustration") && is_category_enabled("fight+frustration") {
         return Some(pick(
             &[
                 "couldn't survive that fight",
@@ -501,7 +516,7 @@ fn aftermath_from_tags(
             ],
         ));
     }
-    if has("celebration") && has("hype") {
+    if has("celebration") && has("hype") && is_category_enabled("celebration+hype") {
         return Some(pick(
             &[
                 "clutched it at the last second",
@@ -527,7 +542,7 @@ fn aftermath_from_tags(
             ],
         ));
     }
-    if has("death") {
+    if has("death") && is_category_enabled("death") {
         return Some(pick(
             &[
                 "broke me before i blinked",
@@ -553,7 +568,7 @@ fn aftermath_from_tags(
             ],
         ));
     }
-    if has("explosion") {
+    if has("explosion") && is_category_enabled("explosion") {
         return Some(pick(
             &[
                 "blew up before i could react",
@@ -579,7 +594,7 @@ fn aftermath_from_tags(
             ],
         ));
     }
-    if has("disbelief") || has("shock") {
+    if (has("disbelief") || has("shock")) && is_category_enabled("disbelief+shock") {
         return Some(pick(
             &[
                 "didn't see that one coming",
