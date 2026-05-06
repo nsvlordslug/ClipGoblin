@@ -1659,7 +1659,7 @@ fn run_analysis_signals(
     log::info!("Signal analysis: analyzing chat activity...");
     set_analysis_progress(vod_id, 16);
     let (chat_peaks, emote_peaks): (Vec<db::HighlightRow>, Vec<db::HighlightRow>) =
-        match analyze_via_chat(chat_messages, duration, &vod.id) {
+        match analyze_via_chat(chat_messages, duration, &vod.id, &game_config.chat) {
             Ok(r) => {
                 log::info!(
                     "Chat analysis: {} rate peak(s), {} emote-burst peak(s) from {} messages",
@@ -1906,7 +1906,15 @@ fn run_analysis(
 
     // Try chat-based analysis first. Tier-2 fallback combines rate + emote
     // peaks into one set of highlights (no fusion stage available here).
-    if let Ok(r) = analyze_via_chat(chat_messages, duration, vod_id) {
+    // Resolve per-game config for the fallback chat analysis. We don't have
+    // the user's sensitivity here (run_analysis is invoked from contexts
+    // without it threaded), so default to Medium — the fallback path is rare
+    // and a Medium baseline is the safest choice.
+    let game_config = crate::game_config::ResolvedConfig::resolve(
+        vod.game_name.as_deref(),
+        crate::game_config::Sensitivity::Medium,
+    );
+    if let Ok(r) = analyze_via_chat(chat_messages, duration, vod_id, &game_config.chat) {
         let mut combined = r.rate_peaks;
         combined.extend(r.emote_peaks);
         if !combined.is_empty() {
@@ -1993,6 +2001,7 @@ fn analyze_via_chat(
     messages: &[crate::twitch_chat_replay::ChatMessage],
     duration: f64,
     vod_id: &str,
+    chat_config: &crate::game_config::ChatConfig,
 ) -> Result<ChatAnalysisResult, String> {
     if messages.is_empty() {
         return Err("No chat messages available".to_string());
@@ -2039,8 +2048,13 @@ fn analyze_via_chat(
 
     // ── Rate peaks (legacy 30s window logic, unchanged behavior) ──
     let rate_avg = total_messages as f64 / num_rate_windows as f64;
+    // Threshold floor comes from per-game config (rate_min_msgs_per_window).
+    // Dynamic component (avg*1.3) preserves existing scaling behavior so we
+    // don't false-positive on slow chats where the floor would otherwise
+    // catch ambient activity. Floor + dynamic = best of both.
+    let rate_threshold = (rate_avg * 1.3).max(chat_config.rate_min_msgs_per_window as f64);
     let mut rate_peak_idxs: Vec<(usize, u32)> = rate_counts.iter().enumerate()
-        .filter(|(_, &count)| count as f64 > rate_avg * 1.3)
+        .filter(|(_, &count)| count as f64 > rate_threshold)
         .map(|(i, &count)| (i, count))
         .collect();
     rate_peak_idxs.sort_by(|a, b| b.1.cmp(&a.1));
@@ -2086,7 +2100,10 @@ fn analyze_via_chat(
     let mut emote_peaks = Vec::new();
     if total_emotes >= 5 {
         let emote_avg = total_emotes as f64 / num_emote_windows as f64;
-        let threshold = (emote_avg * 2.0).max(3.0);
+        // Threshold floor comes from per-game config (emote_burst_threshold).
+        // Dynamic component (avg*2) scales with the VOD's chat density so we
+        // don't fire on relatively-quiet chats. Floor + dynamic = best of both.
+        let threshold = (emote_avg * 2.0).max(chat_config.emote_burst_threshold as f64);
         let mut emote_peak_idxs: Vec<(usize, u32)> = emote_counts.iter().enumerate()
             .filter(|(_, &count)| count as f64 > threshold)
             .map(|(i, &count)| (i, count))
