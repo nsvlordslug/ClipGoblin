@@ -1,1 +1,21 @@
-# Talking genre — placeholder, real content lands in Task 9.
+# Talking genre — Just Chatting, IRL, ASMR, podcasts. Voice-dominant content.
+
+[audio]
+# Voice peaks are subtler than action games. Lower threshold.
+spike_threshold = 0.35
+
+[chat]
+# Variable chat — slight reduction so smaller spikes count.
+rate_min_msgs_per_window = 4
+
+[transcript]
+# Words ARE the content — maximum transcript weight.
+weight = 1.7
+
+[selector]
+# Talking moments often need 30-60s for setup + payoff.
+max_clip_duration = 60
+
+[titles]
+# Skip combat-flavored templates.
+disabled_categories = ["explosion", "ambush", "fight+panic", "fight+frustration"]

@@ -1,1 +1,16 @@
-# Strategy genre — placeholder, real content lands in Task 9.
+# Strategy genre — League, Dota, Hearthstone, MTG, TFT, Civ. Reactive moments.
+
+[audio]
+# Standard threshold — strategy games have varied audio, default works.
+
+[chat]
+# Strategy chats spike hard on plays/clutches. Slightly higher rate threshold.
+rate_min_msgs_per_window = 6
+
+[transcript]
+# Streamer commentary often explains strategy — moderate transcript boost.
+weight = 1.1
+
+[titles]
+# Surface celebration / outplay variants.
+preferred_categories = ["celebration+hype", "disbelief+shock", "fight+frustration"]

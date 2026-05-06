@@ -1,1 +1,25 @@
-# Cozy genre — placeholder, real content lands in Task 9.
+# Cozy genre — quiet audio, slow chat, narration is the primary content.
+
+[audio]
+# Cozy games have minimal audio peaks — lower threshold to catch subtle moments.
+spike_threshold = 0.30
+
+[chat]
+# Slow chats — small spikes are real reactions, not noise.
+rate_min_msgs_per_window = 2
+emote_burst_threshold = 2
+
+[transcript]
+# Narration IS the content — heavy boost.
+weight = 1.5
+
+[selector]
+# Cozy moments are slower-paced — allow longer clips for buildup.
+max_clip_duration = 60
+# Spread clips across the VOD — cozy moments are scarce, shouldn't cluster.
+min_gap_between_clips = 60
+
+[titles]
+# Skip combat-flavored templates entirely — they don't fit cozy content.
+disabled_categories = ["death", "explosion", "ambush", "fight+panic"]
+preferred_categories = ["celebration+hype", "disbelief+shock"]

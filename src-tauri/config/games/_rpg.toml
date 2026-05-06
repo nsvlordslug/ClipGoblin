@@ -1,1 +1,20 @@
-# RPG genre — placeholder, real content lands in Task 9.
+# RPG genre — long quiet exploration with bursts of combat. Heavy narration.
+
+[audio]
+# Slightly lower so subtle exploration audio cues register.
+spike_threshold = 0.50
+
+[chat]
+# Standard chat thresholds work for typical RPG audiences.
+
+[transcript]
+# Streamer narration matters a lot — boost transcript weight.
+weight = 1.3
+
+[selector]
+# Longer clips work for RPG — moments often include narration buildup.
+max_clip_duration = 45
+
+[titles]
+# Surface introspective + epic variants.
+preferred_categories = ["disbelief+shock", "celebration+hype", "death", "fight+frustration"]

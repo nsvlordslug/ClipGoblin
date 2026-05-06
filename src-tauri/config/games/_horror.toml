@@ -2,10 +2,17 @@
 # Sparse override: only declare knobs that DIFFER from default.toml.
 
 [audio]
+# Lower threshold so screams + sudden chase audio register over ambient music.
 spike_threshold = 0.45
 
 [chat]
+# Horror chats are baseline-spammy with KEKW/Sadge — bump the emote-burst bar.
 emote_burst_threshold = 5
 
 [transcript]
+# Streamer focus is on game audio cues, not narration.
 weight = 0.7
+
+[titles]
+# Surface combat/horror-flavored variants over neutral ones.
+preferred_categories = ["ambush", "death", "shock", "celebration+hype"]

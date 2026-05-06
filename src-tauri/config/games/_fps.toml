@@ -1,1 +1,21 @@
-# FPS genre — placeholder, real content lands in Task 9.
+# FPS genre — gunshots dominate audio, chat reactive on round-ending plays.
+
+[audio]
+# Standard threshold works — gunshots are loud and distinct from ambient.
+# (No override; inherits 0.55 from default.)
+
+[chat]
+# Slightly higher emote bar — FPS chats spam Pog on big plays.
+emote_burst_threshold = 4
+
+[transcript]
+# Voice comms are mostly callouts, not interesting narration.
+weight = 0.8
+
+[selector]
+# FPS rounds are short — slightly shorter clip cap fits round structure.
+max_clip_duration = 25
+
+[titles]
+# Surface action-flavored variants.
+preferred_categories = ["ambush", "celebration+hype", "shock"]
