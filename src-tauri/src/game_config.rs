@@ -542,4 +542,20 @@ weight = 0.7
         // Title category lists unchanged:
         assert_eq!(high.titles.preferred_categories, medium.titles.preferred_categories);
     }
+
+    #[test]
+    fn resolve_stardew_applies_cozy_then_per_game() {
+        let resolved = ResolvedConfig::resolve(
+            Some("Stardew Valley"),
+            Sensitivity::Medium,
+        );
+        // stardew_valley.toml overrides _cozy.toml's spike_threshold (0.30 → 0.25):
+        assert!((resolved.audio.spike_threshold - 0.25).abs() < 1e-6);
+        // stardew_valley.toml overrides _cozy.toml's transcript.weight (1.5 → 1.7):
+        assert!((resolved.transcript.weight - 1.7).abs() < 1e-6);
+        // _cozy.toml's chat values still apply (Stardew doesn't override):
+        assert_eq!(resolved.chat.rate_min_msgs_per_window, 2);
+        // _cozy.toml's disabled_categories carries through:
+        assert!(resolved.titles.disabled_categories.contains(&"death".to_string()));
+    }
 }

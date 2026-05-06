@@ -1,1 +1,10 @@
-# Stardew Valley — placeholder, real content lands in Task 10.
+# Stardew Valley — even quieter than typical cozy, narration-heaviest of the genre.
+# Sparse override of _cozy.toml.
+
+[audio]
+# Cozy baseline = 0.30; Stardew is even lower-volume. Most peaks are music transitions.
+spike_threshold = 0.25
+
+[transcript]
+# Cozy baseline = 1.5; Stardew streamers narrate constantly.
+weight = 1.7

@@ -1,1 +1,13 @@
-# Valorant — placeholder, real content lands in Task 10.
+# Valorant — round structure means transcript callouts matter more than typical FPS.
+# Sparse override of _fps.toml.
+
+[transcript]
+# FPS baseline = 0.8; Valorant callouts ("rotate B", "one shot mid") are
+# information-dense and worth boosting.
+weight = 1.0
+
+[selector]
+# Round-length cap — Valorant rounds are 1:40 max, but the moment is 5-15s.
+max_clip_duration = 20
+# Don't cluster clips — same fight in two rounds is rarely both clip-worthy.
+min_gap_between_clips = 45

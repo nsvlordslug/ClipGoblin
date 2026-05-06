@@ -1,5 +1,7 @@
-# DBD specifically — even more emote-spammy than typical horror.
-# Sparse override of _horror.toml.
+# DBD specifically — chat is uniquely emote-spammy even by horror standards.
+# Sparse override of _horror.toml. Only declare what differs from horror baseline.
 
 [chat]
+# Horror baseline = 5; DBD chats KEKW essentially constantly during chases.
+# Bump higher so emote-burst signal only fires on REAL collective reactions.
 emote_burst_threshold = 7
