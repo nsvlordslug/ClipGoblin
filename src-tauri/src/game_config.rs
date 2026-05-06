@@ -200,6 +200,49 @@ pub(crate) fn parse_default() -> ResolvedConfig {
     }
 }
 
+/// Apply a partial config (sparse — most fields Optional) onto an existing
+/// ResolvedConfig. Only fields present in the partial replace the resolved
+/// values. Used for layering genre / per-game files onto the default.
+///
+/// Returns Err if the TOML is malformed. Caller decides whether to log + skip
+/// or propagate the error.
+pub(crate) fn apply_partial(
+    config: &mut ResolvedConfig,
+    toml_str: &str,
+) -> Result<(), toml::de::Error> {
+    let partial: PartialConfig = toml::from_str(toml_str)?;
+
+    if let Some(v) = partial.audio.spike_threshold {
+        config.audio.spike_threshold = v;
+    }
+    if let Some(v) = partial.chat.rate_min_msgs_per_window {
+        config.chat.rate_min_msgs_per_window = v;
+    }
+    if let Some(v) = partial.chat.emote_burst_threshold {
+        config.chat.emote_burst_threshold = v;
+    }
+    if let Some(v) = partial.transcript.weight {
+        config.transcript.weight = v;
+    }
+    if let Some(v) = partial.selector.min_clip_duration {
+        config.selector.min_clip_duration = v;
+    }
+    if let Some(v) = partial.selector.max_clip_duration {
+        config.selector.max_clip_duration = v;
+    }
+    if let Some(v) = partial.selector.min_gap_between_clips {
+        config.selector.min_gap_between_clips = v;
+    }
+    if let Some(v) = partial.titles.preferred_categories {
+        config.titles.preferred_categories = v;
+    }
+    if let Some(v) = partial.titles.disabled_categories {
+        config.titles.disabled_categories = v;
+    }
+
+    Ok(())
+}
+
 // ── Tests ──
 
 #[cfg(test)]
@@ -218,5 +261,48 @@ mod tests {
         assert_eq!(config.selector.min_gap_between_clips, 30);
         assert!(config.titles.preferred_categories.is_empty());
         assert!(config.titles.disabled_categories.is_empty());
+    }
+
+    #[test]
+    fn genre_override_replaces_only_specified_knobs() {
+        // Simulate a genre TOML that overrides audio threshold only.
+        let genre_toml = r#"
+[audio]
+spike_threshold = 0.45
+"#;
+        let mut config = parse_default();
+        apply_partial(&mut config, genre_toml).expect("valid TOML");
+
+        // Audio threshold overridden:
+        assert!((config.audio.spike_threshold - 0.45).abs() < 1e-6);
+        // Everything else still at default:
+        assert_eq!(config.chat.rate_min_msgs_per_window, 5);
+        assert_eq!(config.chat.emote_burst_threshold, 3);
+        assert!((config.transcript.weight - 1.0).abs() < 1e-6);
+        assert_eq!(config.selector.min_clip_duration, 15);
+    }
+
+    #[test]
+    fn genre_override_can_replace_multiple_knobs() {
+        // Realistic genre file — _horror.toml-shaped.
+        let genre_toml = r#"
+[audio]
+spike_threshold = 0.45
+
+[chat]
+emote_burst_threshold = 5
+
+[transcript]
+weight = 0.7
+"#;
+        let mut config = parse_default();
+        apply_partial(&mut config, genre_toml).expect("valid TOML");
+
+        assert!((config.audio.spike_threshold - 0.45).abs() < 1e-6);
+        assert_eq!(config.chat.emote_burst_threshold, 5);
+        assert!((config.transcript.weight - 0.7).abs() < 1e-6);
+        // Untouched knobs remain at default:
+        assert_eq!(config.chat.rate_min_msgs_per_window, 5);
+        assert_eq!(config.selector.min_clip_duration, 15);
     }
 }
