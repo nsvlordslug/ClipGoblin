@@ -12,6 +12,7 @@ mod db;
 mod detection;
 mod emote_signal;
 mod engine;
+mod game_config;
 mod integration_test;
 mod clip_selector;
 mod commands;
