@@ -1,0 +1,5 @@
+# DBD specifically — even more emote-spammy than typical horror.
+# Sparse override of _horror.toml.
+
+[chat]
+emote_burst_threshold = 7

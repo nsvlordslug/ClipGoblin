@@ -238,6 +238,18 @@ impl ResolvedConfig {
             }
         }
 
+        // Layer 3: Per-game override file (optional)
+        if let Some(name) = game_name {
+            if let Some(game_toml) = bundled_game_toml(name) {
+                if let Err(e) = apply_partial(&mut config, game_toml) {
+                    log::warn!(
+                        "[game-config] Skipping malformed per-game file '{}': {}",
+                        name, e
+                    );
+                }
+            }
+        }
+
         // Layer 4 (sensitivity multiplier) will be added in a later task.
         let _ = sensitivity;
 
@@ -322,6 +334,22 @@ fn bundled_genre_toml(genre: &str) -> Option<&'static str> {
         "talking"  => Some(include_str!("../config/games/_talking.toml")),
         "strategy" => Some(include_str!("../config/games/_strategy.toml")),
         _          => None,
+    }
+}
+
+/// Look up a per-game override TOML by exact game name. Returns `None` if
+/// no per-game override file exists for that game — caller falls through
+/// (no error, genre defaults stand).
+///
+/// Per-game files are bundled at compile time via include_str! and only
+/// exist for games whose signal patterns deviate notably from their genre
+/// baseline.
+fn bundled_game_toml(game_name: &str) -> Option<&'static str> {
+    match game_name {
+        "Dead by Daylight" => Some(include_str!("../config/games/dead_by_daylight.toml")),
+        "VALORANT"         => Some(include_str!("../config/games/valorant.toml")),
+        "Stardew Valley"   => Some(include_str!("../config/games/stardew_valley.toml")),
+        _ => None,
     }
 }
 
@@ -425,8 +453,10 @@ weight = 0.7
 
     #[test]
     fn resolve_horror_game_applies_genre_override() {
+        // Use Phasmophobia (horror, no per-game file) so this test isolates
+        // layer-2 behavior. DBD now has a layer-3 override on emote_burst_threshold.
         let resolved = ResolvedConfig::resolve(
-            Some("Dead by Daylight"),
+            Some("Phasmophobia"),
             Sensitivity::Medium,
         );
         // _horror.toml overrides:
@@ -436,5 +466,31 @@ weight = 0.7
         // Knobs not in _horror.toml stay at default:
         assert_eq!(resolved.chat.rate_min_msgs_per_window, 5);
         assert_eq!(resolved.selector.min_clip_duration, 15);
+    }
+
+    #[test]
+    fn resolve_dbd_applies_per_game_on_top_of_horror() {
+        let resolved = ResolvedConfig::resolve(
+            Some("Dead by Daylight"),
+            Sensitivity::Medium,
+        );
+        // dead_by_daylight.toml overrides _horror.toml's emote_burst_threshold (5 → 7):
+        assert_eq!(resolved.chat.emote_burst_threshold, 7);
+        // _horror.toml's audio threshold still applies (DBD doesn't override):
+        assert!((resolved.audio.spike_threshold - 0.45).abs() < 1e-6);
+        // _horror.toml's transcript weight still applies:
+        assert!((resolved.transcript.weight - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_horror_game_without_per_game_file_uses_genre_only() {
+        // Phasmophobia is in _known_games (horror) but has no per-game file
+        // → resolution stops after layer 2 (horror).
+        let resolved = ResolvedConfig::resolve(
+            Some("Phasmophobia"),
+            Sensitivity::Medium,
+        );
+        // _horror.toml's emote_burst_threshold = 5 (NOT 7 like DBD):
+        assert_eq!(resolved.chat.emote_burst_threshold, 5);
     }
 }
