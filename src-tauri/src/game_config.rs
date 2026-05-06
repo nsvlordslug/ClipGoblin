@@ -250,8 +250,14 @@ impl ResolvedConfig {
             }
         }
 
-        // Layer 4 (sensitivity multiplier) will be added in a later task.
-        let _ = sensitivity;
+        // Layer 4: Sensitivity multiplier on threshold-style knobs only.
+        // Does NOT apply to transcript.weight, durations, or category lists.
+        let m = sensitivity.multiplier();
+        config.audio.spike_threshold *= m;
+        config.chat.rate_min_msgs_per_window =
+            ((config.chat.rate_min_msgs_per_window as f64) * m).round() as u32;
+        config.chat.emote_burst_threshold =
+            ((config.chat.emote_burst_threshold as f64) * m).round() as u32;
 
         config
     }
@@ -492,5 +498,48 @@ weight = 0.7
         );
         // _horror.toml's emote_burst_threshold = 5 (NOT 7 like DBD):
         assert_eq!(resolved.chat.emote_burst_threshold, 5);
+    }
+
+    #[test]
+    fn sensitivity_high_lowers_thresholds() {
+        // Default emote_burst_threshold = 3, multiplier 0.8 → 3 * 0.8 = 2.4 → rounds to 2
+        let high = ResolvedConfig::resolve(None, Sensitivity::High);
+        assert_eq!(high.chat.emote_burst_threshold, 2);
+
+        // chat.rate_min_msgs_per_window: 5 * 0.8 = 4.0 → 4
+        assert_eq!(high.chat.rate_min_msgs_per_window, 4);
+
+        // audio.spike_threshold: 0.55 * 0.8 = 0.44
+        assert!((high.audio.spike_threshold - 0.44).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sensitivity_low_raises_thresholds() {
+        // Default emote_burst_threshold = 3, multiplier 1.2 → 3.6 → rounds to 4
+        let low = ResolvedConfig::resolve(None, Sensitivity::Low);
+        assert_eq!(low.chat.emote_burst_threshold, 4);
+
+        // 5 * 1.2 = 6.0 → 6
+        assert_eq!(low.chat.rate_min_msgs_per_window, 6);
+
+        // 0.55 * 1.2 = 0.66
+        assert!((low.audio.spike_threshold - 0.66).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sensitivity_does_not_affect_durations_or_lists() {
+        let high = ResolvedConfig::resolve(None, Sensitivity::High);
+        let medium = ResolvedConfig::resolve(None, Sensitivity::Medium);
+
+        // Durations unchanged across sensitivities:
+        assert_eq!(high.selector.min_clip_duration, medium.selector.min_clip_duration);
+        assert_eq!(high.selector.max_clip_duration, medium.selector.max_clip_duration);
+        assert_eq!(high.selector.min_gap_between_clips, medium.selector.min_gap_between_clips);
+
+        // Transcript weight is a balance knob, not a threshold — unchanged:
+        assert!((high.transcript.weight - medium.transcript.weight).abs() < 1e-6);
+
+        // Title category lists unchanged:
+        assert_eq!(high.titles.preferred_categories, medium.titles.preferred_categories);
     }
 }
