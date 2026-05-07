@@ -40,6 +40,14 @@ export interface Highlight {
   explanation?: string | null;
   /** One-sentence event summary (what happened). Null for pre-migration rows. */
   event_summary?: string | null;
+  /** JSON-serialized 6-dimension scoring breakdown. Null for pre-Phase-C rows. */
+  scoring_dimensions?: string | null;
+  /** JSON-serialized array of signal-source identifiers. Null for pre-Phase-C rows. */
+  signal_sources?: string | null;
+  /** User-supplied review rating from the dev-only Review UI. Null if unrated. */
+  review_rating?: 'good' | 'meh' | 'boring' | null;
+  /** Free-form user note from the dev-only Review UI. Null if no note set. */
+  review_note?: string | null;
 }
 
 export interface Clip {

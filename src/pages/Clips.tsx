@@ -7,11 +7,14 @@ import {
 } from 'lucide-react'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import { useAppStore } from '../stores/appStore'
+import { useUiStore } from '../stores/uiStore'
 import ClipPlayer from '../components/ClipPlayer'
 import Tooltip from '../components/Tooltip'
 import BatchUploadDialog from '../components/BatchUploadDialog'
 import { useScheduleStore } from '../stores/scheduleStore'
 import type { Clip, Vod } from '../types'
+import type { ClipReviewRating } from '../types/clipReview'
+import { REVIEW_RATING_LABELS, REVIEW_RATING_COLORS } from '../types/clipReview'
 
 // ─── Helpers ───────────────────────────────────────────────────────
 
@@ -118,7 +121,14 @@ interface PendingDelete {
 
 function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, selectMode, selected, onToggleSelect, scheduledPlatforms }: {
   clip: Clip
-  highlight?: { description?: string; tags?: string | string[]; transcript_snippet?: string }
+  highlight?: {
+    id?: string
+    description?: string
+    tags?: string | string[]
+    transcript_snippet?: string
+    review_rating?: 'good' | 'meh' | 'boring' | null
+    review_note?: string | null
+  }
   confidence: number | null
   posterSrc: string | null
   onDelete: () => void
@@ -129,6 +139,9 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
   scheduledPlatforms?: Array<{ platform: string; scheduled_time: string }>
 }) {
   const [videoSrc, setVideoSrc] = useState<string | null>(null)
+  const showReviewTools = useUiStore((s) => s.settings.showReviewTools)
+  const fetchHighlights = useAppStore((s) => s.fetchHighlights)
+  const [savingReview, setSavingReview] = useState(false)
 
   const displayTitle = useMemo(
     () => clipDisplayTitle(clip, highlight),
@@ -190,6 +203,14 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
             ✓ Exported
           </div>
         )}
+        {showReviewTools && highlight?.review_rating && (
+          <span
+            className={`absolute top-1 left-1 z-10 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide border ${REVIEW_RATING_COLORS[highlight.review_rating as ClipReviewRating]}`}
+            title={highlight.review_note ?? undefined}
+          >
+            {highlight.review_rating}
+          </span>
+        )}
       </div>
 
       <div className="v4-lib-body flex flex-col gap-2">
@@ -227,6 +248,76 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
             </span>
           )}
         </div>
+        {showReviewTools && (
+          <div
+            className="mt-1 pt-2 border-t border-surface-700/50 flex flex-col gap-2"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-1.5">
+              {(['good', 'meh', 'boring'] as ClipReviewRating[]).map((r) => {
+                const isActive = highlight?.review_rating === r
+                return (
+                  <button
+                    key={r}
+                    type="button"
+                    disabled={savingReview}
+                    onClick={async (e) => {
+                      e.stopPropagation()
+                      const hid = highlight?.id ?? clip.highlight_id
+                      if (!hid) return
+                      const nextRating: ClipReviewRating | null = isActive ? null : r
+                      setSavingReview(true)
+                      try {
+                        await invoke('save_clip_review', {
+                          highlightId: hid,
+                          rating: nextRating,
+                          note: highlight?.review_note ?? null,
+                        })
+                        await fetchHighlights(clip.vod_id)
+                      } catch (err) {
+                        console.error('Failed to save clip review rating:', err)
+                      } finally {
+                        setSavingReview(false)
+                      }
+                    }}
+                    className={`flex-1 px-2 py-1 text-[11px] rounded border transition-colors cursor-pointer disabled:opacity-50 ${
+                      isActive
+                        ? REVIEW_RATING_COLORS[r]
+                        : 'bg-surface-800 text-slate-400 border-surface-600 hover:text-white hover:border-surface-500'
+                    }`}
+                  >
+                    {REVIEW_RATING_LABELS[r]}
+                  </button>
+                )
+              })}
+            </div>
+            <textarea
+              defaultValue={highlight?.review_note ?? ''}
+              onBlur={async (e) => {
+                const hid = highlight?.id ?? clip.highlight_id
+                if (!hid) return
+                const noteValue = e.target.value.trim() || null
+                if ((highlight?.review_note ?? null) === noteValue) return  // no-op if unchanged
+                setSavingReview(true)
+                try {
+                  await invoke('save_clip_review', {
+                    highlightId: hid,
+                    rating: highlight?.review_rating ?? null,
+                    note: noteValue,
+                  })
+                  await fetchHighlights(clip.vod_id)
+                } catch (err) {
+                  console.error('Failed to save clip review note:', err)
+                } finally {
+                  setSavingReview(false)
+                }
+              }}
+              placeholder="Notes (saves on blur)..."
+              className="w-full text-xs px-2 py-1 rounded bg-surface-800 border border-surface-600 text-slate-200 focus:border-violet-500 focus:outline-none resize-y min-h-[2rem]"
+              rows={1}
+            />
+          </div>
+        )}
       </div>
     </div>
   )
@@ -985,7 +1076,7 @@ export default function Clips() {
                       <ClipCard
                         key={clip.id}
                         clip={clip}
-                        highlight={hl ? { description: hl.description, tags: hl.tags, transcript_snippet: hl.transcript_snippet } : undefined}
+                        highlight={hl ? { id: hl.id, description: hl.description, tags: hl.tags, transcript_snippet: hl.transcript_snippet, review_rating: hl.review_rating, review_note: hl.review_note } : undefined}
                         confidence={getConfidence(clip.highlight_id)}
                         posterSrc={getPosterSrc(clip)}
                         onDelete={() => requestDelete([clip.id])}
