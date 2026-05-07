@@ -590,9 +590,14 @@ fn convert_whisper_result(wr: &whisper::TranscriptResult) -> TranscriptResult {
 
     let full_text = segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
 
-    // Scan segments for keywords to generate TranscriptKeyword entries
+    // Phase A: skip segments inside hallucination runs (4+ identical
+    // consecutive lines, typically whisper noise on background music).
+    // See is_hallucinated_segment doc-comment.
     let mut keywords_found = Vec::new();
-    for seg in &segments {
+    for (idx, seg) in segments.iter().enumerate() {
+        if is_hallucinated_segment(&segments, idx) {
+            continue;
+        }
         let lower = seg.text.to_lowercase();
         for &kw in TRANSCRIPT_KEYWORDS {
             if lower.contains(kw) {
@@ -3205,5 +3210,34 @@ mod tests {
         assert!(is_hallucinated_segment(&segs, 4));
         assert!(is_hallucinated_segment(&segs, 5));
         assert!(!is_hallucinated_segment(&segs, 6));  // "Done." standalone
+    }
+
+    #[test]
+    fn convert_whisper_result_drops_keywords_from_hallucinated_runs() {
+        // Build a synthetic whisper result with:
+        // - 5 hallucinated identical segments containing "what the" (a TRANSCRIPT_KEYWORDS hit)
+        // - 1 real segment containing "let's go" (also a hit)
+        let wr = whisper::TranscriptResult {
+            language: "en".to_string(),
+            duration: 6.0,
+            segments: vec![
+                whisper::TranscriptSegment { start: 0.0, end: 1.0, text: "what the dance sound".to_string() },
+                whisper::TranscriptSegment { start: 1.0, end: 2.0, text: "what the dance sound".to_string() },
+                whisper::TranscriptSegment { start: 2.0, end: 3.0, text: "what the dance sound".to_string() },
+                whisper::TranscriptSegment { start: 3.0, end: 4.0, text: "what the dance sound".to_string() },
+                whisper::TranscriptSegment { start: 4.0, end: 5.0, text: "what the dance sound".to_string() },
+                whisper::TranscriptSegment { start: 5.0, end: 6.0, text: "let's go beat the boss".to_string() },
+            ],
+        };
+
+        let result = convert_whisper_result(&wr);
+
+        // The hallucinated "what the" should NOT have produced any keyword entries.
+        // Only the real "let's go" should be present.
+        let has_what_the = result.keywords_found.iter().any(|k| k.keyword == "what the");
+        let has_lets_go = result.keywords_found.iter().any(|k| k.keyword == "let's go");
+
+        assert!(!has_what_the, "Hallucinated 'what the' should have been filtered out");
+        assert!(has_lets_go, "Real 'let's go' should still be detected");
     }
 }
