@@ -1602,6 +1602,35 @@ async fn fetch_community_clips_for_vod(
     }
 }
 
+/// Serialize a ClipCandidate's six scoring dimensions to a compact JSON string
+/// for storage in HighlightRow.scoring_dimensions. Round each to 4 decimal
+/// places to keep the column readable at human-debug time without losing
+/// meaningful precision.
+fn serialize_scoring_dimensions(c: &clip_selector::ClipCandidate) -> String {
+    fn r(x: f64) -> f64 { (x * 10000.0).round() / 10000.0 }
+    serde_json::json!({
+        "hook": r(c.hook_strength),
+        "emotion": r(c.emotional_spike),
+        "payoff": r(c.payoff_clarity),
+        "align": r(c.event_reaction_alignment),
+        "context": r(c.context_simplicity),
+        "replay": r(c.replay_value),
+    }).to_string()
+}
+
+/// Serialize a ClipCandidate's signal_sources Vec<SignalSource> to a JSON
+/// array of lowercase string identifiers, e.g. `["audio","chat","transcript"]`.
+fn serialize_signal_sources(sources: &[clip_selector::SignalSource]) -> String {
+    let names: Vec<&'static str> = sources.iter().map(|s| match s {
+        clip_selector::SignalSource::Audio => "audio",
+        clip_selector::SignalSource::Chat => "chat",
+        clip_selector::SignalSource::EmoteBurst => "emote_burst",
+        clip_selector::SignalSource::Transcript => "transcript",
+        clip_selector::SignalSource::Community => "community",
+    }).collect();
+    serde_json::json!(names).to_string()
+}
+
 fn run_analysis_signals(
     vod: &db::VodRow,
     _hw: &HardwareInfo,
@@ -1861,11 +1890,26 @@ fn run_analysis_signals(
             confidence_score: Some(compute_confidence(raw_score, sig_count)),
             explanation: Some(build_highlight_explanation(audio, visual, chat, has_transcript)),
             event_summary: Some(event_summary),
-            scoring_dimensions: None,  // TODO Task 2: populate from ClipCandidate dimensions
-            signal_sources: None,      // TODO Task 2: populate from ClipCandidate.signal_sources
+            scoring_dimensions: Some(serialize_scoring_dimensions(c)),
+            signal_sources: Some(serialize_signal_sources(&c.signal_sources)),
             review_rating: None,       // user-set via Review UI
             review_note: None,         // user-set via Review UI
         });
+
+        log::info!(
+            "[scoring] [{:.0}s..{:.0}s] total={:.0}% | hook={:.0}% emotion={:.0}% payoff={:.0}% align={:.0}% context={:.0}% replay={:.0}% | sources={} | tags={:?} | excerpt={:?}",
+            c.start_time, c.end_time,
+            raw_score * 100.0,
+            c.hook_strength * 100.0,
+            c.emotional_spike * 100.0,
+            c.payoff_clarity * 100.0,
+            c.event_reaction_alignment * 100.0,
+            c.context_simplicity * 100.0,
+            c.replay_value * 100.0,
+            serialize_signal_sources(&c.signal_sources),
+            all_tags,
+            c.transcript_excerpt.as_deref().unwrap_or(""),
+        );
 
         // Update progress within scoring loop
         let scoring_progress = 62 + ((i + 1) as i64 * 13 / total_candidates as i64);
