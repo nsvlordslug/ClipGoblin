@@ -14,6 +14,8 @@ export interface UiSettings {
   autoShipHighConfidence: boolean
   /** Use GPU (CUDA) for transcription. Default: true (falls back to CPU if unavailable). */
   useGpu: boolean
+  /** Show dev-only clip review tools (rating buttons + note + Export). Default: false. */
+  showReviewTools: boolean
 }
 
 export const UI_DEFAULTS: UiSettings = {
@@ -21,6 +23,7 @@ export const UI_DEFAULTS: UiSettings = {
   theme: 'dark',
   autoShipHighConfidence: false,
   useGpu: true,
+  showReviewTools: false,
 }
 
 const SETTINGS_KEY = 'ui_settings'
