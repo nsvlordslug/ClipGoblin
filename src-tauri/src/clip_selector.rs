@@ -1287,4 +1287,30 @@ mod tests {
         assert!(c.total_score > 0.65,
             "multi-signal total_score should not be capped, got {}", c.total_score);
     }
+
+    #[test]
+    fn score_clip_candidate_phase_b_boilerplate_lands_below_65() {
+        // Replays the exact dimension fingerprint observed in Phase B for
+        // transcript-only candidates rated boring/meh by the user:
+        //   align=0.47, context=0.88, emotion=0.7625, payoff=0.55, replay=0.5475
+        // Pre-fix, hook=0.69 (the "Drainage channel" rated-meh clip) produced
+        // total_score ≈ 0.70. After the fix, the override + cap should
+        // bring total_score below 0.65.
+        let mut c = build_test_candidate(vec![SignalSource::Transcript]);
+        c.hook_strength = 0.69;          // Phase B: "Drainage channel" hook
+        c.emotional_spike = 0.7625;      // boilerplate value
+        c.payoff_clarity = 0.55;
+        c.event_reaction_alignment = 0.47;
+        c.context_simplicity = 0.88;     // boilerplate value
+        c.replay_value = 0.5475;
+
+        score_clip_candidate(&mut c);
+
+        assert!(c.total_score < 0.65,
+            "Phase B boilerplate fingerprint should score below 0.65 after fix, got {}",
+            c.total_score);
+        // Also verify the dimensions were overridden as expected.
+        assert!((c.context_simplicity - 0.50).abs() < 1e-6);
+        assert!((c.emotional_spike - 0.40).abs() < 1e-6);
+    }
 }
