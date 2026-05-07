@@ -512,12 +512,31 @@ fn optimize_clip_end(c: &mut ClipCandidate, a: &AudioContext, duration: f64) {
     // speech triggers extension even on VODs with loud average game-audio
     // (e.g. Elden Ring boss fights raise avg_rms enough that 1.5× avg won't
     // catch a moderately-loud voice reply mid-sentence).
+    let original_end = c.end_time;
     let end_energy = a.intensity_in_range((c.end_time - 3.0).max(c.start_time), c.end_time);
+    let end_ratio = if a.avg_rms > 0.0 { end_energy / a.avg_rms } else { 0.0 };
     if end_energy > a.avg_rms * 1.1 {
         let extended = (c.end_time + 5.0).min(duration);
-        if a.intensity_in_range(c.end_time, extended) > a.avg_rms * 0.9 {
+        let ext_intensity = a.intensity_in_range(c.end_time, extended);
+        let ext_ratio = if a.avg_rms > 0.0 { ext_intensity / a.avg_rms } else { 0.0 };
+        if ext_intensity > a.avg_rms * 0.9 {
             c.end_time = extended;
+            log::info!(
+                "[boundary] extend [{:.1}s..{:.1}s] +{:.1}s (end={:.2}x ext={:.2}x avg={:.3})",
+                c.start_time, original_end, c.end_time - original_end,
+                end_ratio, ext_ratio, a.avg_rms,
+            );
+        } else {
+            log::info!(
+                "[boundary] no-extend [{:.1}s..{:.1}s] (end={:.2}x ext={:.2}x avg={:.3} — ext below 0.9x)",
+                c.start_time, c.end_time, end_ratio, ext_ratio, a.avg_rms,
+            );
         }
+    } else {
+        log::info!(
+            "[boundary] no-extend [{:.1}s..{:.1}s] (end={:.2}x avg={:.3} — below 1.1x trigger)",
+            c.start_time, c.end_time, end_ratio, a.avg_rms,
+        );
     }
 
     // If the last 3s are dead air, trim the tail
