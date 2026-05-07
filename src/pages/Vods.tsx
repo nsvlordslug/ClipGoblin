@@ -171,11 +171,12 @@ export default function Vods() {
     }
   }, [vods, loggedInUser, refreshVods])
 
-  const handleExportReviewData = async (vodId: string, vodTitle: string) => {
+  const handleExportReviewData = async (vodId: string, _vodTitle: string) => {
     try {
       const json = await invoke<string>('export_review_data_for_vod', { vodId })
       await navigator.clipboard.writeText(json)
-      alert(`Review data for "${vodTitle}" copied to clipboard.`)
+      // Success path is silent — clipboard now contains the data, paste to verify.
+      // Matches the alert-only-on-failure convention used throughout this file.
     } catch (e) {
       console.error('Failed to export review data:', e)
       alert(`Failed to export review data: ${e}`)
@@ -658,7 +659,7 @@ export default function Vods() {
                       title="Copy clip-by-clip review data to clipboard for offline analysis"
                     >
                       <Download className="w-3.5 h-3.5" />
-                      Export reviews
+                      Export Reviews
                     </button>
                   )}
                   <button
