@@ -61,7 +61,7 @@ Fields:
 
 ### Where it lives
 
-Single new `log::info!` call in `src-tauri/src/clip_selector.rs` placed just after final-selection commit (immediately before the `[Clip selector: final N clips ...]` line that already exists). Possibly one small helper function to format the line.
+Single new `log::info!` call in `src-tauri/src/commands/vod.rs` at the point each `ClipCandidate` is converted into a `HighlightRow` for persistence (around line 1847, where `highlights.push(db::HighlightRow { ... })` is built). This co-locates the log with the DB write that stores the same dimension data, so live debugging and persisted data agree. The log shows the post-keyword-boost `virality_score` to match what the UI displays.
 
 ### Data availability check
 
@@ -168,7 +168,7 @@ The JSON combines three sources:
 }
 ```
 
-The `dimensions` and `signal_sources` fields come from the C log file (parsed at export time, scoped to the most recent analysis run for that VOD). The review fields come from the new DB columns.
+The `dimensions` and `signal_sources` fields come from new columns on the `highlights` table populated at scoring time (Phase C also writes these directly to DB, not just to the log). The review fields come from the new `review_rating` / `review_note` columns. Reading from DB instead of parsing the log file keeps the export reliable and removes a class of edge cases (log rotation, format drift, missing files).
 
 ### 4.6 Visibility / shipping discipline
 
@@ -179,7 +179,7 @@ The `dimensions` and `signal_sources` fields come from the C log file (parsed at
 ### 4.7 Edge cases & risks
 
 - **VOD re-analysis erases ratings.** Re-analyzing a VOD generates new clips with new IDs; old `review_rating` / `review_note` orphan. Acceptable — re-analysis is rare, and forcing a fresh review after re-analysis is probably the right behavior anyway.
-- **Empty/missing log file at export time.** If the C log file doesn't exist or doesn't contain `[scoring]` lines for this VOD's most recent analysis run, the export still produces JSON but with `dimensions: null` and `signal_sources: null` per clip. Notify the user via toast: "Score data not found in logs — re-run analysis to populate."
+- **Clips analyzed before this feature shipped.** Existing highlights have `scoring_dimensions = NULL` because the columns didn't exist when they were inserted. Export still produces JSON for those clips but with `dimensions: null` and `signal_sources: null`. Re-analyzing the VOD populates the data. No log-parsing edge cases needed.
 - **Note textarea XSS.** The note is stored as plain text and rendered as plain text only (never as HTML). Standard React rendering already handles this.
 - **Concurrent edits.** Single-user dev mode, no concurrency concerns.
 
