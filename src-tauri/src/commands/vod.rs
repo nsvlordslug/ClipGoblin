@@ -1899,7 +1899,20 @@ fn run_analysis_signals(
             0.0
         };
 
-        let raw_score = (c.total_score + kw_boost).min(0.99);
+        // Phase A safety net (also applied at score_clip_candidate's exit):
+        // transcript-only candidates re-capped at 0.65 here because kw_boost
+        // is added AFTER score_clip_candidate ran, which would otherwise push
+        // a capped 0.65 total back up by as much as +0.20. The persisted
+        // virality_score is what the Review UI / Clips page display, so this
+        // guarantees the user-facing "70%+ feels boring" complaint is
+        // addressed end-to-end. See docs/superpowers/specs/2026-05-07-phase-a-scoring-fix-design.md §3.3
+        let is_transcript_only_at_persist = c.signal_sources.len() == 1
+            && c.signal_sources[0] == clip_selector::SignalSource::Transcript;
+        let raw_score = if is_transcript_only_at_persist {
+            (c.total_score + kw_boost).min(0.65)
+        } else {
+            (c.total_score + kw_boost).min(0.99)
+        };
         let audio = c.hook_strength;
         let visual = c.emotional_spike;
         let chat = if c.signal_sources.contains(&clip_selector::SignalSource::Chat) {
