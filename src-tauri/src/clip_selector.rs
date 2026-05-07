@@ -471,6 +471,13 @@ pub fn score_clip_candidate(c: &mut ClipCandidate) {
         + (c.replay_value * 0.05);
     let bonus = match c.signal_sources.len() { n if n >= 3 => 0.10, 2 => 0.05, _ => 0.0 };
     c.total_score = (c.total_score + bonus).min(0.99);
+
+    // Phase A safety net: transcript-only candidates capped at 0.65 even
+    // if the dimension override + weighted sum somehow lands them above.
+    // See docs/superpowers/specs/2026-05-07-phase-a-scoring-fix-design.md §3.3
+    if is_transcript_only {
+        c.total_score = c.total_score.min(0.65);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1243,5 +1250,41 @@ mod tests {
         // Transcript+audio is multi-signal — no override.
         assert!((c.context_simplicity - original_context).abs() < 1e-6);
         assert!((c.emotional_spike - original_emotion).abs() < 1e-6);
+    }
+
+    #[test]
+    fn score_clip_candidate_caps_transcript_only_at_65_percent() {
+        // Build a candidate with extreme dimension values so the un-capped
+        // total would land well above 0.65 even after the Task 3 override.
+        // Hook 0.99 alone contributes 0.30. With the override-set context=0.5
+        // and emotion=0.4, plus extreme other dims, total approaches the
+        // pre-cap ceiling (0.99). The cap should clamp it to 0.65.
+        let mut c = build_test_candidate(vec![SignalSource::Transcript]);
+        c.hook_strength = 0.99;
+        c.payoff_clarity = 0.99;
+        c.event_reaction_alignment = 0.99;
+        c.replay_value = 0.99;
+        // (context_simplicity and emotional_spike will be overridden by Task 3)
+
+        score_clip_candidate(&mut c);
+
+        assert!(c.total_score <= 0.65 + 1e-6,
+            "transcript-only total_score should be capped at 0.65, got {}", c.total_score);
+    }
+
+    #[test]
+    fn score_clip_candidate_does_not_cap_multi_signal() {
+        // Multi-signal candidate with the same extreme dim values should
+        // be allowed to score well above 0.65.
+        let mut c = build_test_candidate(vec![SignalSource::Audio, SignalSource::Transcript]);
+        c.hook_strength = 0.99;
+        c.payoff_clarity = 0.99;
+        c.event_reaction_alignment = 0.99;
+        c.replay_value = 0.99;
+
+        score_clip_candidate(&mut c);
+
+        assert!(c.total_score > 0.65,
+            "multi-signal total_score should not be capped, got {}", c.total_score);
     }
 }
