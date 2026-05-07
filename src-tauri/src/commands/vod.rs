@@ -1861,6 +1861,10 @@ fn run_analysis_signals(
             confidence_score: Some(compute_confidence(raw_score, sig_count)),
             explanation: Some(build_highlight_explanation(audio, visual, chat, has_transcript)),
             event_summary: Some(event_summary),
+            scoring_dimensions: None,  // TODO Task 2: populate from ClipCandidate dimensions
+            signal_sources: None,      // TODO Task 2: populate from ClipCandidate.signal_sources
+            review_rating: None,       // user-set via Review UI
+            review_note: None,         // user-set via Review UI
         });
 
         // Update progress within scoring loop
@@ -1945,6 +1949,10 @@ fn run_analysis(
             confidence_score: Some(compute_confidence(0.75, 0)),
             explanation: Some("Position-based estimate, no signal analysis".into()),
             event_summary: None,
+            scoring_dimensions: None,  // TODO Task 2: populate from ClipCandidate dimensions
+            signal_sources: None,      // TODO Task 2: populate from ClipCandidate.signal_sources
+            review_rating: None,       // user-set via Review UI
+            review_note: None,         // user-set via Review UI
         });
     } else {
         let clip_duration = 30.0_f64.min(duration * 0.15);
@@ -1979,6 +1987,10 @@ fn run_analysis(
                 confidence_score: Some(compute_confidence(score, 0)),
                 explanation: Some("Position-based estimate, no signal analysis".into()),
                 event_summary: None,
+                scoring_dimensions: None,  // TODO Task 2: populate from ClipCandidate dimensions
+                signal_sources: None,      // TODO Task 2: populate from ClipCandidate.signal_sources
+                review_rating: None,       // user-set via Review UI
+                review_note: None,         // user-set via Review UI
             });
         }
     }
@@ -2089,6 +2101,10 @@ fn analyze_via_chat(
                 confidence_score: Some(compute_confidence(virality, 1)),
                 explanation: Some(format!("1 signal — chat {:.0}% ({} messages)", chat_score * 100.0, count)),
                 event_summary: Some(format!("chat went off with {} messages", count)),
+                scoring_dimensions: None,  // TODO Task 2: populate from ClipCandidate dimensions
+                signal_sources: None,      // TODO Task 2: populate from ClipCandidate.signal_sources
+                review_rating: None,       // user-set via Review UI
+                review_note: None,         // user-set via Review UI
             });
         }
     }
@@ -2139,6 +2155,10 @@ fn analyze_via_chat(
                     confidence_score: Some(compute_confidence(virality, 1)),
                     explanation: Some(format!("1 signal — emote burst {:.0}% ({} emotes)", chat_score * 100.0, count)),
                     event_summary: Some(format!("chat hit with {} emotes in 10s", count)),
+                    scoring_dimensions: None,  // TODO Task 2: populate from ClipCandidate dimensions
+                    signal_sources: None,      // TODO Task 2: populate from ClipCandidate.signal_sources
+                    review_rating: None,       // user-set via Review UI
+                    review_note: None,         // user-set via Review UI
                 });
             }
         }

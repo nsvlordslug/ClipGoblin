@@ -116,6 +116,15 @@ pub fn init_db() -> SqliteResult<Connection> {
     // Event summary: one-sentence description of what happened
     conn.execute("ALTER TABLE highlights ADD COLUMN event_summary TEXT", []).ok();
 
+    // Clip scoring investigation (v1.3.12): per-clip diagnostic data populated
+    // at scoring time, plus user-supplied review fields gated behind the
+    // "Show clip review tools" Settings toggle. See
+    // docs/superpowers/specs/2026-05-07-clip-scoring-investigation-design.md
+    conn.execute("ALTER TABLE highlights ADD COLUMN scoring_dimensions TEXT", []).ok();
+    conn.execute("ALTER TABLE highlights ADD COLUMN signal_sources TEXT", []).ok();
+    conn.execute("ALTER TABLE highlights ADD COLUMN review_rating TEXT", []).ok();
+    conn.execute("ALTER TABLE highlights ADD COLUMN review_note TEXT", []).ok();
+
     // Caption style: which visual style is selected for subtitle rendering
     conn.execute("ALTER TABLE clips ADD COLUMN caption_style TEXT DEFAULT 'clean'", []).ok();
 
@@ -276,6 +285,18 @@ pub struct HighlightRow {
     pub confidence_score: Option<f64>,
     pub explanation: Option<String>,
     pub event_summary: Option<String>,
+    /// JSON-serialized 6-dimension breakdown from scoring time, e.g.
+    /// `{"hook":0.80,"emotion":0.75,"payoff":0.68,"align":0.65,"context":0.70,"replay":0.72}`.
+    /// `None` for highlights inserted before the v1.3.12 migration.
+    pub scoring_dimensions: Option<String>,
+    /// JSON-serialized array of signal-source identifiers that triggered this
+    /// candidate, e.g. `["audio","chat","transcript"]`. `None` for legacy rows.
+    pub signal_sources: Option<String>,
+    /// User-supplied rating from the dev-only Review UI: one of `"good"`,
+    /// `"meh"`, `"boring"`. `None` if unrated.
+    pub review_rating: Option<String>,
+    /// Free-form user note from the dev-only Review UI. `None` if no note set.
+    pub review_note: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -598,7 +619,7 @@ pub fn update_vod_analysis_progress(conn: &Connection, id: &str, progress: i64) 
 
 pub fn get_highlights_by_vod(conn: &Connection, vod_id: &str) -> SqliteResult<Vec<HighlightRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, vod_id, start_seconds, end_seconds, virality_score, audio_score, visual_score, chat_score, transcript_snippet, description, tags, thumbnail_path, created_at, confidence_score, explanation, event_summary
+        "SELECT id, vod_id, start_seconds, end_seconds, virality_score, audio_score, visual_score, chat_score, transcript_snippet, description, tags, thumbnail_path, created_at, confidence_score, explanation, event_summary, scoring_dimensions, signal_sources, review_rating, review_note
          FROM highlights WHERE vod_id = ?1 ORDER BY COALESCE(confidence_score, virality_score * 0.75 + 0.05) DESC"
     )?;
     let rows = stmt.query_map(params![vod_id], |row| {
@@ -619,6 +640,10 @@ pub fn get_highlights_by_vod(conn: &Connection, vod_id: &str) -> SqliteResult<Ve
             confidence_score: row.get(13)?,
             explanation: row.get(14)?,
             event_summary: row.get(15)?,
+            scoring_dimensions: row.get(16)?,
+            signal_sources: row.get(17)?,
+            review_rating: row.get(18)?,
+            review_note: row.get(19)?,
         })
     })?;
     rows.collect()
@@ -626,8 +651,8 @@ pub fn get_highlights_by_vod(conn: &Connection, vod_id: &str) -> SqliteResult<Ve
 
 pub fn insert_highlight(conn: &Connection, h: &HighlightRow) -> SqliteResult<()> {
     conn.execute(
-        "INSERT INTO highlights (id, vod_id, start_seconds, end_seconds, virality_score, audio_score, visual_score, chat_score, transcript_snippet, description, tags, thumbnail_path, created_at, confidence_score, explanation, event_summary)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+        "INSERT INTO highlights (id, vod_id, start_seconds, end_seconds, virality_score, audio_score, visual_score, chat_score, transcript_snippet, description, tags, thumbnail_path, created_at, confidence_score, explanation, event_summary, scoring_dimensions, signal_sources, review_rating, review_note)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
          ON CONFLICT(id) DO UPDATE SET
            vod_id = excluded.vod_id,
            start_seconds = excluded.start_seconds,
@@ -642,8 +667,10 @@ pub fn insert_highlight(conn: &Connection, h: &HighlightRow) -> SqliteResult<()>
            thumbnail_path = excluded.thumbnail_path,
            confidence_score = excluded.confidence_score,
            explanation = excluded.explanation,
-           event_summary = excluded.event_summary",
-        params![h.id, h.vod_id, h.start_seconds, h.end_seconds, h.virality_score, h.audio_score, h.visual_score, h.chat_score, h.transcript_snippet, h.description, h.tags, h.thumbnail_path, h.created_at, h.confidence_score, h.explanation, h.event_summary],
+           event_summary = excluded.event_summary,
+           scoring_dimensions = excluded.scoring_dimensions,
+           signal_sources = excluded.signal_sources",
+        params![h.id, h.vod_id, h.start_seconds, h.end_seconds, h.virality_score, h.audio_score, h.visual_score, h.chat_score, h.transcript_snippet, h.description, h.tags, h.thumbnail_path, h.created_at, h.confidence_score, h.explanation, h.event_summary, h.scoring_dimensions, h.signal_sources, h.review_rating, h.review_note],
     )?;
     Ok(())
 }
@@ -1075,7 +1102,7 @@ pub struct CreatorProfileRow {
 
 pub fn get_all_highlights(conn: &Connection) -> SqliteResult<Vec<HighlightRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, vod_id, start_seconds, end_seconds, virality_score, audio_score, visual_score, chat_score, transcript_snippet, description, tags, thumbnail_path, created_at, confidence_score, explanation, event_summary
+        "SELECT id, vod_id, start_seconds, end_seconds, virality_score, audio_score, visual_score, chat_score, transcript_snippet, description, tags, thumbnail_path, created_at, confidence_score, explanation, event_summary, scoring_dimensions, signal_sources, review_rating, review_note
          FROM highlights ORDER BY vod_id, COALESCE(confidence_score, virality_score * 0.75 + 0.05) DESC"
     )?;
     let rows = stmt.query_map([], |row| {
@@ -1096,6 +1123,10 @@ pub fn get_all_highlights(conn: &Connection) -> SqliteResult<Vec<HighlightRow>> 
             confidence_score: row.get(13)?,
             explanation: row.get(14)?,
             event_summary: row.get(15)?,
+            scoring_dimensions: row.get(16)?,
+            signal_sources: row.get(17)?,
+            review_rating: row.get(18)?,
+            review_note: row.get(19)?,
         })
     })?;
     rows.collect()
