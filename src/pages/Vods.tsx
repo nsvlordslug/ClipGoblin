@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Video, Download, Search, Eye, Tv, LogIn, Check, RotateCcw, RefreshCw, Trash2, X, Gamepad2, Plus, Play } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
+import { useUiStore } from '../stores/uiStore'
 import { invoke } from '@tauri-apps/api/core'
 import ImportVodDialog from '../components/ImportVodDialog'
 
@@ -96,6 +97,7 @@ function v4StatusLabel(vod: { analysis_status: string; analysis_progress?: numbe
 
 export default function Vods() {
   const { loggedInUser, vods, isLoading, checkLogin, fetchVods, refreshVods, removeVod, updateVod, removeClipsForVod } = useAppStore()
+  const showReviewTools = useUiStore((s) => s.settings.showReviewTools)
   const navigate = useNavigate()
   const [refreshingId, setRefreshingId] = useState<string | null>(null)
   const [refreshedId, setRefreshedId] = useState<string | null>(null)
@@ -168,6 +170,17 @@ export default function Vods() {
       }
     }
   }, [vods, loggedInUser, refreshVods])
+
+  const handleExportReviewData = async (vodId: string, vodTitle: string) => {
+    try {
+      const json = await invoke<string>('export_review_data_for_vod', { vodId })
+      await navigator.clipboard.writeText(json)
+      alert(`Review data for "${vodTitle}" copied to clipboard.`)
+    } catch (e) {
+      console.error('Failed to export review data:', e)
+      alert(`Failed to export review data: ${e}`)
+    }
+  }
 
   const handleDownload = async (vodId: string) => {
     try {
@@ -636,6 +649,16 @@ export default function Vods() {
                     >
                       <Search className="w-3.5 h-3.5" />
                       View Clips
+                    </button>
+                  )}
+                  {showReviewTools && vod.analysis_status === 'completed' && (
+                    <button
+                      onClick={() => handleExportReviewData(vod.id, vod.title)}
+                      className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg transition-colors cursor-pointer bg-amber-500/20 text-amber-400 border border-amber-500/30 hover:bg-amber-500/30"
+                      title="Copy clip-by-clip review data to clipboard for offline analysis"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Export reviews
                     </button>
                   )}
                   <button
