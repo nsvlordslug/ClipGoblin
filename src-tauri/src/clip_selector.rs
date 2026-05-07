@@ -507,11 +507,15 @@ fn optimize_clip_start(c: &mut ClipCandidate, a: &AudioContext) {
 
 /// Optimize clip end to preserve reaction payoff and trim weak tail.
 fn optimize_clip_end(c: &mut ClipCandidate, a: &AudioContext, duration: f64) {
-    // If energy is still high at the end, extend to capture full reaction
+    // If audio activity continues at the end, extend to catch the full
+    // reaction or sentence. Thresholds are deliberately permissive so normal
+    // speech triggers extension even on VODs with loud average game-audio
+    // (e.g. Elden Ring boss fights raise avg_rms enough that 1.5× avg won't
+    // catch a moderately-loud voice reply mid-sentence).
     let end_energy = a.intensity_in_range((c.end_time - 3.0).max(c.start_time), c.end_time);
-    if end_energy > a.avg_rms * 1.5 {
+    if end_energy > a.avg_rms * 1.1 {
         let extended = (c.end_time + 5.0).min(duration);
-        if a.intensity_in_range(c.end_time, extended) > a.avg_rms * 1.2 {
+        if a.intensity_in_range(c.end_time, extended) > a.avg_rms * 0.9 {
             c.end_time = extended;
         }
     }
