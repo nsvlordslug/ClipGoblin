@@ -147,3 +147,94 @@ pub fn save_clip_review(
     db::set_clip_review(&conn, &highlight_id, rating.as_deref(), note.as_deref())
         .map_err(|e| format!("DB error saving review: {}", e))
 }
+
+/// Build a single JSON blob containing everything needed for offline analysis
+/// of a VOD's clip-scoring quality: VOD metadata, the resolved detection
+/// config (re-resolved at export time using the VOD's game_name + the
+/// current sensitivity setting), and per-clip data including dimension
+/// breakdown, signal sources, and any user reviews.
+///
+/// Frontend consumes this via `navigator.clipboard.writeText(...)`.
+/// Used by the dev-only Review UI behind the "Show clip review tools"
+/// Settings toggle.
+#[tauri::command]
+pub fn export_review_data_for_vod(
+    vod_id: String,
+    db: State<'_, DbConn>,
+) -> Result<String, String> {
+    let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+
+    // ── VOD metadata ──
+    let vod = db::get_vod_by_id(&conn, &vod_id)
+        .map_err(|e| format!("DB error fetching VOD: {}", e))?
+        .ok_or_else(|| format!("VOD '{}' not found", vod_id))?;
+
+    // ── Resolved config ──
+    let sensitivity_str = db::get_setting(&conn, "detection_sensitivity")
+        .ok().flatten()
+        .unwrap_or_else(|| "medium".to_string());
+    let sensitivity = crate::game_config::Sensitivity::from_str_or_default(&sensitivity_str);
+    let resolved = crate::game_config::ResolvedConfig::resolve(
+        vod.game_name.as_deref(),
+        sensitivity,
+    );
+
+    let resolved_json = serde_json::json!({
+        "audio_spike_threshold": resolved.audio.spike_threshold,
+        "chat_emote_burst_threshold": resolved.chat.emote_burst_threshold,
+        "chat_rate_min_msgs_per_window": resolved.chat.rate_min_msgs_per_window,
+        "transcript_weight": resolved.transcript.weight,
+        "selector_min_clip_duration": resolved.selector.min_clip_duration,
+        "selector_max_clip_duration": resolved.selector.max_clip_duration,
+        "selector_min_gap_between_clips": resolved.selector.min_gap_between_clips,
+        "titles_preferred": resolved.titles.preferred_categories,
+        "titles_disabled": resolved.titles.disabled_categories,
+        "sensitivity": sensitivity_str,
+    });
+
+    // ── Per-clip data ──
+    let highlights = db::get_highlights_by_vod(&conn, &vod_id)
+        .map_err(|e| format!("DB error fetching highlights: {}", e))?;
+
+    let clips_json: Vec<serde_json::Value> = highlights.iter().map(|h| {
+        // Parse the stored JSON columns back into structured values so the
+        // export reads as nested JSON, not as escaped strings.
+        let dimensions: Option<serde_json::Value> = h.scoring_dimensions
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
+        let sources: Option<serde_json::Value> = h.signal_sources
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
+
+        serde_json::json!({
+            "highlight_id": h.id,
+            "start_seconds": h.start_seconds,
+            "end_seconds": h.end_seconds,
+            "duration_seconds": h.end_seconds - h.start_seconds,
+            "total_score": h.virality_score,
+            "confidence_score": h.confidence_score,
+            "dimensions": dimensions,
+            "signal_sources": sources,
+            "tags": h.tags,
+            "transcript_snippet": h.transcript_snippet,
+            "event_summary": h.event_summary,
+            "review_rating": h.review_rating,
+            "review_note": h.review_note,
+        })
+    }).collect();
+
+    let payload = serde_json::json!({
+        "vod": {
+            "id": vod.id,
+            "title": vod.title,
+            "game_name": vod.game_name,
+            "duration_seconds": vod.duration_seconds,
+        },
+        "config_resolved": resolved_json,
+        "clips": clips_json,
+        "exported_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    serde_json::to_string_pretty(&payload)
+        .map_err(|e| format!("JSON serialization error: {}", e))
+}

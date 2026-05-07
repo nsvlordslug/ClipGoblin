@@ -1480,4 +1480,30 @@ mod tests {
         assert_eq!(highlights[0].review_rating, None);
         assert_eq!(highlights[0].review_note, None);
     }
+
+    #[test]
+    fn highlight_round_trips_scoring_dimensions_json() {
+        let conn = fresh_db();
+        let h = HighlightRow {
+            id: "h1".to_string(),
+            vod_id: "v1".to_string(),
+            start_seconds: 100.0,
+            end_seconds: 130.0,
+            virality_score: 0.72,
+            audio_score: 0.6, visual_score: 0.6, chat_score: 0.6,
+            transcript_snippet: None, description: None, tags: None,
+            thumbnail_path: None, created_at: "2026-05-07T00:00:00Z".to_string(),
+            confidence_score: None, explanation: None, event_summary: None,
+            scoring_dimensions: Some(r#"{"hook":0.8,"emotion":0.75}"#.to_string()),
+            signal_sources: Some(r#"["audio","transcript"]"#.to_string()),
+            review_rating: None,
+            review_note: None,
+        };
+        insert_highlight(&conn, &h).unwrap();
+
+        let fetched = get_highlights_by_vod(&conn, "v1").unwrap();
+        assert_eq!(fetched.len(), 1);
+        assert_eq!(fetched[0].scoring_dimensions.as_deref(), Some(r#"{"hook":0.8,"emotion":0.75}"#));
+        assert_eq!(fetched[0].signal_sources.as_deref(), Some(r#"["audio","transcript"]"#));
+    }
 }

@@ -55,7 +55,7 @@ pub(crate) fn report_error(app: &AppHandle, err: AppError) -> String {
 use commands::auth::{twitch_login, twitch_logout, get_logged_in_user, get_channels};
 use commands::bug_report::submit_bug_report;
 use commands::captions::{generate_post_captions, generate_ai_title, test_ai_connection};
-use commands::clip::{update_clip_settings, get_clip_detail, save_clip_review, save_clip_to_disk};
+use commands::clip::{export_review_data_for_vod, get_clip_detail, save_clip_review, save_clip_to_disk, update_clip_settings};
 use commands::export::{export_clip, set_clip_thumbnail, generate_clip_captions};
 use commands::model::{check_model_status, download_model, delete_model};
 use commands::binaries::{check_binary_status, download_binaries};
@@ -210,6 +210,7 @@ pub fn run() {
             cancel_scheduled_upload,
             reschedule_upload,
             open_url,
+            export_review_data_for_vod,
             save_clip_review,
             save_clip_to_disk,
             refresh_vod_metadata,
