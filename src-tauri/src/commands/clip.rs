@@ -157,6 +157,13 @@ pub fn save_clip_review(
 /// Frontend consumes this via `navigator.clipboard.writeText(...)`.
 /// Used by the dev-only Review UI behind the "Show clip review tools"
 /// Settings toggle.
+///
+/// **Caveat — config staleness:** the exported `config_resolved` reflects the
+/// CURRENT sensitivity setting plus the per-game TOMLs as they exist now, NOT
+/// a snapshot of what was active when the clips were originally scored. If the
+/// user changes the sensitivity setting between analysis and export, the
+/// dimension scores in `clips[]` were computed under the previous config.
+/// The export annotates this in `config_note` for downstream consumers.
 #[tauri::command]
 pub fn export_review_data_for_vod(
     vod_id: String,
@@ -198,13 +205,33 @@ pub fn export_review_data_for_vod(
 
     let clips_json: Vec<serde_json::Value> = highlights.iter().map(|h| {
         // Parse the stored JSON columns back into structured values so the
-        // export reads as nested JSON, not as escaped strings.
+        // export reads as nested JSON, not as escaped strings. Log a warning
+        // on parse failure so corrupted-JSON rows are distinguishable from
+        // pre-Phase-C rows (both surface as `null` in the export).
         let dimensions: Option<serde_json::Value> = h.scoring_dimensions
             .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok());
+            .and_then(|s| match serde_json::from_str(s) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    log::warn!(
+                        "[export] highlight {} has malformed scoring_dimensions JSON: {} (raw: {:?})",
+                        h.id, e, s
+                    );
+                    None
+                }
+            });
         let sources: Option<serde_json::Value> = h.signal_sources
             .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok());
+            .and_then(|s| match serde_json::from_str(s) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    log::warn!(
+                        "[export] highlight {} has malformed signal_sources JSON: {} (raw: {:?})",
+                        h.id, e, s
+                    );
+                    None
+                }
+            });
 
         serde_json::json!({
             "highlight_id": h.id,
@@ -231,6 +258,9 @@ pub fn export_review_data_for_vod(
             "duration_seconds": vod.duration_seconds,
         },
         "config_resolved": resolved_json,
+        "config_note": "Re-resolved at export time. Reflects the current sensitivity \
+            setting and the per-game TOML files as they exist now. NOT a snapshot of \
+            the config active when the clips in this export were originally scored.",
         "clips": clips_json,
         "exported_at": chrono::Utc::now().to_rfc3339(),
     });
