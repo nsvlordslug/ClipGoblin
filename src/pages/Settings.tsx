@@ -954,6 +954,7 @@ export default function SettingsPage() {
             onClick={() => ui.update({ showReviewTools: !ui.settings.showReviewTools })}
             className={`v4-toggle ${ui.settings.showReviewTools ? 'on' : ''}`}
             aria-label="Toggle clip review tools"
+            aria-pressed={ui.settings.showReviewTools}
           />
         </div>
       </section>
