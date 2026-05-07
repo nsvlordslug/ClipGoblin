@@ -1993,8 +1993,10 @@ fn run_analysis(
             confidence_score: Some(compute_confidence(0.75, 0)),
             explanation: Some("Position-based estimate, no signal analysis".into()),
             event_summary: None,
-            scoring_dimensions: None,  // TODO Task 2: populate from ClipCandidate dimensions
-            signal_sources: None,      // TODO Task 2: populate from ClipCandidate.signal_sources
+            // Intermediate signal event (not a ClipCandidate) — no per-clip
+            // dimension scores or fused source set. Stays None permanently.
+            scoring_dimensions: None,
+            signal_sources: None,
             review_rating: None,       // user-set via Review UI
             review_note: None,         // user-set via Review UI
         });
@@ -2031,8 +2033,10 @@ fn run_analysis(
                 confidence_score: Some(compute_confidence(score, 0)),
                 explanation: Some("Position-based estimate, no signal analysis".into()),
                 event_summary: None,
-                scoring_dimensions: None,  // TODO Task 2: populate from ClipCandidate dimensions
-                signal_sources: None,      // TODO Task 2: populate from ClipCandidate.signal_sources
+                // Intermediate signal event (not a ClipCandidate) — no per-clip
+                // dimension scores or fused source set. Stays None permanently.
+                scoring_dimensions: None,
+                signal_sources: None,
                 review_rating: None,       // user-set via Review UI
                 review_note: None,         // user-set via Review UI
             });
@@ -2145,8 +2149,10 @@ fn analyze_via_chat(
                 confidence_score: Some(compute_confidence(virality, 1)),
                 explanation: Some(format!("1 signal — chat {:.0}% ({} messages)", chat_score * 100.0, count)),
                 event_summary: Some(format!("chat went off with {} messages", count)),
-                scoring_dimensions: None,  // TODO Task 2: populate from ClipCandidate dimensions
-                signal_sources: None,      // TODO Task 2: populate from ClipCandidate.signal_sources
+                // Intermediate signal event (not a ClipCandidate) — no per-clip
+                // dimension scores or fused source set. Stays None permanently.
+                scoring_dimensions: None,
+                signal_sources: None,
                 review_rating: None,       // user-set via Review UI
                 review_note: None,         // user-set via Review UI
             });
@@ -2199,8 +2205,10 @@ fn analyze_via_chat(
                     confidence_score: Some(compute_confidence(virality, 1)),
                     explanation: Some(format!("1 signal — emote burst {:.0}% ({} emotes)", chat_score * 100.0, count)),
                     event_summary: Some(format!("chat hit with {} emotes in 10s", count)),
-                    scoring_dimensions: None,  // TODO Task 2: populate from ClipCandidate dimensions
-                    signal_sources: None,      // TODO Task 2: populate from ClipCandidate.signal_sources
+                    // Intermediate signal event (not a ClipCandidate) — no per-clip
+                    // dimension scores or fused source set. Stays None permanently.
+                    scoring_dimensions: None,
+                    signal_sources: None,
                     review_rating: None,       // user-set via Review UI
                     review_note: None,         // user-set via Review UI
                 });
