@@ -507,37 +507,31 @@ fn optimize_clip_start(c: &mut ClipCandidate, a: &AudioContext) {
 
 /// Optimize clip end to preserve reaction payoff and trim weak tail.
 fn optimize_clip_end(c: &mut ClipCandidate, a: &AudioContext, duration: f64) {
-    // If audio activity continues at the end, extend to catch the full
-    // reaction or sentence. Thresholds are deliberately permissive so normal
-    // speech triggers extension even on VODs with loud average game-audio
-    // (e.g. Elden Ring boss fights raise avg_rms enough that 1.5× avg won't
-    // catch a moderately-loud voice reply mid-sentence).
     let original_end = c.end_time;
+
+    // Always extend by 3s as a speech-tail buffer. Reactions and replies
+    // commonly run a few seconds past the chat/audio peak that triggered
+    // selection, and on loud-game VODs (e.g. Elden Ring boss fights) the
+    // speaker's voice doesn't necessarily register as "high energy"
+    // relative to combat audio average — so a threshold-based extension
+    // alone misses common speech tails. The 45s hard cap in
+    // optimize_clip_boundaries keeps this from running away.
+    c.end_time = (c.end_time + 3.0).min(duration);
+
+    // If audio activity is genuinely high at the (new) end, extend further
+    // to catch sustained reactions / multi-sentence exchanges.
     let end_energy = a.intensity_in_range((c.end_time - 3.0).max(c.start_time), c.end_time);
-    let end_ratio = if a.avg_rms > 0.0 { end_energy / a.avg_rms } else { 0.0 };
     if end_energy > a.avg_rms * 1.1 {
         let extended = (c.end_time + 5.0).min(duration);
-        let ext_intensity = a.intensity_in_range(c.end_time, extended);
-        let ext_ratio = if a.avg_rms > 0.0 { ext_intensity / a.avg_rms } else { 0.0 };
-        if ext_intensity > a.avg_rms * 0.9 {
+        if a.intensity_in_range(c.end_time, extended) > a.avg_rms * 0.9 {
             c.end_time = extended;
-            log::info!(
-                "[boundary] extend [{:.1}s..{:.1}s] +{:.1}s (end={:.2}x ext={:.2}x avg={:.3})",
-                c.start_time, original_end, c.end_time - original_end,
-                end_ratio, ext_ratio, a.avg_rms,
-            );
-        } else {
-            log::info!(
-                "[boundary] no-extend [{:.1}s..{:.1}s] (end={:.2}x ext={:.2}x avg={:.3} — ext below 0.9x)",
-                c.start_time, c.end_time, end_ratio, ext_ratio, a.avg_rms,
-            );
         }
-    } else {
-        log::info!(
-            "[boundary] no-extend [{:.1}s..{:.1}s] (end={:.2}x avg={:.3} — below 1.1x trigger)",
-            c.start_time, c.end_time, end_ratio, a.avg_rms,
-        );
     }
+
+    log::info!(
+        "[boundary] [{:.1}s..{:.1}s -> {:.1}s] (+{:.1}s, avg_rms={:.3})",
+        c.start_time, original_end, c.end_time, c.end_time - original_end, a.avg_rms,
+    );
 
     // If the last 3s are dead air, trim the tail
     let tail_energy = a.intensity_in_range((c.end_time - 3.0).max(c.start_time), c.end_time);
