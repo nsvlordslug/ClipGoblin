@@ -273,7 +273,11 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
                           rating: nextRating,
                           note: highlight?.review_note ?? null,
                         })
-                        await fetchHighlights(clip.vod_id)
+                        // Re-fetch ALL highlights, not just this VOD's. The store's
+                        // fetchHighlights(vodId) replaces the whole highlights array
+                        // with one VOD's results, which would erase highlight data
+                        // for every other VOD currently visible on the Clips page.
+                        await fetchHighlights()
                       } catch (err) {
                         console.error('Failed to save clip review rating:', err)
                       } finally {
@@ -305,7 +309,8 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
                     rating: highlight?.review_rating ?? null,
                     note: noteValue,
                   })
-                  await fetchHighlights(clip.vod_id)
+                  // Re-fetch ALL highlights — see note in the rating-save handler above.
+                  await fetchHighlights()
                 } catch (err) {
                   console.error('Failed to save clip review note:', err)
                 } finally {
