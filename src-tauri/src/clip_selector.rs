@@ -509,14 +509,17 @@ fn optimize_clip_start(c: &mut ClipCandidate, a: &AudioContext) {
 fn optimize_clip_end(c: &mut ClipCandidate, a: &AudioContext, duration: f64) {
     let original_end = c.end_time;
 
-    // Always extend by 3s as a speech-tail buffer. Reactions and replies
+    // Always extend by 5s as a speech-tail buffer. Reactions and replies
     // commonly run a few seconds past the chat/audio peak that triggered
     // selection, and on loud-game VODs (e.g. Elden Ring boss fights) the
     // speaker's voice doesn't necessarily register as "high energy"
     // relative to combat audio average — so a threshold-based extension
-    // alone misses common speech tails. The 45s hard cap in
-    // optimize_clip_boundaries keeps this from running away.
-    c.end_time = (c.end_time + 3.0).min(duration);
+    // alone misses common speech tails. 5s is the empirical sweet spot:
+    // catches most sentence-completion cases (3s frequently wasn't enough
+    // for slower/longer sentences) without burning much benign tail when
+    // there's nothing to catch. The 45s hard cap in
+    // optimize_clip_boundaries keeps this bounded.
+    c.end_time = (c.end_time + 5.0).min(duration);
 
     // If audio activity is genuinely high at the (new) end, extend further
     // to catch sustained reactions / multi-sentence exchanges.
