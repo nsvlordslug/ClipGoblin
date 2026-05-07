@@ -448,6 +448,21 @@ pub fn analyze_replay_value(m: &FusedMoment) -> f64 {
 }
 
 pub fn score_clip_candidate(c: &mut ClipCandidate) {
+    // Phase A: transcript-only candidates emit a boilerplate dimension
+    // fingerprint (typically context=0.88 from the "shock" tag branch in
+    // analyze_context_simplicity, emotion≈0.7625 from the same tag
+    // driving analyze_emotional_spike) regardless of actual content. The
+    // override below replaces those values with less-confident defaults
+    // BEFORE the weighted-sum total is computed, so the total reflects
+    // the scorer's actual epistemic state for transcript-only inputs.
+    // See docs/superpowers/specs/2026-05-07-phase-a-scoring-fix-design.md
+    let is_transcript_only = c.signal_sources.len() == 1
+        && c.signal_sources[0] == SignalSource::Transcript;
+    if is_transcript_only {
+        c.context_simplicity = 0.50;
+        c.emotional_spike = 0.40;
+    }
+
     c.total_score = (c.hook_strength * 0.30)
         + (c.emotional_spike * 0.20)
         + (c.payoff_clarity * 0.20)
@@ -1165,4 +1180,68 @@ pub fn select_clips(
     };
 
     (final_clips, stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_test_candidate(sources: Vec<SignalSource>) -> ClipCandidate {
+        ClipCandidate {
+            start_time: 100.0, end_time: 130.0, peak_time: 115.0,
+            transcript_excerpt: None,
+            event_tags: Vec::new(),
+            emotion_tags: Vec::new(),
+            payoff_summary: None,
+            outcome_label: None,
+            signal_sources: sources,
+            hook_strength: 0.5, emotional_spike: 0.7625,
+            payoff_clarity: 0.55, event_reaction_alignment: 0.47,
+            context_simplicity: 0.88, replay_value: 0.5475,
+            total_score: 0.0,
+            similarity_fingerprint: String::new(),
+            novelty_score: 0.0, diversity_penalty: 0.0, selection_score: 0.0,
+            selected_reason: None, rejection_reason: None,
+        }
+    }
+
+    #[test]
+    fn score_clip_candidate_overrides_dimensions_for_transcript_only() {
+        let mut c = build_test_candidate(vec![SignalSource::Transcript]);
+        score_clip_candidate(&mut c);
+
+        // After scoring, the dimensions should reflect the override.
+        assert!((c.context_simplicity - 0.50).abs() < 1e-6,
+            "context_simplicity should be 0.50, got {}", c.context_simplicity);
+        assert!((c.emotional_spike - 0.40).abs() < 1e-6,
+            "emotional_spike should be 0.40, got {}", c.emotional_spike);
+    }
+
+    #[test]
+    fn score_clip_candidate_does_not_override_for_audio_only() {
+        let mut c = build_test_candidate(vec![SignalSource::Audio]);
+        let original_context = c.context_simplicity;
+        let original_emotion = c.emotional_spike;
+
+        score_clip_candidate(&mut c);
+
+        // Audio-only clips keep their original dimension values.
+        assert!((c.context_simplicity - original_context).abs() < 1e-6,
+            "context_simplicity should be unchanged for audio-only");
+        assert!((c.emotional_spike - original_emotion).abs() < 1e-6,
+            "emotional_spike should be unchanged for audio-only");
+    }
+
+    #[test]
+    fn score_clip_candidate_does_not_override_for_multi_signal_with_transcript() {
+        let mut c = build_test_candidate(vec![SignalSource::Audio, SignalSource::Transcript]);
+        let original_context = c.context_simplicity;
+        let original_emotion = c.emotional_spike;
+
+        score_clip_candidate(&mut c);
+
+        // Transcript+audio is multi-signal — no override.
+        assert!((c.context_simplicity - original_context).abs() < 1e-6);
+        assert!((c.emotional_spike - original_emotion).abs() < 1e-6);
+    }
 }
