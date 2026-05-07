@@ -1120,31 +1120,21 @@ pub fn select_clips(
     log::info!("Clip selector: cooldown={}s distinctness={:.2} penalty={:.2} max_type={} max_clips={}",
         cfg.cooldown_window, cfg.cooldown_distinctness_threshold, cfg.cooldown_penalty,
         cfg.max_same_type, cfg.max_clips);
-    let mut final_clips = diversify_final_selection(&candidates, duration, &cfg);
+    let final_clips = diversify_final_selection(&candidates, duration, &cfg);
 
     log::info!("Clip selector: final {} clips from {} candidates (scores: {})",
         final_clips.len(), candidates_found,
         final_clips.iter().map(|c| format!("{:.0}%", c.total_score * 100.0)).collect::<Vec<_>>().join(", "));
 
-    // Apply per-game duration clamps from selector_config.
-    // Centered on peak_time so the clip stays focused on the moment of interest.
-    for clip in final_clips.iter_mut() {
-        let current = clip.end_time - clip.start_time;
-        let target_min = selector_config.min_clip_duration as f64;
-        let target_max = selector_config.max_clip_duration as f64;
-
-        if current < target_min {
-            // Extend symmetrically around peak_time
-            let half = target_min / 2.0;
-            clip.start_time = (clip.peak_time - half).max(0.0);
-            clip.end_time = (clip.start_time + target_min).min(duration);
-        } else if current > target_max {
-            // Trim symmetrically around peak_time
-            let half = target_max / 2.0;
-            clip.start_time = (clip.peak_time - half).max(0.0);
-            clip.end_time = (clip.start_time + target_max).min(duration);
-        }
-    }
+    // NOTE: Per-game min/max clip-duration enforcement was attempted via a
+    // post-selection clamp (centered on peak_time) but it overwrote the
+    // audio-aware boundaries from optimize_clip_boundaries, producing clips
+    // that cut mid-sentence. Reverted for v1.3.11. The TOML knobs
+    // (selector.min_clip_duration / max_clip_duration) are documented but
+    // not enforced yet — v1.3.12 will integrate them with the audio-aware
+    // boundary logic instead of post-clamping.
+    let _ = selector_config.min_clip_duration;
+    let _ = selector_config.max_clip_duration;
 
     let stats = DetectionStats {
         candidates_found,
