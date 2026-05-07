@@ -536,6 +536,48 @@ const TRANSCRIPT_KEYWORDS: &[&str] = &[
     "behind", "dead", "done", "yes", "dude", "bro",
 ];
 
+/// Detects whether the transcript segment at `idx` is part of a run of
+/// 4 or more consecutive segments with identical text (after trimming).
+///
+/// Whisper sometimes hallucinates background music or low-information audio
+/// as repeated identical lines (e.g., "(little bit of a 'dance' sound)" 16
+/// times in a row). Phase B data showed this passes through the keyword
+/// scanner if a real word happens to also appear in the run, which then
+/// makes the clip register as "transcript signal present" when it shouldn't.
+///
+/// Threshold of 4 chosen to not false-positive on legitimate repetition
+/// (a streamer chanting "go go go" or repeated short callouts) while
+/// catching whisper's typical hallucination patterns. Empty/whitespace
+/// text is excluded so silent segments aren't flagged.
+fn is_hallucinated_segment(segments: &[TranscriptSegment], idx: usize) -> bool {
+    if idx >= segments.len() {
+        return false;
+    }
+    let target = segments[idx].text.trim();
+    if target.is_empty() {
+        return false;
+    }
+
+    // Find the start of the run containing idx by walking backwards while
+    // text matches.
+    let mut run_start = idx;
+    while run_start > 0 && segments[run_start - 1].text.trim() == target {
+        run_start -= 1;
+    }
+
+    // Walk forwards from run_start counting identical text.
+    let mut run_len = 0usize;
+    for i in run_start..segments.len() {
+        if segments[i].text.trim() == target {
+            run_len += 1;
+        } else {
+            break;
+        }
+    }
+
+    run_len >= 4
+}
+
 /// Convert whisper-rs TranscriptResult into the vod.rs TranscriptResult
 /// expected by clip_selector and downstream pipeline.
 fn convert_whisper_result(wr: &whisper::TranscriptResult) -> TranscriptResult {
@@ -3075,5 +3117,93 @@ pub async fn get_stream_status(
             title: s["title"].as_str().map(|x| x.to_string()).filter(|x| !x.is_empty()),
             started_at: s["started_at"].as_str().map(|x| x.to_string()),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seg(start: f64, end: f64, text: &str) -> TranscriptSegment {
+        TranscriptSegment {
+            start,
+            end,
+            text: text.to_string(),
+            words: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn hallucinated_segment_returns_true_for_4_identical_in_a_row() {
+        let segs = vec![
+            seg(0.0, 1.0, "(little bit of a \"dance\" sound)"),
+            seg(1.0, 2.0, "(little bit of a \"dance\" sound)"),
+            seg(2.0, 3.0, "(little bit of a \"dance\" sound)"),
+            seg(3.0, 4.0, "(little bit of a \"dance\" sound)"),
+            seg(4.0, 5.0, "Real speech here."),
+        ];
+        // The first 4 are part of a 4-run, so all four are hallucinated.
+        assert!(is_hallucinated_segment(&segs, 0));
+        assert!(is_hallucinated_segment(&segs, 1));
+        assert!(is_hallucinated_segment(&segs, 2));
+        assert!(is_hallucinated_segment(&segs, 3));
+        // The 5th segment is not part of any run.
+        assert!(!is_hallucinated_segment(&segs, 4));
+    }
+
+    #[test]
+    fn hallucinated_segment_returns_false_for_3_identical_in_a_row() {
+        let segs = vec![
+            seg(0.0, 1.0, "Hi there."),
+            seg(1.0, 2.0, "Hi there."),
+            seg(2.0, 3.0, "Hi there."),
+            seg(3.0, 4.0, "Different now."),
+        ];
+        // 3 in a row is below the 4 threshold.
+        assert!(!is_hallucinated_segment(&segs, 0));
+        assert!(!is_hallucinated_segment(&segs, 1));
+        assert!(!is_hallucinated_segment(&segs, 2));
+        assert!(!is_hallucinated_segment(&segs, 3));
+    }
+
+    #[test]
+    fn hallucinated_segment_returns_false_for_empty_text() {
+        let segs = vec![
+            seg(0.0, 1.0, ""),
+            seg(1.0, 2.0, ""),
+            seg(2.0, 3.0, ""),
+            seg(3.0, 4.0, ""),
+        ];
+        // Empty/whitespace text is not considered hallucination.
+        assert!(!is_hallucinated_segment(&segs, 0));
+    }
+
+    #[test]
+    fn hallucinated_segment_handles_out_of_bounds_idx() {
+        let segs: Vec<TranscriptSegment> = Vec::new();
+        assert!(!is_hallucinated_segment(&segs, 0));
+        assert!(!is_hallucinated_segment(&segs, 100));
+    }
+
+    #[test]
+    fn hallucinated_segment_finds_run_when_idx_is_inside_it() {
+        // 5 identical segments — every index inside the run should be flagged.
+        let segs = vec![
+            seg(0.0, 1.0, "Real."),
+            seg(1.0, 2.0, "noise"),
+            seg(2.0, 3.0, "noise"),
+            seg(3.0, 4.0, "noise"),
+            seg(4.0, 5.0, "noise"),
+            seg(5.0, 6.0, "noise"),
+            seg(6.0, 7.0, "Done."),
+        ];
+        assert!(!is_hallucinated_segment(&segs, 0));  // "Real." standalone
+        // Indices 1-5 are all inside the 5-run.
+        assert!(is_hallucinated_segment(&segs, 1));
+        assert!(is_hallucinated_segment(&segs, 2));
+        assert!(is_hallucinated_segment(&segs, 3));
+        assert!(is_hallucinated_segment(&segs, 4));
+        assert!(is_hallucinated_segment(&segs, 5));
+        assert!(!is_hallucinated_segment(&segs, 6));  // "Done." standalone
     }
 }
