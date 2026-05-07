@@ -30,6 +30,16 @@ pub fn init_db() -> SqliteResult<Connection> {
         conn.execute_batch("REINDEX;")?;
     }
 
+    run_migrations(&conn)?;
+    Ok(conn)
+}
+
+/// Run all schema migrations (CREATE TABLE + ALTER TABLE statements) on the
+/// supplied connection. Extracted from `init_db` so unit tests can run the
+/// same schema against an in-memory database. Production callers should use
+/// `init_db` which also handles file-system setup, WAL mode, and integrity
+/// checks.
+pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
@@ -232,7 +242,7 @@ pub fn init_db() -> SqliteResult<Connection> {
         CREATE INDEX IF NOT EXISTS idx_ai_usage_log_vod ON ai_usage_log(vod_id);"
     )?;
 
-    Ok(conn)
+    Ok(())
 }
 
 // ── Row types ──
@@ -677,6 +687,23 @@ pub fn insert_highlight(conn: &Connection, h: &HighlightRow) -> SqliteResult<()>
 
 pub fn delete_highlights_for_vod(conn: &Connection, vod_id: &str) -> SqliteResult<()> {
     conn.execute("DELETE FROM highlights WHERE vod_id = ?1", params![vod_id])?;
+    Ok(())
+}
+
+/// Update review_rating and review_note on a single highlight row.
+/// `rating` of `None` clears it; values must be one of `"good"`, `"meh"`,
+/// `"boring"` (validated at the Tauri-command layer, not here, since this
+/// helper is also used internally where invariants are already known).
+pub fn set_clip_review(
+    conn: &Connection,
+    highlight_id: &str,
+    rating: Option<&str>,
+    note: Option<&str>,
+) -> SqliteResult<()> {
+    conn.execute(
+        "UPDATE highlights SET review_rating = ?1, review_note = ?2 WHERE id = ?3",
+        params![rating, note, highlight_id],
+    )?;
     Ok(())
 }
 
@@ -1389,4 +1416,68 @@ pub fn reschedule_upload(conn: &Connection, id: &str, new_time: &str) -> SqliteR
         params![new_time, id],
     )?;
     Ok(changed > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn fresh_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        conn
+    }
+
+    fn insert_test_highlight(conn: &Connection, id: &str, vod_id: &str) {
+        let h = HighlightRow {
+            id: id.to_string(),
+            vod_id: vod_id.to_string(),
+            start_seconds: 0.0,
+            end_seconds: 30.0,
+            virality_score: 0.7,
+            audio_score: 0.5,
+            visual_score: 0.5,
+            chat_score: 0.5,
+            transcript_snippet: None,
+            description: None,
+            tags: None,
+            thumbnail_path: None,
+            created_at: "2026-05-07T00:00:00Z".to_string(),
+            confidence_score: None,
+            explanation: None,
+            event_summary: None,
+            scoring_dimensions: None,
+            signal_sources: None,
+            review_rating: None,
+            review_note: None,
+        };
+        insert_highlight(conn, &h).unwrap();
+    }
+
+    #[test]
+    fn set_clip_review_writes_rating_and_note() {
+        let conn = fresh_db();
+        insert_test_highlight(&conn, "h1", "v1");
+
+        set_clip_review(&conn, "h1", Some("good"), Some("nice banter")).unwrap();
+
+        let highlights = get_highlights_by_vod(&conn, "v1").unwrap();
+        assert_eq!(highlights.len(), 1);
+        assert_eq!(highlights[0].review_rating.as_deref(), Some("good"));
+        assert_eq!(highlights[0].review_note.as_deref(), Some("nice banter"));
+    }
+
+    #[test]
+    fn set_clip_review_clears_rating_and_note_when_none() {
+        let conn = fresh_db();
+        insert_test_highlight(&conn, "h1", "v1");
+        set_clip_review(&conn, "h1", Some("good"), Some("first pass")).unwrap();
+
+        set_clip_review(&conn, "h1", None, None).unwrap();
+
+        let highlights = get_highlights_by_vod(&conn, "v1").unwrap();
+        assert_eq!(highlights[0].review_rating, None);
+        assert_eq!(highlights[0].review_note, None);
+    }
 }

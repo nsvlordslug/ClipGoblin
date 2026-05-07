@@ -121,3 +121,29 @@ pub fn save_clip_to_disk(
     log::info!("[save_clip_to_disk] Saved clip {} to: {}", clip_id, dest_str);
     Ok(Some(dest_str))
 }
+
+/// Save a user-supplied review (rating + note) for a single highlight row.
+/// Used by the dev-only Review UI behind the "Show clip review tools"
+/// Settings toggle. Rating must be one of "good", "meh", "boring", or
+/// `None` to clear.
+#[tauri::command]
+pub fn save_clip_review(
+    highlight_id: String,
+    rating: Option<String>,
+    note: Option<String>,
+    db: State<'_, DbConn>,
+) -> Result<(), String> {
+    if let Some(ref r) = rating {
+        if r != "good" && r != "meh" && r != "boring" {
+            return Err(format!(
+                "Invalid review rating '{}'. Expected 'good', 'meh', or 'boring'.",
+                r
+            ));
+        }
+    }
+
+    let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+
+    db::set_clip_review(&conn, &highlight_id, rating.as_deref(), note.as_deref())
+        .map_err(|e| format!("DB error saving review: {}", e))
+}
