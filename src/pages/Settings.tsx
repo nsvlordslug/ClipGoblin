@@ -985,6 +985,7 @@ export default function SettingsPage() {
         <div className="space-y-2 text-sm">
           <div className="flex gap-2">
             <span className="text-slate-300">Version:</span>
+            {/* Deliberately non-accessible: hidden developer-mode unlock gesture (7 taps within 2s). No role, aria-label, or keyboard handler — discoverability is the anti-goal. */}
             <span
               className="text-slate-400 cursor-default select-none"
               onClick={handleVersionTap}
