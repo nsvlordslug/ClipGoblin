@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { Save, FolderOpen, Info, Brain, Check, Loader2, X, Zap, Sun, Moon, Bookmark, Pencil, Trash2, HardDrive, ExternalLink, Gauge, Tv, LogOut, Download, Mic, Cpu } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
@@ -6,7 +6,7 @@ import ConnectedAccounts from '../components/ConnectedAccounts'
 import Tooltip from '../components/Tooltip'
 import { useAiStore, PROVIDER_META, MODEL_OPTIONS, type AiProvider } from '../stores/aiStore'
 import { useAppStore } from '../stores/appStore'
-import { useUiStore } from '../stores/uiStore'
+import { useUiStore, tryAdvanceTapCounter, type TapCounterState } from '../stores/uiStore'
 import { useTemplateStore } from '../stores/templateStore'
 import { CAPTION_STYLES, EXPORT_PRESETS } from '../lib/editTypes'
 import { version as appVersion } from '../../package.json'
@@ -173,6 +173,20 @@ export default function SettingsPage() {
 
   const ai = useAiStore()
   const ui = useUiStore()
+  const tapStateRef = useRef<TapCounterState>({ count: 0, lastTap: 0 })
+
+  const handleVersionTap = () => {
+    const result = tryAdvanceTapCounter(
+      tapStateRef.current,
+      Date.now(),
+      ui.settings.developerModeUnlocked,
+    )
+    tapStateRef.current = result.next
+    if (result.shouldUnlock) {
+      ui.update({ developerModeUnlocked: true })
+    }
+  }
+
   const { loggedInUser, twitchLogin, twitchLogout, isLoading: twitchLoading } = useAppStore()
   const s = ai.settings
   const isByok = ai.isByok()
@@ -971,7 +985,12 @@ export default function SettingsPage() {
         <div className="space-y-2 text-sm">
           <div className="flex gap-2">
             <span className="text-slate-300">Version:</span>
-            <span className="text-slate-400">{appVersion}</span>
+            <span
+              className="text-slate-400 cursor-default select-none"
+              onClick={handleVersionTap}
+            >
+              {appVersion}
+            </span>
           </div>
           <div className="flex gap-2">
             <span className="text-slate-300">Built with:</span>
