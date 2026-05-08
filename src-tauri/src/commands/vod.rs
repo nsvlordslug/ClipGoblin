@@ -530,10 +530,16 @@ pub struct TranscriptResult {
 
 // â”€â”€ Keyword patterns for transcript scanning â”€â”€
 // These match the keywords used by clip_selector::generate_transcript_candidates
+// Phase A amendment: keyword list tightened to genuinely emotional /
+// exclamation-shaped words only. Conversational gaming words ("let's go",
+// "what the", "run", "help", "behind", "dead", "done", "yes", "dude",
+// "bro") were producing false-positive kw_boost on calm planning moments.
+// Real strong reactions using those words still surface via audio peaks
+// + multi-signal bonus, not via this keyword path.
+// See docs/superpowers/specs/2026-05-07-phase-a-scoring-fix-design.md §7a.2
 const TRANSCRIPT_KEYWORDS: &[&str] = &[
-    "no way", "oh my god", "what the", "holy", "let's go", "lets go",
-    "clutch", "rage", "noooo", "nooo", "oh no", "run", "help",
-    "behind", "dead", "done", "yes", "dude", "bro",
+    "no way", "oh my god", "holy", "clutch", "rage",
+    "noooo", "nooo", "oh no",
 ];
 
 /// Detects whether the transcript segment at `idx` is part of a run of
@@ -3233,30 +3239,50 @@ mod tests {
 
     #[test]
     fn convert_whisper_result_drops_keywords_from_hallucinated_runs() {
-        // Build a synthetic whisper result with:
-        // - 5 hallucinated identical segments containing "what the" (a TRANSCRIPT_KEYWORDS hit)
-        // - 1 real segment containing "let's go" (also a hit)
+        // Hallucinated segments contain "oh my god" (a kept keyword) — should be filtered.
+        // The real segment contains "no way" (also kept) — should survive.
+        // Original test used "what the" / "let's go" but Phase A §7a.2 dropped those
+        // from TRANSCRIPT_KEYWORDS, so the test was switched to keepers.
         let wr = whisper::TranscriptResult {
             language: "en".to_string(),
             duration: 6.0,
             segments: vec![
-                whisper::TranscriptSegment { start: 0.0, end: 1.0, text: "what the dance sound".to_string() },
-                whisper::TranscriptSegment { start: 1.0, end: 2.0, text: "what the dance sound".to_string() },
-                whisper::TranscriptSegment { start: 2.0, end: 3.0, text: "what the dance sound".to_string() },
-                whisper::TranscriptSegment { start: 3.0, end: 4.0, text: "what the dance sound".to_string() },
-                whisper::TranscriptSegment { start: 4.0, end: 5.0, text: "what the dance sound".to_string() },
-                whisper::TranscriptSegment { start: 5.0, end: 6.0, text: "let's go beat the boss".to_string() },
+                whisper::TranscriptSegment { start: 0.0, end: 1.0, text: "oh my god dance sound".to_string() },
+                whisper::TranscriptSegment { start: 1.0, end: 2.0, text: "oh my god dance sound".to_string() },
+                whisper::TranscriptSegment { start: 2.0, end: 3.0, text: "oh my god dance sound".to_string() },
+                whisper::TranscriptSegment { start: 3.0, end: 4.0, text: "oh my god dance sound".to_string() },
+                whisper::TranscriptSegment { start: 4.0, end: 5.0, text: "oh my god dance sound".to_string() },
+                whisper::TranscriptSegment { start: 5.0, end: 6.0, text: "no way that worked".to_string() },
             ],
         };
 
         let result = convert_whisper_result(&wr);
 
-        // The hallucinated "what the" should NOT have produced any keyword entries.
-        // Only the real "let's go" should be present.
-        let has_what_the = result.keywords_found.iter().any(|k| k.keyword == "what the");
-        let has_lets_go = result.keywords_found.iter().any(|k| k.keyword == "let's go");
+        let has_oh_my_god = result.keywords_found.iter().any(|k| k.keyword == "oh my god");
+        let has_no_way = result.keywords_found.iter().any(|k| k.keyword == "no way");
 
-        assert!(!has_what_the, "Hallucinated 'what the' should have been filtered out");
-        assert!(has_lets_go, "Real 'let's go' should still be detected");
+        assert!(!has_oh_my_god, "Hallucinated 'oh my god' should have been filtered out");
+        assert!(has_no_way, "Real 'no way' should still be detected");
+    }
+
+    #[test]
+    fn transcript_keywords_excludes_conversational_words() {
+        // Phase A amendment: words that appear in calm gaming chat ("let's go",
+        // "what the", "run", etc.) used to trigger kw_boost on boring moments.
+        // The list now keeps only exclamation-shaped reaction words.
+        let conversational = ["what the", "let's go", "lets go", "run", "help",
+                              "behind", "dead", "done", "yes", "dude", "bro"];
+        for word in &conversational {
+            assert!(!TRANSCRIPT_KEYWORDS.contains(word),
+                "Conversational word {:?} should NOT be in TRANSCRIPT_KEYWORDS", word);
+        }
+
+        // Verify the genuinely-emotional keepers are still present.
+        let kept = ["no way", "oh my god", "holy", "clutch", "rage",
+                    "noooo", "nooo", "oh no"];
+        for word in &kept {
+            assert!(TRANSCRIPT_KEYWORDS.contains(word),
+                "Emotional word {:?} should still be in TRANSCRIPT_KEYWORDS", word);
+        }
     }
 }
