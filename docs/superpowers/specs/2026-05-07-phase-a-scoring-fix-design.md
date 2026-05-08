@@ -131,6 +131,65 @@ None at the time of writing. All design decisions resolved during the brainstorm
 - Q4 (dimensions vs cap): both
 - Hallucination handling: include narrow guard (4+ identical repeats) in Phase A scope
 
+## 7a. Post-smoke-test scope expansion (added 2026-05-08)
+
+After Tasks 1-5 landed and the implementer ran a smoke-test re-analysis on the same DBD VOD that drove the original spec, two additional precision leaks surfaced in the data:
+
+- **Audio-only clips with shock-family tags emit the same boilerplate `context=0.88` as transcript-only clips.** The original `analyze_context_simplicity` returns 0.88 for ANY clip with `shock`/`jumpscare`/`scream`/`surprise` tags, regardless of signal source. Phase B happened to surface this issue mostly via transcript-only clips because of how the keyword detector tagged them, but the underlying issue is broader: `generate_audio_candidates` also adds those tags for certain audio-peak patterns. Result: boring audio-only "Chat about games" (74%) and "Soda flavor" (70%) clips persist above the 65% threshold even after the original fix.
+- **`keyword_boost_for_range` adds up to +0.20 based on TRANSCRIPT_KEYWORDS matches.** The current keyword list includes conversational words (`let's go`, `what the`, `run`, `help`, `behind`, `dead`, `done`, `yes`, `dude`, `bro`) that appear constantly in calm gaming chatter. Result: "Build talk" (78%, audio+transcript) gets a kw_boost from "let's go" appearing in a calm strategy discussion — pushing a multi-signal-but-uninteresting clip into the high-score band.
+
+### 7a.1 Layer 4: generalize the override + cap predicate
+
+The existing `is_transcript_only = signal_sources == [Transcript]` predicate becomes:
+
+```rust
+let has_shock_family_tag = |c: &ClipCandidate| -> bool {
+    let tag_check = |t: &str| matches!(t, "shock" | "jumpscare" | "scream" | "surprise");
+    c.event_tags.iter().any(|t| tag_check(t.as_str()))
+        || c.emotion_tags.iter().any(|t| tag_check(t.as_str()))
+};
+let is_unreliable_single_signal = c.signal_sources.len() == 1
+    && has_shock_family_tag(c);
+```
+
+This catches:
+- Transcript-only with shock tag (the original Phase A target)
+- Audio-only with shock/jumpscare tag (the new audio-only false positives)
+- Chat-only or community-clip-only with these tags (hypothetical, but covered for completeness)
+
+The override (`context = 0.50, emotion = 0.40`) and the 65% cap apply to the broader set. The same persist-time cap at `vod.rs:1902` uses the same predicate.
+
+**Trade-off:** borderline-good audio-only clips with shock-family tags get suppressed too. Specific Phase B example: the "Florida swamp" clip (audio-only, `ambush,jumpscare,shock` tags, rated 'good' but borderline — a 23-second mild map-name joke) drops from 72% to ~61%. Decision (per Slug 2026-05-08): generalize anyway. The clip is still in the candidate pool, just ranked below multi-signal good clips. The user-facing UX gain (no boring clips at 70%+) outweighs the loss on borderline single-signal clips.
+
+### 7a.2 Layer 5: tighten TRANSCRIPT_KEYWORDS
+
+Drop conversational words from the list at `commands/vod.rs:533`. Keep only words that genuinely indicate strong reactions:
+
+**Keep** (8 words): `"no way", "oh my god", "holy", "clutch", "rage", "noooo", "nooo", "oh no"`
+
+**Drop** (10 words): `"what the", "let's go", "lets go", "run", "help", "behind", "dead", "done", "yes", "dude", "bro"`
+
+These conversational words appear constantly in calm gaming speech and produce false-positive kw_boost. The 8 kept words are exclamation-shaped and rarely appear in calm planning.
+
+**Rationale for not relying on keyword absence alone:** real "let's gooo!" reactions fire audio peaks AND chat reactions, so they'll still score high through the dimensions + multi-signal bonus + audio peak signal. The kw_boost was the wrong tool to detect them — audio analysis is.
+
+**Risk:** false negatives — a real strong reaction using only the dropped words and no audio peak might miss the boost. Mitigation: rare in practice; user can rate it good in the Review UI for future tuning iterations.
+
+### 7a.3 Decision matrix (updated)
+
+| Configuration | Original Phase A behavior | Post-amendment behavior |
+|---|---|---|
+| `[Transcript]` + shock tag | Override + cap fires | Same (covered by new predicate) |
+| `[Transcript]` + only "speech" tag | Override + cap fires | Override + cap does NOT fire (no shock-family tag) — but those clips don't have the boilerplate fingerprint anyway |
+| `[Audio]` + shock/jumpscare tag | NOT covered | **Override + cap fires** (NEW) |
+| `[Audio]` + chase/encounter/hype tag | NOT covered | NOT covered (different context_simplicity branch, not the boilerplate) |
+| `[Audio, Transcript]` + any tag | NOT covered | NOT covered (multi-signal preserves) |
+| Any multi-signal | NOT covered | NOT covered |
+
+### 7a.4 What ships in v1.3.12
+
+The amendment scope ships in the SAME v1.3.12 release as the original Phase A fix (Tasks 1-5). Not a separate release. After all three layers (hallucination guard + dimension override/cap + keyword tightening) land, Slug runs the smoke test with all of them active, then version-bumps + tags + ships.
+
 ## 8. Out-of-scope follow-ups for v1.3.13+
 
 - Broader whisper post-processing — preventing hallucinated lines from being produced at all (currently we just discard them downstream)

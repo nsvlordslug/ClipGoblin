@@ -659,7 +659,279 @@ git commit -m "test(scoring): Phase B boilerplate fingerprint regression test"
 
 ---
 
-## Task 6: Manual smoke test + version bump + ship v1.3.12
+## Task 7: Generalize override + cap predicate to single-signal-with-shock-tag (TDD)
+
+**Goal:** Replace the narrow `is_transcript_only` predicate with `is_unreliable_single_signal` which fires for any single-signal clip carrying `shock`/`jumpscare`/`scream`/`surprise` tags. Both the in-scorer override + cap (clip_selector.rs) AND the persist-time cap (vod.rs:1902) use the new predicate.
+
+**Files:**
+- Modify: `src-tauri/src/clip_selector.rs` — replace `is_transcript_only` definition with `is_unreliable_single_signal`. Same use-sites (override block and cap block) consume the renamed variable.
+- Modify: `src-tauri/src/commands/vod.rs` — replace `is_transcript_only_at_persist` with the same broader predicate.
+
+- [ ] **Step 7.1: Write failing tests in clip_selector::tests**
+
+Append inside `mod tests` in `src-tauri/src/clip_selector.rs`:
+
+```rust
+    #[test]
+    fn score_clip_candidate_overrides_dimensions_for_audio_only_with_shock_tag() {
+        // Audio-only clips with shock-family tags should ALSO get the override.
+        // Mirrors the audio-only "Chat about games" Phase B clip pattern:
+        // signal_sources=[Audio], tags include "shock" or "jumpscare".
+        let mut c = build_test_candidate(vec![SignalSource::Audio]);
+        c.event_tags = vec!["jumpscare".to_string(), "audio-spike".to_string()];
+        c.emotion_tags = vec!["shock".to_string()];
+
+        score_clip_candidate(&mut c);
+
+        assert!((c.context_simplicity - 0.50).abs() < 1e-6,
+            "context_simplicity should be 0.50 for audio-only-with-shock-tag, got {}", c.context_simplicity);
+        assert!((c.emotional_spike - 0.40).abs() < 1e-6,
+            "emotional_spike should be 0.40, got {}", c.emotional_spike);
+    }
+
+    #[test]
+    fn score_clip_candidate_does_not_override_for_audio_only_without_shock_tag() {
+        // Audio-only with chase/encounter tags (NOT shock-family) keeps original dims.
+        let mut c = build_test_candidate(vec![SignalSource::Audio]);
+        c.event_tags = vec!["chase".to_string(), "encounter".to_string()];
+        c.emotion_tags = vec!["hype".to_string()];
+        let original_context = c.context_simplicity;
+        let original_emotion = c.emotional_spike;
+
+        score_clip_candidate(&mut c);
+
+        assert!((c.context_simplicity - original_context).abs() < 1e-6,
+            "audio-only without shock-family tag should keep context, got {}", c.context_simplicity);
+        assert!((c.emotional_spike - original_emotion).abs() < 1e-6);
+    }
+
+    #[test]
+    fn score_clip_candidate_caps_audio_only_with_shock_tag_at_65_percent() {
+        let mut c = build_test_candidate(vec![SignalSource::Audio]);
+        c.event_tags = vec!["jumpscare".to_string()];
+        c.emotion_tags = vec!["shock".to_string()];
+        c.hook_strength = 0.99;
+        c.payoff_clarity = 0.99;
+        c.event_reaction_alignment = 0.99;
+        c.replay_value = 0.99;
+
+        score_clip_candidate(&mut c);
+
+        assert!(c.total_score <= 0.65 + 1e-6,
+            "audio-only-with-shock-tag total_score should be capped at 0.65, got {}", c.total_score);
+    }
+```
+
+- [ ] **Step 7.2: Run tests, verify failure**
+
+Run: `cd src-tauri && cargo test clip_selector::tests::score_clip_candidate_overrides_dimensions_for_audio_only_with_shock_tag clip_selector::tests::score_clip_candidate_caps_audio_only_with_shock_tag -- --nocapture`
+
+Expected: assertion failures — `context_simplicity should be 0.50 for audio-only-with-shock-tag, got 0.88` AND `audio-only-with-shock-tag total_score should be capped at 0.65, got X` where X > 0.65. The third test (`does_not_override_for_audio_only_without_shock_tag`) should already pass (no override fires today for audio-only).
+
+- [ ] **Step 7.3: Generalize the predicate in `score_clip_candidate`**
+
+In `src-tauri/src/clip_selector.rs`, find the override block at the top of `score_clip_candidate` (around line 459 — the lines added in Task 3):
+
+```rust
+    let is_transcript_only = c.signal_sources.len() == 1
+        && c.signal_sources[0] == SignalSource::Transcript;
+    if is_transcript_only {
+        c.context_simplicity = 0.50;
+        c.emotional_spike = 0.40;
+    }
+```
+
+Replace with:
+
+```rust
+    // Phase A (amended): the override + cap fire for any single-signal
+    // candidate carrying shock-family tags ("shock" / "jumpscare" /
+    // "scream" / "surprise"). These are the clips where
+    // analyze_context_simplicity returns 0.88 and analyze_emotional_spike
+    // gets the +0.35 shock-tag boost — the boilerplate fingerprint Phase B
+    // identified. Multi-signal clips with the same tags are unaffected
+    // (their other signals provide independent confirmation). See
+    // docs/superpowers/specs/2026-05-07-phase-a-scoring-fix-design.md §7a
+    let has_shock_family_tag = {
+        let tag_check = |t: &str| matches!(t, "shock" | "jumpscare" | "scream" | "surprise");
+        c.event_tags.iter().any(|t| tag_check(t.as_str()))
+            || c.emotion_tags.iter().any(|t| tag_check(t.as_str()))
+    };
+    let is_unreliable_single_signal = c.signal_sources.len() == 1 && has_shock_family_tag;
+    if is_unreliable_single_signal {
+        c.context_simplicity = 0.50;
+        c.emotional_spike = 0.40;
+    }
+```
+
+Then find the cap block at the END of `score_clip_candidate` (added in Task 4):
+
+```rust
+    if is_transcript_only {
+        c.total_score = c.total_score.min(0.65);
+    }
+```
+
+Replace `is_transcript_only` with `is_unreliable_single_signal`:
+
+```rust
+    if is_unreliable_single_signal {
+        c.total_score = c.total_score.min(0.65);
+    }
+```
+
+- [ ] **Step 7.4: Generalize the predicate in vod.rs persist site**
+
+In `src-tauri/src/commands/vod.rs`, find the persist-time cap added in commit `1740014` (around line 1902):
+
+```rust
+        let is_transcript_only_at_persist = c.signal_sources.len() == 1
+            && c.signal_sources[0] == clip_selector::SignalSource::Transcript;
+        let raw_score = if is_transcript_only_at_persist {
+            (c.total_score + kw_boost).min(0.65)
+        } else {
+            (c.total_score + kw_boost).min(0.99)
+        };
+```
+
+Replace with:
+
+```rust
+        // Phase A (amended): re-apply the broader single-signal-with-shock-tag
+        // cap at persist time. Mirrors the predicate in score_clip_candidate.
+        let has_shock_family_tag = {
+            let tag_check = |t: &str| matches!(t, "shock" | "jumpscare" | "scream" | "surprise");
+            c.event_tags.iter().any(|t| tag_check(t.as_str()))
+                || c.emotion_tags.iter().any(|t| tag_check(t.as_str()))
+        };
+        let is_unreliable_single_signal_at_persist = c.signal_sources.len() == 1
+            && has_shock_family_tag;
+        let raw_score = if is_unreliable_single_signal_at_persist {
+            (c.total_score + kw_boost).min(0.65)
+        } else {
+            (c.total_score + kw_boost).min(0.99)
+        };
+```
+
+- [ ] **Step 7.5: Run tests, verify pass**
+
+Run: `cd src-tauri && cargo test clip_selector::tests -- --nocapture`
+
+Expected: 9 tests passing — the original 6 (3 from Task 3 + 2 from Task 4 + 1 from Task 5) plus the 3 new ones from Step 7.1.
+
+The original Task 3/4 tests (transcript-only) still pass because transcript-only candidates always have `shock` tag (from `generate_transcript_candidates`'s shock_words check), so they continue to satisfy the broader predicate.
+
+If they DON'T pass, the issue is likely that `build_test_candidate` constructs a candidate with empty `event_tags` and `emotion_tags`, so the original transcript-only tests no longer trigger the override (no shock-family tag present). Fix by updating `build_test_candidate` to include a shock tag by default OR by updating the original tests to set the tag explicitly.
+
+Read the original tests' assertions and decide which approach is cleaner. Recommended: update the original 3 Task 3 tests + 2 Task 4 tests + 1 Task 5 test to explicitly set `c.emotion_tags = vec!["shock".to_string()];` for the transcript-only cases, to make the test conditions self-documenting. The `build_test_candidate` helper stays empty-tagged.
+
+- [ ] **Step 7.6: Run full crate test suite**
+
+Run: `cd src-tauri && cargo test 2>&1 | tail -10`
+
+Expected: 432+ passed, 0 failed.
+
+- [ ] **Step 7.7: Commit**
+
+```bash
+git add src-tauri/src/clip_selector.rs src-tauri/src/commands/vod.rs
+git commit -m "feat(scoring): generalize override + cap to single-signal-with-shock-tag"
+```
+
+---
+
+## Task 8: Tighten TRANSCRIPT_KEYWORDS to drop conversational words (TDD)
+
+**Goal:** Remove conversational words from `TRANSCRIPT_KEYWORDS` to stop kw_boost from firing on calm gaming chatter. Keep only genuinely emotional exclamation-shaped words.
+
+**Files:**
+- Modify: `src-tauri/src/commands/vod.rs` — replace the contents of `TRANSCRIPT_KEYWORDS` at line 533. Add 1 unit test to verify the new list.
+
+- [ ] **Step 8.1: Write the failing test**
+
+Append to `mod tests` in `src-tauri/src/commands/vod.rs`:
+
+```rust
+    #[test]
+    fn transcript_keywords_excludes_conversational_words() {
+        // Phase A amendment: words that appear in calm gaming chat ("let's go",
+        // "what the", "run", etc.) used to trigger kw_boost on boring moments.
+        // The list now keeps only exclamation-shaped reaction words.
+        let conversational = ["what the", "let's go", "lets go", "run", "help",
+                              "behind", "dead", "done", "yes", "dude", "bro"];
+        for word in &conversational {
+            assert!(!TRANSCRIPT_KEYWORDS.contains(word),
+                "Conversational word {:?} should NOT be in TRANSCRIPT_KEYWORDS", word);
+        }
+
+        // Verify the genuinely-emotional keepers are still present.
+        let kept = ["no way", "oh my god", "holy", "clutch", "rage",
+                    "noooo", "nooo", "oh no"];
+        for word in &kept {
+            assert!(TRANSCRIPT_KEYWORDS.contains(word),
+                "Emotional word {:?} should still be in TRANSCRIPT_KEYWORDS", word);
+        }
+    }
+```
+
+- [ ] **Step 8.2: Run test, verify failure**
+
+Run: `cd src-tauri && cargo test commands::vod::tests::transcript_keywords_excludes_conversational -- --nocapture`
+
+Expected: assertion failure — `Conversational word "what the" should NOT be in TRANSCRIPT_KEYWORDS` (the word is currently in the list).
+
+- [ ] **Step 8.3: Update the keyword list**
+
+In `src-tauri/src/commands/vod.rs`, find `const TRANSCRIPT_KEYWORDS` at line 533:
+
+```rust
+const TRANSCRIPT_KEYWORDS: &[&str] = &[
+    "no way", "oh my god", "what the", "holy", "let's go", "lets go",
+    "clutch", "rage", "noooo", "nooo", "oh no", "run", "help",
+    "behind", "dead", "done", "yes", "dude", "bro",
+];
+```
+
+Replace with:
+
+```rust
+// Phase A amendment: keyword list tightened to genuinely emotional /
+// exclamation-shaped words only. Conversational gaming words ("let's go",
+// "what the", "run", "help", "behind", "dead", "done", "yes", "dude",
+// "bro") were producing false-positive kw_boost on calm planning moments.
+// Real strong reactions using those words still surface via audio peaks
+// + multi-signal bonus, not via this keyword path.
+// See docs/superpowers/specs/2026-05-07-phase-a-scoring-fix-design.md §7a.2
+const TRANSCRIPT_KEYWORDS: &[&str] = &[
+    "no way", "oh my god", "holy", "clutch", "rage",
+    "noooo", "nooo", "oh no",
+];
+```
+
+- [ ] **Step 8.4: Run tests, verify pass**
+
+Run: `cd src-tauri && cargo test commands::vod::tests -- --nocapture`
+
+Expected: all `commands::vod::tests` pass — the 6 hallucination-related tests from Tasks 1-2 plus the new keyword-list test.
+
+If the existing `convert_whisper_result_drops_keywords_from_hallucinated_runs` test fails, it's because that test uses `"what the dance sound"` in segments and asserts `has_what_the` to verify filtering. Since `"what the"` is no longer a keyword, `has_what_the` becomes a vacuously-true negative — the test loses meaning. Update the test to use a keyword that's STILL in the list, e.g. swap `"what the dance sound"` for `"oh my god dance sound"` so the assertion still verifies hallucination filtering with a real keyword.
+
+- [ ] **Step 8.5: Run full crate test suite**
+
+Run: `cd src-tauri && cargo test 2>&1 | tail -10`
+
+Expected: all tests pass.
+
+- [ ] **Step 8.6: Commit**
+
+```bash
+git add src-tauri/src/commands/vod.rs
+git commit -m "feat(scoring): drop conversational words from TRANSCRIPT_KEYWORDS"
+```
+
+---
+
+## Task 9 (formerly Task 6): Manual smoke test + version bump + ship v1.3.12
 
 **Goal:** Validate the fix on a real VOD before shipping, bump version, tag, push.
 
