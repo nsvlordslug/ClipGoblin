@@ -952,26 +952,28 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      {/* Developer tools — hidden behind a toggle for clip-quality investigation */}
-      <section className="v4-section">
-        <h3 className="v4-section-label">🔧 Developer Tools</h3>
-        <div className="v4-setting-row">
-          <div className="v4-setting-info">
-            <div className="v4-setting-name">Show Clip Review Tools</div>
-            <div className="v4-setting-desc">
-              Adds rating buttons and notes to each clip card, plus an "Export review data" button on the Vods page.
-              Used to gather feedback for tuning the clip scoring model. Off by default. No effect on normal clip generation.
+      {/* Developer tools — hidden behind 7-tap-on-version unlock (see uiStore.ts tryAdvanceTapCounter). */}
+      {ui.settings.developerModeUnlocked && (
+        <section className="v4-section">
+          <h3 className="v4-section-label">🔧 Developer Tools</h3>
+          <div className="v4-setting-row">
+            <div className="v4-setting-info">
+              <div className="v4-setting-name">Show Clip Review Tools</div>
+              <div className="v4-setting-desc">
+                Adds rating buttons and notes to each clip card, plus an "Export review data" button on the Vods page.
+                Used to gather feedback for tuning the clip scoring model. Off by default. No effect on normal clip generation.
+              </div>
             </div>
+            <button
+              type="button"
+              onClick={() => ui.update({ showReviewTools: !ui.settings.showReviewTools })}
+              className={`v4-toggle ${ui.settings.showReviewTools ? 'on' : ''}`}
+              aria-label="Toggle clip review tools"
+              aria-pressed={ui.settings.showReviewTools}
+            />
           </div>
-          <button
-            type="button"
-            onClick={() => ui.update({ showReviewTools: !ui.settings.showReviewTools })}
-            className={`v4-toggle ${ui.settings.showReviewTools ? 'on' : ''}`}
-            aria-label="Toggle clip review tools"
-            aria-pressed={ui.settings.showReviewTools}
-          />
-        </div>
-      </section>
+        </section>
+      )}
 
       {/* Clip Templates */}
       <TemplateManager />
