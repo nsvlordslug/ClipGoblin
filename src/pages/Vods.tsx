@@ -97,7 +97,11 @@ function v4StatusLabel(vod: { analysis_status: string; analysis_progress?: numbe
 
 export default function Vods() {
   const { loggedInUser, vods, isLoading, checkLogin, fetchVods, refreshVods, removeVod, updateVod, removeClipsForVod } = useAppStore()
-  const showReviewTools = useUiStore((s) => s.settings.showReviewTools)
+  // Phase A v1.3.13: review tools require BOTH the developer-mode unlock AND
+  // the explicit showReviewTools toggle. Either being false hides the UI.
+  const showReviewTools = useUiStore(
+    (s) => s.settings.developerModeUnlocked && s.settings.showReviewTools,
+  )
   const navigate = useNavigate()
   const [refreshingId, setRefreshingId] = useState<string | null>(null)
   const [refreshedId, setRefreshedId] = useState<string | null>(null)

@@ -139,7 +139,11 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
   scheduledPlatforms?: Array<{ platform: string; scheduled_time: string }>
 }) {
   const [videoSrc, setVideoSrc] = useState<string | null>(null)
-  const showReviewTools = useUiStore((s) => s.settings.showReviewTools)
+  // Phase A v1.3.13: review tools require BOTH the developer-mode unlock AND
+  // the explicit showReviewTools toggle. Either being false hides the UI.
+  const showReviewTools = useUiStore(
+    (s) => s.settings.developerModeUnlocked && s.settings.showReviewTools,
+  )
   const fetchHighlights = useAppStore((s) => s.fetchHighlights)
   const [savingReview, setSavingReview] = useState(false)
 
