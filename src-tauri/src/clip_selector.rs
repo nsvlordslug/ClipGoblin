@@ -456,9 +456,21 @@ pub fn score_clip_candidate(c: &mut ClipCandidate) {
     // BEFORE the weighted-sum total is computed, so the total reflects
     // the scorer's actual epistemic state for transcript-only inputs.
     // See docs/superpowers/specs/2026-05-07-phase-a-scoring-fix-design.md
-    let is_transcript_only = c.signal_sources.len() == 1
-        && c.signal_sources[0] == SignalSource::Transcript;
-    if is_transcript_only {
+    // Phase A (amended): the override + cap fire for any single-signal
+    // candidate carrying shock-family tags ("shock" / "jumpscare" /
+    // "scream" / "surprise"). These are the clips where
+    // analyze_context_simplicity returns 0.88 and analyze_emotional_spike
+    // gets the +0.35 shock-tag boost — the boilerplate fingerprint Phase B
+    // identified. Multi-signal clips with the same tags are unaffected
+    // (their other signals provide independent confirmation). See
+    // docs/superpowers/specs/2026-05-07-phase-a-scoring-fix-design.md §7a
+    let has_shock_family_tag = {
+        let tag_check = |t: &str| matches!(t, "shock" | "jumpscare" | "scream" | "surprise");
+        c.event_tags.iter().any(|t| tag_check(t.as_str()))
+            || c.emotion_tags.iter().any(|t| tag_check(t.as_str()))
+    };
+    let is_unreliable_single_signal = c.signal_sources.len() == 1 && has_shock_family_tag;
+    if is_unreliable_single_signal {
         c.context_simplicity = 0.50;
         c.emotional_spike = 0.40;
     }
@@ -472,10 +484,10 @@ pub fn score_clip_candidate(c: &mut ClipCandidate) {
     let bonus = match c.signal_sources.len() { n if n >= 3 => 0.10, 2 => 0.05, _ => 0.0 };
     c.total_score = (c.total_score + bonus).min(0.99);
 
-    // Phase A safety net: transcript-only candidates capped at 0.65 even
-    // if the dimension override + weighted sum somehow lands them above.
-    // See docs/superpowers/specs/2026-05-07-phase-a-scoring-fix-design.md §3.3
-    if is_transcript_only {
+    // Phase A safety net: single-signal-with-shock-tag candidates capped at
+    // 0.65 even if the dimension override + weighted sum somehow lands them
+    // above. See docs/superpowers/specs/2026-05-07-phase-a-scoring-fix-design.md §7a
+    if is_unreliable_single_signal {
         c.total_score = c.total_score.min(0.65);
     }
 }
@@ -1215,6 +1227,7 @@ mod tests {
     #[test]
     fn score_clip_candidate_overrides_dimensions_for_transcript_only() {
         let mut c = build_test_candidate(vec![SignalSource::Transcript]);
+        c.emotion_tags = vec!["shock".to_string()];  // Phase A amendment: tag triggers override
         score_clip_candidate(&mut c);
 
         // After scoring, the dimensions should reflect the override.
@@ -1260,6 +1273,7 @@ mod tests {
         // and emotion=0.4, plus extreme other dims, total approaches the
         // pre-cap ceiling (0.99). The cap should clamp it to 0.65.
         let mut c = build_test_candidate(vec![SignalSource::Transcript]);
+        c.emotion_tags = vec!["shock".to_string()];  // Phase A amendment: tag triggers override
         c.hook_strength = 0.99;
         c.payoff_clarity = 0.99;
         c.event_reaction_alignment = 0.99;
@@ -1297,6 +1311,7 @@ mod tests {
         // total_score ≈ 0.70. After the fix, the override + cap should
         // bring total_score below 0.65.
         let mut c = build_test_candidate(vec![SignalSource::Transcript]);
+        c.emotion_tags = vec!["shock".to_string()];  // Phase A amendment: tag triggers override
         c.hook_strength = 0.69;          // Phase B: "Drainage channel" hook
         c.emotional_spike = 0.7625;      // boilerplate value
         c.payoff_clarity = 0.55;
@@ -1312,5 +1327,54 @@ mod tests {
         // Also verify the dimensions were overridden as expected.
         assert!((c.context_simplicity - 0.50).abs() < 1e-6);
         assert!((c.emotional_spike - 0.40).abs() < 1e-6);
+    }
+
+    #[test]
+    fn score_clip_candidate_overrides_dimensions_for_audio_only_with_shock_tag() {
+        // Audio-only clips with shock-family tags should ALSO get the override.
+        // Mirrors the audio-only "Chat about games" Phase B clip pattern:
+        // signal_sources=[Audio], tags include "shock" or "jumpscare".
+        let mut c = build_test_candidate(vec![SignalSource::Audio]);
+        c.event_tags = vec!["jumpscare".to_string(), "audio-spike".to_string()];
+        c.emotion_tags = vec!["shock".to_string()];
+
+        score_clip_candidate(&mut c);
+
+        assert!((c.context_simplicity - 0.50).abs() < 1e-6,
+            "context_simplicity should be 0.50 for audio-only-with-shock-tag, got {}", c.context_simplicity);
+        assert!((c.emotional_spike - 0.40).abs() < 1e-6,
+            "emotional_spike should be 0.40, got {}", c.emotional_spike);
+    }
+
+    #[test]
+    fn score_clip_candidate_does_not_override_for_audio_only_without_shock_tag() {
+        // Audio-only with chase/encounter tags (NOT shock-family) keeps original dims.
+        let mut c = build_test_candidate(vec![SignalSource::Audio]);
+        c.event_tags = vec!["chase".to_string(), "encounter".to_string()];
+        c.emotion_tags = vec!["hype".to_string()];
+        let original_context = c.context_simplicity;
+        let original_emotion = c.emotional_spike;
+
+        score_clip_candidate(&mut c);
+
+        assert!((c.context_simplicity - original_context).abs() < 1e-6,
+            "audio-only without shock-family tag should keep context, got {}", c.context_simplicity);
+        assert!((c.emotional_spike - original_emotion).abs() < 1e-6);
+    }
+
+    #[test]
+    fn score_clip_candidate_caps_audio_only_with_shock_tag_at_65_percent() {
+        let mut c = build_test_candidate(vec![SignalSource::Audio]);
+        c.event_tags = vec!["jumpscare".to_string()];
+        c.emotion_tags = vec!["shock".to_string()];
+        c.hook_strength = 0.99;
+        c.payoff_clarity = 0.99;
+        c.event_reaction_alignment = 0.99;
+        c.replay_value = 0.99;
+
+        score_clip_candidate(&mut c);
+
+        assert!(c.total_score <= 0.65 + 1e-6,
+            "audio-only-with-shock-tag total_score should be capped at 0.65, got {}", c.total_score);
     }
 }
