@@ -239,7 +239,7 @@ pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>)
                 let mut tail = StderrTail::new(80);
                 if let Some(err) = stderr {
                     let reader = BufReader::new(err);
-                    for line in reader.lines().map_while(Result::ok) {
+                    for line in reader.lines().filter_map(Result::ok) {
                         tail.push(line);
                     }
                 }
