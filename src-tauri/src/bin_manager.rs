@@ -43,6 +43,22 @@ fn bundled_path(name: &str) -> Option<PathBuf> {
     if p.exists() { Some(p) } else { None }
 }
 
+/// Returns `true` if the bundled yt-dlp should be refreshed: no prior
+/// refresh recorded, an unparseable timestamp, or the last refresh is
+/// older than `threshold_days`. Pure — caller supplies the stored value.
+pub fn ytdlp_is_stale(last_refresh_rfc3339: Option<&str>, threshold_days: i64) -> bool {
+    match last_refresh_rfc3339 {
+        None => true,
+        Some(s) => match chrono::DateTime::parse_from_rfc3339(s) {
+            Ok(ts) => {
+                let age = chrono::Utc::now().signed_duration_since(ts.with_timezone(&chrono::Utc));
+                age > chrono::Duration::days(threshold_days)
+            }
+            Err(_) => true,
+        },
+    }
+}
+
 /// Returns `true` if `<name>` runs successfully with `version_flag` via the
 /// system PATH. Used as a fallback for users who already have the tool
 /// installed system-wide.
@@ -165,6 +181,46 @@ pub async fn download_ytdlp(progress: &ProgressCb) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Settings key holding the RFC3339 timestamp of the last successful
+/// bundled-yt-dlp refresh.
+pub const YTDLP_LAST_REFRESH_KEY: &str = "ytdlp_last_refresh";
+
+/// Force a yt-dlp refresh regardless of staleness. Downloads the latest
+/// release over the bundled binary and returns Ok on success. Caller is
+/// responsible for recording the refresh timestamp (it owns the DB conn).
+pub async fn force_refresh_ytdlp(progress: &ProgressCb) -> Result<(), AppError> {
+    log::info!("[bin_manager] force-refreshing yt-dlp");
+    download_ytdlp(progress).await
+}
+
+/// Background startup refresh: only acts when a *bundled* yt-dlp exists
+/// AND the recorded last refresh is missing/older than 7 days. Never
+/// errors hard — a stale binary still beats no binary. Returns `true`
+/// if a refresh was performed (so the caller can record the timestamp).
+pub async fn refresh_ytdlp_if_stale(last_refresh_rfc3339: Option<String>) -> bool {
+    // Strictly gate on a bundled binary — never touch a user's PATH yt-dlp.
+    if bundled_path("yt-dlp.exe").is_none() {
+        log::info!("[bin_manager] no bundled yt-dlp; skipping staleness refresh (system-PATH user)");
+        return false;
+    }
+    if !ytdlp_is_stale(last_refresh_rfc3339.as_deref(), 7) {
+        log::info!("[bin_manager] bundled yt-dlp is fresh; no refresh needed");
+        return false;
+    }
+    log::info!("[bin_manager] bundled yt-dlp is stale; refreshing in background");
+    let noop: ProgressCb = Box::new(|_, _| {});
+    match download_ytdlp(&noop).await {
+        Ok(()) => {
+            log::info!("[bin_manager] background yt-dlp refresh complete");
+            true
+        }
+        Err(e) => {
+            log::warn!("[bin_manager] background yt-dlp refresh failed (keeping existing binary): {}", e);
+            false
+        }
+    }
+}
+
 /// Download the FFmpeg zip to a temp file, then extract `ffmpeg.exe` and
 /// `ffprobe.exe` into `bin_dir()`.
 ///
@@ -276,6 +332,24 @@ fn extract_ffmpeg_bins(zip_path: &std::path::Path, dir: &std::path::Path) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ytdlp_is_stale_logic() {
+        use chrono::{Duration, Utc};
+        // No prior refresh recorded → stale.
+        assert!(ytdlp_is_stale(None, 7));
+        // Refreshed just now → fresh.
+        let now = Utc::now().to_rfc3339();
+        assert!(!ytdlp_is_stale(Some(&now), 7));
+        // Refreshed 3 days ago, 7-day threshold → fresh.
+        let three_days = (Utc::now() - Duration::days(3)).to_rfc3339();
+        assert!(!ytdlp_is_stale(Some(&three_days), 7));
+        // Refreshed 8 days ago, 7-day threshold → stale.
+        let eight_days = (Utc::now() - Duration::days(8)).to_rfc3339();
+        assert!(ytdlp_is_stale(Some(&eight_days), 7));
+        // Unparseable timestamp → treat as stale (safe default).
+        assert!(ytdlp_is_stale(Some("not-a-date"), 7));
+    }
 
     /// Real network + filesystem test. Downloads ~150 MB to
     /// `%APPDATA%\clipviral\bin\`. Run explicitly:
