@@ -45,6 +45,14 @@ impl StderrTail {
     }
 }
 
+/// A VOD whose download explicitly failed must not silently fall through
+/// to position-heuristic clips (which can't play — no source file). Only
+/// the explicit “failed” status is blocked; genuinely-not-downloaded VODs
+/// (pending/etc.) keep the legitimate position-heuristic fallback.
+fn should_block_position_fallback(download_status: &str) -> bool {
+    download_status == “failed”
+}
+
 // â”€â”€ AudioProfile struct (local to this module) â”€â”€
 
 /// Audio profile extracted from a video file.
@@ -1295,6 +1303,28 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
                     log::warn!("Signal analysis task panicked, falling back: {e}");
                 }
             }
+        }
+
+        // Phase v1.3.14 (Bug D-B): if the download explicitly failed, do
+        // NOT produce position-heuristic clips (they have no source video
+        // and can't play). Surface the real problem instead.
+        if result.is_err() && should_block_position_fallback(&vod_clone.download_status) {
+            log::error!(
+                "[analyze_vod] refusing position fallback for {} — download_status=failed",
+                vod_id_bg
+            );
+            if let Ok(conn) = db.lock() {
+                db::update_vod_analysis_status(&conn, &vod_id_bg, "failed").ok();
+            }
+            use tauri::Emitter;
+            let _ = app.emit(
+                "vod-analysis-failed",
+                serde_json::json!({
+                    "vodId": vod_id_bg,
+                    "reason": "VOD download failed — use 'Update yt-dlp & Retry' on the VOD before analyzing."
+                }),
+            );
+            return;
         }
 
         // Tier 2: Position heuristic (always available)
@@ -3353,5 +3383,14 @@ mod tests {
     fn stderr_tail_empty_is_empty_string() {
         let t = StderrTail::new(4);
         assert_eq!(t.joined(), "");
+    }
+
+    #[test]
+    fn blocks_position_fallback_only_for_failed_download() {
+        assert!(should_block_position_fallback("failed"));
+        assert!(!should_block_position_fallback("pending"));
+        assert!(!should_block_position_fallback("downloaded"));
+        assert!(!should_block_position_fallback("downloading"));
+        assert!(!should_block_position_fallback(""));
     }
 }
