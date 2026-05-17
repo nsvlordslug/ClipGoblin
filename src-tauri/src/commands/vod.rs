@@ -41,7 +41,7 @@ impl StderrTail {
         self.lines.push_back(line);
     }
     fn joined(&self) -> String {
-        self.lines.iter().cloned().collect::<Vec<_>>().join(“\n”)
+        self.lines.iter().cloned().collect::<Vec<_>>().join("\n")
     }
 }
 
@@ -50,7 +50,7 @@ impl StderrTail {
 /// the explicit “failed” status is blocked; genuinely-not-downloaded VODs
 /// (pending/etc.) keep the legitimate position-heuristic fallback.
 fn should_block_position_fallback(download_status: &str) -> bool {
-    download_status == “failed”
+    download_status == "failed"
 }
 
 // â”€â”€ AudioProfile struct (local to this module) â”€â”€
