@@ -22,6 +22,29 @@ use crate::commands::captions::{
     build_highlight_explanation, count_active_signals,
 };
 
+/// A fixed-capacity ring of the most recent stderr lines. Used to keep a
+/// bounded tail of yt-dlp's diagnostic output without buffering its full
+/// (potentially large, verbose) stderr stream in memory.
+struct StderrTail {
+    cap: usize,
+    lines: std::collections::VecDeque<String>,
+}
+
+impl StderrTail {
+    fn new(cap: usize) -> Self {
+        Self { cap, lines: std::collections::VecDeque::with_capacity(cap) }
+    }
+    fn push(&mut self, line: String) {
+        if self.lines.len() == self.cap {
+            self.lines.pop_front();
+        }
+        self.lines.push_back(line);
+    }
+    fn joined(&self) -> String {
+        self.lines.iter().cloned().collect::<Vec<_>>().join(“\n”)
+    }
+}
+
 // â”€â”€ AudioProfile struct (local to this module) â”€â”€
 
 /// Audio profile extracted from a video file.
@@ -209,12 +232,18 @@ pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>)
                 Err(e) => return Err(format!("Failed to start yt-dlp: {}", e)),
             };
 
+            // Phase v1.3.14 (Bug C): keep a bounded tail of yt-dlp stderr so
+            // download failures are diagnosable instead of swallowed.
             let stderr = child.stderr.take();
             let stderr_thread = std::thread::spawn(move || {
+                let mut tail = StderrTail::new(80);
                 if let Some(err) = stderr {
                     let reader = BufReader::new(err);
-                    for _ in reader.lines() {}
+                    for line in reader.lines().map_while(Result::ok) {
+                        tail.push(line);
+                    }
                 }
+                tail.joined()
             });
 
             if let Some(stdout) = child.stdout.take() {
@@ -232,12 +261,16 @@ pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>)
                 }
             }
 
-            let _ = stderr_thread.join();
+            let stderr_tail = stderr_thread.join().unwrap_or_default();
             let status = child.wait().map_err(|e| format!("yt-dlp error: {}", e))?;
             if status.success() {
                 Ok(())
             } else {
-                Err(format!("yt-dlp exited with code: {:?}", status.code()))
+                Err(format!(
+                    "yt-dlp exited with code {:?}\n--- yt-dlp stderr (tail) ---\n{}",
+                    status.code(),
+                    stderr_tail
+                ))
             }
         })
         .await;
@@ -3284,5 +3317,27 @@ mod tests {
             assert!(TRANSCRIPT_KEYWORDS.contains(word),
                 "Emotional word {:?} should still be in TRANSCRIPT_KEYWORDS", word);
         }
+    }
+
+    #[test]
+    fn stderr_tail_keeps_only_last_n_lines() {
+        let mut t = StderrTail::new(3);
+        for i in 0..10 {
+            t.push(format!("line {i}"));
+        }
+        assert_eq!(t.joined(), "line 7\nline 8\nline 9");
+    }
+
+    #[test]
+    fn stderr_tail_handles_fewer_than_cap() {
+        let mut t = StderrTail::new(5);
+        t.push("only".to_string());
+        assert_eq!(t.joined(), "only");
+    }
+
+    #[test]
+    fn stderr_tail_empty_is_empty_string() {
+        let t = StderrTail::new(4);
+        assert_eq!(t.joined(), "");
     }
 }
