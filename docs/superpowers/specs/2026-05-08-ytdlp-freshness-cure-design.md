@@ -27,7 +27,7 @@ A user reported "clips not playing." Investigation traced a four-bug cascade:
 
 ### Success criteria
 - On startup, if the bundled `yt-dlp.exe` exists and its recorded last refresh is missing or >7 days old, it is re-downloaded in the background to the latest release. System-PATH-only users are unaffected (nothing bundled to refresh).
-- A "Update yt-dlp now" button in Settings force-runs the refresh with progress feedback and reports success/failure.
+- On a failed-download VOD card, an "Update yt-dlp & Retry" action force-refreshes yt-dlp (bypassing the 7-day staleness gate) and then re-attempts the download, with progress/result feedback.
 - A failed `download_vod` writes the captured yt-dlp stderr tail to the log (`log::error!`) and includes it in the error surfaced to the UI.
 - Triggering analysis on a VOD whose `download_status == "failed"` does not generate position-heuristic clips; it surfaces the download failure instead.
 - No regression: a healthy download + analyze + playback flow is unchanged.
@@ -56,11 +56,20 @@ Reuse the existing, tested `bin_manager::download_ytdlp()` + `YTDLP_URL` (alread
 
 **Concurrency note:** `download_ytdlp()` writes to a `.tmp` then renames into place — an in-progress download attempt elsewhere is unlikely on startup, but the rename-into-place pattern already makes this safe enough for the hotfix. No lock needed for v1.3.14.
 
-### 3.2 Manual "Update yt-dlp now" button
+### 3.2 "Update yt-dlp & Retry" action on the failed-download VOD card
 
-A button in Settings, near the existing binaries / `BinariesSetup` area. On click it force-runs `download_ytdlp()` (bypassing the staleness gate), shows progress (reuse the existing `ProgressCb` pattern / binaries download UX already present for first-run), and reports success or the error. On success it also updates `ytdlp_last_refresh`.
+The contextual cure lives exactly where the user gets stuck: on a VOD card whose `download_status == "failed"`. A single action — labeled "Update yt-dlp & Retry" — does, in order:
 
-This is the no-terminal cure for users already broken: support answer becomes "Settings → Update yt-dlp now" instead of a terminal `-U`. A backend command (in `commands/binaries.rs`, alongside the existing binary-download commands) exposes the force refresh; the frontend button invokes it.
+1. Force-run `download_ytdlp()` (bypassing the 7-day staleness gate — Twitch can break a yt-dlp that's only days old, so the gate is irrelevant at the point of an actual failure). On success, update `ytdlp_last_refresh = now`.
+2. Re-invoke the existing `download_vod` for that VOD.
+
+Progress/result feedback reuses the existing binaries download UX / `ProgressCb` pattern already present for first-run. A backend command (in `commands/binaries.rs`, alongside the existing binary-download commands) exposes the force-refresh; the frontend card action calls force-refresh then `download_vod`.
+
+**Why one combined action, not two buttons:** simplicity (user's explicit call). The overwhelmingly common failure cause is stale yt-dlp, so "update then retry" is the right default and the explicit label teaches the user what the fix is. The ~20 MB refresh cost is acceptable because retries are infrequent (a stuck user clicks once, not in a loop).
+
+**Double-click guard:** if a force-refresh already completed within this app session (or `ytdlp_last_refresh` is within the last hour), skip the re-download and go straight to retry — avoids a redundant 20 MB pull if the user clicks twice.
+
+**No Settings button.** The startup auto-refresh (§3.1) covers the proactive case; this card action covers the reactive case. A standalone Settings updater is YAGNI for the hotfix (revisit in v1.3.15 if support demand shows otherwise).
 
 ### 3.3 Minimal Bug C — capture yt-dlp stderr
 
@@ -87,16 +96,15 @@ Persist `download_status = "failed"` (unchanged) **and** `log::error!("[download
 
 **(b) Guard analysis against failed-download VODs.** At the analysis entry point (the `analyze_vod` command path in `vod.rs`), before falling through to the Tier-2 position-heuristic fallback, check the VOD's `download_status`. If it is `"failed"`, do **not** produce position-heuristic clips — return/emit a clear error ("VOD download failed — retry the download before analyzing") so the user is pointed at the real problem instead of getting unplayable clips. Position-heuristic fallback remains valid for VODs that were never downloaded *by design* (status not `"failed"`); only the explicit-failure case is guarded.
 
-**(c) VOD card surfacing.** Verify `src/pages/Vods.tsx` renders a `download_status == "failed"` VOD as a clear failed state with a **Retry** affordance (re-invoke `download_vod`). If a usable failed state + retry already exists, no frontend change is required beyond confirming it; if it does not visibly distinguish "failed," add a minimal failed badge + Retry button. (Implementation plan will verify current behavior and scope this precisely.)
+**(c) VOD card surfacing.** `src/pages/Vods.tsx` must render a `download_status == "failed"` VOD as a clear failed state, showing the captured failure reason (from 3.4a — at minimum a short message; full stderr stays in logs), and the **"Update yt-dlp & Retry"** action from §3.2 is the card's primary recovery affordance for this state. The implementation plan verifies the current failed-state rendering: if a usable failed badge already exists, the change is converging its recovery action to "Update yt-dlp & Retry" and surfacing the reason; if no failed state is distinguished today, add a minimal failed badge + reason + the action.
 
 ## 4. File-level changes (logical map; plan pins exact lines)
 
-- `src-tauri/src/bin_manager.rs` — add `refresh_ytdlp_if_stale` (staleness gate + reuse `download_ytdlp`) and a force-refresh entry usable by the manual button.
+- `src-tauri/src/bin_manager.rs` — add `refresh_ytdlp_if_stale` (staleness gate + reuse `download_ytdlp`) and a force-refresh entry usable by the card action.
 - `src-tauri/src/lib.rs` — invoke `refresh_ytdlp_if_stale` in a non-blocking startup background task.
-- `src-tauri/src/commands/binaries.rs` — expose a Tauri command for the manual force refresh (alongside existing binary-download commands).
+- `src-tauri/src/commands/binaries.rs` — expose a Tauri command for the force yt-dlp refresh (alongside existing binary-download commands), used by the card action.
 - `src-tauri/src/commands/vod.rs` — 3.3 (bounded stderr capture, ~213-241), 3.4a (failure-reason capture/log/surface, ~305-309), 3.4b (analysis guard on `download_status == "failed"`).
-- `src/pages/Settings.tsx` — "Update yt-dlp now" button + progress/result UI.
-- `src/pages/Vods.tsx` — confirm/ensure failed-download VOD shows failed state + Retry.
+- `src/pages/Vods.tsx` — failed-download VOD card: failed state + surfaced reason + "Update yt-dlp & Retry" action (force-refresh command, then `download_vod`); double-click/cooldown guard. No `Settings.tsx` change (no standalone updater button).
 - Persistence: existing `settings` k/v key `ytdlp_last_refresh` (no migration).
 
 ## 5. Watchouts
