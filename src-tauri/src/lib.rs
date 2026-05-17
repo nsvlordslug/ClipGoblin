@@ -249,6 +249,37 @@ pub fn run() {
                 start_upload_scheduler(scheduler_handle);
             });
 
+            // Background: keep the bundled yt-dlp fresh so Twitch-extractor
+            // breakage self-heals. Non-blocking; gated on a bundled binary
+            // existing and >7 days since last refresh. Never blocks startup.
+            // See bin_manager::refresh_ytdlp_if_stale.
+            let ytdlp_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                // Read the stored timestamp under a short-lived lock, then
+                // release it BEFORE the (network, ~20MB) download.
+                let last_refresh: Option<String> = {
+                    let state = ytdlp_handle.state::<crate::DbConn>();
+                    match state.lock() {
+                        Ok(conn) => crate::db::get_setting(&conn, crate::bin_manager::YTDLP_LAST_REFRESH_KEY)
+                            .ok()
+                            .flatten(),
+                        Err(_) => None,
+                    }
+                };
+                let refreshed = crate::bin_manager::refresh_ytdlp_if_stale(last_refresh).await;
+                if refreshed {
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let state = ytdlp_handle.state::<crate::DbConn>();
+                    if let Ok(conn) = state.lock() {
+                        let _ = crate::db::save_setting(
+                            &conn,
+                            crate::bin_manager::YTDLP_LAST_REFRESH_KEY,
+                            &now,
+                        );
+                    }
+                }
+            });
+
             Ok(())
         })
         .run(tauri::generate_context!())
