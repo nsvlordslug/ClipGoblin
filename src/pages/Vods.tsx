@@ -648,7 +648,7 @@ export default function Vods() {
                   {vod.download_status === 'failed' ? (
                     <button
                       onClick={() => handleUpdateYtdlpAndRetry(vod.id)}
-                      disabled={updatingYtdlpVodId === vod.id}
+                      disabled={updatingYtdlpVodId !== null}
                       className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg transition-colors cursor-pointer bg-amber-500/20 text-amber-400 border border-amber-500/30 hover:bg-amber-500/30 disabled:opacity-40"
                       title="Twitch download failed — usually a stale yt-dlp. This updates yt-dlp and retries."
                     >
