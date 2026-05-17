@@ -257,21 +257,28 @@ pub fn run() {
             let ytdlp_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 // Read the stored timestamp under a short-lived lock, then
-                // release it BEFORE the (network, ~20MB) download.
+                // release it BEFORE the (network, ~20MB) download. The lock
+                // result is bound to a named local declared AFTER `state`
+                // so the MutexGuard drops before `state` (avoids E0597).
                 let last_refresh: Option<String> = {
                     let state = ytdlp_handle.state::<crate::DbConn>();
-                    match state.lock() {
-                        Ok(conn) => crate::db::get_setting(&conn, crate::bin_manager::YTDLP_LAST_REFRESH_KEY)
-                            .ok()
-                            .flatten(),
+                    let value = match state.lock() {
+                        Ok(conn) => crate::db::get_setting(
+                            &conn,
+                            crate::bin_manager::YTDLP_LAST_REFRESH_KEY,
+                        )
+                        .ok()
+                        .flatten(),
                         Err(_) => None,
-                    }
+                    };
+                    value
                 };
                 let refreshed = crate::bin_manager::refresh_ytdlp_if_stale(last_refresh).await;
                 if refreshed {
                     let now = chrono::Utc::now().to_rfc3339();
                     let state = ytdlp_handle.state::<crate::DbConn>();
-                    if let Ok(conn) = state.lock() {
+                    let locked = state.lock();
+                    if let Ok(conn) = locked {
                         let _ = crate::db::save_setting(
                             &conn,
                             crate::bin_manager::YTDLP_LAST_REFRESH_KEY,
