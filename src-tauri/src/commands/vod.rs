@@ -335,10 +335,24 @@ pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>)
                     db::update_vod_download_progress(&conn, &vod_id_status, 100).ok();
                 }
             }
-            _ => {
+            other => {
+                // Phase v1.3.14 (Bug D-A): extract the real reason (now
+                // meaningful thanks to Bug C's stderr capture), log it, and
+                // emit it to the frontend instead of silently swallowing it.
+                let reason = match other {
+                    Ok(Err(msg)) => msg,
+                    Err(join_err) => format!("download task panicked/join error: {join_err}"),
+                    Ok(Ok(())) => unreachable!("Ok(Ok(())) handled by the success arm above"),
+                };
+                log::error!("[download_vod] failed for {}: {}", vod_id_status, reason);
                 if let Ok(conn) = db.lock() {
                     db::update_vod_download_status(&conn, &vod_id_status, "failed", None, None).ok();
                 }
+                use tauri::Emitter;
+                let _ = app_handle.emit(
+                    "vod-download-failed",
+                    serde_json::json!({ "vodId": vod_id_status, "reason": reason }),
+                );
             }
         }
     });
