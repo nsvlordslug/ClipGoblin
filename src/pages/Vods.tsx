@@ -82,6 +82,7 @@ function v4StatusClass(vod: { analysis_status: string; download_status: string }
   if (vod.analysis_status === 'completed') return 'done'
   if (vod.analysis_status === 'analyzing') return 'analyzing'
   if (vod.analysis_status === 'failed') return 'failed'
+  if (vod.download_status === 'failed') return 'failed'
   if (vod.download_status === 'downloading' || vod.download_status === 'downloaded') return 'queued'
   return 'queued'
 }
@@ -90,6 +91,7 @@ function v4StatusLabel(vod: { analysis_status: string; analysis_progress?: numbe
   if (vod.analysis_status === 'completed') return 'COMPLETE'
   if (vod.analysis_status === 'analyzing') return `ANALYZING · ${vod.analysis_progress ?? 0}%`
   if (vod.analysis_status === 'failed') return 'FAILED · RETRY'
+  if (vod.download_status === 'failed') return 'DOWNLOAD FAILED · RETRY'
   if (vod.download_status === 'downloading') return `DOWNLOADING · ${vod.download_progress ?? 0}%`
   if (vod.download_status === 'downloaded') return 'READY TO ANALYZE'
   return 'PENDING'
@@ -195,6 +197,22 @@ export default function Vods() {
     }
     // Refresh immediately from cache to show "downloading" status
     if (loggedInUser) refreshVods(loggedInUser.id)
+  }
+
+  const [updatingYtdlpVodId, setUpdatingYtdlpVodId] = useState<string | null>(null)
+
+  const handleUpdateYtdlpAndRetry = async (vodId: string) => {
+    if (updatingYtdlpVodId) return // double-click guard
+    setUpdatingYtdlpVodId(vodId)
+    try {
+      await invoke('force_refresh_ytdlp')
+      await invoke('download_vod', { vodId })
+    } catch (err) {
+      alert(`Update & retry failed: ${err}`)
+    } finally {
+      setUpdatingYtdlpVodId(null)
+      if (loggedInUser) refreshVods(loggedInUser.id)
+    }
   }
 
   const handleAnalyze = async (vodId: string) => {
@@ -627,7 +645,16 @@ export default function Vods() {
 
                 {/* Actions — primary row */}
                 <div className="flex gap-2 mt-auto">
-                  {vod.download_status === 'downloaded' ? (
+                  {vod.download_status === 'failed' ? (
+                    <button
+                      onClick={() => handleUpdateYtdlpAndRetry(vod.id)}
+                      disabled={updatingYtdlpVodId === vod.id}
+                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg transition-colors cursor-pointer bg-amber-500/20 text-amber-400 border border-amber-500/30 hover:bg-amber-500/30 disabled:opacity-40"
+                      title="Twitch download failed — usually a stale yt-dlp. This updates yt-dlp and retries."
+                    >
+                      {updatingYtdlpVodId === vod.id ? 'Updating yt-dlp…' : 'Update yt-dlp & Retry'}
+                    </button>
+                  ) : vod.download_status === 'downloaded' ? (
                     <button
                       onClick={() => navigate(`/player/${vod.id}`)}
                       className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg transition-colors cursor-pointer bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30"
