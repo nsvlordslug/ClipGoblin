@@ -50,6 +50,7 @@ These came up in brainstorming and were deliberately punted:
 - **Asset library / named saved avatars** (a first-class library where assets are entities you name and reuse). The recent-assets dropdown is the cheap version that covers the realistic reuse pattern without the schema overhead.
 - **Aspect-ratio fit options** beyond scale-to-fit (cover/crop, stretch, custom anchor). Sensible default is enough for v1; add if users ask.
 - **Asset positioning/sizing independent of the layout slot.** The layout's existing `Pip { x, y, size }` and `Split { ratio }` parameters already control where and how big the cam slot is; the asset just fills whatever slot the layout defines.
+- **Editor preview parity with the export layout.** The current Clip Editor preview uses an HTML5 `<video>` element rendering the raw source VOD with start/end offsets — it does **not** composite any layout (PIP/Split/GameplayFocus). Layouts are export-time-only today. The cam asset follows the same pattern: visible at export, not in the editor preview. Building a layout-composition preview pipeline is a broader layout-system feature, out of scope here and out of scope for this whole feature area until someone explicitly asks.
 
 ## 4. Design
 
@@ -157,7 +158,7 @@ The existing per-clip `facecam_layout` field already handles "hide cam for this 
 - **GIF.** Treat as video (`-stream_loop`); never use the still-image filter path even though GIF has both. Cleaner ffmpeg behavior.
 - **Path with spaces / unicode.** Copy with `std::fs::copy` (handles arbitrary paths); pass to ffmpeg quoted. Existing `vertical_crop.rs` filter-build already handles arbitrary paths in `-i`, but verify the new two-input case quotes the asset path the same way.
 - **`vod.rs` is already 2000+ lines.** Strongly prefer extracting the new commands into `commands/cam_asset.rs` rather than further bloating `vod.rs`. This is consistent with the M6 backlog item from v1.3.14 review ("vod.rs growth — extract persist cap"); same pattern.
-- **Preview rendering parity.** If the editor preview shows a different cam-slot composition than the exported clip ends up with (because preview uses some simpler path), users will be confused. Preview should ideally route through the same filter logic as export (even if at lower resolution / single-frame).
+- **Preview / export divergence (acknowledged, not solved here).** The editor preview shows raw source video; the exported clip shows the layout-composited result. This is true for *all* layouts today, not new to this feature — but the cam asset makes the gap more user-visible (you pick a slug PNG, the preview still shows the dup-source dummy, then on export the slug appears). Mitigation in v1: the cam-asset-row in the editor shows a thumbnail of the asset so the user has visual confirmation of *what* is attached, even if not *how it composites*. Full preview-layout composition is deferred per §3 out-of-scope.
 
 ## 7. Open questions
 
