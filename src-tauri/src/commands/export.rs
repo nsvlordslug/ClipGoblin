@@ -132,7 +132,7 @@ pub async fn export_clip(
 ) -> Result<(), String> {
     let ffmpeg = find_ffmpeg().map_err(|e| report_error(&app, e))?;
 
-    let (clip, vod_path) = {
+    let (clip, vod, vod_path, allow_override) = {
         let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
         let clip = db::get_clip_by_id(&conn, &clip_id)
             .map_err(|e| format!("DB error: {}", e))?
@@ -140,8 +140,15 @@ pub async fn export_clip(
         let vod = db::get_vod_by_id(&conn, &clip.vod_id)
             .map_err(|e| format!("DB error: {}", e))?
             .ok_or("VOD not found")?;
-        let path = vod.local_path.ok_or("VOD not downloaded — download it first to export clips")?;
-        (clip, path)
+        let path = vod.local_path.clone().ok_or("VOD not downloaded — download it first to export clips")?;
+        let allow = matches!(
+            db::get_setting(&conn, "allow_per_clip_cam_region_override")
+                .ok()
+                .flatten()
+                .as_deref(),
+            Some("true"),
+        );
+        (clip, vod, path, allow)
     };
 
     let job_id = format!("export-{}", clip_id);
@@ -170,7 +177,7 @@ pub async fn export_clip(
 
         // ── Building export request ──
         handle.set_progress(5);
-        let request = clip_to_export_request(&clip, &vod_path, &output_path);
+        let request = clip_to_export_request(&clip, &vod, &vod_path, &output_path, allow_override);
 
         // ── Running ffmpeg with real progress ──
         let output_ref = output_path.clone();
@@ -222,7 +229,7 @@ pub(crate) async fn render_clip_by_id(clip_id: &str) -> Result<std::path::PathBu
     let ffmpeg = find_ffmpeg().map_err(|e| e.to_string())?;
 
     // Load clip + vod path (sync)
-    let (clip, vod_path) = {
+    let (clip, vod, vod_path, allow_override) = {
         let db_path = db::db_path().map_err(|e| format!("DB path: {}", e))?;
         let conn = rusqlite::Connection::open(&db_path)
             .map_err(|e| format!("DB open: {}", e))?;
@@ -232,8 +239,15 @@ pub(crate) async fn render_clip_by_id(clip_id: &str) -> Result<std::path::PathBu
         let vod = db::get_vod_by_id(&conn, &clip.vod_id)
             .map_err(|e| format!("DB error: {}", e))?
             .ok_or_else(|| "VOD not found".to_string())?;
-        let path = vod.local_path.ok_or_else(|| "VOD not downloaded".to_string())?;
-        (clip, path)
+        let path = vod.local_path.clone().ok_or_else(|| "VOD not downloaded".to_string())?;
+        let allow = matches!(
+            db::get_setting(&conn, "allow_per_clip_cam_region_override")
+                .ok()
+                .flatten()
+                .as_deref(),
+            Some("true"),
+        );
+        (clip, vod, path, allow)
     };
 
     let output_dir = dirs::data_dir()
@@ -253,7 +267,7 @@ pub(crate) async fn render_clip_by_id(clip_id: &str) -> Result<std::path::PathBu
             .map_err(|e| format!("DB error: {}", e))?;
     }
 
-    let request = clip_to_export_request(&clip, &vod_path, &output_path);
+    let request = clip_to_export_request(&clip, &vod, &vod_path, &output_path, allow_override);
     let output_ref = output_path.clone();
     let clip_id_owned = clip_id.to_string();
 
@@ -288,8 +302,10 @@ pub(crate) async fn render_clip_by_id(clip_id: &str) -> Result<std::path::PathBu
 /// Convert a DB ClipRow into an ExportRequest for the vertical_crop module.
 fn clip_to_export_request(
     clip: &db::ClipRow,
+    vod: &db::VodRow,
     vod_path: &str,
     output_path: &std::path::Path,
+    allow_per_clip_override: bool,
 ) -> vertical_crop::ExportRequest {
     // Resolve platform from aspect ratio (future: store preset id in DB)
     let platform = vertical_crop::Platform::from_aspect_ratio(&clip.aspect_ratio);
@@ -301,6 +317,14 @@ fn clip_to_export_request(
     // Build caption filter if captions are enabled
     let caption_filter = build_caption_filter(clip, target.width as i32, target.height as i32);
 
+    // Resolve the effective cam region using override precedence + settings toggle.
+    let effective_region = crate::cam_region::resolve_effective_region(
+        vod.cam_region_norm.as_deref(),
+        clip.cam_region_norm_override.as_deref(),
+        allow_per_clip_override,
+    );
+    let fit_mode = crate::cam_region::CamFitMode::from_db(clip.cam_fit_mode.as_deref());
+
     vertical_crop::ExportRequest {
         source_path: std::path::PathBuf::from(vod_path),
         output_path: output_path.to_path_buf(),
@@ -310,8 +334,8 @@ fn clip_to_export_request(
         target,
         layout,
         caption_filter,
-        effective_region: None,
-        fit_mode: crate::cam_region::CamFitMode::Fit,
+        effective_region,
+        fit_mode,
     }
 }
 
