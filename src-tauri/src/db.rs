@@ -242,6 +242,27 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
         CREATE INDEX IF NOT EXISTS idx_ai_usage_log_vod ON ai_usage_log(vod_id);"
     )?;
 
+    // ─── v1.4.0 Cam region (crop-from-source) ──────────────────────
+    // Per-VOD source-frame region; per-clip optional override; per-clip fit mode.
+    // All NULL by default = pre-feature dup-source behavior preserved.
+    conn.execute(
+        "ALTER TABLE vods ADD COLUMN cam_region_norm TEXT",
+        [],
+    ).ok();
+    conn.execute(
+        "ALTER TABLE clips ADD COLUMN cam_region_norm_override TEXT",
+        [],
+    ).ok();
+    conn.execute(
+        "ALTER TABLE clips ADD COLUMN cam_fit_mode TEXT",
+        [],
+    ).ok();
+    // Settings k/v default (existing settings table). Idempotent.
+    conn.execute(
+        "INSERT OR IGNORE INTO settings(key, value) VALUES('allow_per_clip_cam_region_override', 'false')",
+        [],
+    ).ok();
+
     Ok(())
 }
 
@@ -275,6 +296,10 @@ pub struct VodRow {
     pub download_progress: Option<i64>,
     pub analysis_progress: i64,
     pub game_name: Option<String>,
+    /// JSON-encoded `{"x":f32,"y":f32,"w":f32,"h":f32}` in normalized 0..1 source-frame coords.
+    /// NULL/absent = no region set; export falls back to dup-source.
+    #[serde(default)]
+    pub cam_region_norm: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -334,6 +359,14 @@ pub struct ClipRow {
     pub game: Option<String>,
     pub publish_description: Option<String>,
     pub publish_hashtags: Option<String>,
+    /// Optional per-clip override of the parent VOD's `cam_region_norm`.
+    /// Only consulted when the `allow_per_clip_cam_region_override` setting is true.
+    /// NULL = use VOD's region.
+    #[serde(default)]
+    pub cam_region_norm_override: Option<String>,
+    /// 'fit' | 'fill' | 'stretch'. NULL is treated as 'fit' (default).
+    #[serde(default)]
+    pub cam_fit_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -496,10 +529,7 @@ pub fn upsert_vod(conn: &Connection, vod: &VodRow) -> SqliteResult<()> {
 }
 
 pub fn get_vods_by_channel(conn: &Connection, channel_id: &str) -> SqliteResult<Vec<VodRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress, game_name
-         FROM vods WHERE channel_id = ?1 ORDER BY stream_date DESC"
-    )?;
+    let mut stmt = conn.prepare(&format!("{} WHERE channel_id = ?1 ORDER BY stream_date DESC", VOD_SELECT))?;
     let rows = stmt.query_map(params![channel_id], |row| {
         Ok(VodRow {
             id: row.get(0)?,
@@ -518,6 +548,7 @@ pub fn get_vods_by_channel(conn: &Connection, channel_id: &str) -> SqliteResult<
             download_progress: row.get(13)?,
             analysis_progress: row.get::<_, Option<i64>>(14)?.unwrap_or(0),
             game_name: row.get(15)?,
+            cam_region_norm: row.get(16)?,
         })
     })?;
     rows.collect()
@@ -529,10 +560,7 @@ pub fn get_vods_by_channel(conn: &Connection, channel_id: &str) -> SqliteResult<
 /// a stub channel for the foreign streamer) appear alongside the user's own VODs.
 /// Single-user desktop app — there's no privacy concern about cross-channel listing.
 pub fn get_all_vods(conn: &Connection) -> SqliteResult<Vec<VodRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress, game_name
-         FROM vods ORDER BY stream_date DESC"
-    )?;
+    let mut stmt = conn.prepare(&format!("{} ORDER BY stream_date DESC", VOD_SELECT))?;
     let rows = stmt.query_map([], |row| {
         Ok(VodRow {
             id: row.get(0)?,
@@ -551,16 +579,14 @@ pub fn get_all_vods(conn: &Connection) -> SqliteResult<Vec<VodRow>> {
             download_progress: row.get(13)?,
             analysis_progress: row.get::<_, Option<i64>>(14)?.unwrap_or(0),
             game_name: row.get(15)?,
+            cam_region_norm: row.get(16)?,
         })
     })?;
     rows.collect()
 }
 
 pub fn get_vod_by_id(conn: &Connection, id: &str) -> SqliteResult<Option<VodRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress, game_name
-         FROM vods WHERE id = ?1"
-    )?;
+    let mut stmt = conn.prepare(&format!("{} WHERE id = ?1", VOD_SELECT))?;
     let mut rows = stmt.query_map(params![id], |row| {
         Ok(VodRow {
             id: row.get(0)?,
@@ -579,6 +605,7 @@ pub fn get_vod_by_id(conn: &Connection, id: &str) -> SqliteResult<Option<VodRow>
             download_progress: row.get(13)?,
             analysis_progress: row.get::<_, Option<i64>>(14)?.unwrap_or(0),
             game_name: row.get(15)?,
+            cam_region_norm: row.get(16)?,
         })
     })?;
     match rows.next() {
@@ -778,10 +805,18 @@ fn read_clip_row(row: &rusqlite::Row) -> rusqlite::Result<ClipRow> {
         game: row.get(20)?,
         publish_description: row.get(21)?,
         publish_hashtags: row.get(22)?,
+        cam_region_norm_override: row.get(23)?,
+        cam_fit_mode: row.get(24)?,
     })
 }
 
-const CLIP_SELECT: &str = "SELECT id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, render_status, output_path, thumbnail_path, created_at, game, publish_description, publish_hashtags FROM clips";
+/// Full SELECT column list for the `vods` table. Centralized so that adding a
+/// column to `VodRow` only requires updating this string plus the row-binding
+/// closures (one per get_vods_* function). Order MUST match the fields in
+/// `VodRow` so positional `row.get(idx)?` calls stay in sync.
+const VOD_SELECT: &str = "SELECT id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress, game_name, cam_region_norm FROM vods";
+
+const CLIP_SELECT: &str = "SELECT id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, render_status, output_path, thumbnail_path, created_at, game, publish_description, publish_hashtags, cam_region_norm_override, cam_fit_mode FROM clips";
 
 pub fn get_all_clips(conn: &Connection) -> SqliteResult<Vec<ClipRow>> {
     let mut stmt = conn.prepare(&format!("{} ORDER BY created_at DESC, start_seconds ASC", CLIP_SELECT))?;
@@ -881,6 +916,47 @@ pub fn update_vod_game_name(conn: &Connection, vod_id: &str, game_name: Option<&
     conn.execute(
         "UPDATE vods SET game_name = ?1 WHERE id = ?2",
         params![game_name, vod_id],
+    )?;
+    Ok(())
+}
+
+/// Set a VOD's cam region. `region_json` is the serde-serialized
+/// `CamRegion` struct (see `crate::cam_region`). Passing `None` clears.
+pub fn update_vod_cam_region(
+    conn: &Connection,
+    vod_id: &str,
+    region_json: Option<&str>,
+) -> SqliteResult<()> {
+    conn.execute(
+        "UPDATE vods SET cam_region_norm = ?1 WHERE id = ?2",
+        params![region_json, vod_id],
+    )?;
+    Ok(())
+}
+
+/// Set a clip's per-VOD region override. NULL = clear override.
+pub fn update_clip_cam_region_override(
+    conn: &Connection,
+    clip_id: &str,
+    region_json: Option<&str>,
+) -> SqliteResult<()> {
+    conn.execute(
+        "UPDATE clips SET cam_region_norm_override = ?1 WHERE id = ?2",
+        params![region_json, clip_id],
+    )?;
+    Ok(())
+}
+
+/// Set a clip's fit mode. `mode` is the lowercase string 'fit' | 'fill' | 'stretch'.
+/// NULL = revert to default ('fit').
+pub fn update_clip_fit_mode(
+    conn: &Connection,
+    clip_id: &str,
+    mode: Option<&str>,
+) -> SqliteResult<()> {
+    conn.execute(
+        "UPDATE clips SET cam_fit_mode = ?1 WHERE id = ?2",
+        params![mode, clip_id],
     )?;
     Ok(())
 }

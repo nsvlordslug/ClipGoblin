@@ -1422,6 +1422,8 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
                             game: vod_clone.game_name.clone(),
                             publish_description: None,
                             publish_hashtags: None,
+                            cam_region_norm_override: None,
+                            cam_fit_mode: None,
                         };
                         db::insert_clip(&conn, &clip).ok();
 
@@ -2470,6 +2472,7 @@ pub async fn get_vods(
                 download_progress: Some(0),
                 analysis_progress: 0,
                 game_name: None,
+                cam_region_norm: None,
             }
         })
         .collect();
@@ -3140,6 +3143,7 @@ pub async fn import_vod_by_url(
         download_progress: Some(0),
         analysis_progress: 0,
         game_name: None,
+        cam_region_norm: None,
     };
     {
         let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
