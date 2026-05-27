@@ -310,6 +310,8 @@ fn clip_to_export_request(
         target,
         layout,
         caption_filter,
+        effective_region: None,
+        fit_mode: crate::cam_region::CamFitMode::Fit,
     }
 }
 

@@ -427,6 +427,104 @@ pub fn layout_filter(
     }
 }
 
+/// Layout filter builder that incorporates a per-VOD cam region (cropped
+/// from the source frame, not an external file).
+///
+/// When `region` is `None`, this delegates to `layout_filter` so the no-region
+/// path is byte-identical to the existing pre-feature behavior.
+///
+/// When `region` is `Some`:
+/// - `GameplayFocus`: no cam slot, region irrelevant (delegates).
+/// - `Pip`: source split into 2 branches; gameplay fills output; cam branch
+///   is cropped to the region, scaled per `fit_mode`, overlaid at the slot's
+///   position+size, centered within the slot box. No slot rectangle drawn,
+///   so gameplay shows through where the cam doesn't fill the slot.
+/// - `Split`: source split into 3 branches; gameplay fills the top region;
+///   cam_blur branch covers the bottom slot (heavy boxblur); cam_sharp branch
+///   is centered on top of the blur at its fit-mode-determined size.
+pub fn layout_filter_with_region(
+    mode: &LayoutMode,
+    target: OutputSize,
+    caption_filter: Option<&str>,
+    region: Option<crate::cam_region::CamRegion>,
+    fit_mode: crate::cam_region::CamFitMode,
+) -> (String, bool) {
+    let region = match region {
+        Some(r) => r,
+        None => return layout_filter(mode, target, caption_filter),
+    };
+
+    let tw = target.width;
+    let th = target.height;
+    let crop_expr = region.to_crop_expr();
+
+    match mode {
+        LayoutMode::GameplayFocus => {
+            // No cam slot; region irrelevant.
+            layout_filter(mode, target, caption_filter)
+        }
+
+        LayoutMode::Pip { x, y, size } => {
+            let ps = (tw as f64 * size.clamp(0.15, 0.45)) as u32;
+            let slot_x = ((tw as f64 - ps as f64) * x.clamp(0.0, 1.0)) as u32;
+            let slot_y = ((th as f64 - ps as f64) * y.clamp(0.0, 1.0)) as u32;
+            let scale_expr = fit_scale_expr(ps, ps, fit_mode);
+
+            let mut f = format!(
+                "[0:v]split=2[gp_src][cam_src];\
+                 [gp_src]scale={tw}:{th}:force_original_aspect_ratio=increase:flags=lanczos,crop={tw}:{th}[main];\
+                 [cam_src]crop={crop_expr},{scale_expr}[cam];\
+                 [main][cam]overlay={slot_x}+({ps}-w)/2:{slot_y}+({ps}-h)/2"
+            );
+            if let Some(cf) = caption_filter {
+                f.push_str(&format!("[overlaid];[overlaid]{cf}[out]"));
+            } else {
+                f.push_str("[out]");
+            }
+            (f, true)
+        }
+
+        LayoutMode::Split { ratio } => {
+            let r = ratio.clamp(0.3, 0.8);
+            let th_top = (th as f64 * r) as u32;
+            let th_bot = th - th_top;
+            let scale_expr_bot = fit_scale_expr(tw, th_bot, fit_mode);
+
+            let mut f = format!(
+                "[0:v]split=3[gp_src][cam_blur_src][cam_sharp_src];\
+                 [gp_src]scale={tw}:{th_top}:force_original_aspect_ratio=increase:flags=lanczos,crop={tw}:{th_top}[top];\
+                 [cam_blur_src]crop={crop_expr},scale={tw}:{th_bot}:force_original_aspect_ratio=increase:flags=lanczos,crop={tw}:{th_bot},boxblur=20:5[blur_bg];\
+                 [cam_sharp_src]crop={crop_expr},{scale_expr_bot}[sharp_fg];\
+                 [blur_bg][sharp_fg]overlay=(W-w)/2:(H-h)/2[bottom];\
+                 [top][bottom]vstack"
+            );
+            if let Some(cf) = caption_filter {
+                f.push_str(&format!("[stacked];[stacked]{cf}[out]"));
+            } else {
+                f.push_str("[out]");
+            }
+            (f, true)
+        }
+    }
+}
+
+/// Build the `<FIT_SCALE>` substring for the given fit mode + target dimensions.
+/// Returns ffmpeg filter snippet WITHOUT a trailing semicolon -- callers chain it.
+fn fit_scale_expr(w: u32, h: u32, mode: crate::cam_region::CamFitMode) -> String {
+    use crate::cam_region::CamFitMode;
+    match mode {
+        CamFitMode::Fit => format!(
+            "scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos"
+        ),
+        CamFitMode::Fill => format!(
+            "scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos,crop={w}:{h}"
+        ),
+        CamFitMode::Stretch => format!(
+            "scale={w}:{h}:flags=lanczos"
+        ),
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  Export request + ffmpeg command builder
 // ═══════════════════════════════════════════════════════════════════
@@ -456,6 +554,11 @@ pub struct ExportRequest {
     pub layout: LayoutMode,
     /// Optional caption/subtitle filter string.
     pub caption_filter: Option<String>,
+    /// Optional source-frame region to use as the cam slot's content.
+    /// `None` falls back to the existing dup-source layout filter.
+    pub effective_region: Option<crate::cam_region::CamRegion>,
+    /// Fit mode for the region within the cam slot. Defaults to Fit.
+    pub fit_mode: crate::cam_region::CamFitMode,
 }
 
 /// Codec and quality settings for the export.
@@ -536,7 +639,13 @@ pub fn build_ffmpeg_command(
 ) -> Command {
     // Build the filter graph
     let caption = request.caption_filter.as_deref();
-    let (filter, is_complex) = layout_filter(&request.layout, request.target, caption);
+    let (filter, is_complex) = layout_filter_with_region(
+        &request.layout,
+        request.target,
+        caption,
+        request.effective_region,
+        request.fit_mode,
+    );
 
     let mut cmd = Command::new(ffmpeg_path);
 
@@ -617,7 +726,13 @@ pub fn run_export(
 ) -> ExportResult {
     let encode = request.platform.encode_settings();
     let caption = request.caption_filter.as_deref();
-    let (filter, is_complex) = layout_filter(&request.layout, request.target, caption);
+    let (filter, is_complex) = layout_filter_with_region(
+        &request.layout,
+        request.target,
+        caption,
+        request.effective_region,
+        request.fit_mode,
+    );
 
     let duration_us = ((request.end - request.start) * 1_000_000.0) as u64;
 
@@ -917,6 +1032,8 @@ mod tests {
             target: OutputSize::VERTICAL_1080,
             layout: LayoutMode::GameplayFocus,
             caption_filter: None,
+            effective_region: None,
+            fit_mode: crate::cam_region::CamFitMode::Fit,
         }
     }
 
@@ -1037,5 +1154,96 @@ mod tests {
         assert_eq!(serde_json::to_string(&Platform::TikTok).unwrap(), "\"tiktok\"");
         assert_eq!(serde_json::to_string(&Platform::Reels).unwrap(), "\"reels\"");
         assert_eq!(serde_json::to_string(&Platform::Shorts).unwrap(), "\"shorts\"");
+    }
+
+    use crate::cam_region::{CamRegion, CamFitMode};
+
+    fn sample_region() -> CamRegion {
+        CamRegion { x: 0.12, y: 0.78, w: 0.22, h: 0.22 }
+    }
+
+    #[test]
+    fn layout_filter_with_region_no_region_byte_identical_to_layout_filter() {
+        let target = OutputSize { width: 1080, height: 1920 };
+        let modes = [
+            LayoutMode::GameplayFocus,
+            LayoutMode::Split { ratio: 0.6 },
+            LayoutMode::Pip { x: 0.93, y: 0.93, size: 0.3 },
+        ];
+        for m in &modes {
+            let (old_f, old_c) = layout_filter(m, target, None);
+            let (new_f, new_c) = layout_filter_with_region(m, target, None, None, CamFitMode::Fit);
+            assert_eq!(old_f, new_f, "no-region path must be byte-identical for {m:?}");
+            assert_eq!(old_c, new_c);
+        }
+    }
+
+    #[test]
+    fn layout_filter_with_region_pip_uses_split2_and_crop_expr() {
+        let target = OutputSize { width: 1080, height: 1920 };
+        let mode = LayoutMode::Pip { x: 0.93, y: 0.93, size: 0.3 };
+        let (f, complex) = layout_filter_with_region(&mode, target, None, Some(sample_region()), CamFitMode::Fit);
+        assert!(complex, "PiP+region must be filter_complex");
+        assert!(f.contains("[0:v]split=2"), "must split source: {f}");
+        assert!(f.contains("crop=iw*0.2200:ih*0.2200:iw*0.1200:ih*0.7800"), "region crop expr missing: {f}");
+        assert!(!f.contains("[1:v]"), "must NOT reference second input -- single-input feature: {f}");
+        assert!(f.ends_with("[out]"));
+    }
+
+    #[test]
+    fn layout_filter_with_region_pip_passthrough_centers_cam_in_slot() {
+        let target = OutputSize { width: 1080, height: 1920 };
+        let mode = LayoutMode::Pip { x: 0.93, y: 0.93, size: 0.3 };
+        let (f, _) = layout_filter_with_region(&mode, target, None, Some(sample_region()), CamFitMode::Fit);
+        // Center expression in overlay arg: SLOT_X+(SLOT_W-w)/2 form.
+        assert!(f.contains("+(") && f.contains("-w)/2"), "centering expression in overlay: {f}");
+    }
+
+    #[test]
+    fn layout_filter_with_region_split_uses_split3_with_boxblur() {
+        let target = OutputSize { width: 1080, height: 1920 };
+        let mode = LayoutMode::Split { ratio: 0.6 };
+        let (f, complex) = layout_filter_with_region(&mode, target, None, Some(sample_region()), CamFitMode::Fit);
+        assert!(complex);
+        assert!(f.contains("[0:v]split=3"), "Split+region must split into 3 branches: {f}");
+        assert!(f.contains("boxblur=20:5"), "blurred backdrop branch missing: {f}");
+        assert!(f.contains("vstack"), "Split must vstack top+bottom: {f}");
+        assert!(f.ends_with("[out]"));
+    }
+
+    #[test]
+    fn layout_filter_with_region_fit_mode_fill_uses_increase_then_crop() {
+        let target = OutputSize { width: 1080, height: 1920 };
+        let mode = LayoutMode::Pip { x: 0.93, y: 0.93, size: 0.3 };
+        let (f_fit, _) = layout_filter_with_region(&mode, target, None, Some(sample_region()), CamFitMode::Fit);
+        let (f_fill, _) = layout_filter_with_region(&mode, target, None, Some(sample_region()), CamFitMode::Fill);
+        assert!(f_fit.contains("force_original_aspect_ratio=decrease"), "Fit uses decrease: {f_fit}");
+        assert!(f_fill.contains("force_original_aspect_ratio=increase"), "Fill uses increase: {f_fill}");
+    }
+
+    #[test]
+    fn layout_filter_with_region_fit_mode_stretch_drops_aspect_clause() {
+        let target = OutputSize { width: 1080, height: 1920 };
+        let mode = LayoutMode::Pip { x: 0.93, y: 0.93, size: 0.3 };
+        let (f, _) = layout_filter_with_region(&mode, target, None, Some(sample_region()), CamFitMode::Stretch);
+        assert!(!f.contains("force_original_aspect_ratio="), "Stretch must omit aspect-ratio clause: {f}");
+    }
+
+    #[test]
+    fn layout_filter_with_region_gameplay_focus_ignores_region() {
+        let target = OutputSize { width: 1080, height: 1920 };
+        let (f_no, _) = layout_filter_with_region(&LayoutMode::GameplayFocus, target, None, None, CamFitMode::Fit);
+        let (f_yes, _) = layout_filter_with_region(&LayoutMode::GameplayFocus, target, None, Some(sample_region()), CamFitMode::Fit);
+        assert_eq!(f_no, f_yes, "GameplayFocus has no cam slot -- region must be irrelevant");
+    }
+
+    #[test]
+    fn layout_filter_with_region_caption_filter_appended() {
+        let target = OutputSize { width: 1080, height: 1920 };
+        let mode = LayoutMode::Pip { x: 0.93, y: 0.93, size: 0.3 };
+        let caption = "drawtext=text='hi'";
+        let (f, _) = layout_filter_with_region(&mode, target, Some(caption), Some(sample_region()), CamFitMode::Fit);
+        assert!(f.contains(caption), "caption filter must be embedded: {f}");
+        assert!(f.ends_with("[out]"));
     }
 }
