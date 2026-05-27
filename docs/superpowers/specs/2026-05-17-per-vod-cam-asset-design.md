@@ -1,3 +1,7 @@
+> **Superseded** — This design was implemented end-to-end (11 commits) and reverted before shipping after live UX feedback showed users want crop-from-source (use a region of the source frame as the cam) rather than attach-external-file. See [`2026-05-26-cam-region-crop-from-source-design.md`](2026-05-26-cam-region-crop-from-source-design.md) for the replacement design.
+
+---
+
 # Per-VOD Cam Asset — Design
 
 **Status:** Approved in brainstorming; pending written-spec review

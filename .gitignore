@@ -36,3 +36,6 @@ src-tauri/binaries/*.exe
 
 # Worker dependencies
 worker/node_modules/
+
+# Brainstorm session artifacts (visual companion)
+.superpowers/

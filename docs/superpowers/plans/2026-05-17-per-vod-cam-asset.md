@@ -1,3 +1,7 @@
+> **Superseded** — This plan was fully executed (11 commits) and then reverted; no user release. See [`2026-05-26-cam-region-crop-from-source.md`](2026-05-26-cam-region-crop-from-source.md) for the replacement plan and `../specs/2026-05-26-cam-region-crop-from-source-design.md` for the replacement design.
+
+---
+
 # Per-VOD Cam Asset Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
