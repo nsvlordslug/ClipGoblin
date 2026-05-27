@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod binaries;
 pub mod bug_report;
+pub mod cam_region;
 pub mod captions;
 pub mod clip;
 pub mod export;

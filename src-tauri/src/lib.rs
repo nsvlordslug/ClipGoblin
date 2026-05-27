@@ -55,6 +55,11 @@ pub(crate) fn report_error(app: &AppHandle, err: AppError) -> String {
 
 use commands::auth::{twitch_login, twitch_logout, get_logged_in_user, get_channels};
 use commands::bug_report::submit_bug_report;
+use commands::cam_region::{
+    set_vod_cam_region, clear_vod_cam_region,
+    set_clip_cam_region_override, clear_clip_cam_region_override,
+    set_clip_fit_mode, set_allow_per_clip_override, get_allow_per_clip_override,
+};
 use commands::captions::{generate_post_captions, generate_ai_title, test_ai_connection};
 use commands::clip::{export_review_data_for_vod, get_clip_detail, save_clip_review, save_clip_to_disk, update_clip_settings};
 use commands::export::{export_clip, set_clip_thumbnail, generate_clip_captions};
@@ -235,6 +240,13 @@ pub fn run() {
             check_binary_status,
             download_binaries,
             force_refresh_ytdlp,
+            set_vod_cam_region,
+            clear_vod_cam_region,
+            set_clip_cam_region_override,
+            clear_clip_cam_region_override,
+            set_clip_fit_mode,
+            set_allow_per_clip_override,
+            get_allow_per_clip_override,
         ])
         .setup(|app| {
             // Wire job queue events into Tauri's frontend event system.
