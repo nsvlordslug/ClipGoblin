@@ -159,6 +159,7 @@ export default function SettingsPage() {
   const [sensitivity, setSensitivity] = useState<'low' | 'medium' | 'high'>('medium')
   const [sensitivitySaved, setSensitivitySaved] = useState(false)
   const [useCommunityClips, setUseCommunityClips] = useState(true)
+  const [allowPerClipCamOverride, setAllowPerClipCamOverride] = useState(false)
 
   // Transcription model state
   const [modelStatus, setModelStatus] = useState<{ base: { downloaded: boolean }; medium: { downloaded: boolean } } | null>(null)
@@ -211,6 +212,10 @@ export default function SettingsPage() {
         const communityRaw = await invoke<string | null>('get_setting', { key: 'use_twitch_community_clips' })
         if (communityRaw === 'false') setUseCommunityClips(false)
       } catch (error) { console.error('Settings load failed:', error) }
+      try {
+        const allow = await invoke<boolean>('get_allow_per_clip_override')
+        setAllowPerClipCamOverride(allow)
+      } catch { /* default false */ }
       // Load whisper model status (separate try/catch so earlier failures don't block it)
       try {
         console.log('About to call check_model_status')
@@ -671,6 +676,31 @@ export default function SettingsPage() {
             className={`v4-toggle ${ui.settings.useGpu ? 'on' : ''}`}
             aria-label="Toggle GPU acceleration"
             aria-pressed={ui.settings.useGpu}
+          />
+        </div>
+
+        {/* Per-clip cam region overrides */}
+        <div className="v4-setting-row">
+          <div className="v4-setting-info">
+            <div className="v4-setting-name">Per-clip cam region overrides</div>
+            <div className="v4-setting-desc">
+              When on, each clip can override its VOD's cam region. Off keeps the simpler one-region-per-VOD flow. Any saved overrides are preserved in the database when this toggle is off -- they just aren't used at export time.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={async () => {
+              const next = !allowPerClipCamOverride
+              setAllowPerClipCamOverride(next)
+              try { await invoke('set_allow_per_clip_override', { enabled: next }) }
+              catch (err) {
+                console.error('[Settings] set_allow_per_clip_override failed', err)
+                setAllowPerClipCamOverride(!next)
+              }
+            }}
+            className={`v4-toggle ${allowPerClipCamOverride ? 'on' : ''}`}
+            aria-label="Toggle per-clip cam region overrides"
+            aria-pressed={allowPerClipCamOverride}
           />
         </div>
       </section>
