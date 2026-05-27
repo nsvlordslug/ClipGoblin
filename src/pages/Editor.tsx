@@ -18,6 +18,9 @@ import { analyzeEmphasis, getEmphasisSummary } from '../lib/captionEmphasis'
 import type { CaptionToken } from '../lib/captionEmphasis'
 import ThumbnailSelector from '../components/ThumbnailSelector'
 import LayoutPicker from '../components/LayoutPicker'
+import CamRegionRow from '../components/CamRegionRow'
+import CamRegionSetter from '../components/CamRegionSetter'
+import type { RegionNorm } from '../components/CamRegionSetter'
 import FacecamEditor, { DraggablePipOverlay, DraggableSplitDivider, DEFAULT_FACECAM, computeSubtitleCollision } from '../components/FacecamEditor'
 import type { FacecamSettings } from '../components/FacecamEditor'
 import SubtitleEditor from '../components/SubtitleEditor'
@@ -579,6 +582,13 @@ export default function Editor() {
   const [clip, setClip] = useState<Clip | null>(null)
   const [highlight, setHighlight] = useState<Highlight | null>(null)
   const [vod, setVod] = useState<Vod | null>(null)
+  // Cam region edit-mode plumbing
+  type RegionEditScope = 'vod' | 'clip-override' | null
+  const [regionEditScope, setRegionEditScope] = useState<RegionEditScope>(null)
+  const [playerRect, setPlayerRect] = useState<DOMRect | null>(null)
+  const playerContainerRef = useRef<HTMLDivElement | null>(null)
+  const [camRegionRefetchToken, setCamRegionRefetchToken] = useState(0)
+  const bumpCamRegionRefetch = () => setCamRegionRefetchToken(t => t + 1)
   const [videoSrc, setVideoSrc] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [exporting, setExporting] = useState(false)
@@ -997,7 +1007,7 @@ export default function Editor() {
         console.error('Failed to load clip:', err)
       }
     })()
-  }, [clipId])
+  }, [clipId, camRegionRefetchToken])
 
   // ── Sync aspect ratio when export preset changes ──
   useEffect(() => {
@@ -1138,6 +1148,20 @@ export default function Editor() {
       : Math.min(85, splitClampMax)
   const captionY = Math.max(3, Math.min(splitClampMax, captionBaseY + captionYOffset))
   const captionInSafeZone = captionY >= 10 && captionY <= (facecamLayout === 'split' ? splitClampMax : 90)
+
+  // Cam region parsers (VOD JSON -> RegionNorm object)
+  const parseRegion = (s: string | null | undefined): RegionNorm | null => {
+    if (!s) return null
+    try {
+      const o = JSON.parse(s)
+      if (typeof o.x === 'number' && typeof o.y === 'number' && typeof o.w === 'number' && typeof o.h === 'number') {
+        return { x: o.x, y: o.y, w: o.w, h: o.h }
+      }
+    } catch { /* swallow */ }
+    return null
+  }
+  const vodRegion = parseRegion(vod?.cam_region_norm ?? null)
+  const clipOverride = parseRegion(clip?.cam_region_norm_override ?? null)
   const captionCollision = computeSubtitleCollision(captionY, facecamLayout, facecamSettings)
   const captionPositionStyle = { top: `${captionY}%`, transform: captionsPosition === 'center' ? 'translateY(-50%)' : undefined }
 
@@ -1161,6 +1185,19 @@ export default function Editor() {
     padding: captionStyle.bgPadding > 0 ? `${captionStyle.bgPadding * plainS * 0.6}px ${captionStyle.bgPadding * plainS}px` : undefined,
     borderRadius: captionStyle.bgRadius > 0 ? `${captionStyle.bgRadius * plainS}px` : undefined,
   }
+
+  // Measure the source-player container when entering region-edit mode.
+  useEffect(() => {
+    if (!regionEditScope) { setPlayerRect(null); return }
+    const measure = () => {
+      if (playerContainerRef.current) {
+        setPlayerRect(playerContainerRef.current.getBoundingClientRect())
+      }
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [regionEditScope])
 
   if (!clip) {
     return <div className="flex items-center justify-center h-64"><p className="text-slate-400">Loading editor...</p></div>
@@ -1203,7 +1240,7 @@ export default function Editor() {
               </span>
             </div>
             <div className="flex justify-center">
-              <div className={`relative rounded-lg overflow-hidden ${previewAspect} ${previewWidth} transition-all duration-300 ease-in-out`}>
+              <div ref={playerContainerRef} className={`relative rounded-lg overflow-hidden ${previewAspect} ${previewWidth} transition-all duration-300 ease-in-out`}>
                 <ClipPlayer
                   src={videoSrc}
                   clipStart={startSeconds}
@@ -1339,6 +1376,31 @@ export default function Editor() {
                     ))}
                   </>}
                 />
+                {regionEditScope && playerRect && (
+                  <CamRegionSetter
+                    initial={
+                      regionEditScope === 'vod'
+                        ? (vodRegion ?? { x: 0.05, y: 0.70, w: 0.25, h: 0.25 })
+                        : (clipOverride ?? vodRegion ?? { x: 0.05, y: 0.70, w: 0.25, h: 0.25 })
+                    }
+                    containerRect={playerRect}
+                    onChange={() => { /* could update a live-preview overlay; minimal v1 */ }}
+                    onSave={async (r) => {
+                      try {
+                        if (regionEditScope === 'vod') {
+                          await invoke('set_vod_cam_region', { vodId: vod!.id, region: r })
+                        } else {
+                          await invoke('set_clip_cam_region_override', { clipId: clip!.id, region: r })
+                        }
+                        setRegionEditScope(null)
+                        bumpCamRegionRefetch()
+                      } catch (e) {
+                        console.error('[Editor] save cam region failed', e)
+                      }
+                    }}
+                    onCancel={() => setRegionEditScope(null)}
+                  />
+                )}
               </div>
             </div>
           </div>
@@ -1704,6 +1766,22 @@ export default function Editor() {
                 settings={facecamSettings}
                 onChange={setFacecamSettings}
               />
+            )}
+            {/* Cam region (crop from source) — visible whenever layout has a cam slot */}
+            {clip && vod && (facecamLayout === 'split' || facecamLayout === 'pip') && (
+              <div className="mt-3">
+                <CamRegionRow
+                  vodId={vod.id}
+                  clipId={clip.id}
+                  vodRegion={vodRegion}
+                  clipOverride={clipOverride}
+                  fitMode={(clip.cam_fit_mode ?? null) as 'fit' | 'fill' | 'stretch' | null}
+                  layoutHasCamSlot={facecamLayout === 'split' || facecamLayout === 'pip'}
+                  onEnterVodEditMode={() => setRegionEditScope('vod')}
+                  onEnterClipOverrideMode={() => setRegionEditScope('clip-override')}
+                  onChanged={bumpCamRegionRefetch}
+                />
+              </div>
             )}
             {facecamLayout === 'none' && (
               <p className="text-[9px] text-slate-600 mt-2">Select Split or PiP layout to add facecam controls.</p>
