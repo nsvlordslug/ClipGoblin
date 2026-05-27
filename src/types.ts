@@ -20,6 +20,7 @@ export interface Vod {
   analysis_progress: number;
   local_path: string | null;
   game_name: string | null;
+  cam_region_norm: string | null;
 }
 
 export interface Highlight {
@@ -73,6 +74,8 @@ export interface Clip {
   game: string | null;
   publish_description: string | null;
   publish_hashtags: string | null;
+  cam_region_norm_override: string | null;
+  cam_fit_mode: 'fit' | 'fill' | 'stretch' | null;
 }
 
 export interface AppInfo {
