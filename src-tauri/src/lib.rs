@@ -1,4 +1,5 @@
 mod bin_manager;
+mod cam_region;
 mod ai_provider;
 mod ai_usage;
 mod auth_proxy;
