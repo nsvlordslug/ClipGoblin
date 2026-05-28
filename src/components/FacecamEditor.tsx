@@ -125,9 +125,12 @@ export default function FacecamEditor({ layout, settings, onChange }: Props) {
 }
 
 /** Draggable PiP overlay with snap-to-edge behavior and alignment guides. */
-export function DraggablePipOverlay({ settings, onChange, frameWidth, frameHeight }: {
+export function DraggablePipOverlay({ settings, onChange, frameWidth, frameHeight, transparent = false }: {
   settings: FacecamSettings; onChange: (s: FacecamSettings) => void
   frameWidth: number; frameHeight: number
+  /** When true, drop the placeholder gradient + FACECAM label so an underlying
+   *  preview (e.g. CamRegionPreview canvas) shows through. Border + handles stay. */
+  transparent?: boolean
 }) {
   const [dragging, setDragging] = useState(false)
   const [guides, setGuides] = useState<SnapGuide[]>([])
@@ -184,10 +187,14 @@ export function DraggablePipOverlay({ settings, onChange, frameWidth, frameHeigh
         <div className={`w-full h-full rounded-lg overflow-hidden border-2 transition-colors ${
           dragging ? 'border-violet-400' : 'border-white/40 group-hover/pip:border-white/70'
         }`}
-          style={{ background: 'linear-gradient(135deg, #1a1a3a 0%, #2a1a4a 100%)' }}>
-          <div className="w-full h-full flex items-center justify-center">
-            <span className="text-[8px] text-white/50 font-mono">FACECAM</span>
-          </div>
+          style={{
+            background: transparent ? 'transparent' : 'linear-gradient(135deg, #1a1a3a 0%, #2a1a4a 100%)',
+          }}>
+          {!transparent && (
+            <div className="w-full h-full flex items-center justify-center">
+              <span className="text-[8px] text-white/50 font-mono">FACECAM</span>
+            </div>
+          )}
         </div>
         {/* Resize handle */}
         <div className="absolute -bottom-1 -right-1 w-3 h-3 bg-white/60 rounded-full opacity-0 group-hover/pip:opacity-100 cursor-nwse-resize"

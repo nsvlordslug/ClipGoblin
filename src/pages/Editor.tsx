@@ -1364,6 +1364,7 @@ export default function Editor() {
                           onChange={setFacecamSettings}
                           frameWidth={frameWidthPx}
                           frameHeight={frameHeightPx}
+                          transparent={!!effectiveRegion}
                         />
                       </>
                     )}
