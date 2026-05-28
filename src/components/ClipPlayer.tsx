@@ -35,14 +35,24 @@ interface Props {
   seekRef?: React.MutableRefObject<((absoluteTime: number) => void) | null>
   /** How the video fits its container: 'cover' crops to fill, 'contain' fits inside with bars. Default: 'cover' */
   objectFit?: 'cover' | 'contain'
+  /** Optional ref that receives the underlying <video> element so external
+   * code (e.g. the cam-region preview) can read frames via canvas drawImage
+   * without opening a second decoder on the same source. */
+  videoElementRef?: React.MutableRefObject<HTMLVideoElement | null>
 }
 
 export default function ClipPlayer({
   src, poster, clipStart, clipEnd, mode = 'compact', className = '', overlay,
   controlsOverlay = false, onPlayChange, onTimeUpdate, seekRef: externalSeekRef,
-  objectFit = 'cover',
+  objectFit = 'cover', videoElementRef,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
+  // Mirror our internal video ref into the external ref (if provided)
+  // so callers can drawImage frames without opening a second decoder.
+  useEffect(() => {
+    if (videoElementRef) videoElementRef.current = videoRef.current
+    return () => { if (videoElementRef) videoElementRef.current = null }
+  }, [videoElementRef])
   const seekRef = useRef<HTMLDivElement>(null)
   // Keep a stable ref to onTimeUpdate to avoid re-registering the timeupdate
   // listener on every parent render (the callback fires on every video frame)

@@ -587,6 +587,11 @@ export default function Editor() {
   // (CamRegionModal) so the user can drag on the UNCROPPED source frame.
   type RegionEditScope = 'vod' | 'clip-override' | null
   const [regionEditScope, setRegionEditScope] = useState<RegionEditScope>(null)
+  // Shared ref to the main ClipPlayer's underlying <video> element. The
+  // CamRegionPreview draws frames from THIS element to a canvas (instead of
+  // opening its own decoder, which Tauri's WebView doesn't reliably support
+  // when two <video> tags target the same asset URL).
+  const mainVideoElementRef = useRef<HTMLVideoElement | null>(null)
   // Whether per-clip cam-region override is enabled in Settings.
   // Lifted here (vs. internal to CamRegionRow) so the live preview can
   // resolve the effective region using the same override precedence.
@@ -1305,6 +1310,7 @@ export default function Editor() {
                   onTimeUpdate={setPlaybackTime}
                   onPlayChange={setIsPlaying}
                   seekRef={playerSeekRef}
+                  videoElementRef={mainVideoElementRef}
                   overlay={<>
                     {/* ── Layout mode overlay — interactive ── */}
                     {facecamLayout === 'split' && (
@@ -1318,10 +1324,9 @@ export default function Editor() {
                             style={{ top: `${facecamSettings.splitRatio * 100}%`, background: 'rgba(60,20,100,0.25)' }}>
                             {effectiveRegion && videoSrc && (
                               <CamRegionPreview
-                                videoSrc={videoSrc}
+                                sourceVideoRef={mainVideoElementRef}
                                 region={effectiveRegion}
                                 fitMode={effectiveFitMode}
-                                currentTime={playbackTime}
                               />
                             )}
                           </div>
@@ -1348,10 +1353,9 @@ export default function Editor() {
                             }}
                           >
                             <CamRegionPreview
-                              videoSrc={videoSrc}
+                              sourceVideoRef={mainVideoElementRef}
                               region={effectiveRegion}
                               fitMode={effectiveFitMode}
-                              currentTime={playbackTime}
                             />
                           </div>
                         )}

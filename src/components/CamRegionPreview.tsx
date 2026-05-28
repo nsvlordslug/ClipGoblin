@@ -1,159 +1,133 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
 
 type RegionNorm = { x: number; y: number; w: number; h: number }
 type FitMode = 'fit' | 'fill' | 'stretch'
 
 type Props = {
-  /** Source video URL (already converted via convertFileSrc). */
-  videoSrc: string
+  /** Ref to the main player's underlying <video> element. We draw frames
+   * from THIS element to a canvas, avoiding a second decoder on the same
+   * source (which Tauri's WebView doesn't reliably support). */
+  sourceVideoRef: React.MutableRefObject<HTMLVideoElement | null>
   /** Normalized 0..1 source-frame region to show. */
   region: RegionNorm
   /** How the region maps into the slot. */
   fitMode: FitMode
-  /** Current playback time of the main player; preview seeks here. */
-  currentTime: number
 }
 
 /**
  * Live preview of the source-region cam content, rendered inside the editor's
- * cam slot. CSS-positioned `<video>` element with calculated transform that
- * mirrors what ffmpeg does at export time.
+ * cam slot. Uses a canvas that draws frames from the MAIN player's video
+ * element (via shared ref) — no second decoder needed.
  *
- * The component measures its own parent (the slot) via ResizeObserver, so the
- * math always uses ACTUAL rendered pixel dimensions instead of estimates.
- *
- * For Fit/Fill modes we need the source's aspect ratio. We default to 16:9
- * (the common Twitch source aspect) and refine when the video element's
- * loadedmetadata event fires.
+ * Render loop: requestAnimationFrame copies the source's region rectangle to
+ * the canvas with the chosen fit mode applied. The canvas auto-resizes to
+ * fill its parent slot.
  */
-export default function CamRegionPreview({
-  videoSrc,
-  region,
-  fitMode,
-  currentTime,
-}: Props) {
+export default function CamRegionPreview({ sourceVideoRef, region, fitMode }: Props) {
   const wrapperRef = useRef<HTMLDivElement | null>(null)
-  const videoRef = useRef<HTMLVideoElement | null>(null)
-  const [intrinsicAspect, setIntrinsicAspect] = useState<number>(16 / 9)
-  const [slotSize, setSlotSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 })
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const rafIdRef = useRef<number | null>(null)
 
-  // Measure the parent slot's actual rendered dimensions.
+  // Single rAF loop: draws the current frame from the source video to canvas.
   useEffect(() => {
-    const el = wrapperRef.current
-    if (!el) return
-    const measure = () => {
-      const r = el.getBoundingClientRect()
-      if (r.width > 0 && r.height > 0) {
-        setSlotSize({ w: r.width, h: r.height })
+    const draw = () => {
+      const canvas = canvasRef.current
+      const wrapper = wrapperRef.current
+      const source = sourceVideoRef.current
+      if (!canvas || !wrapper || !source) {
+        rafIdRef.current = requestAnimationFrame(draw)
+        return
       }
+
+      // Resize canvas backing store to match its CSS pixel size (so 1 CSS px
+      // == 1 canvas px). DPR is handled by leaving the CSS size alone.
+      const rect = wrapper.getBoundingClientRect()
+      const cw = Math.max(1, Math.floor(rect.width))
+      const ch = Math.max(1, Math.floor(rect.height))
+      if (canvas.width !== cw) canvas.width = cw
+      if (canvas.height !== ch) canvas.height = ch
+
+      const ctx = canvas.getContext('2d')
+      if (!ctx) {
+        rafIdRef.current = requestAnimationFrame(draw)
+        return
+      }
+
+      const vw = source.videoWidth
+      const vh = source.videoHeight
+      if (vw === 0 || vh === 0 || source.readyState < 2) {
+        // Metadata not loaded yet -- clear to transparent and try again next frame.
+        ctx.clearRect(0, 0, cw, ch)
+        rafIdRef.current = requestAnimationFrame(draw)
+        return
+      }
+
+      // Source rectangle (in source video pixel coords).
+      const sx = region.x * vw
+      const sy = region.y * vh
+      const sw = region.w * vw
+      const sh = region.h * vh
+
+      // Destination rectangle on canvas, per fit mode.
+      let dx = 0, dy = 0, dw = cw, dh = ch
+      if (fitMode !== 'stretch') {
+        const sourceAspect = sw / sh
+        const slotAspect = cw / ch
+        if (fitMode === 'fit') {
+          // Letterbox: preserve aspect, fit entirely inside slot.
+          if (sourceAspect > slotAspect) {
+            dw = cw
+            dh = cw / sourceAspect
+            dx = 0
+            dy = (ch - dh) / 2
+          } else {
+            dh = ch
+            dw = ch * sourceAspect
+            dx = (cw - dw) / 2
+            dy = 0
+          }
+        } else {
+          // Fill: preserve aspect, crop overflow.
+          if (sourceAspect > slotAspect) {
+            dh = ch
+            dw = ch * sourceAspect
+            dx = (cw - dw) / 2
+            dy = 0
+          } else {
+            dw = cw
+            dh = cw / sourceAspect
+            dx = 0
+            dy = (ch - dh) / 2
+          }
+        }
+      }
+
+      ctx.clearRect(0, 0, cw, ch)
+      try {
+        ctx.drawImage(source, sx, sy, sw, sh, dx, dy, dw, dh)
+      } catch {
+        // Cross-origin / decoder hiccup — skip this frame.
+      }
+
+      rafIdRef.current = requestAnimationFrame(draw)
     }
-    measure()
-    const ro = new ResizeObserver(measure)
-    ro.observe(el)
-    window.addEventListener('resize', measure)
+
+    rafIdRef.current = requestAnimationFrame(draw)
     return () => {
-      ro.disconnect()
-      window.removeEventListener('resize', measure)
+      if (rafIdRef.current !== null) cancelAnimationFrame(rafIdRef.current)
     }
-  }, [])
-
-  // Capture the source's intrinsic aspect once metadata loads.
-  useEffect(() => {
-    const v = videoRef.current
-    if (!v) return
-    const onMeta = () => {
-      if (v.videoWidth > 0 && v.videoHeight > 0) {
-        setIntrinsicAspect(v.videoWidth / v.videoHeight)
-      }
-    }
-    if (v.readyState >= 1 && v.videoWidth > 0) {
-      onMeta()
-    } else {
-      v.addEventListener('loadedmetadata', onMeta)
-      v.addEventListener('loadeddata', onMeta)
-      return () => {
-        v.removeEventListener('loadedmetadata', onMeta)
-        v.removeEventListener('loadeddata', onMeta)
-      }
-    }
-  }, [videoSrc])
-
-  // Seek the preview to the main player's currentTime whenever it changes.
-  useEffect(() => {
-    const v = videoRef.current
-    if (!v) return
-    if (Math.abs(v.currentTime - currentTime) > 0.05) {
-      try { v.currentTime = currentTime } catch { /* ignore */ }
-    }
-    v.pause()
-  }, [currentTime])
-
-  // Compute the video's CSS transform based on the REAL measured slot size.
-  const { w: slotWidth, h: slotHeight } = slotSize
-  let videoStyle: React.CSSProperties = {
-    position: 'absolute',
-    left: 0,
-    top: 0,
-    width: '100%',
-    height: '100%',
-    objectFit: 'cover',
-  }
-
-  if (slotWidth > 0 && slotHeight > 0 && region.w > 0 && region.h > 0) {
-    // Logical source coords: width 1000, height 1000/aspect. Actual values
-    // cancel out in the scale calculation -- only the ratio matters.
-    const logicalSourceW = 1000
-    const logicalSourceH = logicalSourceW / intrinsicAspect
-    const regionPxW = region.w * logicalSourceW
-    const regionPxH = region.h * logicalSourceH
-
-    if (fitMode === 'stretch') {
-      const scaleX = slotWidth / regionPxW
-      const scaleY = slotHeight / regionPxH
-      const scaledW = logicalSourceW * scaleX
-      const scaledH = logicalSourceH * scaleY
-      videoStyle = {
-        position: 'absolute',
-        left: `${-region.x * scaledW}px`,
-        top: `${-region.y * scaledH}px`,
-        width: `${scaledW}px`,
-        height: `${scaledH}px`,
-        objectFit: 'fill',
-      }
-    } else {
-      const scale = fitMode === 'fit'
-        ? Math.min(slotWidth / regionPxW, slotHeight / regionPxH)
-        : Math.max(slotWidth / regionPxW, slotHeight / regionPxH)
-      const scaledVideoW = logicalSourceW * scale
-      const scaledVideoH = logicalSourceH * scale
-      const regionAtScaleW = regionPxW * scale
-      const regionAtScaleH = regionPxH * scale
-      const offsetX = (slotWidth - regionAtScaleW) / 2
-      const offsetY = (slotHeight - regionAtScaleH) / 2
-      videoStyle = {
-        position: 'absolute',
-        left: `${offsetX - region.x * scaledVideoW}px`,
-        top: `${offsetY - region.y * scaledVideoH}px`,
-        width: `${scaledVideoW}px`,
-        height: `${scaledVideoH}px`,
-        objectFit: 'fill',
-      }
-    }
-  }
+  }, [sourceVideoRef, region, fitMode])
 
   return (
     <div
       ref={wrapperRef}
       className="absolute inset-0 overflow-hidden pointer-events-none"
-      style={{ zIndex: 5, background: 'transparent' }}
+      style={{ zIndex: 5 }}
     >
-      <video
-        ref={videoRef}
-        src={videoSrc}
-        muted
-        preload="auto"
-        playsInline
-        style={videoStyle}
+      <canvas
+        ref={canvasRef}
+        className="absolute inset-0"
+        style={{ width: '100%', height: '100%', display: 'block' }}
       />
     </div>
   )
