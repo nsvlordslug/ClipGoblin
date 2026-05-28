@@ -1226,7 +1226,16 @@ mod tests {
         let target = OutputSize { width: 1080, height: 1920 };
         let mode = LayoutMode::Pip { x: 0.93, y: 0.93, size: 0.3 };
         let (f, _) = layout_filter_with_region(&mode, target, None, Some(sample_region()), CamFitMode::Stretch);
-        assert!(!f.contains("force_original_aspect_ratio="), "Stretch must omit aspect-ratio clause: {f}");
+        // Scope the assertion to the cam branch only -- the gameplay branch
+        // ALWAYS uses force_original_aspect_ratio=increase to fill the output frame,
+        // regardless of fit_mode. Only the cam branch is fit-mode-controlled.
+        let cam_start = f.find("[cam_src]").expect("cam branch present");
+        let cam_end_rel = f[cam_start..].find("[cam]").expect("cam branch ends with [cam]");
+        let cam_branch = &f[cam_start..cam_start + cam_end_rel];
+        assert!(
+            !cam_branch.contains("force_original_aspect_ratio="),
+            "Stretch must omit aspect-ratio clause in cam branch: {cam_branch}"
+        );
     }
 
     #[test]
