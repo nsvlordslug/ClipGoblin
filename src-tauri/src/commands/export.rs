@@ -480,13 +480,27 @@ pub(crate) fn build_caption_filter(clip: &db::ClipRow, target_width: i32, target
     let style = get_sub_style(&clip.caption_style);
     let is_srt = text.contains("-->") && text.lines().count() > 2;
 
+    // Layout-aware caption positioning: in Split layout, captions stay in the
+    // gameplay region so they don't overlap the cam slot (which may contain a
+    // user-selected source region per v1.4.0). For other layouts, bottom is
+    // at ~82% Y as before.
+    let layout = crate::vertical_crop::LayoutMode::from_db(&clip.facecam_layout);
+
     // MarginV = distance from the BOTTOM edge for Alignment=2 (bottom-center).
-    // Bottom position: ~18% from bottom clears YouTube Shorts UI (likes/comments)
-    // and regular player controls (progress bar).  Target: text baseline at ~82% height.
-    let margin_v = match clip.captions_position.as_str() {
-        "top" => target_height - (target_height * 18 / 100),
-        "center" => target_height / 2 - 30,
-        _ => target_height * 18 / 100, // ~346px on 1920-tall → bottom of text at 82%
+    let margin_v = match (clip.captions_position.as_str(), &layout) {
+        ("top", _) => target_height - (target_height * 18 / 100),
+        ("center", crate::vertical_crop::LayoutMode::Split { ratio }) => {
+            // Center of the gameplay region (top of split)
+            let baseline_y = (*ratio as f64 * target_height as f64 * 0.5) as i32;
+            target_height - baseline_y
+        }
+        ("center", _) => target_height / 2 - 30,
+        (_, crate::vertical_crop::LayoutMode::Split { ratio }) => {
+            // Just above the split line (gameplay-region bottom)
+            let baseline_y_from_top = ((*ratio as f64 - 0.03) * target_height as f64) as i32;
+            target_height - baseline_y_from_top
+        }
+        _ => target_height * 18 / 100,
     };
 
     if is_srt {
@@ -614,10 +628,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
             .replace('[', "\\[")
             .replace(']', "\\]")
             .replace(';', "\\;");
-        let ypos = match clip.captions_position.as_str() {
-            "top" => "h*0.08",
-            "center" => "(h-text_h)/2",
-            _ => "h*0.78",  // ~78% → clears YouTube Shorts/player UI at bottom
+        // Layout-aware Y: Split keeps captions in the gameplay region.
+        let ypos: String = match (clip.captions_position.as_str(), &layout) {
+            ("top", _) => "h*0.08".to_string(),
+            ("center", crate::vertical_crop::LayoutMode::Split { ratio }) => {
+                // Center of gameplay region (above split line)
+                format!("h*{:.3}", *ratio * 0.5)
+            }
+            ("center", _) => "(h-text_h)/2".to_string(),
+            (_, crate::vertical_crop::LayoutMode::Split { ratio }) => {
+                // Text top at (ratio - ~7% text height) so text body sits just above split line
+                format!("h*{:.3}", (*ratio - 0.07).max(0.0))
+            }
+            _ => "h*0.78".to_string(),
         };
 
         let mut filter = format!(

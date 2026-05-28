@@ -1173,17 +1173,20 @@ export default function Editor() {
   const frameWidthPx = frameWidth > 0 ? frameWidth : 442
 
   // Caption Y position -- mirrors the export pipeline (commands/export.rs).
-  // Bottom position lands at ~82% (matches export's MarginV=18% / drawtext y=h*0.78).
-  // Captions intentionally overlay the cam slot in Split layout when 'bottom'
-  // is chosen -- users requested this so subtitles match TikTok/Shorts UX
-  // expectations regardless of whether the cam slot is dup-source or a
-  // user-cropped region from the source frame.
-  const splitClampMax = 95
+  // Split layout: keep captions in the gameplay region so they don't overlap
+  // the cam slot (which now may show a user-cropped source region).
+  // Other layouts: top=8%, center=50%, bottom=82% (matches export's MarginV).
+  const isSplitLayout = facecamLayout === 'split'
+  // For Split, bottom lands just above the split line; clamp prevents it
+  // from sliding into the cam region via the offset slider.
+  const splitBottomY = facecamSettings.splitRatio * 100 - 3
+  const splitClampMax = isSplitLayout ? splitBottomY : 95
   const captionBaseY = captionsPosition === 'top' ? 8
-    : captionsPosition === 'center' ? 50
-    : 82
+    : captionsPosition === 'center'
+      ? (isSplitLayout ? facecamSettings.splitRatio * 50 : 50)
+      : (isSplitLayout ? splitBottomY : 82)
   const captionY = Math.max(3, Math.min(splitClampMax, captionBaseY + captionYOffset))
-  const captionInSafeZone = captionY >= 10 && captionY <= 90
+  const captionInSafeZone = captionY >= 10 && captionY <= (isSplitLayout ? splitBottomY + 2 : 90)
 
   // Cam region parsers (VOD JSON -> RegionNorm object)
   const parseRegion = (s: string | null | undefined): RegionNorm | null => {
