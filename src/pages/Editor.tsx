@@ -1322,8 +1322,6 @@ export default function Editor() {
                                 region={effectiveRegion}
                                 fitMode={effectiveFitMode}
                                 currentTime={playbackTime}
-                                slotWidth={frameWidthPx}
-                                slotHeight={(1 - facecamSettings.splitRatio) * frameHeightPx}
                               />
                             )}
                           </div>
@@ -1354,8 +1352,6 @@ export default function Editor() {
                               region={effectiveRegion}
                               fitMode={effectiveFitMode}
                               currentTime={playbackTime}
-                              slotWidth={(facecamSettings.pipW / 100) * frameWidthPx}
-                              slotHeight={(facecamSettings.pipH / 100) * frameHeightPx}
                             />
                           </div>
                         )}

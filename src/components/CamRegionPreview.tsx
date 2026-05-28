@@ -12,9 +12,6 @@ type Props = {
   fitMode: FitMode
   /** Current playback time of the main player; preview seeks here. */
   currentTime: number
-  /** Slot pixel dimensions (the visible cam-slot area in the editor preview). */
-  slotWidth: number
-  slotHeight: number
 }
 
 /**
@@ -22,26 +19,45 @@ type Props = {
  * cam slot. CSS-positioned `<video>` element with calculated transform that
  * mirrors what ffmpeg does at export time.
  *
- * Implementation note: we compute the transform from the region + a source
- * aspect ratio. For the initial render we assume 16:9 (the common Twitch
- * source aspect); once the video element's loadedmetadata fires we replace
- * with the true intrinsic aspect. This lets the preview render IMMEDIATELY
- * with a reasonable approximation, instead of waiting on metadata (which
- * some browsers/WebViews delay or skip for clipped/off-screen videos).
+ * The component measures its own parent (the slot) via ResizeObserver, so the
+ * math always uses ACTUAL rendered pixel dimensions instead of estimates.
+ *
+ * For Fit/Fill modes we need the source's aspect ratio. We default to 16:9
+ * (the common Twitch source aspect) and refine when the video element's
+ * loadedmetadata event fires.
  */
 export default function CamRegionPreview({
   videoSrc,
   region,
   fitMode,
   currentTime,
-  slotWidth,
-  slotHeight,
 }: Props) {
+  const wrapperRef = useRef<HTMLDivElement | null>(null)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const [intrinsicAspect, setIntrinsicAspect] = useState<number>(16 / 9)
+  const [slotSize, setSlotSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 })
+
+  // Measure the parent slot's actual rendered dimensions.
+  useEffect(() => {
+    const el = wrapperRef.current
+    if (!el) return
+    const measure = () => {
+      const r = el.getBoundingClientRect()
+      if (r.width > 0 && r.height > 0) {
+        setSlotSize({ w: r.width, h: r.height })
+      }
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    window.addEventListener('resize', measure)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', measure)
+    }
+  }, [])
 
   // Capture the source's intrinsic aspect once metadata loads.
-  // Falls back to 16:9 default if we never get it (most Twitch sources are 16:9).
   useEffect(() => {
     const v = videoRef.current
     if (!v) return
@@ -72,9 +88,8 @@ export default function CamRegionPreview({
     v.pause()
   }, [currentTime])
 
-  // Compute the video's CSS transform. We work in NORMALIZED video coords:
-  // the video element is sized so that the region (region.w x region.h normalized)
-  // maps to the slot dimensions per the fit mode.
+  // Compute the video's CSS transform based on the REAL measured slot size.
+  const { w: slotWidth, h: slotHeight } = slotSize
   let videoStyle: React.CSSProperties = {
     position: 'absolute',
     left: 0,
@@ -85,8 +100,8 @@ export default function CamRegionPreview({
   }
 
   if (slotWidth > 0 && slotHeight > 0 && region.w > 0 && region.h > 0) {
-    // Pretend the source has intrinsic dimensions (regionW × intrinsicAspect, regionH).
-    // Pick a "logical source width" of 1000 for the math; the actual value cancels out.
+    // Logical source coords: width 1000, height 1000/aspect. Actual values
+    // cancel out in the scale calculation -- only the ratio matters.
     const logicalSourceW = 1000
     const logicalSourceH = logicalSourceW / intrinsicAspect
     const regionPxW = region.w * logicalSourceW
@@ -106,7 +121,6 @@ export default function CamRegionPreview({
         objectFit: 'fill',
       }
     } else {
-      // Fit (decrease) or Fill (increase) — uniform scale.
       const scale = fitMode === 'fit'
         ? Math.min(slotWidth / regionPxW, slotHeight / regionPxH)
         : Math.max(slotWidth / regionPxW, slotHeight / regionPxH)
@@ -129,6 +143,7 @@ export default function CamRegionPreview({
 
   return (
     <div
+      ref={wrapperRef}
       className="absolute inset-0 overflow-hidden pointer-events-none"
       style={{ zIndex: 5, background: 'transparent' }}
     >
