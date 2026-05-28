@@ -1229,7 +1229,9 @@ mod tests {
         // Scope the assertion to the cam branch only -- the gameplay branch
         // ALWAYS uses force_original_aspect_ratio=increase to fill the output frame,
         // regardless of fit_mode. Only the cam branch is fit-mode-controlled.
-        let cam_start = f.find("[cam_src]").expect("cam branch present");
+        // Use "[cam_src]crop=" as the anchor (the split declaration has [cam_src]
+        // without a trailing crop=, so this uniquely identifies the cam branch start).
+        let cam_start = f.find("[cam_src]crop=").expect("cam branch present");
         let cam_end_rel = f[cam_start..].find("[cam]").expect("cam branch ends with [cam]");
         let cam_branch = &f[cam_start..cam_start + cam_end_rel];
         assert!(
