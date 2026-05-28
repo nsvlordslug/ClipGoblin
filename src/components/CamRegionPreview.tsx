@@ -72,7 +72,16 @@ export default function CamRegionPreview({
 
   // Calculate the video's CSS transform: position+size so that the slot shows
   // only the region, with the chosen fit mode applied.
-  let videoStyle: React.CSSProperties = { display: 'none' }
+  // Until intrinsic dimensions are known, position the video far off-screen
+  // (NOT display:none -- many browsers/WebViews skip loadedmetadata for
+  // display:none elements, which would leave us stuck in the loading state).
+  let videoStyle: React.CSSProperties = {
+    position: 'absolute',
+    left: '-99999px',
+    top: '-99999px',
+    width: '1px',
+    height: '1px',
+  }
   if (intrinsic && slotWidth > 0 && slotHeight > 0) {
     const regionPxW = region.w * intrinsic.w
     const regionPxH = region.h * intrinsic.h
