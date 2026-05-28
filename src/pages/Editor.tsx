@@ -20,6 +20,7 @@ import ThumbnailSelector from '../components/ThumbnailSelector'
 import LayoutPicker from '../components/LayoutPicker'
 import CamRegionRow from '../components/CamRegionRow'
 import CamRegionModal from '../components/CamRegionModal'
+import CamRegionPreview from '../components/CamRegionPreview'
 import type { RegionNorm } from '../components/CamRegionSetter'
 import FacecamEditor, { DraggablePipOverlay, DraggableSplitDivider, DEFAULT_FACECAM, computeSubtitleCollision } from '../components/FacecamEditor'
 import type { FacecamSettings } from '../components/FacecamEditor'
@@ -586,6 +587,15 @@ export default function Editor() {
   // (CamRegionModal) so the user can drag on the UNCROPPED source frame.
   type RegionEditScope = 'vod' | 'clip-override' | null
   const [regionEditScope, setRegionEditScope] = useState<RegionEditScope>(null)
+  // Whether per-clip cam-region override is enabled in Settings.
+  // Lifted here (vs. internal to CamRegionRow) so the live preview can
+  // resolve the effective region using the same override precedence.
+  const [allowPerClipCamOverride, setAllowPerClipCamOverride] = useState(false)
+  useEffect(() => {
+    invoke<boolean>('get_allow_per_clip_override')
+      .then(setAllowPerClipCamOverride)
+      .catch(() => setAllowPerClipCamOverride(false))
+  }, [])
   // Narrow refetch: refresh only cam-region columns on the vod/clip rows
   // without re-running the full clip-load (which would reset editor state
   // like facecamLayout to the DB's saved value, wiping unsaved layout picks).
@@ -1180,6 +1190,15 @@ export default function Editor() {
   }
   const vodRegion = parseRegion(vod?.cam_region_norm ?? null)
   const clipOverride = parseRegion(clip?.cam_region_norm_override ?? null)
+  // Effective region for live preview -- mirrors resolve_effective_region in
+  // src-tauri/src/cam_region.rs so the editor's cam slot shows the same pixels
+  // ffmpeg will render at export time.
+  const effectiveRegion: RegionNorm | null =
+    (allowPerClipCamOverride && clipOverride) ? clipOverride : (vodRegion ?? null)
+  const effectiveFitMode: 'fit' | 'fill' | 'stretch' =
+    (clip?.cam_fit_mode === 'fill' || clip?.cam_fit_mode === 'stretch')
+      ? clip.cam_fit_mode
+      : 'fit'
   const captionCollision = computeSubtitleCollision(captionY, facecamLayout, facecamSettings)
   const captionPositionStyle = { top: `${captionY}%`, transform: captionsPosition === 'center' ? 'translateY(-50%)' : undefined }
 
@@ -1294,9 +1313,20 @@ export default function Editor() {
                           <div className="absolute left-1 text-[7px] text-white/40 font-mono" style={{ top: '2%' }}>GAME</div>
                           <div className="absolute left-1 text-[7px] text-white/40 font-mono"
                             style={{ top: `${facecamSettings.splitRatio * 100 + 2}%` }}>FACECAM</div>
-                          {/* Facecam region preview */}
-                          <div className="absolute left-0 right-0 bottom-0"
-                            style={{ top: `${facecamSettings.splitRatio * 100}%`, background: 'rgba(60,20,100,0.25)' }} />
+                          {/* Facecam region preview — bottom slot */}
+                          <div className="absolute left-0 right-0 bottom-0 overflow-hidden"
+                            style={{ top: `${facecamSettings.splitRatio * 100}%`, background: 'rgba(60,20,100,0.25)' }}>
+                            {effectiveRegion && videoSrc && (
+                              <CamRegionPreview
+                                videoSrc={videoSrc}
+                                region={effectiveRegion}
+                                fitMode={effectiveFitMode}
+                                currentTime={playbackTime}
+                                slotWidth={frameWidthPx}
+                                slotHeight={(1 - facecamSettings.splitRatio) * frameHeightPx}
+                              />
+                            )}
+                          </div>
                         </div>
                         <DraggableSplitDivider
                           settings={facecamSettings}
@@ -1306,12 +1336,36 @@ export default function Editor() {
                       </>
                     )}
                     {facecamLayout === 'pip' && (
-                      <DraggablePipOverlay
-                        settings={facecamSettings}
-                        onChange={setFacecamSettings}
-                        frameWidth={frameWidthPx}
-                        frameHeight={frameHeightPx}
-                      />
+                      <>
+                        {/* PiP cam-region preview -- sits beneath the draggable overlay */}
+                        {effectiveRegion && videoSrc && (
+                          <div
+                            className="absolute overflow-hidden pointer-events-none"
+                            style={{
+                              left: `${facecamSettings.pipX}%`,
+                              top: `${facecamSettings.pipY}%`,
+                              width: `${facecamSettings.pipW}%`,
+                              height: `${facecamSettings.pipH}%`,
+                              zIndex: 4,
+                            }}
+                          >
+                            <CamRegionPreview
+                              videoSrc={videoSrc}
+                              region={effectiveRegion}
+                              fitMode={effectiveFitMode}
+                              currentTime={playbackTime}
+                              slotWidth={(facecamSettings.pipW / 100) * frameWidthPx}
+                              slotHeight={(facecamSettings.pipH / 100) * frameHeightPx}
+                            />
+                          </div>
+                        )}
+                        <DraggablePipOverlay
+                          settings={facecamSettings}
+                          onChange={setFacecamSettings}
+                          frameWidth={frameWidthPx}
+                          frameHeight={frameHeightPx}
+                        />
+                      </>
                     )}
 
                     {/* ── Safe zone guides (adapt to facecam layout) ── */}
