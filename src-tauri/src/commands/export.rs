@@ -323,7 +323,17 @@ fn clip_to_export_request(
         clip.cam_region_norm_override.as_deref(),
         allow_per_clip_override,
     );
-    let fit_mode = crate::cam_region::CamFitMode::from_db(clip.cam_fit_mode.as_deref());
+    // Layout-aware fit-mode default: PiP slots are non-square so Fit produces
+    // tiny letterboxed content; default to Fill instead. Split/GameplayFocus
+    // default to Fit. Explicit 'fill'/'stretch' from DB always honored.
+    // Special case: 'fit' stored from a previous Split session is overridden
+    // to Fill when the current layout is PiP, to avoid the tiny-letterbox bug.
+    let fit_mode = match (clip.cam_fit_mode.as_deref(), &layout) {
+        (Some("fill"), _) => crate::cam_region::CamFitMode::Fill,
+        (Some("stretch"), _) => crate::cam_region::CamFitMode::Stretch,
+        (_, vertical_crop::LayoutMode::Pip { .. }) => crate::cam_region::CamFitMode::Fill,
+        _ => crate::cam_region::CamFitMode::Fit,
+    };
 
     vertical_crop::ExportRequest {
         source_path: std::path::PathBuf::from(vod_path),

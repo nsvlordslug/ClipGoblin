@@ -11,10 +11,13 @@ type Props = {
   vodRegion: RegionNorm | null
   /** Per-clip override (parsed from `clip.cam_region_norm_override`). Null = no override. */
   clipOverride: RegionNorm | null
-  /** Current fit mode for this clip. Null/undefined treated as 'fit'. */
+  /** Current fit mode for this clip. Null/undefined treated as layout default. */
   fitMode: FitMode | null
   /** Whether the current layout uses a cam slot (false for GameplayFocus). */
   layoutHasCamSlot: boolean
+  /** Active layout kind. PiP slots are tall+narrow so Fit gives tiny
+   *  letterboxed output; we drop the Fit option for PiP and default to Fill. */
+  layoutKind: 'pip' | 'split' | 'other'
   /** Called when the user clicks "Set region..." — parent should enter edit mode on the source player. */
   onEnterVodEditMode: () => void
   /** Called when the user clicks "Override for this clip..." — parent enters override-edit mode. */
@@ -29,7 +32,7 @@ function regionLabel(r: RegionNorm | null): string {
 }
 
 export default function CamRegionRow({
-  vodId, clipId, vodRegion, clipOverride, fitMode, layoutHasCamSlot,
+  vodId, clipId, vodRegion, clipOverride, fitMode, layoutHasCamSlot, layoutKind,
   onEnterVodEditMode, onEnterClipOverrideMode, onChanged,
 }: Props) {
   const [allowOverride, setAllowOverride] = useState(false)
@@ -69,7 +72,15 @@ export default function CamRegionRow({
     } catch (e) { setError(String(e)) } finally { setBusy(false) }
   }
 
-  const effectiveFit: FitMode = fitMode ?? 'fit'
+  // Layout-aware default: Fill for PiP, Fit elsewhere. Mirrors the backend
+  // resolver in commands/export.rs.
+  const layoutDefault: FitMode = layoutKind === 'pip' ? 'fill' : 'fit'
+  // If layout is PiP but a stored 'fit' lingers from when this clip was Split,
+  // treat as the layout default (Fill) since 'fit' isn't offered in PiP.
+  const effectiveFit: FitMode =
+    layoutKind === 'pip' && fitMode === 'fit'
+      ? 'fill'
+      : (fitMode ?? layoutDefault)
   const fitDisabledReason = !layoutHasCamSlot
     ? 'No cam slot in this layout'
     : (!vodRegion && !clipOverride)
@@ -121,9 +132,18 @@ export default function CamRegionRow({
           className="px-2 py-1 text-xs bg-surface-800 border border-surface-700 text-slate-200 rounded disabled:opacity-40"
           title={fitDisabledReason ?? 'How the source region fits into the cam slot'}
         >
-          <option value="fit">Fit (default)</option>
-          <option value="fill">Fill</option>
-          <option value="stretch">Stretch</option>
+          {layoutKind === 'pip' ? (
+            <>
+              <option value="fill">Fill (default)</option>
+              <option value="stretch">Stretch</option>
+            </>
+          ) : (
+            <>
+              <option value="fit">Fit (default)</option>
+              <option value="fill">Fill</option>
+              <option value="stretch">Stretch</option>
+            </>
+          )}
         </select>
       </div>
 

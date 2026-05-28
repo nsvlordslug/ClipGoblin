@@ -1200,10 +1200,16 @@ export default function Editor() {
   // ffmpeg will render at export time.
   const effectiveRegion: RegionNorm | null =
     (allowPerClipCamOverride && clipOverride) ? clipOverride : (vodRegion ?? null)
-  const effectiveFitMode: 'fit' | 'fill' | 'stretch' =
-    (clip?.cam_fit_mode === 'fill' || clip?.cam_fit_mode === 'stretch')
-      ? clip.cam_fit_mode
-      : 'fit'
+  // Layout-aware fit-mode default. PiP slots are tall+narrow, so Fit gives
+  // tiny letterboxed content; default Fill there. Split keeps Fit as default.
+  // 'fit' stored from a previous Split session is overridden to Fill when
+  // we're now in PiP, matching the backend resolver in commands/export.rs.
+  const effectiveFitMode: 'fit' | 'fill' | 'stretch' = (() => {
+    const stored = clip?.cam_fit_mode
+    if (stored === 'fill' || stored === 'stretch') return stored
+    if (facecamLayout === 'pip') return 'fill'
+    return 'fit'
+  })()
   const captionCollision = computeSubtitleCollision(captionY, facecamLayout, facecamSettings)
   const captionPositionStyle = { top: `${captionY}%`, transform: captionsPosition === 'center' ? 'translateY(-50%)' : undefined }
 
@@ -1842,6 +1848,7 @@ export default function Editor() {
                   clipOverride={clipOverride}
                   fitMode={(clip.cam_fit_mode ?? null) as 'fit' | 'fill' | 'stretch' | null}
                   layoutHasCamSlot={facecamLayout === 'split' || facecamLayout === 'pip'}
+                  layoutKind={facecamLayout === 'pip' ? 'pip' : facecamLayout === 'split' ? 'split' : 'other'}
                   onEnterVodEditMode={() => setRegionEditScope('vod')}
                   onEnterClipOverrideMode={() => setRegionEditScope('clip-override')}
                   onChanged={refetchCamRegions}
