@@ -586,8 +586,27 @@ export default function Editor() {
   // (CamRegionModal) so the user can drag on the UNCROPPED source frame.
   type RegionEditScope = 'vod' | 'clip-override' | null
   const [regionEditScope, setRegionEditScope] = useState<RegionEditScope>(null)
-  const [camRegionRefetchToken, setCamRegionRefetchToken] = useState(0)
-  const bumpCamRegionRefetch = () => setCamRegionRefetchToken(t => t + 1)
+  // Narrow refetch: refresh only cam-region columns on the vod/clip rows
+  // without re-running the full clip-load (which would reset editor state
+  // like facecamLayout to the DB's saved value, wiping unsaved layout picks).
+  const refetchCamRegions = async () => {
+    try {
+      if (clip?.id) {
+        const c = await invoke<Clip>('get_clip_detail', { clipId: clip.id })
+        setClip(prev => prev ? {
+          ...prev,
+          cam_region_norm_override: c.cam_region_norm_override,
+          cam_fit_mode: c.cam_fit_mode,
+        } : prev)
+      }
+      if (vod?.id) {
+        const v = await invoke<Vod>('get_vod_detail', { vodId: vod.id })
+        setVod(prev => prev ? { ...prev, cam_region_norm: v.cam_region_norm } : prev)
+      }
+    } catch (e) {
+      console.error('[Editor] refetch cam regions failed', e)
+    }
+  }
   const [videoSrc, setVideoSrc] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [exporting, setExporting] = useState(false)
@@ -1006,7 +1025,7 @@ export default function Editor() {
         console.error('Failed to load clip:', err)
       }
     })()
-  }, [clipId, camRegionRefetchToken])
+  }, [clipId])
 
   // ── Sync aspect ratio when export preset changes ──
   useEffect(() => {
@@ -1203,13 +1222,17 @@ export default function Editor() {
           }
           onSave={async (r) => {
             try {
+              const regionJson = JSON.stringify(r)
               if (regionEditScope === 'vod') {
                 await invoke('set_vod_cam_region', { vodId: vod.id, region: r })
+                // Optimistic local update -- avoids a full clip refetch that
+                // would reset unsaved editor state (facecamLayout, etc.).
+                setVod(v => v ? { ...v, cam_region_norm: regionJson } : v)
               } else {
                 await invoke('set_clip_cam_region_override', { clipId: clip.id, region: r })
+                setClip(c => c ? { ...c, cam_region_norm_override: regionJson } : c)
               }
               setRegionEditScope(null)
-              bumpCamRegionRefetch()
             } catch (e) {
               console.error('[Editor] save cam region failed', e)
             }
@@ -1766,7 +1789,7 @@ export default function Editor() {
                   layoutHasCamSlot={facecamLayout === 'split' || facecamLayout === 'pip'}
                   onEnterVodEditMode={() => setRegionEditScope('vod')}
                   onEnterClipOverrideMode={() => setRegionEditScope('clip-override')}
-                  onChanged={bumpCamRegionRefetch}
+                  onChanged={refetchCamRegions}
                 />
               </div>
             )}
