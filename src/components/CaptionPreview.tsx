@@ -131,8 +131,14 @@ export default function CaptionPreview({
   let transform: string | undefined
 
   if (useCustomY) {
-    posTop = `${yPercent}%`
-    if (position === 'center') transform = 'translateY(-50%)'
+    // For 'bottom' position, anchor from the bottom edge so multi-line / tall
+    // styles grow UPWARD instead of overflowing off the bottom of the frame.
+    if (position === 'bottom') {
+      posBottom = `${Math.max(0, 100 - (yPercent ?? 97))}%`
+    } else {
+      posTop = `${yPercent}%`
+      if (position === 'center') transform = 'translateY(-50%)'
+    }
   } else if (position === 'top') {
     posTop = `${Math.round(frameHeight * 0.08)}px`
   } else if (position === 'center') {
