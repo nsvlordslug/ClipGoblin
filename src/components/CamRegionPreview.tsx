@@ -20,16 +20,14 @@ type Props = {
 /**
  * Live preview of the source-region cam content, rendered inside the editor's
  * cam slot. CSS-positioned `<video>` element with calculated transform that
- * mirrors what ffmpeg does at export time:
+ * mirrors what ffmpeg does at export time.
  *
- * - Fit:     preserve aspect, letterbox with black bars
- * - Fill:    preserve aspect, crop overflow
- * - Stretch: distort to fill the slot
- *
- * The preview pauses at `currentTime` (synced with the main player). It does
- * not render the blur backdrop (Split) or the gameplay pass-through (PiP) -
- * those layout-specific effects are export-only. The preview just shows the
- * cropped source region centered/filled per the fit mode.
+ * Implementation note: we compute the transform from the region + a source
+ * aspect ratio. For the initial render we assume 16:9 (the common Twitch
+ * source aspect); once the video element's loadedmetadata fires we replace
+ * with the true intrinsic aspect. This lets the preview render IMMEDIATELY
+ * with a reasonable approximation, instead of waiting on metadata (which
+ * some browsers/WebViews delay or skip for clipped/off-screen videos).
  */
 export default function CamRegionPreview({
   videoSrc,
@@ -40,58 +38,65 @@ export default function CamRegionPreview({
   slotHeight,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
-  const [intrinsic, setIntrinsic] = useState<{ w: number; h: number } | null>(null)
+  const [intrinsicAspect, setIntrinsicAspect] = useState<number>(16 / 9)
 
-  // Capture the source's intrinsic dimensions once metadata loads.
+  // Capture the source's intrinsic aspect once metadata loads.
+  // Falls back to 16:9 default if we never get it (most Twitch sources are 16:9).
   useEffect(() => {
     const v = videoRef.current
     if (!v) return
     const onMeta = () => {
       if (v.videoWidth > 0 && v.videoHeight > 0) {
-        setIntrinsic({ w: v.videoWidth, h: v.videoHeight })
+        setIntrinsicAspect(v.videoWidth / v.videoHeight)
       }
     }
-    if (v.readyState >= 1) onMeta()
-    else {
+    if (v.readyState >= 1 && v.videoWidth > 0) {
+      onMeta()
+    } else {
       v.addEventListener('loadedmetadata', onMeta)
-      return () => v.removeEventListener('loadedmetadata', onMeta)
+      v.addEventListener('loadeddata', onMeta)
+      return () => {
+        v.removeEventListener('loadedmetadata', onMeta)
+        v.removeEventListener('loadeddata', onMeta)
+      }
     }
   }, [videoSrc])
 
   // Seek the preview to the main player's currentTime whenever it changes.
   useEffect(() => {
     const v = videoRef.current
-    if (!v || !intrinsic) return
-    // Only seek if delta is meaningful (avoid feedback loops + jitter).
+    if (!v) return
     if (Math.abs(v.currentTime - currentTime) > 0.05) {
       try { v.currentTime = currentTime } catch { /* ignore */ }
     }
-    // Keep preview paused -- main player drives playback timing.
     v.pause()
-  }, [currentTime, intrinsic])
+  }, [currentTime])
 
-  // Calculate the video's CSS transform: position+size so that the slot shows
-  // only the region, with the chosen fit mode applied.
-  // Until intrinsic dimensions are known, position the video far off-screen
-  // (NOT display:none -- many browsers/WebViews skip loadedmetadata for
-  // display:none elements, which would leave us stuck in the loading state).
+  // Compute the video's CSS transform. We work in NORMALIZED video coords:
+  // the video element is sized so that the region (region.w x region.h normalized)
+  // maps to the slot dimensions per the fit mode.
   let videoStyle: React.CSSProperties = {
     position: 'absolute',
-    left: '-99999px',
-    top: '-99999px',
-    width: '1px',
-    height: '1px',
+    left: 0,
+    top: 0,
+    width: '100%',
+    height: '100%',
+    objectFit: 'cover',
   }
-  if (intrinsic && slotWidth > 0 && slotHeight > 0) {
-    const regionPxW = region.w * intrinsic.w
-    const regionPxH = region.h * intrinsic.h
+
+  if (slotWidth > 0 && slotHeight > 0 && region.w > 0 && region.h > 0) {
+    // Pretend the source has intrinsic dimensions (regionW × intrinsicAspect, regionH).
+    // Pick a "logical source width" of 1000 for the math; the actual value cancels out.
+    const logicalSourceW = 1000
+    const logicalSourceH = logicalSourceW / intrinsicAspect
+    const regionPxW = region.w * logicalSourceW
+    const regionPxH = region.h * logicalSourceH
 
     if (fitMode === 'stretch') {
-      // Distort: independent scaling on each axis.
       const scaleX = slotWidth / regionPxW
       const scaleY = slotHeight / regionPxH
-      const scaledW = intrinsic.w * scaleX
-      const scaledH = intrinsic.h * scaleY
+      const scaledW = logicalSourceW * scaleX
+      const scaledH = logicalSourceH * scaleY
       videoStyle = {
         position: 'absolute',
         left: `${-region.x * scaledW}px`,
@@ -101,12 +106,12 @@ export default function CamRegionPreview({
         objectFit: 'fill',
       }
     } else {
-      // Fit (decrease) or Fill (increase) -- uniform scale.
+      // Fit (decrease) or Fill (increase) — uniform scale.
       const scale = fitMode === 'fit'
         ? Math.min(slotWidth / regionPxW, slotHeight / regionPxH)
         : Math.max(slotWidth / regionPxW, slotHeight / regionPxH)
-      const scaledVideoW = intrinsic.w * scale
-      const scaledVideoH = intrinsic.h * scale
+      const scaledVideoW = logicalSourceW * scale
+      const scaledVideoH = logicalSourceH * scale
       const regionAtScaleW = regionPxW * scale
       const regionAtScaleH = regionPxH * scale
       const offsetX = (slotWidth - regionAtScaleW) / 2
@@ -117,20 +122,21 @@ export default function CamRegionPreview({
         top: `${offsetY - region.y * scaledVideoH}px`,
         width: `${scaledVideoW}px`,
         height: `${scaledVideoH}px`,
+        objectFit: 'fill',
       }
     }
   }
 
   return (
     <div
-      className="absolute inset-0 overflow-hidden bg-black pointer-events-none"
-      style={{ zIndex: 5 }}
+      className="absolute inset-0 overflow-hidden pointer-events-none"
+      style={{ zIndex: 5, background: 'transparent' }}
     >
       <video
         ref={videoRef}
         src={videoSrc}
         muted
-        preload="metadata"
+        preload="auto"
         playsInline
         style={videoStyle}
       />
