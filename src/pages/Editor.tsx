@@ -1173,15 +1173,18 @@ export default function Editor() {
   const frameWidthPx = frameWidth > 0 ? frameWidth : 442
 
   // Caption Y position -- mirrors the export pipeline (commands/export.rs).
-  // 'bottom' lands at ~95% Y (just above the play bar / controls overlay)
-  // regardless of layout -- captions intentionally overlay the cam slot when
-  // the user picks bottom, matching TikTok/Shorts UX conventions.
-  const splitClampMax = 95
+  // For each position, captionY represents the ANCHOR of the text:
+  //   top:    text top edge sits at captionY% Y
+  //   center: text center sits at captionY% Y (via translateY(-50%))
+  //   bottom: text bottom edge sits at captionY% Y (anchored from frame bottom)
+  // This makes multi-line / large styles grow IN THE RIGHT DIRECTION instead
+  // of overflowing the frame.
+  const splitClampMax = 97
   const captionBaseY = captionsPosition === 'top' ? 8
     : captionsPosition === 'center' ? 50
-    : 92  // ~just above play bar; text body 92-96% Y
+    : 97  // text bottom edge ~3% above frame bottom (above play bar)
   const captionY = Math.max(3, Math.min(splitClampMax, captionBaseY + captionYOffset))
-  const captionInSafeZone = captionY >= 5 && captionY <= 95
+  const captionInSafeZone = captionY >= 5 && captionY <= 97
 
   // Cam region parsers (VOD JSON -> RegionNorm object)
   const parseRegion = (s: string | null | undefined): RegionNorm | null => {
@@ -1212,7 +1215,14 @@ export default function Editor() {
     return 'fit'
   })()
   const captionCollision = computeSubtitleCollision(captionY, facecamLayout, facecamSettings)
-  const captionPositionStyle = { top: `${captionY}%`, transform: captionsPosition === 'center' ? 'translateY(-50%)' : undefined }
+  // CSS positioning: 'bottom' anchors from the bottom edge so tall/multi-line
+  // captions grow UPWARD instead of off the bottom of the frame.
+  const captionPositionStyle: React.CSSProperties =
+    captionsPosition === 'bottom'
+      ? { bottom: `${Math.max(0, 100 - captionY)}%`, top: 'auto' }
+      : captionsPosition === 'center'
+        ? { top: `${captionY}%`, transform: 'translateY(-50%)' }
+        : { top: `${captionY}%` }
 
   // Plain-text caption scale — uses same frame width as the preview container
   // CaptionPreview (SRT path) measures its own frame via ResizeObserver, but

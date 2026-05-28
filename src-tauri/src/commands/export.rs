@@ -481,12 +481,12 @@ pub(crate) fn build_caption_filter(clip: &db::ClipRow, target_width: i32, target
     let is_srt = text.contains("-->") && text.lines().count() > 2;
 
     // MarginV = distance from the BOTTOM edge for Alignment=2 (bottom-center).
-    // 'bottom' lands ~5% from the bottom (baseline at ~95% Y), just above the
-    // typical player control bar. Layout-agnostic per v1.4.0 UX requirement.
+    // ASS naturally grows multi-line text upward from this anchor, so a small
+    // value safely keeps tall captions inside the frame.
     let margin_v = match clip.captions_position.as_str() {
         "top" => target_height - (target_height * 18 / 100),
         "center" => target_height / 2 - 30,
-        _ => target_height * 5 / 100,
+        _ => target_height * 3 / 100, // ~3% from frame bottom -- text grows upward
     };
 
     if is_srt {
@@ -614,11 +614,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
             .replace('[', "\\[")
             .replace(']', "\\]")
             .replace(';', "\\;");
-        // Bottom = ~92% Y (text body 92-96%), just above player control bar.
+        // 'bottom' anchors the text's BOTTOM edge ~3% above the frame bottom
+        // so tall / multi-line text grows upward instead of clipping off-frame.
         let ypos = match clip.captions_position.as_str() {
             "top" => "h*0.08",
             "center" => "(h-text_h)/2",
-            _ => "h*0.92",
+            _ => "h-text_h-h*0.03",
         };
 
         let mut filter = format!(
