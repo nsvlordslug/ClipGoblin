@@ -76,7 +76,7 @@ use commands::settings::{
 };
 use commands::social::{
     connect_platform, disconnect_platform, get_connected_account,
-    get_all_connected_accounts, upload_to_platform, get_upload_status,
+    get_all_connected_accounts, upload_to_platform, get_upload_status, tiktok_get_creator_info,
     get_clip_upload_history, restore_deleted_vods, refresh_upload_stats,
 };
 use commands::vod::{
@@ -207,6 +207,7 @@ pub fn run() {
             get_all_connected_accounts,
             upload_to_platform,
             get_upload_status,
+            tiktok_get_creator_info,
             get_clip_upload_history,
             restore_deleted_vods,
             refresh_upload_stats,

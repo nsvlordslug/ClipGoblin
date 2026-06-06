@@ -4,6 +4,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { usePlatformStore, PLATFORM_INFO, type UploadResult } from '../stores/platformStore'
 import { useScheduleStore } from '../stores/scheduleStore'
+import TikTokComplianceFields, { EMPTY_TIKTOK_COMPLIANCE } from './TikTokComplianceFields'
+import type { TikTokComplianceValue } from './TikTokComplianceFields'
 import type { Clip } from '../types'
 
 // ── Types ──
@@ -31,7 +33,7 @@ function getDefaultVisibility(platform: string): string {
   return 'public'
 }
 
-function buildMetaForClip(clip: Clip, platform: string, visibility: string, useSavedCaptions: boolean, force: boolean) {
+function buildMetaForClip(clip: Clip, platform: string, visibility: string, useSavedCaptions: boolean, force: boolean, tiktok?: TikTokComplianceValue) {
   const title = clip.title?.trim() || 'Untitled Clip'
   let description = ''
   let tags: string[] = []
@@ -46,13 +48,22 @@ function buildMetaForClip(clip: Clip, platform: string, visibility: string, useS
     }
   }
 
+  const isTikTok = platform === 'tiktok'
   return {
     clip_id: clip.id,
     title,
     description,
     tags,
-    visibility,
+    // TikTok privacy comes from the compliance panel (a real creator_info enum).
+    visibility: isTikTok && tiktok?.privacyLevel ? tiktok.privacyLevel : visibility,
     force,
+    ...(isTikTok && tiktok ? {
+      disable_comment: tiktok.disableComment,
+      disable_duet: tiktok.disableDuet,
+      disable_stitch: tiktok.disableStitch,
+      brand_organic: tiktok.yourBrand,
+      branded_content: tiktok.brandedContent,
+    } : {}),
   }
 }
 
@@ -121,6 +132,9 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
   const [completed, setCompleted] = useState(false)
   const [clipStatuses, setClipStatuses] = useState<Record<string, Record<string, ClipUploadStatus>>>({})
   const [expanded, setExpanded] = useState(true)
+  // TikTok Content Posting API compliance — applies to every clip in the batch.
+  const [tiktokCompliance, setTiktokCompliance] = useState<TikTokComplianceValue>(EMPTY_TIKTOK_COMPLIANCE)
+  const [tiktokComplianceValid, setTiktokComplianceValid] = useState(false)
   const cancelRef = useRef(false)
   // Keep a mutable ref to the latest version of each clip (updated after export)
   const clipMapRef = useRef<Record<string, Clip>>({})
@@ -236,7 +250,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
         updateClipStatus(platform, clip.id, { status: 'uploading', error: undefined })
 
         try {
-          const meta = buildMetaForClip(exportedClip, platform, visibility[platform] || getDefaultVisibility(platform), useSavedCaptions, false)
+          const meta = buildMetaForClip(exportedClip, platform, visibility[platform] || getDefaultVisibility(platform), useSavedCaptions, false, tiktokCompliance)
           const result = await invoke<UploadResult>('upload_to_platform', { platform, meta })
 
           if (result.status.status === 'complete') {
@@ -256,7 +270,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
 
     setUploading(false)
     setCompleted(true)
-  }, [activePlatforms, clips, clipStatuses, visibility, useSavedCaptions, isConnected, connect, updateClipStatus, ensureExported])
+  }, [activePlatforms, clips, clipStatuses, visibility, useSavedCaptions, isConnected, connect, updateClipStatus, ensureExported, tiktokCompliance])
 
   const retryFailed = useCallback(() => {
     setClipStatuses(prev => {
@@ -302,7 +316,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
         if (cancelRef.current) break
         updateClipStatus(platform, clip.id, { status: 'uploading' })
         try {
-          const meta = buildMetaForClip(exportedClip, platform, visibility[platform] || getDefaultVisibility(platform), useSavedCaptions, false)
+          const meta = buildMetaForClip(exportedClip, platform, visibility[platform] || getDefaultVisibility(platform), useSavedCaptions, false, tiktokCompliance)
           await scheduleUpload(clip.id, platform, isoTime, JSON.stringify(meta))
           updateClipStatus(platform, clip.id, { status: 'done' })
         } catch (e: any) {
@@ -314,7 +328,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
     setUploading(false)
     setScheduleComplete(true)
     setCompleted(true)
-  }, [scheduleTime, activePlatforms, clips, visibility, useSavedCaptions, cancelRef, updateClipStatus, scheduleUpload, ensureExported])
+  }, [scheduleTime, activePlatforms, clips, visibility, useSavedCaptions, cancelRef, updateClipStatus, scheduleUpload, ensureExported, tiktokCompliance])
 
   const handleCancel = () => {
     cancelRef.current = true
@@ -374,8 +388,8 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
                 </div>
               </div>
 
-              {/* Visibility per platform */}
-              {activePlatforms.map(platform => (
+              {/* Visibility per platform (TikTok handled by the compliance panel below) */}
+              {activePlatforms.filter(p => p !== 'tiktok').map(platform => (
                 <div key={platform} className="flex items-center gap-3">
                   <span className="text-sm text-slate-400 w-20">{PLATFORM_INFO[platform]?.name}</span>
                   <select
@@ -400,6 +414,15 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
                   </select>
                 </div>
               ))}
+
+              {/* TikTok Content Posting API compliance — applies to all clips in the batch */}
+              {activePlatforms.includes('tiktok') && (
+                <TikTokComplianceFields
+                  value={tiktokCompliance}
+                  onChange={setTiktokCompliance}
+                  onValidityChange={setTiktokComplianceValid}
+                />
+              )}
 
               {/* Use saved captions toggle */}
               <label className="flex items-center gap-3 cursor-pointer">
@@ -548,7 +571,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
               {scheduleMode ? (
                 <button
                   onClick={startSchedule}
-                  disabled={activePlatforms.length === 0 || clips.length === 0 || !scheduleTime}
+                  disabled={activePlatforms.length === 0 || clips.length === 0 || !scheduleTime || (activePlatforms.includes('tiktok') && !tiktokComplianceValid)}
                   className="px-4 py-2 rounded-lg text-sm font-medium bg-violet-600 hover:bg-violet-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer flex items-center gap-2"
                 >
                   <Clock className="w-4 h-4" />
@@ -557,7 +580,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
               ) : (
                 <button
                   onClick={() => startUpload(false)}
-                  disabled={activePlatforms.length === 0 || clips.length === 0}
+                  disabled={activePlatforms.length === 0 || clips.length === 0 || (activePlatforms.includes('tiktok') && !tiktokComplianceValid)}
                   className="px-4 py-2 rounded-lg text-sm font-medium bg-violet-600 hover:bg-violet-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer flex items-center gap-2"
                 >
                   <Upload className="w-4 h-4" />

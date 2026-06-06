@@ -33,6 +33,8 @@ import { useMontageStore } from '../stores/montageStore'
 import Tooltip from '../components/Tooltip'
 import PublishComposer from '../components/PublishComposer'
 import type { PublishMetadata } from '../components/PublishComposer'
+import TikTokComplianceFields, { EMPTY_TIKTOK_COMPLIANCE } from '../components/TikTokComplianceFields'
+import type { TikTokComplianceValue } from '../components/TikTokComplianceFields'
 import { useScheduleStore } from '../stores/scheduleStore'
 import PlatformUploadSelector, { getPresetForPlatform, getDefaultVisibility, getDefaultYouTubeSubFormat, expandYouTubeSubFormat } from '../components/PlatformUploadSelector'
 import type { PlatformUploadState, YouTubeSubFormat } from '../components/PlatformUploadSelector'
@@ -174,6 +176,11 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
     }
   }
 
+  // TikTok Content Posting API compliance state — only consumed when TikTok is
+  // a selected target. The panel reports validity so we can gate the buttons.
+  const [tiktokCompliance, setTiktokCompliance] = useState<TikTokComplianceValue>(EMPTY_TIKTOK_COMPLIANCE)
+  const [tiktokComplianceValid, setTiktokComplianceValid] = useState(false)
+
   const selectedPlatforms = Object.entries(platformSelections)
     .filter(([_, checked]) => checked)
     .flatMap(([platform]) =>
@@ -194,13 +201,25 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
     const description = hashtagSuffix
       ? (baseDesc ? baseDesc + '\n\n' + hashtagSuffix : hashtagSuffix)
       : baseDesc
+    const isTikTok = platform === 'tiktok'
     return {
       clip_id: clipId,
       title: clipTitle || clip?.title || 'Untitled Clip',
       description,
       tags,
-      visibility: platformVisibilities[platform] || getDefaultVisibility(platform),
+      // TikTok: the compliance panel's privacy dropdown is the source of truth
+      // (a real TikTok enum from creator_info). Other platforms keep their picker.
+      visibility: isTikTok && tiktokCompliance.privacyLevel
+        ? tiktokCompliance.privacyLevel
+        : (platformVisibilities[platform] || getDefaultVisibility(platform)),
       force,
+      ...(isTikTok ? {
+        disable_comment: tiktokCompliance.disableComment,
+        disable_duet: tiktokCompliance.disableDuet,
+        disable_stitch: tiktokCompliance.disableStitch,
+        brand_organic: tiktokCompliance.yourBrand,
+        branded_content: tiktokCompliance.brandedContent,
+      } : {}),
     }
   }
 
@@ -458,6 +477,15 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
           clipDuration={clipDuration}
         />
 
+        {/* TikTok Content Posting API compliance panel (required for audit) */}
+        {selectedPlatforms.includes('tiktok') && (
+          <TikTokComplianceFields
+            value={tiktokCompliance}
+            onChange={setTiktokCompliance}
+            onValidityChange={setTiktokComplianceValid}
+          />
+        )}
+
         {/* Schedule toggle + Upload/Schedule buttons */}
         {selectedPlatforms.length > 0 && (
           <div className="space-y-1.5">
@@ -489,7 +517,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
             {scheduleMode ? (
               <button
                 onClick={handleScheduleUpload}
-                disabled={scheduling || !scheduleTime || !vodPath}
+                disabled={scheduling || !scheduleTime || !vodPath || (selectedPlatforms.includes('tiktok') && !tiktokComplianceValid)}
                 className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors cursor-pointer border bg-amber-600/80 text-white border-amber-500 hover:bg-amber-500 disabled:opacity-60"
               >
                 {scheduling ? (
@@ -503,7 +531,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
             ) : (
               <button
                 onClick={handleMultiUpload}
-                disabled={anyUploading || !vodPath || allDone}
+                disabled={anyUploading || !vodPath || allDone || (selectedPlatforms.includes('tiktok') && !tiktokComplianceValid)}
                 className={`w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors cursor-pointer border ${
                   allDone
                     ? 'bg-green-600/20 text-green-400 border-green-500/30'

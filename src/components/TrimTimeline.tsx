@@ -71,8 +71,14 @@ export default function TrimTimeline({
   const [hoverTime, setHoverTime] = useState<number | null>(null)
   const [snapTarget, setSnapTarget] = useState<TimelineMarker | null>(null)
 
-  // View window with padding
-  const padding = Math.max(5, (originalEnd - originalStart) * 0.15)
+  // View window with padding.
+  // Padding is generous (≥30s) so the trim handles can always reach well
+  // before/after the current clip bounds. This keeps trimming fully
+  // reversible: if a snap/drag moved the start inward and ate the front of
+  // the moment, you can always drag back to recover it. A tight padding
+  // (the old max(5, dur*0.15)) made the lost beginning fall off-screen once
+  // the clip had been shortened and re-saved, so it became unrecoverable.
+  const padding = Math.max(30, (originalEnd - originalStart) * 0.5)
   const viewStart = Math.max(0, originalStart - padding)
   const viewEnd = Math.min(videoDuration, originalEnd + padding)
   const viewDuration = viewEnd - viewStart

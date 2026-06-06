@@ -504,8 +504,20 @@ impl PlatformAdapter for TikTokAdapter {
 
         // 4. Upload via Content Posting API
         log::info!("TikTok upload: calling do_upload_net (title='{}', visibility='{}', handle='{}')", title, visibility, tiktok_handle);
-        let (publish_id, video_url) =
-            do_upload_net(&access_token, &title, &description, &visibility, file_bytes, &tiktok_handle).await?;
+        let (publish_id, video_url) = do_upload_net(
+            &access_token,
+            &title,
+            &description,
+            &visibility,
+            file_bytes,
+            &tiktok_handle,
+            meta.disable_comment,
+            meta.disable_duet,
+            meta.disable_stitch,
+            meta.brand_organic,
+            meta.branded_content,
+        )
+        .await?;
 
         // 5. Record in upload history
         db::upsert_upload(db, &meta.clip_id, "tiktok", &video_url)
@@ -660,14 +672,98 @@ async fn query_creator_info(
     options
 }
 
+/// Full creator info for the publish UI. TikTok's Content Sharing Guidelines
+/// require the publish screen to reflect these (privacy options, interaction
+/// restrictions, display name) rather than hardcoding them.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TikTokCreatorInfo {
+    pub creator_nickname: String,
+    pub creator_username: String,
+    pub creator_avatar_url: String,
+    pub privacy_level_options: Vec<String>,
+    pub comment_disabled: bool,
+    pub duet_disabled: bool,
+    pub stitch_disabled: bool,
+    pub max_video_post_duration_sec: u64,
+}
+
+/// Fetch the full creator_info for the compliance panel. Unlike
+/// `query_creator_info` (upload path, only needs the privacy list and is
+/// non-fatal), this surfaces errors to the UI so the publish screen can tell
+/// the user to reconnect instead of silently posting with defaults.
+pub async fn fetch_creator_info(access_token: &str) -> Result<TikTokCreatorInfo, AppError> {
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(TIKTOK_CREATOR_INFO_URL)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("Content-Type", "application/json; charset=UTF-8")
+        .body("{}")
+        .send()
+        .await
+        .map_err(|e| AppError::Api(format!("TikTok creator_info request failed: {}", e)))?;
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    log::debug!("TikTok fetch_creator_info ({}) body: {}", status, body);
+
+    if !status.is_success() {
+        return Err(AppError::Api(format!(
+            "TikTok creator_info failed ({}): {}",
+            status, body
+        )));
+    }
+
+    let parsed: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| AppError::Api(format!("creator_info parse error: {}", e)))?;
+
+    let error_code = parsed["error"]["code"].as_str().unwrap_or("ok");
+    if error_code != "ok" {
+        let msg = parsed["error"]["message"].as_str().unwrap_or("unknown");
+        return Err(AppError::Api(format!(
+            "TikTok creator_info error: {} — {}",
+            error_code, msg
+        )));
+    }
+
+    let data = &parsed["data"];
+    let privacy_level_options = data["privacy_level_options"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(TikTokCreatorInfo {
+        creator_nickname: data["creator_nickname"].as_str().unwrap_or("").to_string(),
+        creator_username: data["creator_username"].as_str().unwrap_or("").to_string(),
+        creator_avatar_url: data["creator_avatar_url"].as_str().unwrap_or("").to_string(),
+        privacy_level_options,
+        comment_disabled: data["comment_disabled"].as_bool().unwrap_or(false),
+        duet_disabled: data["duet_disabled"].as_bool().unwrap_or(false),
+        stitch_disabled: data["stitch_disabled"].as_bool().unwrap_or(false),
+        max_video_post_duration_sec: data["max_video_post_duration_sec"].as_u64().unwrap_or(0),
+    })
+}
+
 /// Map frontend visibility value to TikTok Content Posting API privacy_level.
 ///   "public"  → PUBLIC_TO_EVERYONE
 ///   "friends" → MUTUAL_FOLLOW_FRIENDS
 ///   "private" → SELF_ONLY (draft — only you can see it)
 fn map_visibility_to_privacy(visibility: &str) -> &'static str {
     match visibility {
-        "public" => "PUBLIC_TO_EVERYONE",
-        "friends" => "MUTUAL_FOLLOW_FRIENDS",
+        // TikTok Content Posting API enums — sent directly by the compliance
+        // panel (its dropdown is populated from creator_info.privacy_level_options).
+        "PUBLIC_TO_EVERYONE" => "PUBLIC_TO_EVERYONE",
+        "MUTUAL_FOLLOW_FRIENDS" => "MUTUAL_FOLLOW_FRIENDS",
+        "FOLLOWER_OF_CREATOR" => "FOLLOWER_OF_CREATOR",
+        "SELF_ONLY" => "SELF_ONLY",
+        // Legacy / lowercase frontend values (batch dialog + older callers).
+        "public" | "public_to_everyone" => "PUBLIC_TO_EVERYONE",
+        "friends" | "mutual_follow_friends" => "MUTUAL_FOLLOW_FRIENDS",
+        "follower_of_creator" => "FOLLOWER_OF_CREATOR",
         _ => "SELF_ONLY",
     }
 }
@@ -681,6 +777,11 @@ async fn do_upload_net(
     visibility: &str,
     file_bytes: Vec<u8>,
     tiktok_handle: &str,
+    disable_comment: bool,
+    disable_duet: bool,
+    disable_stitch: bool,
+    brand_organic: bool,
+    branded_content: bool,
 ) -> Result<(String, String), AppError> {
     let client = reqwest::Client::new();
     let total_size = file_bytes.len();
@@ -736,9 +837,11 @@ async fn do_upload_net(
         "post_info": {
             "title": caption,
             "privacy_level": privacy_level,
-            "disable_duet": false,
-            "disable_comment": false,
-            "disable_stitch": false,
+            "disable_duet": disable_duet,
+            "disable_comment": disable_comment,
+            "disable_stitch": disable_stitch,
+            "brand_content_toggle": branded_content,
+            "brand_organic_toggle": brand_organic,
         },
         "source_info": {
             "source": "FILE_UPLOAD",

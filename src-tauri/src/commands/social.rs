@@ -139,6 +139,32 @@ pub async fn upload_to_platform(
     Ok(result)
 }
 
+/// Fetch TikTok creator info for the publish UI: allowed privacy levels,
+/// interaction restrictions (comment/duet/stitch), and display name. TikTok's
+/// Content Sharing Guidelines require the publish screen to reflect these, so
+/// the compliance panel calls this on mount. Refreshes the access token first.
+#[tauri::command]
+pub async fn tiktok_get_creator_info(
+    db: State<'_, DbConn>,
+) -> Result<social::tiktok::TikTokCreatorInfo, String> {
+    let rt = tokio::runtime::Handle::current();
+    tokio::task::block_in_place(|| {
+        rt.block_on(async {
+            // Ensure a fresh token (refreshes + persists if expired). Hold the
+            // lock only for the token call, then drop it before the HTTP fetch.
+            let token = {
+                let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
+                social::tiktok::ensure_fresh_access_token(&conn)
+                    .await
+                    .map_err(|e| e.to_string())?
+            };
+            social::tiktok::fetch_creator_info(&token)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    })
+}
+
 /// Check if a clip has already been uploaded to a platform.
 /// Returns the upload history row if found, None otherwise.
 #[tauri::command]

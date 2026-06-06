@@ -32,6 +32,22 @@ pub struct UploadMeta {
     pub visibility: String,
     pub clip_id: String,
     pub force: bool,
+    // ── TikTok Content Posting API compliance fields ──
+    // Ignored by YouTube/Instagram. `#[serde(default)]` keeps this backward
+    // compatible: existing frontend callers and stored scheduled-upload JSON
+    // blobs that omit these fields still deserialize.
+    #[serde(default)]
+    pub disable_comment: bool,
+    #[serde(default)]
+    pub disable_duet: bool,
+    #[serde(default)]
+    pub disable_stitch: bool,
+    /// "Your brand" disclosure → TikTok `brand_organic_toggle`.
+    #[serde(default)]
+    pub brand_organic: bool,
+    /// "Branded content" disclosure → TikTok `brand_content_toggle`.
+    #[serde(default)]
+    pub branded_content: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

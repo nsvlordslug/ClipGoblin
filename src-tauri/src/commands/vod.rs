@@ -1626,6 +1626,11 @@ fn run_auto_ship_for_vod(
                 visibility: "public".to_string(),
                 clip_id: (*clip_id).clone(),
                 force: false,
+                disable_comment: false,
+                disable_duet: false,
+                disable_stitch: false,
+                brand_organic: false,
+                branded_content: false,
             };
             let meta_json = match serde_json::to_string(&meta) {
                 Ok(s) => s,

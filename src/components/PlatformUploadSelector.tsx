@@ -382,8 +382,9 @@ export default function PlatformUploadSelector({
               </div>
             )}
 
-            {/* Non-YouTube visibility selector */}
-            {!isYouTube && checked && visConfig && (
+            {/* Non-YouTube visibility selector — TikTok excluded: its privacy is
+                owned by the TikTokComplianceFields panel (Content Posting API rules). */}
+            {!isYouTube && platform !== 'tiktok' && checked && visConfig && (
               <VisibilityRow
                 label="Visibility"
                 platformKey={platform}

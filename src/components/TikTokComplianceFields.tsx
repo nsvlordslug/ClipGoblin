@@ -1,0 +1,233 @@
+import { useEffect, useRef, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
+
+// Mirrors the Rust `TikTokCreatorInfo` struct (src-tauri/src/social/tiktok.rs).
+interface CreatorInfo {
+  creator_nickname: string
+  creator_username: string
+  creator_avatar_url: string
+  privacy_level_options: string[]
+  comment_disabled: boolean
+  duet_disabled: boolean
+  stitch_disabled: boolean
+  max_video_post_duration_sec: number
+}
+
+/** Compliance state the parent owns and threads into the upload meta. */
+export interface TikTokComplianceValue {
+  /** TikTok privacy enum (PUBLIC_TO_EVERYONE | MUTUAL_FOLLOW_FRIENDS | FOLLOWER_OF_CREATOR | SELF_ONLY). null = not chosen yet. */
+  privacyLevel: string | null
+  disableComment: boolean
+  disableDuet: boolean
+  disableStitch: boolean
+  discloseContent: boolean
+  yourBrand: boolean       // → brand_organic
+  brandedContent: boolean  // → brand_content
+}
+
+export const EMPTY_TIKTOK_COMPLIANCE: TikTokComplianceValue = {
+  privacyLevel: null,
+  disableComment: false,
+  disableDuet: false,
+  disableStitch: false,
+  discloseContent: false,
+  yourBrand: false,
+  brandedContent: false,
+}
+
+const PRIVACY_LABELS: Record<string, string> = {
+  PUBLIC_TO_EVERYONE: 'Everyone',
+  MUTUAL_FOLLOW_FRIENDS: 'Friends',
+  FOLLOWER_OF_CREATOR: 'Followers',
+  SELF_ONLY: 'Only me (private)',
+}
+
+// TikTok-required consent links (Content Sharing Guidelines).
+const MUSIC_URL = 'https://www.tiktok.com/legal/page/global/music-usage-confirmation/en'
+const BRANDED_POLICY_URL = 'https://www.tiktok.com/legal/page/global/bc-policy/en'
+
+interface Props {
+  value: TikTokComplianceValue
+  onChange: (v: TikTokComplianceValue) => void
+  /** Reports whether the panel is in a postable state so the parent can gate the Post button. */
+  onValidityChange?: (valid: boolean) => void
+}
+
+/**
+ * TikTok publish-compliance panel. Renders the controls TikTok's Content
+ * Sharing Guidelines require on the publish screen — privacy level (sourced
+ * live from creator_info, never hardcoded), interaction toggles that honor the
+ * account's restrictions, a content-disclosure toggle with the brand/branded
+ * sub-options, and the music-usage consent line. Used by both the single-clip
+ * publish composer and the batch upload dialog.
+ */
+export default function TikTokComplianceFields({ value, onChange, onValidityChange }: Props) {
+  const [info, setInfo] = useState<CreatorInfo | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const seededRef = useRef(false)
+
+  // Fetch creator_info on mount (refreshes the token backend-side).
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    invoke<CreatorInfo>('tiktok_get_creator_info')
+      .then(ci => { if (!cancelled) { setInfo(ci); setLoading(false) } })
+      .catch(e => { if (!cancelled) { setError(String(e)); setLoading(false) } })
+    return () => { cancelled = true }
+  }, [])
+
+  // Once info loads, force the account's interaction restrictions into the value
+  // (e.g. an account with duets disabled must send disable_duet=true). One-time.
+  useEffect(() => {
+    if (!info || seededRef.current) return
+    seededRef.current = true
+    onChange({
+      ...value,
+      disableComment: info.comment_disabled || value.disableComment,
+      disableDuet: info.duet_disabled || value.disableDuet,
+      disableStitch: info.stitch_disabled || value.disableStitch,
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [info])
+
+  // Validity: must pick a privacy level; if disclosing, pick ≥1 brand type;
+  // branded content is incompatible with an "Only me" audience.
+  const brandedOnPrivate = value.brandedContent && value.privacyLevel === 'SELF_ONLY'
+  const discloseMissing = value.discloseContent && !value.yourBrand && !value.brandedContent
+  const valid = !!info && !error && value.privacyLevel != null && !discloseMissing && !brandedOnPrivate
+  useEffect(() => {
+    onValidityChange?.(valid)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [valid])
+
+  const set = (patch: Partial<TikTokComplianceValue>) => onChange({ ...value, ...patch })
+
+  if (loading) {
+    return <div className="text-xs text-slate-400 px-3 py-2">Loading TikTok account settings…</div>
+  }
+  if (error || !info) {
+    return (
+      <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 text-xs text-red-300">
+        Couldn't load TikTok settings: {error || 'unknown error'}.
+        <br />Reconnect TikTok in Settings and try again.
+      </div>
+    )
+  }
+
+  const discloseLabel = value.brandedContent
+    ? 'Your video will be labeled "Paid partnership".'
+    : value.yourBrand
+      ? 'Your video will be labeled "Promotional content".'
+      : null
+
+  return (
+    <div className="space-y-3 border border-surface-600 rounded-lg p-3 bg-surface-900/40">
+      {/* Posting as */}
+      <div className="flex items-center gap-2">
+        {info.creator_avatar_url
+          ? <img src={info.creator_avatar_url} alt="" className="w-6 h-6 rounded-full" />
+          : <div className="w-6 h-6 rounded-full bg-surface-700" />}
+        <span className="text-xs text-slate-300">
+          Posting to TikTok as{' '}
+          <span className="font-semibold text-white">
+            {info.creator_nickname || `@${info.creator_username}`}
+          </span>
+        </span>
+      </div>
+
+      {/* Privacy level — options come straight from creator_info */}
+      <div>
+        <label className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold block mb-1">
+          Who can view this video <span className="text-red-400">*</span>
+        </label>
+        <select
+          value={value.privacyLevel ?? ''}
+          onChange={e => {
+            const lvl = e.target.value || null
+            // Branded content can't be private — drop it if user picks Only me.
+            set({ privacyLevel: lvl, brandedContent: lvl === 'SELF_ONLY' ? false : value.brandedContent })
+          }}
+          className="w-full px-3 py-1.5 bg-surface-800 border border-surface-600 rounded text-sm text-white focus:outline-none focus:border-violet-500"
+        >
+          <option value="" disabled>Select…</option>
+          {info.privacy_level_options.map(lvl => (
+            <option key={lvl} value={lvl}>{PRIVACY_LABELS[lvl] || lvl}</option>
+          ))}
+        </select>
+      </div>
+
+      {/* Interaction toggles — greyed + forced off where the account restricts them */}
+      <div>
+        <label className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold block mb-1">Allow users to</label>
+        <div className="flex gap-4">
+          {([
+            ['Comment', 'disableComment', info.comment_disabled],
+            ['Duet', 'disableDuet', info.duet_disabled],
+            ['Stitch', 'disableStitch', info.stitch_disabled],
+          ] as const).map(([lbl, key, forced]) => (
+            <label key={key} className={`flex items-center gap-1.5 text-xs ${forced ? 'opacity-40' : 'text-slate-300'}`}>
+              <input
+                type="checkbox"
+                disabled={forced}
+                checked={!value[key]}
+                onChange={e => set({ [key]: !e.target.checked } as Partial<TikTokComplianceValue>)}
+                className="w-3.5 h-3.5 rounded border-surface-600 bg-surface-800 text-violet-500"
+              />
+              {lbl}{forced ? ' (off)' : ''}
+            </label>
+          ))}
+        </div>
+      </div>
+
+      {/* Content disclosure */}
+      <div>
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={value.discloseContent}
+            onChange={e => set({ discloseContent: e.target.checked, yourBrand: false, brandedContent: false })}
+            className="w-4 h-4 rounded border-surface-600 bg-surface-800 text-violet-500"
+          />
+          <span className="text-xs text-slate-300">Disclose video content</span>
+        </label>
+        <p className="text-[10px] text-slate-500 ml-6 mt-0.5">Turn on if this promotes a brand, product, or service.</p>
+
+        {value.discloseContent && (
+          <div className="ml-6 mt-2 space-y-1.5">
+            <label className="flex items-center gap-2 text-xs text-slate-300">
+              <input type="checkbox" checked={value.yourBrand}
+                onChange={e => set({ yourBrand: e.target.checked })}
+                className="w-3.5 h-3.5 rounded border-surface-600 bg-surface-800 text-violet-500" />
+              Your brand <span className="text-slate-500">— promoting yourself / your own business</span>
+            </label>
+            <label className={`flex items-center gap-2 text-xs ${value.privacyLevel === 'SELF_ONLY' ? 'opacity-40' : 'text-slate-300'}`}>
+              <input type="checkbox" checked={value.brandedContent}
+                disabled={value.privacyLevel === 'SELF_ONLY'}
+                onChange={e => set({ brandedContent: e.target.checked })}
+                className="w-3.5 h-3.5 rounded border-surface-600 bg-surface-800 text-violet-500" />
+              Branded content <span className="text-slate-500">— paid partnership with a brand</span>
+            </label>
+            {discloseMissing && <p className="text-[10px] text-amber-400">Select at least one disclosure type.</p>}
+            {value.privacyLevel === 'SELF_ONLY' && (
+              <p className="text-[10px] text-amber-400">Branded content can't be set to "Only me" — pick a wider audience to enable it.</p>
+            )}
+            {discloseLabel && <p className="text-[10px] text-slate-400">{discloseLabel}</p>}
+          </div>
+        )}
+      </div>
+
+      {/* Consent line (required) */}
+      <p className="text-[10px] text-slate-500 leading-relaxed">
+        By posting, you agree to TikTok's{' '}
+        <a href={MUSIC_URL} target="_blank" rel="noopener noreferrer" className="text-violet-400 hover:underline">Music Usage Confirmation</a>
+        {value.brandedContent && (
+          <>{' '}and{' '}
+            <a href={BRANDED_POLICY_URL} target="_blank" rel="noopener noreferrer" className="text-violet-400 hover:underline">Branded Content Policy</a>
+          </>
+        )}.
+      </p>
+    </div>
+  )
+}
