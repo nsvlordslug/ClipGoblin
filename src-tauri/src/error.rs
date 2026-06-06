@@ -29,6 +29,9 @@ pub enum AppError {
     NotFound(String),
     /// Feature not yet supported (e.g. TikTok, Instagram stubs).
     NotSupported(String),
+    /// OAuth refresh token is revoked/expired — the account must be reconnected.
+    /// The detail string is already user-friendly (shown verbatim by Display).
+    AuthExpired(String),
     /// Catch-all for errors that don't fit a specific category.
     Unknown(String),
 }
@@ -44,6 +47,7 @@ impl AppError {
             Self::Database(_) => "database",
             Self::NotFound(_) => "not_found",
             Self::NotSupported(_) => "not_supported",
+            Self::AuthExpired(_) => "auth_expired",
             Self::Unknown(_) => "unknown",
         }
     }
@@ -58,6 +62,7 @@ impl AppError {
             | Self::Database(s)
             | Self::NotFound(s)
             | Self::NotSupported(s)
+            | Self::AuthExpired(s)
             | Self::Unknown(s) => s,
         }
     }
@@ -84,6 +89,7 @@ impl fmt::Display for AppError {
             Self::Database(d) => write!(f, "Database error: {d}"),
             Self::NotFound(d) => write!(f, "Not found: {d}"),
             Self::NotSupported(d) => write!(f, "Not supported: {d}"),
+            Self::AuthExpired(d) => write!(f, "{d}"),
             Self::Unknown(d) => write!(f, "Error: {d}"),
         }
     }
@@ -177,5 +183,13 @@ mod tests {
         let e = rusqlite::Error::QueryReturnedNoRows;
         let app_err: AppError = e.into();
         assert_eq!(app_err.category(), "database");
+    }
+
+    #[test]
+    fn auth_expired_displays_bare_message_and_categorizes() {
+        let err = AppError::AuthExpired("Please reconnect.".into());
+        assert_eq!(err.to_string(), "Please reconnect."); // no "Error:" prefix
+        assert_eq!(err.category(), "auth_expired");
+        assert_eq!(err.detail(), "Please reconnect.");
     }
 }

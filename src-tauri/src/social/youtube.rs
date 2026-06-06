@@ -301,7 +301,7 @@ impl PlatformAdapter for YouTubeAdapter {
             })?;
 
         // --- async: exchange with Google ---
-        let tokens = do_refresh_token_net(&refresh_tok).await?;
+        let tokens = youtube_refresh_or_clear(db, &refresh_tok).await?;
 
         // --- sync: persist new tokens ---
         let expiry = chrono::Utc::now().timestamp() + tokens.expires_in as i64;
@@ -363,7 +363,7 @@ impl PlatformAdapter for YouTubeAdapter {
                     AppError::Api("No YouTube refresh token found — please reconnect.".into())
                 })?;
 
-            let new_tokens = do_refresh_token_net(&refresh_tok).await?;
+            let new_tokens = youtube_refresh_or_clear(db, &refresh_tok).await?;
 
             let new_expiry = chrono::Utc::now().timestamp() + new_tokens.expires_in as i64;
             db::save_setting(db, "youtube_access_token", &new_tokens.access_token)
@@ -463,6 +463,15 @@ async fn do_refresh_token_net(refresh_tok: &str) -> Result<TokenResponse, AppErr
 
     if let Some(err) = proxy_resp.error {
         let desc = proxy_resp.error_description.unwrap_or_default();
+        // invalid_grant = the refresh token itself is revoked/expired; it can't
+        // be refreshed silently (OAuth requires re-consent). Surface a distinct
+        // AuthExpired error so callers wipe the dead tokens and the UI can guide
+        // a clean reconnect instead of showing a cryptic failure.
+        if err == "invalid_grant" {
+            return Err(AppError::AuthExpired(
+                "Your YouTube session has expired. Please reconnect your YouTube account in Settings.".into(),
+            ));
+        }
         return Err(AppError::Api(format!(
             "YouTube token refresh failed: {} — {}",
             err, desc
@@ -477,6 +486,23 @@ async fn do_refresh_token_net(refresh_tok: &str) -> Result<TokenResponse, AppErr
         expires_in: proxy_resp.expires_in.unwrap_or(0),
         refresh_token: proxy_resp.refresh_token,
     })
+}
+
+/// Refresh YouTube tokens; if the refresh token is dead (`invalid_grant` →
+/// `AuthExpired`), wipe the stale YouTube connection so the account shows as
+/// disconnected and a fresh reconnect works in one step (no manual disconnect).
+async fn youtube_refresh_or_clear(
+    db: &Connection,
+    refresh_tok: &str,
+) -> Result<TokenResponse, AppError> {
+    match do_refresh_token_net(refresh_tok).await {
+        Err(AppError::AuthExpired(msg)) => {
+            log::warn!("[YouTube] refresh token rejected (invalid_grant) — clearing stale connection");
+            let _ = db::delete_settings_for_platform(db, "youtube");
+            Err(AppError::AuthExpired(msg))
+        }
+        other => other,
+    }
 }
 
 /// Initiate a resumable upload and send file bytes in chunks.
@@ -758,7 +784,7 @@ pub async fn ensure_fresh_access_token(conn: &Connection) -> Result<String, AppE
         let refresh_tok = db::get_setting(conn, "youtube_refresh_token")
             .map_err(|e| AppError::Database(e.to_string()))?
             .ok_or_else(|| AppError::Api("No YouTube refresh token — please reconnect.".into()))?;
-        let new_tokens = do_refresh_token_net(&refresh_tok).await?;
+        let new_tokens = youtube_refresh_or_clear(conn, &refresh_tok).await?;
         let new_expiry = chrono::Utc::now().timestamp() + new_tokens.expires_in as i64;
         db::save_setting(conn, "youtube_access_token", &new_tokens.access_token)
             .map_err(|e| AppError::Database(e.to_string()))?;

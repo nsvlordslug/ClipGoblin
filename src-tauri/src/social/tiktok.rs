@@ -770,6 +770,58 @@ fn map_visibility_to_privacy(visibility: &str) -> &'static str {
 
 /// Upload video via TikTok Content Posting API.
 /// Flow: creator_info query → init upload → PUT chunks → returns publish_id.
+/// Translate a TikTok Content Posting API error code into a human-readable,
+/// actionable message. Unknown codes fall back to TikTok's own message + the
+/// raw code so nothing is ever hidden from the user.
+fn friendly_tiktok_error(code: &str, message: &str) -> String {
+    let hint = match code {
+        "unaudited_client_can_only_post_to_private_accounts" =>
+            "ClipGoblin is still being audited by TikTok. Until it's approved, set your TikTok account to Private to post (audit submitted — usually 2–4 weeks).",
+        "access_token_invalid" | "access_token_expired" =>
+            "Your TikTok session has expired. Reconnect TikTok in Settings and try again.",
+        "scope_not_authorized" | "scope_permission_missed" =>
+            "ClipGoblin doesn't have permission to post. Reconnect TikTok and approve all the requested permissions.",
+        "spam_risk_too_many_posts" =>
+            "TikTok is limiting this account for posting too often. Wait a while and try again.",
+        "spam_risk_user_banned_from_posting" =>
+            "TikTok has temporarily blocked this account from posting. Try again later.",
+        "spam_risk" =>
+            "TikTok flagged this as potential spam. Wait a while and try again.",
+        "rate_limit_exceeded" =>
+            "Too many requests to TikTok right now. Wait a minute and try again.",
+        "file_format_check_failed" =>
+            "TikTok rejected the video format. Try re-exporting the clip.",
+        "video_pull_failed" | "video_pull_url_invalid" =>
+            "TikTok couldn't fetch the video. Re-export the clip and try again.",
+        "privacy_level_option_mismatch" =>
+            "The selected privacy setting isn't available for your account. Pick a different audience.",
+        _ => "",
+    };
+    if hint.is_empty() {
+        if message.trim().is_empty() {
+            format!("TikTok error: {}", code)
+        } else {
+            format!("{} (TikTok: {})", message, code)
+        }
+    } else {
+        hint.to_string()
+    }
+}
+
+/// Pull TikTok's `error.code`/`error.message` out of a raw response body and run
+/// it through [`friendly_tiktok_error`]. Falls back to status + body when the
+/// body isn't the expected error shape.
+fn friendly_tiktok_error_from_body(body: &str, status: impl std::fmt::Display) -> String {
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+        let code = json["error"]["code"].as_str().unwrap_or("");
+        if !code.is_empty() && code != "ok" {
+            let message = json["error"]["message"].as_str().unwrap_or("");
+            return friendly_tiktok_error(code, message);
+        }
+    }
+    format!("TikTok request failed ({}): {}", status, body)
+}
+
 async fn do_upload_net(
     access_token: &str,
     title: &str,
@@ -868,10 +920,7 @@ async fn do_upload_net(
     log::debug!("TikTok upload init response body: {}", init_body_text);
 
     if !init_status.is_success() {
-        return Err(AppError::Api(format!(
-            "TikTok upload init failed ({}): {}",
-            init_status, init_body_text
-        )));
+        return Err(AppError::Api(friendly_tiktok_error_from_body(&init_body_text, init_status)));
     }
 
     let init_result: PublishInitResponse = serde_json::from_str(&init_body_text)
@@ -882,10 +931,7 @@ async fn do_upload_net(
 
     if let Some(ref err) = init_result.error {
         if err.code != "ok" {
-            return Err(AppError::Api(format!(
-                "TikTok upload init error: {} — {}",
-                err.code, err.message
-            )));
+            return Err(AppError::Api(friendly_tiktok_error(&err.code, &err.message)));
         }
     }
 
@@ -943,10 +989,7 @@ async fn do_upload_net(
             "TikTok chunk upload failed (HTTP {}): {}",
             status, body
         );
-        return Err(AppError::Api(format!(
-            "TikTok chunk upload failed ({}): {}",
-            status, body
-        )));
+        return Err(AppError::Api(friendly_tiktok_error_from_body(&body, status)));
     }
 
     log::info!("TikTok upload complete — all {} chunks sent. Polling for video URL...", chunk_count);
@@ -1068,6 +1111,52 @@ async fn poll_publish_status(
     } else {
         log::info!("TikTok status poll done — no handle set, using tiktok.com");
         "https://www.tiktok.com".to_string()
+    }
+}
+
+#[cfg(test)]
+mod error_message_tests {
+    use super::*;
+
+    #[test]
+    fn maps_audit_code_to_private_account_guidance() {
+        let msg = friendly_tiktok_error("unaudited_client_can_only_post_to_private_accounts", "raw");
+        assert!(msg.contains("audited"), "got: {msg}");
+        assert!(msg.contains("Private"), "got: {msg}");
+        assert!(!msg.contains("unaudited_client"), "should not leak raw code: {msg}");
+    }
+
+    #[test]
+    fn maps_expired_token_to_reconnect() {
+        let msg = friendly_tiktok_error("access_token_invalid", "");
+        assert!(msg.to_lowercase().contains("reconnect"), "got: {msg}");
+    }
+
+    #[test]
+    fn unknown_code_keeps_message_and_code() {
+        assert_eq!(
+            friendly_tiktok_error("some_new_code", "Something broke"),
+            "Something broke (TikTok: some_new_code)"
+        );
+    }
+
+    #[test]
+    fn unknown_code_empty_message_shows_code() {
+        assert_eq!(friendly_tiktok_error("some_new_code", ""), "TikTok error: some_new_code");
+    }
+
+    #[test]
+    fn from_body_parses_tiktok_error_shape() {
+        let body = r#"{"error":{"code":"access_token_invalid","message":"bad"}}"#;
+        let msg = friendly_tiktok_error_from_body(body, 401);
+        assert!(msg.to_lowercase().contains("reconnect"), "got: {msg}");
+    }
+
+    #[test]
+    fn from_body_falls_back_on_non_error_body() {
+        let msg = friendly_tiktok_error_from_body("not json", 500);
+        assert!(msg.contains("500"), "got: {msg}");
+        assert!(msg.contains("not json"), "got: {msg}");
     }
 }
 
