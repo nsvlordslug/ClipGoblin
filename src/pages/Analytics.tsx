@@ -86,12 +86,44 @@ export default function Analytics() {
     return map
   }, [completed])
 
+  // Aggregate like counts per clip (across platforms).
+  const likesByClip = useMemo(() => {
+    const map = new Map<string, number>()
+    for (const u of completed) {
+      if (u.like_count == null) continue
+      map.set(u.clip_id, (map.get(u.clip_id) ?? 0) + u.like_count)
+    }
+    return map
+  }, [completed])
+
+  // Per-clip, per-platform views + likes — so each clip shows how it did on each
+  // platform it was published to, not just a cross-platform total.
+  const platformStatsByClip = useMemo(() => {
+    const map = new Map<string, Map<string, { views: number | null; likes: number | null }>>()
+    for (const u of completed) {
+      const byPlat = map.get(u.clip_id) ?? new Map<string, { views: number | null; likes: number | null }>()
+      const cur = byPlat.get(u.platform) ?? { views: null, likes: null }
+      if (u.view_count != null) cur.views = (cur.views ?? 0) + u.view_count
+      if (u.like_count != null) cur.likes = (cur.likes ?? 0) + u.like_count
+      byPlat.set(u.platform, cur)
+      map.set(u.clip_id, byPlat)
+    }
+    return map
+  }, [completed])
+
+  const platLabel = (p: string): string =>
+    ({ youtube: 'YT', tiktok: 'TT', instagram: 'IG' } as Record<string, string>)[p] ?? p.toUpperCase()
+
   const topClips = useMemo(() => {
     const scored = clips.map(c => {
       const hl = highlights.find(h => h.id === c.highlight_id)
       const score = hl?.confidence_score ?? (hl ? legacyToConfidence(hl.virality_score) : 0)
       const views = viewsByClip.get(c.id) ?? null
-      return { clip: c, score, views }
+      const likes = likesByClip.get(c.id) ?? null
+      const platforms = Array.from(
+        (platformStatsByClip.get(c.id) ?? new Map<string, { views: number | null; likes: number | null }>()).entries()
+      ).map(([platform, s]) => ({ platform, views: s.views, likes: s.likes }))
+      return { clip: c, score, views, likes, platforms }
     })
     if (sortMode === 'views') {
       // Pull clips with real view data to the top, then fall back to score
@@ -105,7 +137,7 @@ export default function Analytics() {
         .slice(0, 5)
     }
     return [...scored].sort((a, b) => b.score - a.score).slice(0, 5)
-  }, [clips, highlights, viewsByClip, sortMode])
+  }, [clips, highlights, viewsByClip, likesByClip, platformStatsByClip, sortMode])
 
   const bestClipTitle = topClips[0]?.clip?.title || '—'
 
@@ -114,6 +146,12 @@ export default function Analytics() {
     const contributors = completed.filter(u => u.view_count != null)
     if (contributors.length === 0) return null
     return contributors.reduce((sum, u) => sum + (u.view_count ?? 0), 0)
+  }, [completed])
+
+  const totalLikes = useMemo(() => {
+    const contributors = completed.filter(u => u.like_count != null)
+    if (contributors.length === 0) return null
+    return contributors.reduce((sum, u) => sum + (u.like_count ?? 0), 0)
   }, [completed])
 
   return (
@@ -152,6 +190,13 @@ export default function Analytics() {
           <div className="v4-kpi-value">{totalViews != null ? formatViewerCount(totalViews) : '—'}</div>
           <div className="v4-kpi-delta neutral">
             {totalViews != null ? `across ${completed.length} upload${completed.length !== 1 ? 's' : ''}` : 'Connect analytics to track'}
+          </div>
+        </div>
+        <div className="v4-kpi">
+          <div className="v4-kpi-label">Total likes</div>
+          <div className="v4-kpi-value">{totalLikes != null ? formatViewerCount(totalLikes) : '—'}</div>
+          <div className="v4-kpi-delta neutral">
+            {totalLikes != null ? 'across YouTube + TikTok' : 'Refresh to pull likes'}
           </div>
         </div>
         <div className="v4-kpi">
@@ -251,7 +296,7 @@ export default function Analytics() {
           </div>
         ) : (
           <div>
-            {topClips.map(({ clip, score, views }, i) => (
+            {topClips.map(({ clip, score, views, likes, platforms }, i) => (
               <div
                 key={clip.id}
                 className="v4-clip-row"
@@ -269,10 +314,23 @@ export default function Analytics() {
                     <span>Score {Math.round(score * 100)}%</span>
                     {score >= 0.9 && <span className="v4-viral-badge">🔥 VIRAL</span>}
                   </div>
+                  {platforms.length > 0 && (
+                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1 text-[11px] text-slate-500">
+                      {platforms.map(p => (
+                        <span key={p.platform}>
+                          <span className="text-slate-400 font-semibold">{platLabel(p.platform)}</span>{' '}
+                          {p.views != null ? formatViewerCount(p.views) : '—'} ▶ · {p.likes != null ? formatViewerCount(p.likes) : '—'} ♥
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div className="v4-views">
                   <span className="v4-views-num">{views != null ? formatViewerCount(views) : '—'}</span>
                   <span className="v4-views-lbl">VIEWS</span>
+                  <span className="v4-views-lbl" style={{ marginTop: 6 }}>
+                    {likes != null ? `${formatViewerCount(likes)} likes` : '— likes'}
+                  </span>
                   {views != null && views >= 10_000 && (
                     <span className="v4-viral-badge">🔥 TRENDING</span>
                   )}

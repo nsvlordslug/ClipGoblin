@@ -136,6 +136,16 @@ pub async fn upload_to_platform(
     })?;
     log::info!("[Upload] {} upload complete: {:?}", platform, result.status);
 
+    // Record this direct upload in the analytics ledger (scheduled_uploads) so it
+    // appears in Analytics + the ScheduledUploads "Completed" section and gets
+    // view-count refreshes. The scheduler creates its own row, so this only fires
+    // for direct "Upload now" uploads — no duplicate rows.
+    if let social::UploadResultStatus::Complete { video_url } = &result.status {
+        if let Err(e) = db::record_direct_upload_for_analytics(&conn, &meta.clip_id, &platform, video_url) {
+            log::warn!("[Upload] failed to record analytics row for {}: {}", meta.clip_id, e);
+        }
+    }
+
     Ok(result)
 }
 

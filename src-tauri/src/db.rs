@@ -221,6 +221,25 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
     conn.execute("ALTER TABLE scheduled_uploads ADD COLUMN ctr_percent REAL", []).ok();
     conn.execute("ALTER TABLE scheduled_uploads ADD COLUMN stats_updated_at TEXT", []).ok();
 
+    // Backfill: direct uploads historically only landed in `upload_history`, which the
+    // analytics pipeline doesn't read. Copy any upload_history rows without a matching
+    // scheduled_uploads row into the ledger as completed, so PAST direct uploads show
+    // up in Analytics. Idempotent — the NOT EXISTS guard skips already-migrated rows.
+    conn.execute(
+        "INSERT INTO scheduled_uploads
+            (id, clip_id, platform, scheduled_time, status, retry_count, video_url, upload_meta_json, created_at)
+         SELECT lower(hex(randomblob(16))), h.clip_id, h.platform,
+                COALESCE(h.uploaded_at, datetime('now')), 'completed', 0, h.video_url, '{}',
+                COALESCE(h.uploaded_at, datetime('now'))
+         FROM upload_history h
+         WHERE h.video_url IS NOT NULL
+           AND EXISTS (SELECT 1 FROM clips c WHERE c.id = h.clip_id)
+           AND NOT EXISTS (
+               SELECT 1 FROM scheduled_uploads s WHERE s.clip_id = h.clip_id AND s.platform = h.platform
+           )",
+        [],
+    ).ok();
+
     // Phase 6.0: per-call AI usage log for cost tracking and rolling estimates.
     // Each row is one LLM API call. Used by ai_usage::estimate_cost_per_analyze
     // to drive the per-VOD cost preview in Settings + the Analyze confirmation modal.
@@ -1284,6 +1303,38 @@ pub fn upsert_upload(conn: &Connection, clip_id: &str, platform: &str, video_url
     Ok(())
 }
 
+/// Record a direct ("Upload now") upload in the `scheduled_uploads` ledger as a
+/// completed row, so it appears in Analytics and gets view-count refreshes.
+/// Direct uploads otherwise only land in `upload_history` (used for dedup), which
+/// the analytics pipeline never reads. Re-uploading the same clip+platform updates
+/// the existing completed row instead of duplicating it.
+///
+/// Only called from the direct `upload_to_platform` command — the scheduler creates
+/// its own `scheduled_uploads` row, so this never double-records scheduled uploads.
+pub fn record_direct_upload_for_analytics(
+    conn: &Connection,
+    clip_id: &str,
+    platform: &str,
+    video_url: &str,
+) -> SqliteResult<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let updated = conn.execute(
+        "UPDATE scheduled_uploads SET video_url = ?3, stats_updated_at = NULL
+         WHERE clip_id = ?1 AND platform = ?2 AND status = 'completed'",
+        params![clip_id, platform, video_url],
+    )?;
+    if updated == 0 {
+        let id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO scheduled_uploads
+                (id, clip_id, platform, scheduled_time, status, retry_count, video_url, upload_meta_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, 'completed', 0, ?5, '{}', ?4)",
+            params![id, clip_id, platform, now, video_url],
+        )?;
+    }
+    Ok(())
+}
+
 pub fn delete_settings_for_platform(conn: &Connection, platform: &str) -> SqliteResult<()> {
     // Delete all settings that start with "{platform}_"
     // This covers YouTube (channel_name, channel_id) and
@@ -1529,6 +1580,29 @@ mod tests {
             review_note: None,
         };
         insert_highlight(conn, &h).unwrap();
+    }
+
+    #[test]
+    fn direct_upload_appears_in_completed_ledger() {
+        let conn = fresh_db();
+        // The ledger row FKs to clips(id); this unit test exercises the ledger
+        // upsert logic in isolation, so relax FK enforcement (in production the
+        // clip being uploaded always exists).
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        // A direct upload with no prior scheduled_uploads row.
+        record_direct_upload_for_analytics(&conn, "clip1", "youtube", "https://youtu.be/abc").unwrap();
+        let rows = get_completed_uploads_with_url(&conn).unwrap();
+        assert_eq!(rows.len(), 1, "direct upload should appear in the completed ledger");
+        assert_eq!(rows[0].clip_id, "clip1");
+        assert_eq!(rows[0].platform, "youtube");
+        assert_eq!(rows[0].status, "completed");
+        assert_eq!(rows[0].video_url.as_deref(), Some("https://youtu.be/abc"));
+
+        // Re-uploading the same clip+platform updates the row instead of duplicating.
+        record_direct_upload_for_analytics(&conn, "clip1", "youtube", "https://youtu.be/xyz").unwrap();
+        let rows = get_completed_uploads_with_url(&conn).unwrap();
+        assert_eq!(rows.len(), 1, "re-upload must update, not duplicate");
+        assert_eq!(rows[0].video_url.as_deref(), Some("https://youtu.be/xyz"));
     }
 
     #[test]
