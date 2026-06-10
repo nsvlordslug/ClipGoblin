@@ -483,6 +483,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
             value={tiktokCompliance}
             onChange={setTiktokCompliance}
             onValidityChange={setTiktokComplianceValid}
+            clipDurationSec={clipDuration}
           />
         )}
 

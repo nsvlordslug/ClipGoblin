@@ -46,11 +46,22 @@ const PRIVACY_LABELS: Record<string, string> = {
 const MUSIC_URL = 'https://www.tiktok.com/legal/page/global/music-usage-confirmation/en'
 const BRANDED_POLICY_URL = 'https://www.tiktok.com/legal/page/global/bc-policy/en'
 
+// mm:ss formatter for the per-account max-duration hint.
+function fmtDuration(totalSec: number): string {
+  const s = Math.max(0, Math.round(totalSec))
+  const m = Math.floor(s / 60)
+  return `${m}:${(s % 60).toString().padStart(2, '0')}`
+}
+
 interface Props {
   value: TikTokComplianceValue
   onChange: (v: TikTokComplianceValue) => void
   /** Reports whether the panel is in a postable state so the parent can gate the Post button. */
   onValidityChange?: (valid: boolean) => void
+  /** Duration of the clip being posted, in seconds. When provided, the panel
+   *  enforces the account's max_video_post_duration_sec (TikTok's Content
+   *  Sharing Guidelines require checking video length before posting). */
+  clipDurationSec?: number
 }
 
 /**
@@ -61,7 +72,7 @@ interface Props {
  * sub-options, and the music-usage consent line. Used by both the single-clip
  * publish composer and the batch upload dialog.
  */
-export default function TikTokComplianceFields({ value, onChange, onValidityChange }: Props) {
+export default function TikTokComplianceFields({ value, onChange, onValidityChange, clipDurationSec }: Props) {
   const [info, setInfo] = useState<CreatorInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -93,10 +104,13 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
   }, [info])
 
   // Validity: must pick a privacy level; if disclosing, pick ≥1 brand type;
-  // branded content is incompatible with an "Only me" audience.
+  // branded content is incompatible with an "Only me" audience; the clip must
+  // not exceed the account's max post duration.
   const brandedOnPrivate = value.brandedContent && value.privacyLevel === 'SELF_ONLY'
   const discloseMissing = value.discloseContent && !value.yourBrand && !value.brandedContent
-  const valid = !!info && !error && value.privacyLevel != null && !discloseMissing && !brandedOnPrivate
+  const maxDurationSec = info?.max_video_post_duration_sec ?? 0
+  const durationExceeded = clipDurationSec != null && maxDurationSec > 0 && clipDurationSec > maxDurationSec
+  const valid = !!info && !error && value.privacyLevel != null && !discloseMissing && !brandedOnPrivate && !durationExceeded
   useEffect(() => {
     onValidityChange?.(valid)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -116,10 +130,11 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
     )
   }
 
+  // Exact TikTok-required disclosure labels (Content Sharing Guidelines).
   const discloseLabel = value.brandedContent
-    ? 'Your video will be labeled "Paid partnership".'
+    ? "Your video will be labeled as 'Paid partnership'."
     : value.yourBrand
-      ? 'Your video will be labeled "Promotional content".'
+      ? "Your video will be labeled as 'Promotional content'."
       : null
 
   return (
@@ -136,6 +151,16 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
           </span>
         </span>
       </div>
+
+      {/* Max length hint + duration gate — TikTok requires checking
+          max_video_post_duration_sec before posting. */}
+      {maxDurationSec > 0 && (
+        <p className={`text-[10px] ${durationExceeded ? 'text-red-400' : 'text-slate-500'}`}>
+          {durationExceeded
+            ? `This clip is ${fmtDuration(clipDurationSec!)} — your TikTok account allows videos up to ${fmtDuration(maxDurationSec)}. Trim it shorter to post.`
+            : `Max video length for your TikTok account: ${fmtDuration(maxDurationSec)}.`}
+        </p>
+      )}
 
       {/* Privacy level — options come straight from creator_info */}
       <div>
@@ -209,7 +234,7 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
                 className="w-3.5 h-3.5 rounded border-surface-600 bg-surface-800 text-violet-500" />
               Branded content <span className="text-slate-500">— paid partnership with a brand</span>
             </label>
-            {discloseMissing && <p className="text-[10px] text-amber-400">Select at least one disclosure type.</p>}
+            {discloseMissing && <p className="text-[10px] text-amber-400">You need to indicate if your content promotes yourself, a third party, or both.</p>}
             {value.privacyLevel === 'SELF_ONLY' && (
               <p className="text-[10px] text-amber-400">Branded content can't be set to "Only me" — pick a wider audience to enable it.</p>
             )}
@@ -218,15 +243,22 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
         )}
       </div>
 
-      {/* Consent line (required) */}
+      {/* Consent declaration (required; exact TikTok wording). When branded
+          content is disclosed, the Branded Content Policy is listed FIRST. */}
       <p className="text-[10px] text-slate-500 leading-relaxed">
         By posting, you agree to TikTok's{' '}
-        <a href={MUSIC_URL} target="_blank" rel="noopener noreferrer" className="text-violet-400 hover:underline">Music Usage Confirmation</a>
         {value.brandedContent && (
-          <>{' '}and{' '}
+          <>
             <a href={BRANDED_POLICY_URL} target="_blank" rel="noopener noreferrer" className="text-violet-400 hover:underline">Branded Content Policy</a>
+            {' '}and{' '}
           </>
-        )}.
+        )}
+        <a href={MUSIC_URL} target="_blank" rel="noopener noreferrer" className="text-violet-400 hover:underline">Music Usage Confirmation</a>.
+      </p>
+
+      {/* Post-publish processing notice (required by TikTok's Content Sharing Guidelines). */}
+      <p className="text-[10px] text-slate-500 leading-relaxed">
+        After you post, it may take a few minutes for your video to process and be visible on TikTok.
       </p>
     </div>
   )
