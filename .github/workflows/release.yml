@@ -12,10 +12,10 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 20
 
@@ -36,7 +36,10 @@ jobs:
         run: npm ci
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0.5
+        # v0.6 = Node 24 runtime (required from 2026-06-16); same inputs as v0.5,
+        # verified drop-in for tagName/releaseName/releaseBody/releaseDraft/
+        # prerelease/includeUpdaterJson/args (action.yml @ v0.6).
+        uses: tauri-apps/tauri-action@v0.6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Signing uses the passwordless v3 keypair (clipgoblin-nopass.key,
