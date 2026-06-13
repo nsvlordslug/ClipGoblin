@@ -516,6 +516,7 @@ impl PlatformAdapter for TikTokAdapter {
             meta.disable_stitch,
             meta.brand_organic,
             meta.branded_content,
+            &meta.clip_id,
         )
         .await?;
 
@@ -834,6 +835,7 @@ async fn do_upload_net(
     disable_stitch: bool,
     brand_organic: bool,
     branded_content: bool,
+    clip_id: &str,
 ) -> Result<(String, String), AppError> {
     let client = reqwest::Client::new();
     let total_size = file_bytes.len();
@@ -981,6 +983,8 @@ async fn do_upload_net(
                 "TikTok upload chunk {}/{} complete (HTTP {})",
                 chunk_idx, chunk_count, status
             );
+            let pct = ((chunk_idx * 100) / chunk_count.max(1)).min(100) as u8;
+            crate::social::emit_upload_status("tiktok", clip_id, "uploading", Some(pct));
             continue;
         }
 
@@ -996,6 +1000,7 @@ async fn do_upload_net(
 
     // Poll the publish status endpoint to get the real video URL.
     // TikTok needs time to process the upload before returning a post ID.
+    crate::social::emit_upload_status("tiktok", clip_id, "processing", None);
     let video_url = poll_publish_status(&client, access_token, &publish_id, tiktok_handle).await;
 
     Ok((publish_id, video_url))

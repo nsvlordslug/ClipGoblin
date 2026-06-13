@@ -71,6 +71,24 @@ pub struct UploadResult {
     pub job_id: String,
 }
 
+/// Emit a live `upload-status` event so the publish UI can show real phase
+/// transitions (chunk progress, platform-side processing). Best-effort:
+/// no-op when the app handle isn't set (unit tests, headless).
+pub fn emit_upload_status(platform: &str, clip_id: &str, phase: &str, progress_pct: Option<u8>) {
+    if let Some(handle) = crate::APP_HANDLE.get() {
+        use tauri::Emitter;
+        let _ = handle.emit(
+            "upload-status",
+            serde_json::json!({
+                "platform": platform,
+                "clip_id": clip_id,
+                "phase": phase,
+                "progress_pct": progress_pct,
+            }),
+        );
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  Platform adapter trait
 // ═══════════════════════════════════════════════════════════════════

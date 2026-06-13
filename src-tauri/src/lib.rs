@@ -40,6 +40,10 @@ use job_queue::JobQueue;
 /// Database connection type shared across commands.
 pub(crate) type DbConn = Mutex<Connection>;
 
+/// Global app handle so non-command code (e.g. upload internals) can emit
+/// UI events. Set once during setup; absent in unit tests (emits no-op).
+pub(crate) static APP_HANDLE: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
+
 /// Emit a structured `"job-error"` event to the frontend AND convert to String.
 /// Use at Tauri command boundaries for errors that should notify the UI.
 pub(crate) fn report_error(app: &AppHandle, err: AppError) -> String {
@@ -250,6 +254,8 @@ pub fn run() {
             get_allow_per_clip_override,
         ])
         .setup(|app| {
+            let _ = APP_HANDLE.set(app.handle().clone());
+
             // Wire job queue events into Tauri's frontend event system.
             let queue: State<'_, JobQueue> = app.state();
             let handle = app.handle().clone();

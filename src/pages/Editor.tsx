@@ -249,6 +249,31 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
     }
   }
 
+  // Live upload-status events from the backend (chunk progress + platform-side
+  // processing phase). Only applies while a platform row is mid-upload, so stale
+  // or cross-clip events can't clobber terminal states (done/error).
+  useEffect(() => {
+    const unlisten = listen<{ platform: string; clip_id: string; phase: string; progress_pct?: number }>(
+      'upload-status',
+      (e) => {
+        const p = e.payload
+        if (p.clip_id !== clipId) return
+        setPlatformStates(prev => {
+          const cur = prev[p.platform]
+          if (!cur || (cur.status !== 'uploading' && cur.status !== 'processing')) return prev
+          if (p.phase === 'processing') {
+            return { ...prev, [p.platform]: { ...cur, status: 'processing' as const, progress: 100 } }
+          }
+          if (p.phase === 'uploading') {
+            return { ...prev, [p.platform]: { ...cur, status: 'uploading' as const, progress: p.progress_pct ?? cur.progress } }
+          }
+          return prev
+        })
+      },
+    )
+    return () => { unlisten.then(f => f()) }
+  }, [clipId])
+
   // Multi-platform upload orchestrator — always saves + exports first, then uploads
   const handleMultiUpload = async () => {
     if (!clipId || selectedPlatforms.length === 0) return
@@ -291,7 +316,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
       for (const platform of platforms) {
         setPlatformStates(prev => ({
           ...prev,
-          [platform]: { status: 'uploading', progress: 50 },
+          [platform]: { status: 'uploading', progress: 0 },
         }))
         const result = await uploadToPlatform(platform)
         setPlatformStates(prev => ({ ...prev, [platform]: result }))

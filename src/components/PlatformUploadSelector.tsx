@@ -87,6 +87,7 @@ export type PlatformUploadStatus =
   | 'waiting'       // queued, hasn't started yet
   | 'exporting'     // re-exporting in required format
   | 'uploading'     // uploading to platform
+  | 'processing'    // platform is processing the upload (e.g. TikTok post-upload)
   | 'done'          // success
   | 'error'         // failed
 
@@ -156,7 +157,12 @@ function StatusIndicator({ state, platformName, onViewUrl }: {
   )
   if (state.status === 'uploading') return (
     <div className="flex items-center gap-1 text-[9px] text-violet-400">
-      <Loader2 className="w-3 h-3 animate-spin" /> Upload
+      <Loader2 className="w-3 h-3 animate-spin" /> Upload{state.progress > 0 ? ` ${state.progress}%` : ''}
+    </div>
+  )
+  if (state.status === 'processing') return (
+    <div className="flex items-center gap-1 text-[9px] text-cyan-400" title={`${platformName} is processing your post — it may take a few minutes to appear`}>
+      <Loader2 className="w-3 h-3 animate-spin" /> Processing on {platformName}…
     </div>
   )
   if (state.status === 'waiting') return (
