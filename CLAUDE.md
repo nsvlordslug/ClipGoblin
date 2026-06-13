@@ -8,7 +8,7 @@ ClipGoblin is a Tauri 2 + React + TypeScript desktop app (crate name: `clipviral
 - **Cargo check:** `cd src-tauri && cargo check`
 - **Database:** `%APPDATA%\clipviral\clipviral.db`
 - **GitHub repo:** `https://github.com/nsvlordslug/ClipGoblin`
-- **Current version:** v1.0.0
+- **Current version:** v1.4.5 (package.json is the source of truth — synced by `bump-version.ps1`)
 
 ---
 
@@ -36,8 +36,8 @@ After any successful `cargo check` or `cargo tauri dev`, commit and push:
 cd "C:\Users\cereb\Desktop\Claude projects\clipviral" && git add -A && git commit -m "description" && git push origin main
 ```
 
-### 5. Rust Not Available in Cowork VM
-You cannot run `cargo check` in this VM. Always ask Slug to run it in his terminal. Do static analysis to catch obvious errors, but the real compiler check happens on his machine.
+### 5. Rust IS Available Here — Verify Before Commit
+`cargo check` / `cargo test` run fine in this environment (verified across the v1.4.x releases; full lib suite ~479 tests). Run them from `src-tauri/` before every commit. Frontend typecheck: `node node_modules\typescript\bin\tsc -b` from the project root — plain `npx tsc` can resolve a bogus `tsc` package when the shell starts in the parent folder.
 
 ### 6. Version Bump Before Every Commit
 IMPORTANT: Before every git commit, run `powershell -file bump-version.ps1 <new_version>` to sync the version across package.json, src-tauri/Cargo.toml, and src-tauri/tauri.conf.json.
@@ -62,10 +62,12 @@ src-tauri/src/
 ├── social/
 │   ├── mod.rs              # PlatformAdapter trait, UploadMeta, UploadResult types
 │   ├── youtube.rs          # YouTube Data API v3 OAuth + resumable upload
-│   ├── tiktok.rs           # TikTok OAuth + Content Posting API (sandbox)
+│   ├── tiktok.rs           # TikTok OAuth + Content Posting API (production; audit in progress)
 │   └── instagram.rs        # stub — TODO(v2)
 ├── db.rs                   # SQLite schema, migrations, all CRUD helpers
-├── twitch.rs               # Twitch OAuth (Confidential client, embedded creds)
+├── twitch.rs               # Twitch OAuth (token exchange/refresh via the Cloudflare auth proxy)
+├── auth_proxy.rs           # client for the clipgoblin-auth-proxy Worker (X-Proxy-Key header)
+├── crypto.rs               # DPAPI encryption for tokens at rest ("dpapi:" prefix, per-Windows-user)
 ├── post_captions.rs        # AI + pattern-based caption/title generation (FINALIZED)
 ├── ai_provider.rs          # BYOK provider resolution (Claude/OpenAI/Gemini/Free)
 ├── clip_selector.rs        # clip detection, scoring, sensitivity scaling
@@ -142,7 +144,8 @@ See worker/wrangler.toml for the proxy configuration.
 
 ### Publishing
 - YouTube: resumable upload with snippet.tags + description hashtags
-- TikTok: sandbox working, production app submitted 3 times (latest uses GitHub Pages callback)
+- TikTok: production client live (GitHub Pages callback). Content Posting API audit: round 1 NOT approved 2026-06-09 (ref 20260606214146) — TikTok support confirmed the issue is the DEMO VIDEO (must start with login+scopes, show privacy switching, show options interacting), not the app. Resubmission prep tracked in `C:\Users\cereb\Pictures\cg-demo-frames\TikTok-UX-Mockups-Blueprint.md`.
+- YouTube: Google OAuth brand verification APPROVED (2026-06-08); sensitive-scope review (youtube.upload + youtube.readonly) submitted 2026-06-09, under review. Until it passes, users click through the unverified-app warning (Advanced → Continue).
 - Scheduled uploads: background scheduler checks every 60s, auto-retry once on failure
 - Batch upload: auto-exports un-exported clips before uploading
 
@@ -158,6 +161,10 @@ See worker/wrangler.toml for the proxy configuration.
 6. **Asset protocol 403 on external drives** — scope set to `["**"]` in tauri.conf.json.
 7. **lib.rs truncation** — was 4359 lines, now split into 8 modules. NEVER let it grow large again.
 8. **Cargo.toml is in src-tauri/** — run `cargo check` from there, not project root.
+9. **Tokens are DPAPI-encrypted at rest** (crypto.rs, `dpapi:` prefix in the settings table). Any tooling that reads tokens outside the app must CryptUnprotectData first — raw values are ciphertext.
+10. **Two clip ledgers:** direct uploads write `upload_history`; the Analytics pipeline reads `scheduled_uploads` (status='completed'). Direct uploads are mirrored into the ledger via `db::record_direct_upload_for_analytics` (v1.4.3) — keep that in mind when touching either table.
+11. **Repo `.env` `PROXY_API_KEY` is STALE** — the deployed worker rejects it (403), so Twitch/YouTube/TikTok token refresh fails in local dev builds. Release builds are fine (key embedded from GitHub secrets at CI build time). Fix = paste the real key into `.env` (Slug has it). Do NOT rotate the worker secret — shipped builds have the current key baked in.
+12. **Unaudited TikTok client = SELF_ONLY posting.** Until the Content Posting API audit passes, posts only succeed with the TikTok account set to Private (`unaudited_client_can_only_post_to_private_accounts`).
 
 ---
 
@@ -181,27 +188,27 @@ See worker/wrangler.toml for the proxy configuration.
 
 ---
 
+## What's Done Since v1.0 (highlights, as of v1.4.4 / 2026-06-12)
+
+- ✅ Phase 1 complete: auto-updater + signed installers + CI on tag push (`release.yml`, Node-24-ready actions) + manual draft publish
+- ✅ Phase 2 complete: in-app bug reporter → GitHub Issues; `triage.yml` + `autofix.yml` pipelines; Discord webhooks
+- ✅ Analytics dashboard (views + likes, per-platform, Refresh stats) — incl. the v1.4.3 direct-upload ledger fix
+- ✅ TikTok Content Posting API compliance UI (creator_info-driven privacy/interactions/disclosure/consent) + v1.4.4 polish (processing notice, max-duration gate, exact guideline strings)
+- ✅ YouTube auto-reauth on invalid_grant; human-readable TikTok upload errors
+- ✅ Cam-region vertical-crop editor (v1.4.0); clip-trim reversibility fix
+- ✅ OAuth secrets moved out of the binary → Cloudflare auth proxy; tokens DPAPI-encrypted at rest
+- ✅ Landing/download/terms/privacy at clipgoblin.mindrotstudios.com (Pages, HTTPS enforced; apex 301→landing via `mindrot-apex-redirect` worker)
+
 ## What's Next (in order)
 
-### Phase 1: App Packaging + Auto-Update
-1. Tauri auto-updater plugin
-2. .msi installer via `cargo tauri build`
-3. GitHub Actions CI/CD for auto-build + GitHub Releases
-4. Code signing for Windows SmartScreen
+### 1. TikTok audit resubmission (active)
+Re-record the demo on the current build per the storyboard in `cg-demo-frames\TikTok-UX-Mockups-Blueprint.md` (login+scopes first, privacy switching, options interacting, branded×private block) → assemble the UX-mockup PDF from fresh frames → resubmit with the own-content use-case framing.
 
-### Phase 2: Bug Reporting + Automated Fix Pipeline
-1. In-app bug reporter (structured form → GitHub Issues with logs/system info)
-2. Claude Code triage (classify: bug/feature request/exploit attempt)
-3. Auto-fix PRs to `fixes` branch (scope-locked: bugs only, no features/security changes)
-4. Discord webhook notifications to private channel
-5. Approval gate: only Slug's Discord user ID can approve (slash command or reaction)
+### 2. Meta platform expansion (start after resubmission)
+One Meta developer app covers Instagram + Facebook + Threads. Business Verification is the long pole — start it early. IG/Threads need a PUBLIC video URL (host clips temporarily, e.g. R2); Facebook takes direct upload. Build a Mindrot Studios landing at the apex before/with Business Verification.
 
-### Phase 3: Platform Expansion
-1. Meta Developer setup (one app for Instagram + Facebook + Threads)
-2. Instagram Reels, Facebook video, Threads adapters
-3. TikTok production approval (3rd submission pending)
+### 3. Twitch clips importer / detection fusion (validated, speced after resubmission)
+Helix Get Clips (`vod_offset`+`view_count`, no extra scope) as audience-signal seeds fused into detection; re-cut from the VOD (escapes the 60s clip cap); instant-import onboarding without full VOD analyze. Twitch's Auto Clips alpha multiplies the supply for free.
 
-### Phase 4: Analytics & Polish
-1. Analytics dashboard (YouTube/TikTok view counts)
-2. Clip performance badges on Clips page
-3. Landing page screenshots + download link
+### 4. Steam release prep
+One-time purchase ≈ one month of Eklipse (~$24.99), no subscription. Store page leans on the structural moat: local processing, no queues/caps/expiry, BYOK. Free keys for Discord beta testers at launch.

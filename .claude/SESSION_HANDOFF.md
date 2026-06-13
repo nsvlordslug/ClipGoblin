@@ -1,7 +1,17 @@
 # Session Handoff — ClipGoblin
 
-**Last session:** 2026-04-24 (Phase 12 caller migration + 6-pattern title framework rebuild + save-path Wave 3 + Phase 6.0 foundation)
+**Last updated:** 2026-06-12 (platform-review sprint). Sections below the "2026-06-12 state" block are the older 2026-04-24 handoff — still accurate on the title framework, superseded on release/status facts.
 **Written for:** next Claude Code session resuming work on ClipGoblin.
+
+## 2026-06-12 state (read this, skim the rest)
+
+- **Shipped:** v1.4.1 (TikTok compliance UI) → v1.4.2 (friendly TikTok errors + YouTube auto-reauth) → v1.4.3 (Analytics direct-upload ledger fix + likes/per-platform) → **v1.4.4 published** (TikTok polish: processing notice, max-duration gate, exact guideline strings). Version files sit at **1.4.5 untagged** (CI Node-24 action bumps, commit `7209601`) — the next release tags v1.4.5.
+- **TikTok Content Posting API audit:** round 1 NOT approved (2026-06-09, ref 20260606214146). TikTok support confirmed the issue is the **demo video** (must open with TikTok login + exact scopes; show Everyone/Followers/Only-Me switching; show options *interacting* — esp. the branded-content × Only-Me block), not the app. **Resubmission kit ready:** storyboard + mockup-PDF blueprint at `C:\Users\cereb\Pictures\cg-demo-frames\TikTok-UX-Mockups-Blueprint.md`; reframed own-content use-case drafted. **Waiting on Slug to re-record on the current build.**
+- **YouTube/Google:** brand verification APPROVED (2026-06-08); sensitive-scope review (youtube.upload + youtube.readonly) submitted 2026-06-09 with the unlisted demo https://youtu.be/58uCZnB_3Jo — under review. The unverified-app warning persists until it passes (Advanced → Continue meanwhile).
+- **Infra this week:** GitHub Pages Enforce-HTTPS turned ON (fixes the Search Console duplicate-canonical flag); apex/www mindrotstudios.com 522/525 fixed via the `mindrot-apex-redirect` worker (301 → clipgoblin landing; tiny project folder lives next to this repo). Search Console "Validate fix" clicked.
+- **Decisions:** Steam pricing = **one-time ~$24.99** ("one month of Eklipse"), no subscription. Queued roadmap: Meta (ONE dev app for IG+FB+Threads, Business Verification early, Mindrot landing page), Twitch clips importer/detection fusion (validated live against Slug's channel: Get Clips needs no extra scope; vod_offset only survives VOD retention).
+- **Gotchas learned:** tokens are DPAPI-encrypted at rest (crypto.rs); repo `.env` PROXY_API_KEY is stale (local-dev OAuth refresh 403s — release builds fine); `upload_history` vs `scheduled_uploads` ledger split; run tsc as `node node_modules\typescript\bin\tsc -b` (the shell starts in the parent folder).
+- Full detail lives in the memory files (`project_clipgoblin_status.md` + `project_clipgoblin_infrastructure.md`).
 
 Read this first, then [docs/ROADMAP.md](../docs/ROADMAP.md), then [CLAUDE.md](../CLAUDE.md). **[docs/PHASE12_PROMPT_DIFF.md](../docs/PHASE12_PROMPT_DIFF.md) is historical reference now** — the 3-pattern framework it describes was scrapped this session. See the "Title framework rebuild" section below for what replaced it.
 
