@@ -1366,6 +1366,23 @@ mod tests {
     }
 
     #[test]
+    fn loud_steady_stream_with_spikes_yields_clips_end_to_end() {
+        // The bug reproduced through the WHOLE pipeline: a loud-throughout stream
+        // (baseline 0.45) with many genuine, well-separated spikes (0.90). The old
+        // fixed-0.50 cliff collapsed the real loud VOD to 1 clip; calibration +
+        // two-gate must surface a healthy set (capped by diversity, not a cliff).
+        let dur = 5940.0;
+        let mut rms = vec![0.45f64; dur as usize];
+        for s in (500usize..5600).step_by(500) {
+            for k in 0..4 { rms[s + k] = 0.90; }
+        }
+        let audio = AudioContext::new(rms, vec![]);
+        let sel = crate::game_config::SelectorConfig { min_clip_duration: 15, max_clip_duration: 60, min_gap_between_clips: 30 };
+        let (clips, _stats) = select_clips(Some(&audio), None, &[], &[], &[], dur, "medium", &sel);
+        assert!(clips.len() >= 4, "loud stream with many real spikes should yield a healthy set, got {}", clips.len());
+    }
+
+    #[test]
     fn score_clip_candidate_overrides_dimensions_for_transcript_only() {
         let mut c = build_test_candidate(vec![SignalSource::Transcript]);
         c.emotion_tags = vec!["shock".to_string()];  // Phase A amendment: tag triggers override

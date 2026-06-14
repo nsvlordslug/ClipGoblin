@@ -81,7 +81,8 @@ pub struct DisplayCalibrator {
 
 impl Default for DisplayCalibrator {
     fn default() -> Self {
-        // Starting constants; refined against the validation VODs in Task 7.
+        // Starting constants; final tuning happens against the real VODs when the
+        // v1.5.0 build is run live (the synthetic test only exercises the mechanism).
         Self { midpoint: 0.55, slope: 6.0 }
     }
 }
