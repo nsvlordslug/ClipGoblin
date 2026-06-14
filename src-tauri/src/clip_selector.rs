@@ -689,6 +689,27 @@ fn is_scene_card(c: &ClipCandidate, duration: f64) -> bool {
     c.peak_time < edge || (duration > 2.0 * edge && c.peak_time > duration - edge)
 }
 
+/// True if a transcript STRING is music-only: it has a music annotation and,
+/// after stripping all bracketed annotations, no real speech remains. Run on the
+/// full-range transcript over a clip window — catches chat-sourced scene cards
+/// whose ClipCandidate excerpt is the chat text, not the music tag.
+pub fn is_music_only_text(s: &str) -> bool {
+    if !(s.to_lowercase().contains("music") && (s.contains('(') || s.contains('['))) {
+        return false;
+    }
+    let mut depth = 0i32;
+    let mut remainder = String::new();
+    for ch in s.chars() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = (depth - 1).max(0),
+            c if depth == 0 => remainder.push(c),
+            _ => {}
+        }
+    }
+    remainder.trim().is_empty()
+}
+
 /// Two-gate selection. Gate A = the no-noise quality gates + the per-sensitivity
 /// display-score floor. Gate B = rank Gate-A survivors by score and take the top
 /// `max_clips` (the existing diversity/cooldown logic). The old fixed total_score
@@ -1431,6 +1452,16 @@ mod tests {
         let mut audio_only = build_test_candidate(vec![SignalSource::Audio]);
         audio_only.transcript_excerpt = None;
         assert!(!is_scene_card(&audio_only, dur));
+    }
+
+    #[test]
+    fn is_music_only_text_detects_scene_cards() {
+        assert!(is_music_only_text("(upbeat music)"));
+        assert!(is_music_only_text("(upbeat music) (upbeat music) (upbeat music)"));
+        assert!(is_music_only_text("[Piano music]"));
+        assert!(!is_music_only_text("Come on. [Piano music] I'm doing it.")); // speech present
+        assert!(!is_music_only_text("(Laughter) oh yeah")); // no music annotation
+        assert!(!is_music_only_text("got him lets go")); // no annotation at all
     }
 
     #[test]

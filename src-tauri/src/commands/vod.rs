@@ -2029,6 +2029,15 @@ fn run_analysis_signals(
             .and_then(|t| extract_transcript_for_range(t, c.start_time, c.end_time))
             .or_else(|| c.transcript_excerpt.clone());
 
+        // Drop scene cards (starting-soon / BRB / ending screens): the transcript
+        // over the clip window is music-only (no speech) — not real content. This
+        // catches chat-sourced cards the in-selector guard can't see (their
+        // ClipCandidate excerpt is the chat text, not the music annotation).
+        if full_range_transcript.as_deref().map_or(false, clip_selector::is_music_only_text) {
+            log::info!("[scene-card] dropped clip at {:.0}s (music-only transcript)", c.start_time);
+            continue;
+        }
+
         highlights.push(db::HighlightRow {
             id: uuid::Uuid::new_v4().to_string(),
             vod_id: vod_id.clone(),
