@@ -527,12 +527,18 @@ pub async fn fetch_community_clips(
     let max_pages = 6;
 
     for _ in 0..max_pages {
+        // URL-encode the query values. started_at/ended_at are RFC3339 with a
+        // "+00:00" offset; an un-encoded "+" is decoded server-side as a space
+        // ("…T03:20:44 00:00") → Twitch 400. Pagination cursors can also contain
+        // "+"/"/"/"=". broadcaster_id is numeric and safe as-is.
         let mut url = format!(
             "https://api.twitch.tv/helix/clips?broadcaster_id={}&started_at={}&ended_at={}&first=100",
-            broadcaster_id, started_at, ended_at
+            broadcaster_id,
+            urlencoding::encode(started_at),
+            urlencoding::encode(ended_at),
         );
         if let Some(c) = &cursor {
-            url.push_str(&format!("&after={}", c));
+            url.push_str(&format!("&after={}", urlencoding::encode(c)));
         }
 
         let body = curl_twitch_get(&url, access_token).await
