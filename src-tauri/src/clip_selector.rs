@@ -676,17 +676,41 @@ fn passes_quality_gates(c: &ClipCandidate, audio: Option<&AudioContext>, cfg: &C
 /// (e.g. "(upbeat music)", pure music with no speech) OR a music tag sitting near
 /// the stream's start/end (intro/outro music). Background music *with* speech
 /// around it mid-gameplay is NOT flagged (it has real content).
-fn is_scene_card(c: &ClipCandidate, duration: f64) -> bool {
-    let Some(s) = c.transcript_excerpt.as_deref() else { return false; };
-    let t = s.trim();
-    let lower = t.to_lowercase();
-    if !lower.contains("music") || !(t.contains('(') || t.contains('[')) { return false; }
-    // Whole snippet is one bracketed music annotation → pure music card.
-    let wrapped = (t.starts_with('(') && t.ends_with(')')) || (t.starts_with('[') && t.ends_with(']'));
-    if wrapped { return true; }
-    // A music annotation near the very start/end → intro/outro card.
+/// Core scene-card test on a transcript STRING + clip position. A scene card is
+/// an intro/outro/BRB screen: a music annotation that is EITHER the whole clip
+/// (pure music) OR sits in the first/last 5 minutes (idle chatter over intro/
+/// outro music). Pass the FULL-RANGE transcript over the clip — a candidate's
+/// single-sentence peak excerpt can miss the music tag entirely.
+fn is_scene_card_text(text: &str, peak_time: f64, duration: f64) -> bool {
+    let t = text.trim();
+    if !(t.to_lowercase().contains("music") && (t.contains('(') || t.contains('['))) {
+        return false;
+    }
+    // Pure music annotation (nothing but bracketed tags) → card anywhere.
+    if is_music_only_text(t) {
+        return true;
+    }
+    // Otherwise only a card in the intro/outro band.
     let edge = 300.0;
-    c.peak_time < edge || (duration > 2.0 * edge && c.peak_time > duration - edge)
+    peak_time < edge || (duration > 2.0 * edge && peak_time > duration - edge)
+}
+
+/// Scene-card test for a candidate, using the authoritative full-range transcript
+/// over the clip window when one is available (falls back to the peak excerpt).
+/// This is what catches chat-sourced cards (whose excerpt is the chat text) and
+/// outro chatter (whose excerpt may omit the music tag).
+fn is_scene_card_full(
+    c: &ClipCandidate,
+    transcript: Option<&TranscriptResult>,
+    duration: f64,
+) -> bool {
+    let text = transcript
+        .and_then(|t| crate::commands::vod::extract_transcript_for_range(t, c.start_time, c.end_time))
+        .or_else(|| c.transcript_excerpt.clone());
+    match text.as_deref() {
+        Some(s) => is_scene_card_text(s, c.peak_time, duration),
+        None => false,
+    }
 }
 
 /// True if a transcript STRING is music-only: it has a music annotation and,
@@ -718,20 +742,22 @@ pub fn is_music_only_text(s: &str) -> bool {
 fn apply_two_gate_selection(
     candidates: &mut Vec<ClipCandidate>,
     audio: Option<&AudioContext>,
+    transcript: Option<&TranscriptResult>,
     duration: f64,
     cfg: &CurationConfig,
 ) -> Vec<ClipCandidate> {
     let display = crate::signal_calibration::DisplayCalibrator::default();
-    // Diagnostic (for real-VOD tuning from the log): quality-gate pass count and
-    // the full display-score distribution entering the gate.
+    // Diagnostic (for real-VOD tuning from the log): quality-gate pass count,
+    // scene cards dropped, and the full display-score distribution entering the gate.
     let qpass = candidates.iter().filter(|c| passes_quality_gates(c, audio, cfg)).count();
+    let scene_cards = candidates.iter().filter(|c| is_scene_card_full(c, transcript, duration)).count();
     let mut dscores: Vec<f64> = candidates.iter().map(|c| display.to_display(c.total_score)).collect();
     dscores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-    log::info!("Clip selector: gate-A — {} of {} pass quality gates; floor={:.0}; display scores desc: {}",
-        qpass, candidates.len(), cfg.min_display_score,
+    log::info!("Clip selector: gate-A — {} of {} pass quality gates; {} scene card(s) dropped; floor={:.0}; display scores desc: {}",
+        qpass, candidates.len(), scene_cards, cfg.min_display_score,
         dscores.iter().map(|d| format!("{:.0}", d)).collect::<Vec<_>>().join(","));
     candidates.retain(|c| {
-        !is_scene_card(c, duration)
+        !is_scene_card_full(c, transcript, duration)
             && passes_quality_gates(c, audio, cfg)
             && display.to_display(c.total_score) >= cfg.min_display_score
     });
@@ -1286,7 +1312,7 @@ pub fn select_clips(
         cfg.cooldown_window, cfg.cooldown_distinctness_threshold, cfg.cooldown_penalty,
         cfg.max_same_type, cfg.max_clips, cfg.min_display_score);
     let before_gate = candidates.len();
-    let final_clips = apply_two_gate_selection(&mut candidates, audio, duration, &cfg);
+    let final_clips = apply_two_gate_selection(&mut candidates, audio, transcript, duration, &cfg);
     let rejected = before_gate.saturating_sub(candidates.len());
 
     log::info!("Clip selector: final {} clips from {} candidates (scores: {})",
@@ -1390,7 +1416,7 @@ mod tests {
             c.similarity_fingerprint = compute_similarity_fingerprint(&c);
             c
         }).collect();
-        let kept = apply_two_gate_selection(&mut cands, None, 99.0 * 60.0, &cfg);
+        let kept = apply_two_gate_selection(&mut cands, None, None, 99.0 * 60.0, &cfg);
         assert!(kept.len() >= 5, "must not collapse to ~1, got {}", kept.len());
         assert!(kept.len() <= cfg.max_clips, "must respect the cap, got {} > {}", kept.len(), cfg.max_clips);
     }
@@ -1409,7 +1435,7 @@ mod tests {
             c.total_score = 0.05;
             c
         }).collect();
-        let kept = apply_two_gate_selection(&mut cands, None, 99.0 * 60.0, &cfg);
+        let kept = apply_two_gate_selection(&mut cands, None, None, 99.0 * 60.0, &cfg);
         assert_eq!(kept.len(), 0, "dead-air candidates must yield no clips");
     }
 
@@ -1432,26 +1458,23 @@ mod tests {
 
     #[test]
     fn scene_card_music_rejected_but_gameplay_music_kept() {
-        let dur = 5940.0;
-        let card = |snip: &str, t: f64| {
-            let mut c = build_test_candidate(vec![SignalSource::Chat]);
-            c.transcript_excerpt = Some(snip.to_string());
-            c.peak_time = t;
-            c
-        };
-        // Pure music annotations → scene cards (the BRB/intro cards).
-        assert!(is_scene_card(&card("(upbeat music)", 140.0), dur));
-        assert!(is_scene_card(&card("(upbeat music)", 732.0), dur));
-        // Music annotation near the very end → ending card.
-        assert!(is_scene_card(&card("Come on. [Piano music] I'm doing it.", 5664.0), dur));
-        // Laughter + real speech → kept.
-        assert!(!is_scene_card(&card("(Laughter) Oh yeah I added that", 1920.0), dur));
-        // Background music WITH speech mid-gameplay → kept.
-        assert!(!is_scene_card(&card("got him (upbeat music) lets go", 3000.0), dur));
-        // No transcript → not flagged here (other gates handle audio-only).
+        // Cases mirror the real "You sound big" VOD (duration 5938s).
+        let dur = 5938.0;
+        // Pure music annotations → scene cards (BRB/intro cards), anywhere.
+        assert!(is_scene_card_text("(upbeat music)", 141.0, dur));
+        assert!(is_scene_card_text("(upbeat music)", 735.0, dur));
+        // Music annotation in the outro band, even with idle chatter → ending card.
+        assert!(is_scene_card_text("Come on, the SD-screen. Yes. [Piano music] I'm doing it.", 5666.0, dur));
+        assert!(is_scene_card_text("I have to have some fabric next to me. [Piano music] yeah", 5758.0, dur));
+        // Real speech, no music annotation → kept (the genuine clips).
+        assert!(!is_scene_card_text("(Laughter) (Laughter) Oh, yeah. I just added that.", 1922.0, dur));
+        assert!(!is_scene_card_text("If he hits you, then he can see Harby's.", 2061.0, dur));
+        // Background music WITH speech mid-gameplay (not edge) → kept.
+        assert!(!is_scene_card_text("got him (upbeat music) lets go", 3000.0, dur));
+        // No transcript and no excerpt → not flagged (other gates handle audio-only).
         let mut audio_only = build_test_candidate(vec![SignalSource::Audio]);
         audio_only.transcript_excerpt = None;
-        assert!(!is_scene_card(&audio_only, dur));
+        assert!(!is_scene_card_full(&audio_only, None, dur));
     }
 
     #[test]

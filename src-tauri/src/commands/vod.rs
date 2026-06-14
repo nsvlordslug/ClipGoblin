@@ -1181,7 +1181,7 @@ fn format_srt_time(seconds: f64) -> String {
 /// Extract the full dialogue text from transcript segments that overlap a clip's time range.
 /// Concatenates all segment text into a single string â€” used to save a richer
 /// `transcript_snippet` in the highlights table so Claude gets more context.
-fn extract_transcript_for_range(transcript: &TranscriptResult, start: f64, end: f64) -> Option<String> {
+pub(crate) fn extract_transcript_for_range(transcript: &TranscriptResult, start: f64, end: f64) -> Option<String> {
     let texts: Vec<&str> = transcript.segments.iter()
         .filter(|seg| seg.end >= start && seg.start <= end)
         .map(|seg| seg.text.as_str())
@@ -2028,15 +2028,6 @@ fn run_analysis_signals(
         let full_range_transcript = transcript.as_ref()
             .and_then(|t| extract_transcript_for_range(t, c.start_time, c.end_time))
             .or_else(|| c.transcript_excerpt.clone());
-
-        // Drop scene cards (starting-soon / BRB / ending screens): the transcript
-        // over the clip window is music-only (no speech) — not real content. This
-        // catches chat-sourced cards the in-selector guard can't see (their
-        // ClipCandidate excerpt is the chat text, not the music annotation).
-        if full_range_transcript.as_deref().map_or(false, clip_selector::is_music_only_text) {
-            log::info!("[scene-card] dropped clip at {:.0}s (music-only transcript)", c.start_time);
-            continue;
-        }
 
         highlights.push(db::HighlightRow {
             id: uuid::Uuid::new_v4().to_string(),
