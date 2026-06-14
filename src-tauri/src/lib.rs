@@ -4,6 +4,7 @@ mod ai_provider;
 mod ai_usage;
 mod auth_proxy;
 mod crypto;
+mod signal_calibration;
 mod audio_signal;
 mod clip_fusion;
 mod clip_labeler;
