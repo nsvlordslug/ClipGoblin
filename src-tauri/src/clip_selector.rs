@@ -654,6 +654,42 @@ pub fn evaluate_rejection(c: &mut ClipCandidate, audio: Option<&AudioContext>, c
     }
 }
 
+/// The absolute no-noise quality gates (everything EXCEPT the score cliff). A
+/// candidate failing any of these is genuine noise / dead air and must never
+/// surface, regardless of sensitivity. This is the structural "no noise" floor.
+fn passes_quality_gates(c: &ClipCandidate, audio: Option<&AudioContext>, cfg: &CurationConfig) -> bool {
+    if c.hook_strength < cfg.min_hook { return false; }
+    if c.emotional_spike < cfg.min_emotion { return false; }
+    if let Some(a) = audio {
+        let body_start = c.start_time + 3.0;
+        let body_end = (c.end_time - 2.0).max(body_start + 1.0);
+        if a.intensity_in_range(body_start, body_end) < a.avg_rms * 0.4 { return false; }
+    }
+    if c.signal_sources.len() == 1 && c.transcript_excerpt.is_none() && c.payoff_clarity < 0.35 {
+        return false;
+    }
+    true
+}
+
+/// Two-gate selection. Gate A = the no-noise quality gates + the per-sensitivity
+/// display-score floor. Gate B = rank Gate-A survivors by score and take the top
+/// `max_clips` (the existing diversity/cooldown logic). The old fixed total_score
+/// cliff is gone — score now RANKS, it no longer guillotines, so a loud stream's
+/// (calibrated) moments are capped rather than collapsed.
+fn apply_two_gate_selection(
+    candidates: &mut Vec<ClipCandidate>,
+    audio: Option<&AudioContext>,
+    duration: f64,
+    cfg: &CurationConfig,
+) -> Vec<ClipCandidate> {
+    let display = crate::signal_calibration::DisplayCalibrator::default();
+    candidates.retain(|c| {
+        passes_quality_gates(c, audio, cfg)
+            && display.to_display(c.total_score) >= cfg.min_display_score
+    });
+    diversify_final_selection(&candidates[..], duration, cfg)
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Stage 6: Duplicate suppression
 // ═══════════════════════════════════════════════════════════════════════
@@ -1188,25 +1224,22 @@ pub fn select_clips(
     // ── Stage 4: Optimize boundaries ──
     for c in &mut candidates { optimize_clip_boundaries(c, audio, duration); }
 
-    // ── Stage 5: Reject low-quality clips (thresholds scaled by config) ──
-    for c in &mut candidates { evaluate_rejection(c, audio, &cfg); }
-    let rejected = candidates.iter().filter(|c| c.rejection_reason.is_some()).count();
-    candidates.retain(|c| c.rejection_reason.is_none());
-    if rejected > 0 { log::info!("Clip selector: rejected {} weak clips", rejected); }
-
-    // ── Stage 6: Suppress duplicates ──
+    // ── Stage 5: Suppress duplicates ──
     let before_dedup = candidates.len();
     suppress_duplicate_candidates(&mut candidates);
     let duplicates_suppressed = before_dedup - candidates.len();
 
-    // ── Stage 6b: Enforce minimum gap (30s) — merge or drop heavy overlap ──
+    // ── Stage 5b: Enforce minimum gap (30s) — merge or drop heavy overlap ──
     enforce_minimum_gap(&mut candidates, 30.0);
 
-    // ── Stage 7: Diversity-aware final selection with temporal cooldown ──
-    log::info!("Clip selector: cooldown={}s distinctness={:.2} penalty={:.2} max_type={} max_clips={}",
+    // ── Stage 6: Two-gate selection — absolute quality floor + relative top-K.
+    // Replaces the old fixed-score rejection cliff that starved loud streams. ──
+    log::info!("Clip selector: cooldown={}s distinctness={:.2} penalty={:.2} max_type={} max_clips={} min_display={:.0}",
         cfg.cooldown_window, cfg.cooldown_distinctness_threshold, cfg.cooldown_penalty,
-        cfg.max_same_type, cfg.max_clips);
-    let final_clips = diversify_final_selection(&candidates, duration, &cfg);
+        cfg.max_same_type, cfg.max_clips, cfg.min_display_score);
+    let before_gate = candidates.len();
+    let final_clips = apply_two_gate_selection(&mut candidates, audio, duration, &cfg);
+    let rejected = before_gate.saturating_sub(candidates.len());
 
     log::info!("Clip selector: final {} clips from {} candidates (scores: {})",
         final_clips.len(), candidates_found,
@@ -1287,6 +1320,49 @@ mod tests {
         assert!(qmax > 1.0 && lmax > 1.0, "both spikes should register: q={qmax} l={lmax}");
         assert!((qmax - lmax).abs() < qmax.max(lmax) * 0.5,
             "same-shape spikes should give comparable peak z: q={qmax} l={lmax}");
+    }
+
+    #[test]
+    fn two_gate_caps_a_healthy_set_not_one_not_all() {
+        let sel = crate::game_config::SelectorConfig { min_clip_duration: 15, max_clip_duration: 60, min_gap_between_clips: 30 };
+        let cfg = CurationConfig::for_duration(99.0 * 60.0, "medium", &sel);
+        // 35 well-separated candidates that pass the quality gates and score
+        // above the Medium display floor — the bug VOD had 35 candidates collapse
+        // to 1 under the old fixed cliff; the two-gate must cap, not collapse.
+        let events = ["kill", "escape", "chase", "fight", "death"];
+        let emotions = ["hype", "shock", "fear", "rage", "relief"];
+        let mut cands: Vec<ClipCandidate> = (0..35).map(|i| {
+            let mut c = build_test_candidate(vec![SignalSource::Audio, SignalSource::Chat]);
+            c.start_time = (i as f64) * 150.0;
+            c.end_time = c.start_time + 25.0;
+            c.peak_time = c.start_time + 10.0;
+            c.total_score = 0.70; // display ≈ 73, above the medium floor (55)
+            c.event_tags = vec![events[i % 5].to_string()];
+            c.emotion_tags = vec![emotions[i % 5].to_string()];
+            c.similarity_fingerprint = compute_similarity_fingerprint(&c);
+            c
+        }).collect();
+        let kept = apply_two_gate_selection(&mut cands, None, 99.0 * 60.0, &cfg);
+        assert!(kept.len() >= 5, "must not collapse to ~1, got {}", kept.len());
+        assert!(kept.len() <= cfg.max_clips, "must respect the cap, got {} > {}", kept.len(), cfg.max_clips);
+    }
+
+    #[test]
+    fn two_gate_rejects_dead_air_as_noise() {
+        let sel = crate::game_config::SelectorConfig { min_clip_duration: 15, max_clip_duration: 60, min_gap_between_clips: 30 };
+        let cfg = CurationConfig::for_duration(99.0 * 60.0, "medium", &sel);
+        // Candidates that fail the absolute quality gates → zero clips (no noise).
+        let mut cands: Vec<ClipCandidate> = (0..10).map(|i| {
+            let mut c = build_test_candidate(vec![SignalSource::Audio]);
+            c.start_time = (i as f64) * 150.0;
+            c.end_time = c.start_time + 25.0;
+            c.hook_strength = 0.05;   // below min_hook
+            c.emotional_spike = 0.05; // below min_emotion
+            c.total_score = 0.05;
+            c
+        }).collect();
+        let kept = apply_two_gate_selection(&mut cands, None, 99.0 * 60.0, &cfg);
+        assert_eq!(kept.len(), 0, "dead-air candidates must yield no clips");
     }
 
     #[test]
