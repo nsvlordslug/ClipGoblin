@@ -68,6 +68,31 @@ pub fn alpha_from_halflife(dt: f64, halflife: f64) -> f64 {
     1.0 - (-(dt / halflife) * std::f64::consts::LN_2).exp()
 }
 
+/// Frozen, global score → 0–100 map. Identical for every creator/VOD so "70"
+/// means the same hype everywhere. Logistic squash; tuned ONCE (validation) and
+/// shipped. Must stay discriminative across the full range (no vanity band).
+#[derive(Clone, Debug)]
+pub struct DisplayCalibrator {
+    /// Composite score that maps to 50.
+    pub midpoint: f64,
+    /// Slope; larger = steeper transition around the midpoint.
+    pub slope: f64,
+}
+
+impl Default for DisplayCalibrator {
+    fn default() -> Self {
+        // Starting constants; refined against the validation VODs in Task 7.
+        Self { midpoint: 0.55, slope: 6.0 }
+    }
+}
+
+impl DisplayCalibrator {
+    pub fn to_display(&self, s: f64) -> f64 {
+        let z = self.slope * (s - self.midpoint);
+        100.0 / (1.0 + (-z).exp())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,5 +118,23 @@ mod tests {
         for _ in 0..60 { b.push(0.01); }
         let blip_z = b.push(0.011);
         assert!(blip_z < 1.0, "flat-signal blip z should stay small, got {blip_z}");
+    }
+
+    #[test]
+    fn display_map_is_monotonic_full_range_and_centered() {
+        let d = DisplayCalibrator::default();
+        // Monotonic increasing.
+        let mut prev = -1.0;
+        for i in -30..=30 {
+            let s = i as f64 / 10.0; // -3.0 ..= 3.0
+            let v = d.to_display(s);
+            assert!(v >= prev, "not monotonic at s={s}: {v} < {prev}");
+            assert!((0.0..=100.0).contains(&v), "out of range at s={s}: {v}");
+            prev = v;
+        }
+        // Centered: the midpoint maps to 50.
+        assert!((d.to_display(DisplayCalibrator::default().midpoint) - 50.0).abs() < 0.5);
+        // Discriminative (NOT compressed to a vanity band).
+        assert!(d.to_display(1.0) - d.to_display(0.0) > 10.0);
     }
 }
