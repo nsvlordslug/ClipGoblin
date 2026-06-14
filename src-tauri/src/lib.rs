@@ -7,6 +7,7 @@ mod crypto;
 mod signal_calibration;
 mod audio_signal;
 mod clip_fusion;
+mod clip_judge;
 mod clip_labeler;
 mod clip_output;
 mod clip_ranker;

@@ -553,7 +553,7 @@ pub(crate) fn generate_thumbnail(
 
 /// Transcript data from faster-whisper
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct TranscriptWord {
+pub struct TranscriptWord {
     word: String,
     start: f64,
     end: f64,
