@@ -159,6 +159,7 @@ export default function SettingsPage() {
   const [sensitivity, setSensitivity] = useState<'low' | 'medium' | 'high'>('medium')
   const [sensitivitySaved, setSensitivitySaved] = useState(false)
   const [useCommunityClips, setUseCommunityClips] = useState(true)
+  const [aiClipDetection, setAiClipDetection] = useState(false)
   const [allowPerClipCamOverride, setAllowPerClipCamOverride] = useState(false)
 
   // Transcription model state
@@ -211,6 +212,8 @@ export default function SettingsPage() {
         if (sens === 'low' || sens === 'high') setSensitivity(sens)
         const communityRaw = await invoke<string | null>('get_setting', { key: 'use_twitch_community_clips' })
         if (communityRaw === 'false') setUseCommunityClips(false)
+        const aiClipRaw = await invoke<string | null>('get_setting', { key: 'ai_clip_detection_enabled' })
+        if (aiClipRaw === 'true') setAiClipDetection(true)
       } catch (error) { console.error('Settings load failed:', error) }
       try {
         const allow = await invoke<boolean>('get_allow_per_clip_override')
@@ -646,6 +649,39 @@ export default function SettingsPage() {
             className={`v4-toggle ${useCommunityClips ? 'on' : ''}`}
             aria-label="Toggle Twitch community clip signal"
             aria-pressed={useCommunityClips}
+          />
+        </div>
+
+        {/* AI clip detection (opt-in, BYOK) */}
+        <div className="v4-setting-row">
+          <div className="v4-setting-info">
+            <div className="v4-setting-name">AI clip detection</div>
+            <div className="v4-setting-desc">
+              Reads your transcript with your AI provider to surface banter/plays/scares the signals miss and skip loud-but-empty moments. Off by default · uses your configured provider.
+              {aiClipDetection && ai.isByok() && (
+                <span className="block mt-1 text-amber-400/80">
+                  ≈ $0.01–0.10 per VOD depending on your model — cheaper models (Haiku, Gemini Flash, GPT-4o-mini) are pennies.
+                </span>
+              )}
+              {!ai.isByok() && (
+                <span className="block mt-1 text-slate-500">Requires an AI provider — configure one above.</span>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={!ai.isByok()}
+            onClick={async () => {
+              const next = !aiClipDetection
+              setAiClipDetection(next)
+              try {
+                await invoke('save_setting', { key: 'ai_clip_detection_enabled', value: next ? 'true' : 'false' })
+              } catch { /* best effort */ }
+            }}
+            className={`v4-toggle ${aiClipDetection ? 'on' : ''}`}
+            style={{ opacity: ai.isByok() ? 1 : 0.4 }}
+            aria-label="Toggle AI clip detection"
+            aria-pressed={aiClipDetection}
           />
         </div>
 
