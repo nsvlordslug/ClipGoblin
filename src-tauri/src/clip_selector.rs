@@ -671,6 +671,24 @@ fn passes_quality_gates(c: &ClipCandidate, audio: Option<&AudioContext>, cfg: &C
     true
 }
 
+/// Detects scene-card / transition segments (starting-soon / BRB / ending cards):
+/// the transcript over the clip is a music annotation — either the WHOLE snippet
+/// (e.g. "(upbeat music)", pure music with no speech) OR a music tag sitting near
+/// the stream's start/end (intro/outro music). Background music *with* speech
+/// around it mid-gameplay is NOT flagged (it has real content).
+fn is_scene_card(c: &ClipCandidate, duration: f64) -> bool {
+    let Some(s) = c.transcript_excerpt.as_deref() else { return false; };
+    let t = s.trim();
+    let lower = t.to_lowercase();
+    if !lower.contains("music") || !(t.contains('(') || t.contains('[')) { return false; }
+    // Whole snippet is one bracketed music annotation → pure music card.
+    let wrapped = (t.starts_with('(') && t.ends_with(')')) || (t.starts_with('[') && t.ends_with(']'));
+    if wrapped { return true; }
+    // A music annotation near the very start/end → intro/outro card.
+    let edge = 300.0;
+    c.peak_time < edge || (duration > 2.0 * edge && c.peak_time > duration - edge)
+}
+
 /// Two-gate selection. Gate A = the no-noise quality gates + the per-sensitivity
 /// display-score floor. Gate B = rank Gate-A survivors by score and take the top
 /// `max_clips` (the existing diversity/cooldown logic). The old fixed total_score
@@ -692,7 +710,8 @@ fn apply_two_gate_selection(
         qpass, candidates.len(), cfg.min_display_score,
         dscores.iter().map(|d| format!("{:.0}", d)).collect::<Vec<_>>().join(","));
     candidates.retain(|c| {
-        passes_quality_gates(c, audio, cfg)
+        !is_scene_card(c, duration)
+            && passes_quality_gates(c, audio, cfg)
             && display.to_display(c.total_score) >= cfg.min_display_score
     });
     diversify_final_selection(&candidates[..], duration, cfg)
@@ -1388,6 +1407,30 @@ mod tests {
         let sel = crate::game_config::SelectorConfig { min_clip_duration: 15, max_clip_duration: 60, min_gap_between_clips: 30 };
         let (clips, _stats) = select_clips(Some(&audio), None, &[], &[], &[], dur, "medium", &sel);
         assert!(clips.len() >= 4, "loud stream with many real spikes should yield a healthy set, got {}", clips.len());
+    }
+
+    #[test]
+    fn scene_card_music_rejected_but_gameplay_music_kept() {
+        let dur = 5940.0;
+        let card = |snip: &str, t: f64| {
+            let mut c = build_test_candidate(vec![SignalSource::Chat]);
+            c.transcript_excerpt = Some(snip.to_string());
+            c.peak_time = t;
+            c
+        };
+        // Pure music annotations → scene cards (the BRB/intro cards).
+        assert!(is_scene_card(&card("(upbeat music)", 140.0), dur));
+        assert!(is_scene_card(&card("(upbeat music)", 732.0), dur));
+        // Music annotation near the very end → ending card.
+        assert!(is_scene_card(&card("Come on. [Piano music] I'm doing it.", 5664.0), dur));
+        // Laughter + real speech → kept.
+        assert!(!is_scene_card(&card("(Laughter) Oh yeah I added that", 1920.0), dur));
+        // Background music WITH speech mid-gameplay → kept.
+        assert!(!is_scene_card(&card("got him (upbeat music) lets go", 3000.0), dur));
+        // No transcript → not flagged here (other gates handle audio-only).
+        let mut audio_only = build_test_candidate(vec![SignalSource::Audio]);
+        audio_only.transcript_excerpt = None;
+        assert!(!is_scene_card(&audio_only, dur));
     }
 
     #[test]
