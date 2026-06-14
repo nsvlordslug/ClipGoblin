@@ -207,6 +207,15 @@ impl AudioContext {
         if e <= s { return 0.0; }
         self.rms_per_second[s..e].iter().sum::<f64>() / (e - s) as f64
     }
+
+    /// Per-second baseline-relative z-score envelope: how far each second sits
+    /// above the stream's OWN rolling normal, in units of its variability. This
+    /// is what lets a spike on a loud-but-steady stream stand out (the global
+    /// avg_rms cannot). Slow half-life 90s ("normal"), fast 5s ("now").
+    pub fn z_envelope(&self) -> Vec<f64> {
+        let mut b = crate::signal_calibration::RollingBaseline::new(1.0, 90.0, 5.0, 1e-4);
+        self.rms_per_second.iter().map(|&x| b.push(x)).collect()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1117,6 +1126,10 @@ pub fn select_clips(
 
     // ── Stage 3: Score ──
     let clip_len = 25.0_f64.min(duration * 0.10).max(15.0);
+    // Baseline-relative audio calibration (per-second z over the RMS envelope),
+    // computed once and reused below to lift moments that spike above the
+    // stream's own rolling normal.
+    let audio_z: Option<Vec<f64>> = audio.map(|a| a.z_envelope());
     let mut candidates: Vec<ClipCandidate> = moments.iter().map(|m| {
         let start = (m.center - clip_len * 0.3).max(0.0);
         let end = (start + clip_len).min(duration);
@@ -1150,6 +1163,14 @@ pub fn select_clips(
             selected_reason: None, rejection_reason: None,
         };
         score_clip_candidate(&mut c);
+        // Baseline-relative boost: reward a moment that spikes above the stream's
+        // own rolling normal (z), up to +0.30 for a strong departure — the
+        // loud-throughout-stream fix the global avg_rms can't see.
+        if let Some(z) = audio_z.as_deref() {
+            let sec = (c.peak_time as usize).min(z.len().saturating_sub(1));
+            let local_z = z.get(sec).copied().unwrap_or(0.0);
+            c.total_score = (c.total_score + (local_z / 5.0).clamp(0.0, 0.30)).min(1.0);
+        }
         c.similarity_fingerprint = compute_similarity_fingerprint(&c);
         // Intro penalty: only for audio-only signals (music/overlays without speech).
         // If transcript is present, the streamer is talking — likely real gameplay.
@@ -1246,6 +1267,26 @@ mod tests {
         assert!(med.min_display_score > high.min_display_score, "medium floor must exceed high");
         // Caps already differ; keep that property.
         assert!(low.max_clips < med.max_clips && med.max_clips < high.max_clips);
+    }
+
+    fn envelope(base: f64, peak: f64) -> Vec<f64> {
+        let mut v = vec![base; 60];
+        v.extend(std::iter::repeat(peak).take(5));
+        v.extend(std::iter::repeat(base).take(10));
+        v
+    }
+
+    #[test]
+    fn z_envelope_is_baseline_relative_across_loudness() {
+        // Same-shape spike (delta 0.30) on a quiet vs loud steady stream must
+        // produce comparable peak z — the loud-stream calibration property.
+        let qmax = AudioContext::new(envelope(0.20, 0.50), vec![]).z_envelope()
+            .into_iter().fold(f64::MIN, f64::max);
+        let lmax = AudioContext::new(envelope(0.50, 0.80), vec![]).z_envelope()
+            .into_iter().fold(f64::MIN, f64::max);
+        assert!(qmax > 1.0 && lmax > 1.0, "both spikes should register: q={qmax} l={lmax}");
+        assert!((qmax - lmax).abs() < qmax.max(lmax) * 0.5,
+            "same-shape spikes should give comparable peak z: q={qmax} l={lmax}");
     }
 
     #[test]
