@@ -1764,6 +1764,7 @@ fn serialize_signal_sources(sources: &[clip_selector::SignalSource]) -> String {
         clip_selector::SignalSource::EmoteBurst => "emote_burst",
         clip_selector::SignalSource::Transcript => "transcript",
         clip_selector::SignalSource::Community => "community",
+        clip_selector::SignalSource::Semantic => "ai",
     }).collect();
     serde_json::json!(names).to_string()
 }
@@ -1936,6 +1937,7 @@ fn run_analysis_signals(
         &chat_peaks,
         &emote_peaks,
         community_clips,
+        &[], // ai_moments — real judge wired in Step 3 (runs in the async caller)
         duration,
         sensitivity,
         &game_config.selector,

@@ -28,7 +28,7 @@ pub struct RawSignal {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum SignalSource { Audio, Transcript, Chat, Community, EmoteBurst }
+pub enum SignalSource { Audio, Transcript, Chat, Community, EmoteBurst, Semantic }
 
 /// A community-created Twitch clip associated with this VOD. Used as a
 /// human-curated detection signal: if multiple viewers clipped a moment,
@@ -77,6 +77,9 @@ pub struct ClipCandidate {
     pub context_simplicity: f64,
     pub replay_value: f64,
     pub total_score: f64,
+    /// AI clip-worthiness verdict (0.0–1.0) when the BYOK judge ran; None when
+    /// AI detection is off. Drives the fusion blend and the gate bypass.
+    pub ai_score: Option<f64>,
 
     // Selection metadata
     pub similarity_fingerprint: String,
@@ -761,6 +764,104 @@ pub fn is_music_only_text(s: &str) -> bool {
     remainder.trim().is_empty()
 }
 
+// ── AI clip-worthiness fusion (Piece 2) ──
+// When the BYOK judge ran, blend its per-moment verdict into the signal score.
+// The AI is the primary ranker; signals corroborate. This VETOES loud-but-empty
+// moments (the AI read the transcript and passed them over → low ai_score →
+// demoted out) and RESCUES quiet ones the signals never spiked on (AI-only
+// moments appended as Semantic candidates that bypass the signal quality gates).
+
+/// Weight on the AI verdict vs. the signal composite in the fused score.
+const AI_WEIGHT: f64 = 0.65;
+const SIGNAL_WEIGHT: f64 = 0.35;
+/// ai_score for a signal candidate the AI did NOT flag — it read the transcript
+/// and passed this moment over, so treat it as probably-not-clip-worthy.
+const AI_PASSED_OVER: f64 = 0.15;
+/// Neutral signal composite for an AI-discovered moment no signal fired on
+/// (quiet banter): the AI vouches; the signals are silent, not opposed.
+const AI_RESCUE_SIGNAL: f64 = 0.40;
+/// ai_score at/above which a candidate bypasses the signal quality gates — the
+/// AI's judgment stands in for the hook/emotion/dead-air checks.
+const AI_VOUCH_THRESHOLD: f64 = 0.50;
+
+/// Do two time windows overlap at all?
+fn windows_overlap(a_start: f64, a_end: f64, b_start: f64, b_end: f64) -> bool {
+    a_start < b_end && b_start < a_end
+}
+
+/// The highest-scoring AI moment overlapping `[start, end]`, if any.
+fn best_overlapping(
+    start: f64,
+    end: f64,
+    moments: &[crate::clip_judge::JudgedMoment],
+) -> Option<&crate::clip_judge::JudgedMoment> {
+    moments
+        .iter()
+        .filter(|m| windows_overlap(start, end, m.start_sec, m.end_sec))
+        .max_by(|x, y| x.score.partial_cmp(&y.score).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+/// Blend the AI verdict into `candidates` and append AI-discovered moments the
+/// signals missed. No-op when `ai_moments` is empty (AI off). Afterwards each
+/// candidate's `total_score` is the fused score and `ai_score` is set.
+fn fuse_ai_moments(
+    candidates: &mut Vec<ClipCandidate>,
+    ai_moments: &[crate::clip_judge::JudgedMoment],
+    duration: f64,
+) {
+    if ai_moments.is_empty() {
+        return;
+    }
+    // 1. Blend the AI verdict into every existing signal candidate.
+    for c in candidates.iter_mut() {
+        let ai = best_overlapping(c.start_time, c.end_time, ai_moments)
+            .map(|m| m.score)
+            .unwrap_or(AI_PASSED_OVER);
+        c.ai_score = Some(ai);
+        c.total_score = (AI_WEIGHT * ai + SIGNAL_WEIGHT * c.total_score).min(0.99);
+    }
+    // 2. Rescue: AI moments overlapping NO signal candidate become candidates.
+    let existing: Vec<(f64, f64)> =
+        candidates.iter().map(|c| (c.start_time, c.end_time)).collect();
+    for m in ai_moments {
+        if existing.iter().any(|&(s, e)| windows_overlap(s, e, m.start_sec, m.end_sec)) {
+            continue;
+        }
+        let start = m.start_sec.max(0.0);
+        let end = m.end_sec.min(duration);
+        if end - start < 1.0 {
+            continue;
+        }
+        let mut c = ClipCandidate {
+            start_time: start,
+            end_time: end,
+            peak_time: (start + end) / 2.0,
+            transcript_excerpt: Some(m.reason.clone()),
+            event_tags: vec![m.category.clone()],
+            emotion_tags: Vec::new(),
+            payoff_summary: Some(m.reason.clone()),
+            outcome_label: None,
+            signal_sources: vec![SignalSource::Semantic],
+            hook_strength: 0.5,
+            emotional_spike: 0.5,
+            payoff_clarity: 0.5,
+            event_reaction_alignment: 0.5,
+            context_simplicity: 0.5,
+            replay_value: 0.5,
+            total_score: (AI_WEIGHT * m.score + SIGNAL_WEIGHT * AI_RESCUE_SIGNAL).min(0.99),
+            ai_score: Some(m.score),
+            similarity_fingerprint: String::new(),
+            novelty_score: 0.0,
+            diversity_penalty: 0.0,
+            selection_score: 0.0,
+            selected_reason: None,
+            rejection_reason: None,
+        };
+        c.similarity_fingerprint = compute_similarity_fingerprint(&c);
+        candidates.push(c);
+    }
+}
+
 /// Two-gate selection. Gate A = the no-noise quality gates + the per-sensitivity
 /// display-score floor. Gate B = rank Gate-A survivors by score and take the top
 /// `max_clips` (the existing diversity/cooldown logic). The old fixed total_score
@@ -784,8 +885,11 @@ fn apply_two_gate_selection(
         qpass, candidates.len(), scene_cards, cfg.min_display_score,
         dscores.iter().map(|d| format!("{:.0}", d)).collect::<Vec<_>>().join(","));
     candidates.retain(|c| {
+        // An AI-vouched moment bypasses the SIGNAL quality gates — the judge's
+        // verdict is its quality check (this is what lets quiet banter survive).
+        let ai_vouched = c.ai_score.map_or(false, |s| s >= AI_VOUCH_THRESHOLD);
         !is_scene_card_full(c, transcript, duration)
-            && passes_quality_gates(c, audio, cfg)
+            && (ai_vouched || passes_quality_gates(c, audio, cfg))
             && display.to_display(c.total_score) >= cfg.min_display_score
     });
     diversify_final_selection(&candidates[..], duration, cfg)
@@ -1218,6 +1322,7 @@ pub fn select_clips(
     chat_peaks: &[db::HighlightRow],
     emote_peaks: &[db::HighlightRow],
     community_clips: &[CommunityClip],
+    ai_moments: &[crate::clip_judge::JudgedMoment],
     duration: f64,
     sensitivity: &str,
     selector_config: &crate::game_config::SelectorConfig,
@@ -1295,6 +1400,7 @@ pub fn select_clips(
             context_simplicity: analyze_context_simplicity(m),
             replay_value: analyze_replay_value(m),
             total_score: 0.0,
+            ai_score: None,
             similarity_fingerprint: String::new(),
             novelty_score: 0.0, diversity_penalty: 0.0, selection_score: 0.0,
             selected_reason: None, rejection_reason: None,
@@ -1339,6 +1445,8 @@ pub fn select_clips(
     log::info!("Clip selector: cooldown={}s distinctness={:.2} penalty={:.2} max_type={} max_clips={} min_display={:.0}",
         cfg.cooldown_window, cfg.cooldown_distinctness_threshold, cfg.cooldown_penalty,
         cfg.max_same_type, cfg.max_clips, cfg.min_display_score);
+    // Fuse the AI verdict (no-op when AI detection is off / found nothing).
+    fuse_ai_moments(&mut candidates, ai_moments, duration);
     let before_gate = candidates.len();
     let final_clips = apply_two_gate_selection(&mut candidates, audio, transcript, duration, &cfg);
     let rejected = before_gate.saturating_sub(candidates.len());
@@ -1385,6 +1493,7 @@ mod tests {
             payoff_clarity: 0.55, event_reaction_alignment: 0.47,
             context_simplicity: 0.88, replay_value: 0.5475,
             total_score: 0.0,
+            ai_score: None,
             similarity_fingerprint: String::new(),
             novelty_score: 0.0, diversity_penalty: 0.0, selection_score: 0.0,
             selected_reason: None, rejection_reason: None,
@@ -1480,7 +1589,7 @@ mod tests {
         }
         let audio = AudioContext::new(rms, vec![]);
         let sel = crate::game_config::SelectorConfig { min_clip_duration: 15, max_clip_duration: 60, min_gap_between_clips: 30 };
-        let (clips, _stats) = select_clips(Some(&audio), None, &[], &[], &[], dur, "medium", &sel);
+        let (clips, _stats) = select_clips(Some(&audio), None, &[], &[], &[], &[], dur, "medium", &sel);
         assert!(clips.len() >= 4, "loud stream with many real spikes should yield a healthy set, got {}", clips.len());
     }
 
@@ -1542,6 +1651,53 @@ mod tests {
         soft.emotion_tags = vec!["hype".to_string()];
         soft.event_tags = vec!["shock".to_string()];
         assert!(!is_corroborated(&soft));
+    }
+
+    fn judged(s: f64, e: f64, score: f64) -> crate::clip_judge::JudgedMoment {
+        crate::clip_judge::JudgedMoment {
+            start_sec: s, end_sec: e, category: "banter".into(), score,
+            reason: "savage deadpan roast".into(),
+        }
+    }
+
+    #[test]
+    fn fusion_noop_when_no_ai_moments() {
+        let mut c = vec![build_test_candidate(vec![SignalSource::Audio])];
+        c[0].total_score = 0.6;
+        fuse_ai_moments(&mut c, &[], 600.0);
+        assert!(c[0].ai_score.is_none(), "no AI run → ai_score stays None");
+        assert!((c[0].total_score - 0.6).abs() < 1e-9, "score untouched");
+        assert_eq!(c.len(), 1);
+    }
+
+    #[test]
+    fn fusion_blends_flagged_and_vetoes_unflagged() {
+        let mut c0 = build_test_candidate(vec![SignalSource::Chat]);
+        c0.start_time = 100.0; c0.end_time = 130.0; c0.total_score = 0.6;
+        let mut c1 = build_test_candidate(vec![SignalSource::Audio]);
+        c1.start_time = 500.0; c1.end_time = 530.0; c1.total_score = 0.6;
+        let mut cands = vec![c0, c1];
+        // One AI moment overlapping c0 only.
+        fuse_ai_moments(&mut cands, &[judged(105.0, 125.0, 0.9)], 600.0);
+        // flagged: 0.65*0.9 + 0.35*0.6 = 0.795
+        assert!((cands[0].total_score - 0.795).abs() < 1e-6);
+        assert!((cands[0].ai_score.unwrap() - 0.9).abs() < 1e-9);
+        // vetoed (AI passed it over): 0.65*0.15 + 0.35*0.6 = 0.3075
+        assert!((cands[1].total_score - 0.3075).abs() < 1e-6);
+        assert!((cands[1].ai_score.unwrap() - 0.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fusion_rescues_unmatched_ai_moment_as_semantic() {
+        let mut cands = vec![build_test_candidate(vec![SignalSource::Audio])];
+        cands[0].start_time = 100.0; cands[0].end_time = 130.0;
+        fuse_ai_moments(&mut cands, &[judged(800.0, 825.0, 0.85)], 1000.0);
+        assert_eq!(cands.len(), 2, "unmatched AI moment becomes a candidate");
+        let rescued = cands.iter().find(|c| c.signal_sources == vec![SignalSource::Semantic]).unwrap();
+        assert!((rescued.start_time - 800.0).abs() < 1e-9);
+        // rescue: 0.65*0.85 + 0.35*0.40 = 0.6925
+        assert!((rescued.total_score - 0.6925).abs() < 1e-6);
+        assert_eq!(rescued.transcript_excerpt.as_deref(), Some("savage deadpan roast"));
     }
 
     #[test]
