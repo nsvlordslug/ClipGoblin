@@ -165,6 +165,7 @@ See worker/wrangler.toml for the proxy configuration.
 10. **Two clip ledgers:** direct uploads write `upload_history`; the Analytics pipeline reads `scheduled_uploads` (status='completed'). Direct uploads are mirrored into the ledger via `db::record_direct_upload_for_analytics` (v1.4.3) — keep that in mind when touching either table.
 11. **Repo `.env` `PROXY_API_KEY` is STALE** — the deployed worker rejects it (403), so Twitch/YouTube/TikTok token refresh fails in local dev builds. Release builds are fine (key embedded from GitHub secrets at CI build time). Fix = paste the real key into `.env` (Slug has it). Do NOT rotate the worker secret — shipped builds have the current key baked in.
 12. **Unaudited TikTok client = SELF_ONLY posting.** Until the Content Posting API audit passes, posts only succeed with the TikTok account set to Private (`unaudited_client_can_only_post_to_private_accounts`).
+13. **A running `clipviral.exe` locks its own binary — rebuilds SILENTLY fail.** On Windows, while the app is open, `cargo build` / `cargo tauri dev` cannot overwrite `src-tauri/target/debug/clipviral.exe` (error: `failed to remove file … Access is denied. (os error 5)`), so the rebuild no-ops and the OLD binary keeps running — code edits never take effect. Symptom: "I rebuilt but nothing changed." Fix: fully CLOSE the app (or `Stop-Process -Name clipviral -Force`) BEFORE rebuilding. Verify the build actually landed with `(Get-Item src-tauri\target\debug\clipviral.exe).LastWriteTime` — if it isn't fresh, you're still on stale code.
 
 ---
 
