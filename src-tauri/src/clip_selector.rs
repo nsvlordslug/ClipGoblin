@@ -154,9 +154,9 @@ impl CurationConfig {
         // User-facing quality floor on the 0–100 display scale. Genuinely differs
         // per preset (the old min_total_score clamp collapsed Medium==High).
         let min_display_score = match sensitivity {
-            "low"  => 70.0,
-            "high" => 45.0,
-            _      => 55.0,
+            "low"  => 58.0,
+            "high" => 30.0,
+            _      => 40.0,
         };
 
         // ── Cooldown scaling ──
@@ -683,6 +683,14 @@ fn apply_two_gate_selection(
     cfg: &CurationConfig,
 ) -> Vec<ClipCandidate> {
     let display = crate::signal_calibration::DisplayCalibrator::default();
+    // Diagnostic (for real-VOD tuning from the log): quality-gate pass count and
+    // the full display-score distribution entering the gate.
+    let qpass = candidates.iter().filter(|c| passes_quality_gates(c, audio, cfg)).count();
+    let mut dscores: Vec<f64> = candidates.iter().map(|c| display.to_display(c.total_score)).collect();
+    dscores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    log::info!("Clip selector: gate-A — {} of {} pass quality gates; floor={:.0}; display scores desc: {}",
+        qpass, candidates.len(), cfg.min_display_score,
+        dscores.iter().map(|d| format!("{:.0}", d)).collect::<Vec<_>>().join(","));
     candidates.retain(|c| {
         passes_quality_gates(c, audio, cfg)
             && display.to_display(c.total_score) >= cfg.min_display_score
@@ -1205,7 +1213,7 @@ pub fn select_clips(
         if let Some(z) = audio_z.as_deref() {
             let sec = (c.peak_time as usize).min(z.len().saturating_sub(1));
             let local_z = z.get(sec).copied().unwrap_or(0.0);
-            c.total_score = (c.total_score + (local_z / 5.0).clamp(0.0, 0.30)).min(1.0);
+            c.total_score = (c.total_score + (local_z / 4.0).clamp(0.0, 0.35)).min(1.0);
         }
         c.similarity_fingerprint = compute_similarity_fingerprint(&c);
         // Intro penalty: only for audio-only signals (music/overlays without speech).
