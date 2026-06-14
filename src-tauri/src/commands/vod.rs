@@ -1769,6 +1769,71 @@ fn serialize_signal_sources(sources: &[clip_selector::SignalSource]) -> String {
     serde_json::json!(names).to_string()
 }
 
+/// Run the AI clip-worthiness judge when it's enabled AND a BYOK provider is
+/// configured. Returns the judge's moments, or an empty Vec on disabled / no key
+/// / API error — the analysis NEVER fails because of the judge. Runs inside
+/// `spawn_blocking`, so it opens a direct DB connection (for the setting, the
+/// provider, and the usage log) and `block_on`s the async judge.
+fn run_ai_judge(
+    transcript: Option<&TranscriptResult>,
+    vod_id: &str,
+    vod_title: &str,
+    duration: f64,
+) -> Vec<crate::clip_judge::JudgedMoment> {
+    let Some(t) = transcript else { return Vec::new() };
+    let Ok(db_path) = db::db_path() else { return Vec::new() };
+    let Ok(conn) = rusqlite::Connection::open(&db_path) else { return Vec::new() };
+
+    let enabled = db::get_setting(&conn, "ai_clip_detection_enabled")
+        .ok()
+        .flatten()
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    if !enabled {
+        return Vec::new();
+    }
+    let resolved = crate::ai_provider::resolve(&conn, crate::ai_provider::Scope::ClipJudge);
+    if !resolved.is_llm() {
+        log::info!("AI clip detection on but no AI provider/key configured — signal-only");
+        return Vec::new();
+    }
+    log::info!("AI clip detection: judging via {:?} {}", resolved.provider, resolved.model);
+    let fut = crate::clip_judge::judge(
+        resolved.provider,
+        &resolved.api_key,
+        &resolved.model,
+        t,
+        vod_title,
+        duration,
+    );
+    match tokio::runtime::Handle::current().block_on(fut) {
+        Ok((moments, tin, tout)) => {
+            crate::ai_usage::log_usage(
+                &conn,
+                crate::ai_usage::UsageEntry {
+                    feature: "clip_judge",
+                    provider: resolved.provider,
+                    model: &resolved.model,
+                    tokens_in: tin,
+                    tokens_out: tout,
+                    vod_id: Some(vod_id),
+                    clip_id: None,
+                    context: None,
+                },
+            );
+            log::info!(
+                "AI clip detection: {} clip-worthy moments (tokens {}+{})",
+                moments.len(), tin, tout
+            );
+            moments
+        }
+        Err(e) => {
+            log::warn!("AI clip detection failed — falling back to signal-only: {}", e);
+            Vec::new()
+        }
+    }
+}
+
 fn run_analysis_signals(
     vod: &db::VodRow,
     _hw: &HardwareInfo,
@@ -1931,13 +1996,15 @@ fn run_analysis_signals(
     // it runs inside tokio::task::spawn_blocking) and passed in as `community_clips`.
     log::info!("Signal analysis: running clip selector pipeline...");
     set_analysis_progress(vod_id, 52);
+    // AI clip-worthiness judge (opt-in, BYOK) — empty Vec when off / no key / error.
+    let ai_moments = run_ai_judge(transcript.as_ref(), vod_id, &vod.title, duration);
     let (selected, detection_stats): (Vec<clip_selector::ClipCandidate>, _) = clip_selector::select_clips(
         audio_ctx.as_ref(),
         transcript.as_ref(),
         &chat_peaks,
         &emote_peaks,
         community_clips,
-        &[], // ai_moments — real judge wired in Step 3 (runs in the async caller)
+        &ai_moments,
         duration,
         sensitivity,
         &game_config.selector,

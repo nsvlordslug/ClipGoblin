@@ -54,6 +54,10 @@ pub enum Scope {
     Titles,
     /// TikTok caption generation.
     Captions,
+    /// AI clip-worthiness judge (detection). Enablement is gated by the separate
+    /// `ai_clip_detection_enabled` setting, so this scope always resolves the
+    /// configured provider when a key exists.
+    ClipJudge,
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -176,6 +180,7 @@ pub fn resolve(conn: &rusqlite::Connection, scope: Scope) -> ResolvedProvider {
     let scope_enabled = match scope {
         Scope::Titles   => settings.use_for_titles,
         Scope::Captions => settings.use_for_captions,
+        Scope::ClipJudge => true, // gated by `ai_clip_detection_enabled`, not a per-provider toggle
     };
 
     if !scope_enabled {
