@@ -107,6 +107,9 @@ pub struct CurationConfig {
     pub min_hook: f64,
     /// Minimum emotional spike to survive rejection.
     pub min_emotion: f64,
+    /// Minimum 0–100 display score a clip must reach to qualify (the user-facing
+    /// quality floor; genuinely differs per sensitivity — see DisplayCalibrator).
+    pub min_display_score: f64,
 }
 
 impl CurationConfig {
@@ -148,6 +151,13 @@ impl CurationConfig {
         let min_total_score = (0.50 * threshold_scale).clamp(0.50, 0.55);
         let min_hook        = (0.32 * threshold_scale).clamp(0.22, 0.40);
         let min_emotion     = (0.28 * threshold_scale).clamp(0.18, 0.35);
+        // User-facing quality floor on the 0–100 display scale. Genuinely differs
+        // per preset (the old min_total_score clamp collapsed Medium==High).
+        let min_display_score = match sensitivity {
+            "low"  => 70.0,
+            "high" => 45.0,
+            _      => 55.0,
+        };
 
         // ── Cooldown scaling ──
         // Shorter cooldown for longer VODs (more content spread out). Floor
@@ -173,6 +183,7 @@ impl CurationConfig {
             min_total_score,
             min_hook,
             min_emotion,
+            min_display_score,
         }
     }
 }
@@ -1222,6 +1233,19 @@ mod tests {
             novelty_score: 0.0, diversity_penalty: 0.0, selection_score: 0.0,
             selected_reason: None, rejection_reason: None,
         }
+    }
+
+    #[test]
+    fn sensitivity_presets_have_distinct_floors_and_caps() {
+        let sel = crate::game_config::SelectorConfig { min_clip_duration: 15, max_clip_duration: 60, min_gap_between_clips: 30 };
+        let low  = CurationConfig::for_duration(99.0 * 60.0, "low", &sel);
+        let med  = CurationConfig::for_duration(99.0 * 60.0, "medium", &sel);
+        let high = CurationConfig::for_duration(99.0 * 60.0, "high", &sel);
+        // Floors must strictly differ across presets (the Med==High placebo bug).
+        assert!(low.min_display_score > med.min_display_score, "low floor must exceed medium");
+        assert!(med.min_display_score > high.min_display_score, "medium floor must exceed high");
+        // Caps already differ; keep that property.
+        assert!(low.max_clips < med.max_clips && med.max_clips < high.max_clips);
     }
 
     #[test]
