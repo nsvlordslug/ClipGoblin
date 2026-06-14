@@ -37,7 +37,9 @@ The AI judge's instruction set (all four are in-scope for this creator's content
 
 **Anti-criteria (explicitly NOT clips):** explaining settings/OBS/logistics, dead air, mic checks, "what video are you watching" housekeeping — regardless of volume or laughter.
 
-## 3. Piece 1 — Corroboration gate (signal-level, free, always on)
+## 3. Piece 1 — Corroboration gate (signal-level, free, always on) ✅ IMPLEMENTED (1131a5b)
+
+> **Validated change vs. the draft below.** Uncorroborated boost is CAPPED at `0.12`, NOT scaled — a scale (×0.35) penalizes every single-signal clip equally and re-starved "You sound big" 6→3; a cap only trims BIG bare spikes (a loud laugh), sparing modest single-signal boosts. Corroboration = `≥2 sources OR Community` only — keyword tags are excluded because `shock` is over-applied (lands on mundane OBS chatter). The **emotion-dimension gate was DROPPED** (same re-starve risk, unvalidatable from stored data; the cap already demotes ambient laughter ~90→70 for free users). Validated result: laugh clip 90→70 and no longer top, both VODs hold their clip counts.
 
 The z-envelope boost in `select_clips` currently applies to every candidate by its peak audio z. Change it to scale by **corroboration**: a loud spike earns the full boost only when an *independent* signal backs it; a bare loud laugh earns a fraction.
 
