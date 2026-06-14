@@ -467,6 +467,33 @@ pub fn analyze_replay_value(m: &FusedMoment) -> f64 {
     // TODO(v2): audio loop analysis
 }
 
+/// A candidate is corroborated when its loudness is backed by something
+/// INDEPENDENT: ≥2 distinct signal sources agree, or viewers themselves clipped
+/// it (Community). Keyword-derived emotion/event tags deliberately do NOT count —
+/// they're produced from a single signal (already in the source count) and are
+/// over-applied in practice (real data: the "shock" tag lands on mundane OBS
+/// chatter), so trusting them would re-admit the very ambient laughter this gate
+/// exists to dampen.
+fn is_corroborated(c: &ClipCandidate) -> bool {
+    c.signal_sources.len() >= 2 || c.signal_sources.contains(&SignalSource::Community)
+}
+
+/// Max baseline-relative audio boost an UNcorroborated moment may receive. A
+/// small spike (a real single-signal moment — e.g. a talky VOD's reactions) is
+/// already under this and passes through untouched; only a BIG bare spike (a
+/// loud laugh with no independent backing) gets capped. This is the key to
+/// fixing the over-rate WITHOUT re-starving single-signal streams — validated on
+/// both real VODs (laugh clip 90→70, "You sound big" holds at 6 clips). Tunable.
+const UNCORROBORATED_BOOST_CAP: f64 = 0.12;
+
+/// Baseline-relative audio boost for a moment's local z-score, CAPPED by
+/// corroboration. The loud-stream fix (commit cf8502a) made honest: a real
+/// (corroborated) spike earns the full lift, a bare loud spike at most the cap.
+fn audio_boost(local_z: f64, corroborated: bool) -> f64 {
+    let base = (local_z / 4.0).clamp(0.0, 0.35);
+    if corroborated { base } else { base.min(UNCORROBORATED_BOOST_CAP) }
+}
+
 pub fn score_clip_candidate(c: &mut ClipCandidate) {
     // Phase A: transcript-only candidates emit a boilerplate dimension
     // fingerprint (typically context=0.88 from the "shock" tag branch in
@@ -1274,12 +1301,13 @@ pub fn select_clips(
         };
         score_clip_candidate(&mut c);
         // Baseline-relative boost: reward a moment that spikes above the stream's
-        // own rolling normal (z), up to +0.30 for a strong departure — the
-        // loud-throughout-stream fix the global avg_rms can't see.
+        // own rolling normal (z) — the loud-throughout-stream fix the global
+        // avg_rms can't see — but CAPPED for UNcorroborated spikes so a bare loud
+        // spike (ambient laughter) can't dominate the way a corroborated one can.
         if let Some(z) = audio_z.as_deref() {
             let sec = (c.peak_time as usize).min(z.len().saturating_sub(1));
             let local_z = z.get(sec).copied().unwrap_or(0.0);
-            c.total_score = (c.total_score + (local_z / 4.0).clamp(0.0, 0.35)).min(1.0);
+            c.total_score = (c.total_score + audio_boost(local_z, is_corroborated(&c))).min(1.0);
         }
         c.similarity_fingerprint = compute_similarity_fingerprint(&c);
         // Intro penalty: only for audio-only signals (music/overlays without speech).
@@ -1485,6 +1513,35 @@ mod tests {
         assert!(!is_music_only_text("Come on. [Piano music] I'm doing it.")); // speech present
         assert!(!is_music_only_text("(Laughter) oh yeah")); // no music annotation
         assert!(!is_music_only_text("got him lets go")); // no annotation at all
+    }
+
+    #[test]
+    fn audio_boost_capped_when_uncorroborated() {
+        // A BIG spike (z=2.0 → base 0.35): corroborated keeps it; uncorroborated
+        // is capped so a loud laugh can't dominate.
+        assert!((audio_boost(2.0, true) - 0.35).abs() < 1e-6);
+        assert!((audio_boost(2.0, false) - UNCORROBORATED_BOOST_CAP).abs() < 1e-6);
+        // A SMALL spike (z=0.4 → base 0.10) sits UNDER the cap → passes through
+        // unchanged. This is what spares single-signal talky VODs from re-starving.
+        let small = (0.4f64 / 4.0).clamp(0.0, 0.35);
+        assert!((audio_boost(0.4, false) - small).abs() < 1e-6, "small boost passes through uncapped");
+        assert!((audio_boost(0.4, true) - small).abs() < 1e-6);
+    }
+
+    #[test]
+    fn corroboration_requires_independent_signal() {
+        // ≥2 distinct sources agree → corroborated.
+        let multi = build_test_candidate(vec![SignalSource::Audio, SignalSource::Chat]);
+        assert!(is_corroborated(&multi));
+        // viewers clipped it (Community) → corroborated even solo.
+        let community = build_test_candidate(vec![SignalSource::Community]);
+        assert!(is_corroborated(&community));
+        // single signal + only keyword tags → NOT corroborated. This is the bug:
+        // a loud laugh tagged "hype"/"shock" was sailing through on one signal.
+        let mut soft = build_test_candidate(vec![SignalSource::Chat]);
+        soft.emotion_tags = vec!["hype".to_string()];
+        soft.event_tags = vec!["shock".to_string()];
+        assert!(!is_corroborated(&soft));
     }
 
     #[test]
