@@ -110,26 +110,30 @@ function getConfirmDeletePref(): boolean {
 
 const lastEditedClipIdRef: { current: string | null } = { current: null }
 
-// Scroll a clip/VOD card into its REAL scroll container. The app's content pane
-// is a non-window `overflow-y-auto` element, so `el.scrollIntoView()` and
-// `window.scrollTo` are unreliable here — the v4 UI port (18995a1) changed the
-// container, which silently regressed the editor-return scroll while the
-// scroll-to-VOD flow was migrated to this explicit approach (3ace911). Both
-// flows now share this helper so they can't drift apart again.
+// Scroll a clip/VOD card into its REAL scroll container. The content pane has
+// `overflow-y-auto` but does NOT itself overflow — the element that actually
+// scrolls is a NESTED ancestor — so picking the first `overflow-y:auto` element
+// (the old approach) scrolled nothing and the page stayed pinned at the top.
+// We walk up for the nearest ancestor that BOTH overflows and is scrollable, and
+// scroll that; if nothing overflows, fall back to the browser's own
+// scrollIntoView (the document scrolls). Both the editor-return and
+// scroll-to-VOD flows share this so they can't drift apart again.
 function scrollCardIntoView(el: HTMLElement, block: 'start' | 'center'): void {
-  let container: HTMLElement = (document.scrollingElement as HTMLElement) || document.documentElement
+  let scroller: HTMLElement | null = null
   for (let p = el.parentElement; p; p = p.parentElement) {
-    const oy = window.getComputedStyle(p).overflowY
-    if (oy === 'auto' || oy === 'scroll') { container = p; break }
+    if (p.scrollHeight > p.clientHeight + 4) {
+      const oy = window.getComputedStyle(p).overflowY
+      if (oy === 'auto' || oy === 'scroll' || oy === 'overlay') { scroller = p; break }
+    }
   }
-  const isWindow = container === document.scrollingElement || container === document.documentElement
+  if (!scroller) {
+    el.scrollIntoView({ block, behavior: 'instant' as ScrollBehavior })
+    return
+  }
   const elRect = el.getBoundingClientRect()
-  const baseTop = isWindow
-    ? elRect.top + window.scrollY
-    : container.scrollTop + (elRect.top - container.getBoundingClientRect().top)
-  const viewport = isWindow ? window.innerHeight : container.clientHeight
-  const target = block === 'center' ? baseTop - viewport / 2 + elRect.height / 2 : baseTop
-  container.scrollTo({ top: Math.max(0, target), behavior: 'instant' as ScrollBehavior })
+  const base = scroller.scrollTop + (elRect.top - scroller.getBoundingClientRect().top)
+  const target = block === 'center' ? base - scroller.clientHeight / 2 + elRect.height / 2 : base
+  scroller.scrollTop = Math.max(0, target)
 }
 
 // ─── Undo toast state ─────────────────────────────────────────────
@@ -496,19 +500,34 @@ export default function Clips() {
     const ssVal = (() => { try { return sessionStorage.getItem('scrollToClip') } catch { return null } })()
     const clipId = lastEditedClipIdRef.current ?? ssVal
     if (!clipId) return
-    if (clips.length === 0) return
-    const raf = requestAnimationFrame(() => {
+    // The target card may not be in the DOM on the first frame back from the
+    // editor (clips can re-render/re-fetch), so retry across frames until it
+    // exists, then re-assert the scroll a few times to survive late layout
+    // shifts (images/clips finishing their layout).
+    let cancelled = false
+    let raf = 0
+    let attempts = 0
+    const run = () => {
+      if (cancelled) return
       const el = document.querySelector<HTMLElement>(`[data-clip-id="${clipId}"]`)
-      if (el) {
-        scrollCardIntoView(el, 'center')
-        // Brief highlight flash so the user can spot where they were
-        el.classList.add('ring-2', 'ring-violet-500/60')
-        setTimeout(() => el.classList.remove('ring-2', 'ring-violet-500/60'), 900)
-        lastEditedClipIdRef.current = null
-        try { sessionStorage.removeItem('scrollToClip') } catch { /* ignore */ }
+      if (!el) {
+        if (attempts++ < 60) raf = requestAnimationFrame(run)
+        return
       }
-    })
-    return () => cancelAnimationFrame(raf)
+      scrollCardIntoView(el, 'center')
+      ;[60, 160, 320, 500].forEach((ms) => setTimeout(() => {
+        if (cancelled) return
+        const e2 = document.querySelector<HTMLElement>(`[data-clip-id="${clipId}"]`)
+        if (e2) scrollCardIntoView(e2, 'center')
+      }, ms))
+      // Brief highlight flash so the user can spot where they were
+      el.classList.add('ring-2', 'ring-violet-500/60')
+      setTimeout(() => el.classList.remove('ring-2', 'ring-violet-500/60'), 1100)
+      lastEditedClipIdRef.current = null
+      try { sessionStorage.removeItem('scrollToClip') } catch { /* ignore */ }
+    }
+    raf = requestAnimationFrame(run)
+    return () => { cancelled = true; cancelAnimationFrame(raf) }
   }, [clips.length])
 
   // ── Scroll-to-VOD on arrival from a just-completed analysis ──
