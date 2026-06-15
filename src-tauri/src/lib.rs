@@ -111,6 +111,24 @@ fn init_steam() -> Result<(), String> {
 pub fn run() {
     let _ = dotenvy::dotenv();
 
+    // Dev-only: WebView2 caches compiled JS and serves it stale across restarts
+    // (gotcha #14), silently breaking frontend edits — a fresh `cargo tauri dev`
+    // can load an old page even though Vite serves the current one (no-cache/
+    // no-store headers don't reliably stop it). Wipe the HTTP cache on startup,
+    // before the webview is created, so dev always loads current code. Local
+    // Storage (AI keys / settings) is left intact; release builds are untouched.
+    #[cfg(debug_assertions)]
+    {
+        if let Some(local) = dirs::data_local_dir() {
+            let webview = local
+                .join("com.clipgoblin.desktop")
+                .join("EBWebView")
+                .join("Default");
+            let _ = std::fs::remove_dir_all(webview.join("Cache"));
+            let _ = std::fs::remove_dir_all(webview.join("Code Cache"));
+        }
+    }
+
     let conn = db::init_db().expect("Failed to initialize database");
 
     // Recover any clips that were stuck mid-render when the app last closed
