@@ -110,6 +110,28 @@ function getConfirmDeletePref(): boolean {
 
 const lastEditedClipIdRef: { current: string | null } = { current: null }
 
+// Scroll a clip/VOD card into its REAL scroll container. The app's content pane
+// is a non-window `overflow-y-auto` element, so `el.scrollIntoView()` and
+// `window.scrollTo` are unreliable here — the v4 UI port (18995a1) changed the
+// container, which silently regressed the editor-return scroll while the
+// scroll-to-VOD flow was migrated to this explicit approach (3ace911). Both
+// flows now share this helper so they can't drift apart again.
+function scrollCardIntoView(el: HTMLElement, block: 'start' | 'center'): void {
+  let container: HTMLElement = (document.scrollingElement as HTMLElement) || document.documentElement
+  for (let p = el.parentElement; p; p = p.parentElement) {
+    const oy = window.getComputedStyle(p).overflowY
+    if (oy === 'auto' || oy === 'scroll') { container = p; break }
+  }
+  const isWindow = container === document.scrollingElement || container === document.documentElement
+  const elRect = el.getBoundingClientRect()
+  const baseTop = isWindow
+    ? elRect.top + window.scrollY
+    : container.scrollTop + (elRect.top - container.getBoundingClientRect().top)
+  const viewport = isWindow ? window.innerHeight : container.clientHeight
+  const target = block === 'center' ? baseTop - viewport / 2 + elRect.height / 2 : baseTop
+  container.scrollTo({ top: Math.max(0, target), behavior: 'instant' as ScrollBehavior })
+}
+
 // ─── Undo toast state ─────────────────────────────────────────────
 
 interface PendingDelete {
@@ -477,7 +499,7 @@ export default function Clips() {
     const raf = requestAnimationFrame(() => {
       const el = document.querySelector<HTMLElement>(`[data-clip-id="${clipId}"]`)
       if (el) {
-        el.scrollIntoView({ block: 'center', behavior: 'instant' as ScrollBehavior })
+        scrollCardIntoView(el, 'center')
         // Brief highlight flash so the user can spot where they were
         el.classList.add('ring-2', 'ring-violet-500/60')
         setTimeout(() => el.classList.remove('ring-2', 'ring-violet-500/60'), 900)
@@ -522,23 +544,7 @@ export default function Clips() {
       // scrollIntoView's "nearest scrollable ancestor" is what actually
       // moves. We replicate that detection explicitly so we can call
       // scrollTo on the right container with the right offset.
-      const findScrollableAncestor = (start: HTMLElement): HTMLElement => {
-        let p: HTMLElement | null = start.parentElement
-        while (p) {
-          const oy = window.getComputedStyle(p).overflowY
-          if (oy === 'auto' || oy === 'scroll') return p
-          p = p.parentElement
-        }
-        return (document.scrollingElement as HTMLElement) || document.documentElement
-      }
-      const container = findScrollableAncestor(el)
-      const elRect = el.getBoundingClientRect()
-      const containerRect = container.getBoundingClientRect()
-      const targetTop =
-        container === document.scrollingElement || container === document.documentElement
-          ? elRect.top + window.scrollY
-          : container.scrollTop + (elRect.top - containerRect.top)
-      container.scrollTo({ top: Math.max(0, targetTop), behavior: 'instant' as ScrollBehavior })
+      scrollCardIntoView(el, 'start')
 
       // Brief highlight pulse so the user can confirm visually where they
       // landed. Matches the editor-return flow's pulse.
