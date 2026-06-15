@@ -493,7 +493,8 @@ export default function Clips() {
   // Runs whenever clip count changes while a pending clip ID is set, so it
   // fires as soon as the list has actually rendered the card we care about.
   useEffect(() => {
-    const clipId = lastEditedClipIdRef.current
+    const ssVal = (() => { try { return sessionStorage.getItem('scrollToClip') } catch { return null } })()
+    const clipId = lastEditedClipIdRef.current ?? ssVal
     if (!clipId) return
     if (clips.length === 0) return
     const raf = requestAnimationFrame(() => {
@@ -504,6 +505,7 @@ export default function Clips() {
         el.classList.add('ring-2', 'ring-violet-500/60')
         setTimeout(() => el.classList.remove('ring-2', 'ring-violet-500/60'), 900)
         lastEditedClipIdRef.current = null
+        try { sessionStorage.removeItem('scrollToClip') } catch { /* ignore */ }
       }
     })
     return () => cancelAnimationFrame(raf)
@@ -813,6 +815,7 @@ export default function Clips() {
 
   const navigateToEditor = (clipId: string) => {
     lastEditedClipIdRef.current = clipId
+    try { sessionStorage.setItem('scrollToClip', clipId) } catch { /* ignore */ }
     navigate(`/editor/${clipId}`)
   }
 
