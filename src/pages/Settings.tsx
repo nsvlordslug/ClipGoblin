@@ -466,6 +466,33 @@ export default function SettingsPage() {
               </div>
             )}
 
+            {/* Claude-only: clip-detection (judge) model + Sonnet final pass.
+                Separate from the model dropdown above, which drives titles/captions. */}
+            {s.provider === 'claude' && (
+              <>
+                <div>
+                  <label className="block text-sm text-slate-300 mb-1.5">Clip-detection model</label>
+                  <select
+                    value={s.claudeJudgeModel}
+                    onChange={e => ai.update({ claudeJudgeModel: e.target.value })}
+                    className={inputCls}>
+                    <option value="claude-sonnet-4-6">Claude Sonnet 4.6 (recommended — best clip quality)</option>
+                    <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5 (economy — cheaper, best for gameplay-heavy VODs)</option>
+                  </select>
+                </div>
+
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <input type="checkbox" checked={s.useSonnetFinalPass}
+                    onChange={e => ai.update({ useSonnetFinalPass: e.target.checked })}
+                    className="w-4 h-4 rounded border-surface-600 bg-surface-900 text-violet-500 focus:ring-violet-500" />
+                  <div>
+                    <span className="text-sm text-slate-300">Sonnet final pass</span>
+                    <p className="text-[10px] text-slate-500">let Sonnet make the final clip picks — small extra cost, sharper taste</p>
+                  </div>
+                </label>
+              </>
+            )}
+
             {/* Test connection + status */}
             {(s[keyField] as string) ? (
               <div className="flex items-center gap-3">

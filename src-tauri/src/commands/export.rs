@@ -299,6 +299,32 @@ pub(crate) async fn render_clip_by_id(clip_id: &str) -> Result<std::path::PathBu
     }
 }
 
+/// Probe a media file's duration (seconds) via ffprobe. Returns `None` on any
+/// failure (ffprobe missing, parse error, etc.). Used by the community-clip
+/// export branch to bound `-to` at the downloaded clip's full length.
+fn probe_media_duration(path: &std::path::Path) -> Option<f64> {
+    let ffprobe = crate::bin_manager::ffprobe_path().ok()?;
+    let mut cmd = std::process::Command::new(&ffprobe);
+    cmd.arg("-v").arg("error")
+        .arg("-show_entries").arg("format=duration")
+        .arg("-of").arg("default=noprint_wrappers=1:nokey=1")
+        .arg(path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&output.stdout);
+    let dur: f64 = s.trim().parse().ok()?;
+    if dur.is_finite() && dur > 0.0 { Some(dur) } else { None }
+}
+
 /// Convert a DB ClipRow into an ExportRequest for the vertical_crop module.
 fn clip_to_export_request(
     clip: &db::ClipRow,
@@ -307,6 +333,31 @@ fn clip_to_export_request(
     output_path: &std::path::Path,
     allow_per_clip_override: bool,
 ) -> vertical_crop::ExportRequest {
+    // ── Community-clip source override ──
+    // When this clip is backed by a downloaded Twitch clip MP4 (viewer-made
+    // clip), that file IS the clip's video: export it WHOLE (0-based, no
+    // start/end trim) instead of re-cutting the VOD via the unreliable
+    // vod_offset. Falls back to the VOD path + start/end if the file is missing
+    // or its duration can't be probed (graceful — normal clips are untouched).
+    let community_source: Option<(std::path::PathBuf, f64)> = clip
+        .community_clip_mp4_path
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.exists())
+        .and_then(|p| probe_media_duration(&p).map(|dur| (p, dur)));
+    if let Some((ref src, _)) = community_source {
+        log::info!(
+            "[export] clip {} using downloaded community clip MP4 (whole, 0-based): {}",
+            clip.id, src.display()
+        );
+    } else if clip.community_clip_mp4_path.as_deref().map_or(false, |p| !p.is_empty()) {
+        log::warn!(
+            "[export] clip {} has community_clip_mp4_path but file/duration unavailable — falling back to VOD cut",
+            clip.id
+        );
+    }
+
     // Resolve platform from aspect ratio (future: store preset id in DB)
     let platform = vertical_crop::Platform::from_aspect_ratio(&clip.aspect_ratio);
     let target = platform.resolution();
@@ -335,11 +386,22 @@ fn clip_to_export_request(
         _ => crate::cam_region::CamFitMode::Fit,
     };
 
+    // Source + span: community-clip file whole (0..duration) when present,
+    // otherwise the VOD path trimmed to the clip's start/end.
+    let (source_path, start, end) = match community_source {
+        Some((src, dur)) => (src, 0.0, dur),
+        None => (
+            std::path::PathBuf::from(vod_path),
+            clip.start_seconds,
+            clip.end_seconds,
+        ),
+    };
+
     vertical_crop::ExportRequest {
-        source_path: std::path::PathBuf::from(vod_path),
+        source_path,
         output_path: output_path.to_path_buf(),
-        start: clip.start_seconds,
-        end: clip.end_seconds,
+        start,
+        end,
         platform,
         target,
         layout,

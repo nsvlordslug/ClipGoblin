@@ -142,6 +142,147 @@ fn ensure_proper_mp4(path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Download the ACTUAL Twitch clip MP4 for a community (viewer-made) clip via
+/// yt-dlp (which supports Twitch clip page URLs). Returns the local file path on
+/// success, `None` on ANY failure so the caller falls back to the VOD re-cut.
+///
+/// This is the fix for community clips landing in the wrong section: re-cutting
+/// from the VOD via the unreliable `vod_offset` is replaced by the viewer's exact
+/// clip file. The persist loop sets the resulting path on the row; the export path
+/// then uses that file whole (0-based) instead of `vod_path` + start/end.
+///
+/// Blocking (process + network IO). The only caller runs inside
+/// `tokio::task::spawn_blocking`, so it's safe to block here directly.
+///
+/// Output: `dirs::data_dir()/clipviral/community_clips/<sanitized id-or-hash>.mp4`.
+/// If that file already exists (non-empty), it's reused instead of re-downloaded.
+fn download_community_clip(url: &str) -> Option<String> {
+    if url.is_empty() {
+        return None;
+    }
+    let ytdlp = match find_ytdlp() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("[community-clip] yt-dlp not found, skipping download: {}", e);
+            return None;
+        }
+    };
+
+    let out_dir = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("clipviral")
+        .join("community_clips");
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        log::warn!("[community-clip] failed to create output dir: {}", e);
+        return None;
+    }
+
+    // Stable filename from the clip slug (last path segment of the URL), falling
+    // back to a hash of the URL when the slug isn't usable. Sanitize to a safe
+    // filename so a crafted slug can't escape the directory.
+    let raw_id = url
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            url.hash(&mut h);
+            format!("{:x}", h.finish())
+        });
+    let safe_id: String = raw_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+
+    let out_path = out_dir.join(format!("{}.mp4", safe_id));
+
+    // Reuse an already-downloaded (non-empty) file — don't re-download.
+    if out_path.exists()
+        && std::fs::metadata(&out_path).map(|m| m.len() > 0).unwrap_or(false)
+    {
+        log::info!("[community-clip] reusing cached file: {}", out_path.display());
+        return Some(out_path.to_string_lossy().to_string());
+    }
+
+    let output_template = out_path
+        .with_extension("%(ext)s")
+        .to_string_lossy()
+        .to_string();
+
+    let mut cmd = std::process::Command::new(&ytdlp);
+    cmd.arg("--force-overwrites")
+        .arg("--no-color")
+        .arg("--remux-video").arg("mp4")
+        .arg("-o")
+        .arg(&output_template)
+        .arg(url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+
+    // Tell yt-dlp where ffmpeg is so it can remux MPEG-TS to proper MP4.
+    if let Ok(ffmpeg) = find_ffmpeg() {
+        if let Some(ffmpeg_dir) = ffmpeg.parent() {
+            cmd.arg("--ffmpeg-location").arg(ffmpeg_dir);
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(e) => {
+            log::warn!("[community-clip] yt-dlp spawn failed for {}: {}", url, e);
+            return None;
+        }
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::warn!(
+            "[community-clip] yt-dlp exited {:?} for {} — {}",
+            output.status.code(), url, stderr.trim()
+        );
+        return None;
+    }
+
+    // yt-dlp may have produced a differently-extensioned file; find the actual
+    // output. Prefer the expected .mp4, else the first matching file by stem.
+    let actual = if out_path.exists() {
+        Some(out_path.clone())
+    } else {
+        std::fs::read_dir(&out_dir).ok().and_then(|entries| {
+            entries.flatten().map(|e| e.path()).find(|p| {
+                p.file_stem().map(|s| s.to_string_lossy() == safe_id.as_str()).unwrap_or(false)
+                    && !p.to_string_lossy().ends_with(".part")
+                    && !p.to_string_lossy().ends_with(".remuxing.mp4")
+            })
+        })
+    };
+    let actual = match actual {
+        Some(p) => p,
+        None => {
+            log::warn!("[community-clip] download reported success but no output file for {}", url);
+            return None;
+        }
+    };
+
+    // Same post-yt-dlp remux as the VOD path: guarantee a webview-playable MP4
+    // (faststart, no lingering MPEG-TS packetization). Non-fatal on failure.
+    if let Err(e) = ensure_proper_mp4(&actual) {
+        log::warn!("[community-clip] remux failed (file may not play in webview): {}", e);
+    }
+
+    log::info!("[community-clip] downloaded {} -> {}", url, actual.display());
+    Some(actual.to_string_lossy().to_string())
+}
+
 /// Parse yt-dlp progress output to extract download percentage.
 fn parse_ytdlp_progress(line: &str) -> Option<u8> {
     if !line.contains("[download]") {
@@ -370,18 +511,98 @@ pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>)
 
 /// Get cached VODs from DB only (no Twitch API call). Used for polling status.
 ///
-/// Returns EVERY VOD in the library, including ones imported via
-/// `import_vod_by_url` (which live under stub channels). The `channel_id` param
-/// is retained for API compatibility but no longer filters — the library is
-/// a single-user surface and imported VODs should appear alongside owned ones.
+/// Shows the currently-logged-in account's VODs plus any *downloaded* VOD from a
+/// previously-used account (a download is kept regardless of which Twitch login
+/// it came from). The app can accumulate more than one account's VODs across
+/// logins; only the active account's are relevant, so a second account's
+/// not-downloaded leftovers are filtered out here — mirroring `get_vods` so this
+/// polling/fallback path can't re-surface what `get_vods` hides.
 #[tauri::command]
 pub fn get_cached_vods(channel_id: String, db: State<'_, DbConn>) -> Result<Vec<db::VodRow>, String> {
-    let _ = channel_id; // retained for API compat; see doc comment
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
-    db::get_all_vods(&conn).map_err(|e| format!("DB error: {}", e))
+    let result: Vec<db::VodRow> = db::get_all_vods(&conn)
+        .map_err(|e| format!("DB error: {}", e))?
+        .into_iter()
+        .filter(|v| v.channel_id == channel_id || v.download_status == "downloaded")
+        .collect();
+    Ok(result)
 }
 
-// â”€â”€ AI Analysis â”€â”€
+/// Ensure a local thumbnail JPEG exists for a downloaded VOD (a single frame
+/// pulled from the video file) and return its path. Fallback for when the Twitch
+/// thumbnail has expired — Twitch deletes VOD thumbnails past its retention
+/// window, but the user still has the downloaded file, so we render a preview
+/// from it. Lazily generated and cached on disk. Returns None if the VOD isn't
+/// downloaded, the file is missing, or extraction fails (UI then shows the
+/// gradient placeholder).
+#[tauri::command]
+pub async fn ensure_vod_thumbnail(
+    vod_id: String,
+    db: State<'_, DbConn>,
+) -> Result<Option<String>, String> {
+    let local_path = {
+        let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
+        match db::get_vod_by_id(&conn, &vod_id).map_err(|e| format!("DB error: {}", e))? {
+            Some(v) if v.download_status == "downloaded" => v.local_path,
+            _ => None,
+        }
+    };
+    let Some(local_path) = local_path else { return Ok(None) };
+    if !std::path::Path::new(&local_path).exists() {
+        return Ok(None);
+    }
+
+    let thumb_dir = dirs::data_dir()
+        .ok_or_else(|| "no data dir".to_string())?
+        .join("clipviral")
+        .join("vod_thumbnails");
+    std::fs::create_dir_all(&thumb_dir).ok();
+    let thumb_path = thumb_dir.join(format!("{}.jpg", vod_id));
+    let thumb_str = thumb_path.to_string_lossy().to_string();
+
+    // Reuse an already-extracted frame.
+    if std::fs::metadata(&thumb_path).map(|m| m.len() > 0).unwrap_or(false) {
+        return Ok(Some(thumb_str));
+    }
+
+    // Pull one frame ~60s in (past intros); fall back to 3s for short VODs.
+    let ffmpeg = find_ffmpeg().map_err(|e| format!("ffmpeg not found: {}", e))?;
+    let lp = local_path.clone();
+    let tp = thumb_str.clone();
+    let made = tokio::task::spawn_blocking(move || {
+        for seek in ["60", "3"] {
+            let mut cmd = std::process::Command::new(&ffmpeg);
+            cmd.arg("-y")
+                .arg("-ss").arg(seek)
+                .arg("-i").arg(&lp)
+                .arg("-frames:v").arg("1")
+                .arg("-vf").arg("scale=640:-2")
+                .arg("-q:v").arg("4")
+                .arg(&tp);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            }
+            let ok = cmd.output().map(|o| o.status.success()).unwrap_or(false);
+            if ok && std::fs::metadata(&tp).map(|m| m.len() > 0).unwrap_or(false) {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .map_err(|e| format!("thumbnail task failed: {}", e))?;
+
+    if made {
+        Ok(Some(thumb_str))
+    } else {
+        let _ = std::fs::remove_file(&thumb_path);
+        Ok(None)
+    }
+}
+
+//â”€â”€ AI Analysis â”€â”€
 
 /// Extract per-second audio intensity from a video file using ffmpeg.
 /// Returns an AudioProfile with RMS levels and detected spike positions.
@@ -1424,6 +1645,10 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
                             publish_hashtags: None,
                             cam_region_norm_override: None,
                             cam_fit_mode: None,
+                            // Carry the downloaded Twitch clip MP4 path (if any) from
+                            // the highlight so export + the frontend use the actual
+                            // viewer clip file instead of a VOD re-cut.
+                            community_clip_mp4_path: h.community_clip_mp4_path.clone(),
                         };
                         db::insert_clip(&conn, &clip).ok();
 
@@ -1724,11 +1949,25 @@ async fn fetch_community_clips_for_vod(
                 broadcaster_id, raw, matching.len(), this_vod,
             );
             matching.into_iter().filter_map(|c| {
+                // Prefer Helix's clip page `url`; fall back to building it from the
+                // slug `id` so yt-dlp still has something to download. Empty/blank →
+                // None (no download attempted; export uses the VOD cut).
+                let clip_url = {
+                    let u = c.url.trim();
+                    if !u.is_empty() {
+                        Some(u.to_string())
+                    } else if !c.id.trim().is_empty() {
+                        Some(format!("https://clips.twitch.tv/{}", c.id.trim()))
+                    } else {
+                        None
+                    }
+                };
                 c.vod_offset.map(|off| clip_selector::CommunityClip {
                     vod_offset_seconds: off as f64,
                     duration_seconds: c.duration,
                     view_count: c.view_count,
                     title: c.title,
+                    clip_url,
                 })
             }).collect()
         }
@@ -1825,11 +2064,104 @@ fn run_ai_judge(
                 "AI clip detection: {} clip-worthy moments (tokens {}+{})",
                 moments.len(), tin, tout
             );
-            moments
+            // Optional cheap Sonnet final-pass: re-rank/curate only the top
+            // survivors (their snippets, not the VOD) for near-Sonnet taste at
+            // ~Haiku-bulk cost. Skips gracefully on any error → Haiku ranking.
+            if resolved.use_sonnet_final_pass && moments.len() >= 2 {
+                run_final_pass(&conn, &resolved.api_key, t, moments, vod_id, vod_title)
+            } else {
+                moments
+            }
         }
         Err(e) => {
             log::warn!("AI clip detection failed — falling back to signal-only: {}", e);
             Vec::new()
+        }
+    }
+}
+
+/// Cheap Sonnet final-pass over the top Haiku-ranked moments. Builds a short
+/// snippet for each top moment (via `extract_transcript_for_range`), asks one
+/// Sonnet call to pick/order the final cut, logs the call as `clip_judge_final`,
+/// and returns the curated set. ANY failure (API error, empty result) falls back
+/// to the original Haiku ranking — the final-pass must never lose clips.
+fn run_final_pass(
+    conn: &rusqlite::Connection,
+    api_key: &str,
+    transcript: &TranscriptResult,
+    haiku_moments: Vec<crate::clip_judge::JudgedMoment>,
+    vod_id: &str,
+    vod_title: &str,
+) -> Vec<crate::clip_judge::JudgedMoment> {
+    /// How many top moments the Sonnet final-pass reviews. Generous enough to
+    /// cover a strong VOD's real highlights, small enough to stay cheap.
+    const FINAL_PASS_TOP_N: usize = 10;
+
+    // Rank by the judge's score and take the top N as final-pass candidates.
+    let mut ranked = haiku_moments.clone();
+    ranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    let top: Vec<crate::clip_judge::JudgedMoment> =
+        ranked.into_iter().take(FINAL_PASS_TOP_N).collect();
+
+    // Pair each top moment with a compact transcript snippet for its window.
+    let candidates: Vec<(crate::clip_judge::JudgedMoment, String)> = top
+        .iter()
+        .map(|m| {
+            let snippet = extract_transcript_for_range(transcript, m.start_sec, m.end_sec)
+                .unwrap_or_default();
+            (m.clone(), snippet)
+        })
+        .collect();
+
+    let model = crate::ai_provider::final_pass_model();
+    let fut = crate::clip_judge::final_pass(
+        crate::ai_provider::Provider::Claude,
+        api_key,
+        &model,
+        &candidates,
+        vod_title,
+    );
+    match tokio::runtime::Handle::current().block_on(fut) {
+        Ok((final_moments, tin, tout)) => {
+            crate::ai_usage::log_usage(
+                conn,
+                crate::ai_usage::UsageEntry {
+                    feature: "clip_judge_final",
+                    provider: crate::ai_provider::Provider::Claude,
+                    model: &model,
+                    tokens_in: tin,
+                    tokens_out: tout,
+                    vod_id: Some(vod_id),
+                    clip_id: None,
+                    context: None,
+                },
+            );
+            if final_moments.is_empty() {
+                log::info!("AI clip detection: final-pass returned nothing — keeping Haiku ranking");
+                return haiku_moments;
+            }
+            // Use the final-pass (re-scored, re-ordered) set as the head, then
+            // append any original moments it didn't cover so recall is never
+            // reduced (downstream selection still gates them).
+            let mut out = final_moments;
+            let covered: Vec<(f64, f64)> = out.iter().map(|m| (m.start_sec, m.end_sec)).collect();
+            for m in haiku_moments {
+                let dup = covered.iter().any(|(s, e)| {
+                    (s - m.start_sec).abs() < 0.5 && (e - m.end_sec).abs() < 0.5
+                });
+                if !dup {
+                    out.push(m);
+                }
+            }
+            log::info!(
+                "AI clip detection: Sonnet final-pass → {} moments (tokens {}+{})",
+                out.len(), tin, tout
+            );
+            out
+        }
+        Err(e) => {
+            log::warn!("AI clip detection: final-pass failed — keeping Haiku ranking: {}", e);
+            haiku_moments
         }
     }
 }
@@ -2098,6 +2430,34 @@ fn run_analysis_signals(
             .and_then(|t| extract_transcript_for_range(t, c.start_time, c.end_time))
             .or_else(|| c.transcript_excerpt.clone());
 
+        // Community (viewer-clipped) candidates carry the Twitch clip URL. Download
+        // the ACTUAL clip MP4 via yt-dlp and use that file as the clip's video
+        // (exact viewer framing, 0-based) instead of re-cutting from the VOD via
+        // the unreliable vod_offset. `None` on any failure → graceful VOD-cut
+        // fallback (export still works off vod_path + start/end). We're inside
+        // spawn_blocking here, so the blocking download is safe.
+        let community_clip_mp4_path = match c.community_url.as_deref() {
+            Some(clip_url) if !clip_url.is_empty() => {
+                match download_community_clip(clip_url) {
+                    Some(path) => {
+                        log::info!(
+                            "[community-clip] [{:.0}s..{:.0}s] using downloaded clip MP4: {}",
+                            c.start_time, c.end_time, path
+                        );
+                        Some(path)
+                    }
+                    None => {
+                        log::warn!(
+                            "[community-clip] [{:.0}s..{:.0}s] download failed for {} — falling back to VOD cut",
+                            c.start_time, c.end_time, clip_url
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+
         highlights.push(db::HighlightRow {
             id: uuid::Uuid::new_v4().to_string(),
             vod_id: vod_id.clone(),
@@ -2119,6 +2479,7 @@ fn run_analysis_signals(
             signal_sources: Some(serialize_signal_sources(&c.signal_sources)),
             review_rating: None,       // user-set via Review UI
             review_note: None,         // user-set via Review UI
+            community_clip_mp4_path,
         });
 
         log::info!(
@@ -2224,6 +2585,7 @@ fn run_analysis(
             signal_sources: None,
             review_rating: None,       // user-set via Review UI
             review_note: None,         // user-set via Review UI
+            community_clip_mp4_path: None, // position-fallback — no Twitch clip file
         });
     } else {
         let clip_duration = 30.0_f64.min(duration * 0.15);
@@ -2264,6 +2626,7 @@ fn run_analysis(
                 signal_sources: None,
                 review_rating: None,       // user-set via Review UI
                 review_note: None,         // user-set via Review UI
+                community_clip_mp4_path: None, // chat/position fallback — no Twitch clip file
             });
         }
     }
@@ -2380,6 +2743,7 @@ fn analyze_via_chat(
                 signal_sources: None,
                 review_rating: None,       // user-set via Review UI
                 review_note: None,         // user-set via Review UI
+                community_clip_mp4_path: None, // chat/position fallback — no Twitch clip file
             });
         }
     }
@@ -2436,6 +2800,7 @@ fn analyze_via_chat(
                     signal_sources: None,
                     review_rating: None,       // user-set via Review UI
                     review_note: None,         // user-set via Review UI
+                    community_clip_mp4_path: None, // emote/position fallback — no Twitch clip file
                 });
             }
         }
@@ -2562,10 +2927,35 @@ pub async fn get_vods(
     }
 
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
-    // Return all VODs (own + imported via import_vod_by_url) so foreign-channel
-    // imports appear in the same library list. See get_all_vods doc comment.
-    let result = db::get_all_vods(&conn).map_err(|e| format!("DB error: {}", e))?;
-    log::info!("[get_vods] get_all_vods returned {} VODs", result.len());
+
+    // Twitch deletes VODs (and their thumbnails) once they age past its retention
+    // window, so a VOD no longer in the freshly-paginated /videos list is gone
+    // from Twitch for good. Purge such OWN-channel VODs UNLESS we've already
+    // downloaded them — a downloaded VOD's local copy outlives Twitch, so it
+    // stays; foreign-channel imports are preserved by the channel_id guard inside
+    // the helper. Guard on a non-empty fetch so a fluke empty response can't wipe
+    // the library (it self-heals on the next fetch regardless).
+    if !videos.is_empty() {
+        let live_ids: std::collections::HashSet<String> =
+            videos.iter().map(|v| v.id.clone()).collect();
+        match db::purge_expired_vods(&conn, &channel_id, &live_ids) {
+            Ok(n) if n > 0 => log::info!("[get_vods] purged {} expired-on-Twitch VOD(s) (channel_id={})", n, channel_id),
+            Ok(_) => {}
+            Err(e) => log::warn!("[get_vods] purge_expired_vods failed: {}", e),
+        }
+    }
+
+    // Show only the logged-in account's VODs, plus any downloaded VOD from a
+    // previously-used account (downloads survive regardless of which login they
+    // came from). The app can hold more than one account's VODs across logins;
+    // only the active one is relevant, so the other account's not-downloaded
+    // VODs are filtered out. get_cached_vods mirrors this rule.
+    let result: Vec<db::VodRow> = db::get_all_vods(&conn)
+        .map_err(|e| format!("DB error: {}", e))?
+        .into_iter()
+        .filter(|v| v.channel_id == channel_id || v.download_status == "downloaded")
+        .collect();
+    log::info!("[get_vods] returning {} VODs for channel {} (active account + downloads)", result.len(), channel_id);
     Ok(result)
 }
 

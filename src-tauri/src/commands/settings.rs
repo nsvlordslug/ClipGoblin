@@ -132,6 +132,58 @@ pub fn get_ai_cost_summary(
     Ok(crate::ai_usage::estimate_cost(&conn, lookback))
 }
 
+/// Phase 1 (BYOK cost visibility) — estimate the BYOK cost to analyze a VOD
+/// of `duration_secs` BEFORE the user kicks it off, so spend is never a
+/// surprise. Rendered next to the Analyze action.
+///
+/// Returns 0.0 when the clip-judge provider resolves to Free (no API spend).
+/// Otherwise prefers the rolling per-analyze average from recent history
+/// (most accurate once a few VODs have run); falls back to a duration-based
+/// projection on the configured judge model for the very first analyze
+/// (see `ai_usage::project_analyze_cost`).
+#[tauri::command]
+pub fn estimate_analyze_cost(
+    duration_secs: f64,
+    db: State<'_, DbConn>,
+) -> Result<f64, String> {
+    let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
+
+    // Detection uses the ClipJudge scope; if it resolves to Free there's no
+    // BYOK spend to estimate.
+    let resolved = crate::ai_provider::resolve(&conn, crate::ai_provider::Scope::ClipJudge);
+    if !resolved.is_llm() {
+        return Ok(0.0);
+    }
+
+    // Prefer the measured rolling average over the last 10 analyses when we
+    // have any history — it already folds in this user's real VOD lengths,
+    // model, and titles/captions usage. Fall back to a per-length projection
+    // for the first run, when there's nothing to average.
+    let summary = crate::ai_usage::estimate_cost(&conn, 10);
+    if summary.vod_count > 0 {
+        return Ok(summary.avg_per_analyze_usd);
+    }
+
+    Ok(crate::ai_usage::project_analyze_cost(
+        resolved.provider,
+        &resolved.model,
+        duration_secs,
+    ))
+}
+
+/// Phase 1 (BYOK cost visibility) — total BYOK spend already logged for one
+/// VOD across every AI call (clip judge + analysis-time titles/captions +
+/// any later regens tagged with this VOD). Backs the post-analyze
+/// "this analyze cost ~$Y" readout. Returns 0.0 for an unknown VOD.
+#[tauri::command]
+pub fn get_analysis_cost(
+    vod_id: String,
+    db: State<'_, DbConn>,
+) -> Result<f64, String> {
+    let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
+    Ok(crate::ai_usage::sum_cost_for_vod(&conn, &vod_id))
+}
+
 #[tauri::command]
 pub fn list_jobs(queue: State<'_, JobQueue>) -> Vec<Job> {
     queue.list()

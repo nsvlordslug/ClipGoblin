@@ -70,6 +70,14 @@ export interface Clip {
   facecam_layout: string;
   render_status: 'pending' | 'rendering' | 'completed' | 'failed';
   output_path: string | null;
+  /**
+   * When set, this clip's video is a STANDALONE, already-trimmed MP4 (a
+   * downloaded Twitch community clip) rather than a sub-range of the VOD.
+   * Players must use this file directly and treat it as the whole clip
+   * (0 → its own duration) — NOT seek/trim to start_seconds/end_seconds.
+   * Null/absent = normal VOD-seek behavior (unchanged).
+   */
+  community_clip_mp4_path?: string | null;
   thumbnail_path: string | null;
   game: string | null;
   publish_description: string | null;

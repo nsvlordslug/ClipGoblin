@@ -43,6 +43,10 @@ pub struct CommunityClip {
     pub view_count: i64,
     /// Optional: the clipper's chosen title. Used for display only, not scoring.
     pub title: String,
+    /// Twitch clip page URL (yt-dlp downloads this to get the actual viewer-made
+    /// MP4). `None` when the clip wasn't fetched with a URL. Threaded onto the
+    /// pinned `ClipCandidate.community_url` so the persist loop can download it.
+    pub clip_url: Option<String>,
 }
 
 /// Multi-signal moment after fusion.
@@ -88,6 +92,11 @@ pub struct ClipCandidate {
     pub selection_score: f64,
     pub selected_reason: Option<String>,
     pub rejection_reason: Option<String>,
+    /// For community (viewer-clipped) candidates only: the Twitch clip page URL.
+    /// `Some` only on pinned community clips (set in `pin_community_clips`); the
+    /// persist loop downloads this and uses the resulting MP4 as the clip video.
+    /// `None` for every normal candidate.
+    pub community_url: Option<String>,
 }
 
 /// Configurable curation parameters.
@@ -481,6 +490,20 @@ fn is_corroborated(c: &ClipCandidate) -> bool {
     c.signal_sources.len() >= 2 || c.signal_sources.contains(&SignalSource::Community)
 }
 
+/// True if this candidate carries a community (viewer-clipped) signal. Such clips
+/// were validated by a human on Twitch, so they're exempt from the loudness/payoff
+/// quality gates and are pinned into the final output (see pin_community_clips).
+fn is_community_sourced(c: &ClipCandidate) -> bool {
+    c.signal_sources.contains(&SignalSource::Community)
+}
+
+/// Hard cap on how many community (viewer-clipped) moments we PIN into the final
+/// output. Generous — a creator with a handful of audience clips gets all of them
+/// guaranteed — but bounded so a flood of low-view community clips can't bury the
+/// app's own detections. Pinned clips are prioritized by view_count, so the most-
+/// watched audience moments win the cap.
+const MAX_PINNED_COMMUNITY: usize = 12;
+
 /// Max baseline-relative audio boost an UNcorroborated moment may receive. A
 /// small spike (a real single-signal moment — e.g. a talky VOD's reactions) is
 /// already under this and passes through untouched; only a BIG bare spike (a
@@ -690,13 +713,21 @@ pub fn evaluate_rejection(c: &mut ClipCandidate, audio: Option<&AudioContext>, c
 fn passes_quality_gates(c: &ClipCandidate, audio: Option<&AudioContext>, cfg: &CurationConfig) -> bool {
     if c.hook_strength < cfg.min_hook { return false; }
     if c.emotional_spike < cfg.min_emotion { return false; }
-    if let Some(a) = audio {
-        let body_start = c.start_time + 3.0;
-        let body_end = (c.end_time - 2.0).max(body_start + 1.0);
-        if a.intensity_in_range(body_start, body_end) < a.avg_rms * 0.4 { return false; }
-    }
-    if c.signal_sources.len() == 1 && c.transcript_excerpt.is_none() && c.payoff_clarity < 0.35 {
-        return false;
+    // Community-sourced clips were validated by a human (a viewer clipped the
+    // moment on Twitch) — don't second-guess that with loudness/payoff heuristics.
+    // A quiet viewer-clipped beat (deadpan banter, chat-reading, a pause before a
+    // payoff) legitimately fails the audio-body and single-source/low-payoff
+    // checks below, so SKIP both for community clips.
+    let is_community = is_community_sourced(c);
+    if !is_community {
+        if let Some(a) = audio {
+            let body_start = c.start_time + 3.0;
+            let body_end = (c.end_time - 2.0).max(body_start + 1.0);
+            if a.intensity_in_range(body_start, body_end) < a.avg_rms * 0.4 { return false; }
+        }
+        if c.signal_sources.len() == 1 && c.transcript_excerpt.is_none() && c.payoff_clarity < 0.35 {
+            return false;
+        }
     }
     true
 }
@@ -856,6 +887,7 @@ fn fuse_ai_moments(
             selection_score: 0.0,
             selected_reason: None,
             rejection_reason: None,
+            community_url: None,
         };
         c.similarity_fingerprint = compute_similarity_fingerprint(&c);
         candidates.push(c);
@@ -1205,6 +1237,163 @@ fn diversify_final_selection(
     selected
 }
 
+/// Strong display score for a pinned community (viewer-clipped) moment. A human
+/// (and Twitch) validated this beat, so it must NEVER read as a low-rated clip —
+/// the signal heuristics that scored the auto-detected version don't apply. We
+/// give it a high floor scaled by `view_count` (more views → higher) and clamp it
+/// into a strong band so it always displays as a strong clip.
+///
+/// Curve mirrors `generate_community_candidates` (log(views+1)/log(1000)):
+///   1 view     → 0.70   (floor — still human-validated, just not viral)
+///   50 views   → ~0.84
+///   200 views  → ~0.89
+///   1k+ views  → 0.95   (ceiling)
+///
+/// `total_score` is what the persist path (`vod.rs`) writes as `virality_score` —
+/// the user-facing rating — so setting it here drives the displayed strong score.
+const COMMUNITY_SCORE_FLOOR: f64 = 0.70;
+const COMMUNITY_SCORE_CEIL: f64 = 0.95;
+fn community_display_score(view_count: i64) -> f64 {
+    let frac = ((view_count as f64 + 1.0).ln() / 1000.0_f64.ln()).clamp(0.0, 1.0);
+    (COMMUNITY_SCORE_FLOOR + frac * (COMMUNITY_SCORE_CEIL - COMMUNITY_SCORE_FLOOR))
+        .clamp(COMMUNITY_SCORE_FLOOR, COMMUNITY_SCORE_CEIL)
+}
+
+/// Force the most-watched community (viewer-clipped) moments into the final set,
+/// GUARANTEEING they survive — the gate-A floor, near-duplicate suppression, the
+/// min-gap drop, and the max-clips/type caps can otherwise quietly evict a clip a
+/// human already validated. Pinned from the authoritative `community_clips` slice
+/// (which still carries `view_count`, lost after fusion), capped at
+/// MAX_PINNED_COMMUNITY and prioritized by view_count so a flood of low-view clips
+/// can't bury the app's own detections.
+///
+/// Two non-negotiables for a viewer-made clip (it ALREADY has human-chosen
+/// boundaries and human validation):
+///   1. EXACT span — use the viewer's `vod_offset_seconds`..`+duration_seconds`
+///      verbatim. NEVER run `optimize_clip_boundaries` / boundary expansion on it
+///      (that re-cut the clip and lost the viewer's context).
+///   2. STRONG rating — a hardcoded strong score (see `community_display_score`),
+///      NOT the normal signal scorer (which rated the re-cut version low).
+///
+/// Replacement rule (so the EXACT-boundary version always WINS):
+///   * FIRST remove every community-sourced clip already in `selected` — those
+///     went through the normal pipeline (re-cut boundaries + low score), so they
+///     must not survive.
+///   * THEN add each pinned clip fresh (exact boundaries + strong score), deduped
+///     only against the remaining NON-community clips: when a pin overlaps a
+///     non-community (auto) clip, KEEP the community one (drop the auto clip).
+fn pin_community_clips(
+    selected: &mut Vec<ClipCandidate>,
+    community_clips: &[CommunityClip],
+    _audio: Option<&AudioContext>,
+    duration: f64,
+) {
+    if community_clips.is_empty() {
+        return;
+    }
+
+    // ── Step 1: purge any community-sourced clip already selected. Those carry
+    // the re-cut boundaries + low score from the normal pipeline (community clips
+    // are gate-exempt, so a viewer moment can reach `selected` that way). We
+    // replace them wholesale with exact-boundary + strong-score pins below. ──
+    let purged = selected.iter().filter(|c| is_community_sourced(c)).count();
+    if purged > 0 {
+        selected.retain(|c| !is_community_sourced(c));
+        log::info!(
+            "Clip selector: removed {} normally-selected community clip(s) (re-cut/low-scored) before pinning exact-boundary versions",
+            purged
+        );
+    }
+
+    // Most-watched first, then keep at most MAX_PINNED_COMMUNITY.
+    let mut ordered: Vec<&CommunityClip> = community_clips.iter().collect();
+    ordered.sort_by(|a, b| b.view_count.cmp(&a.view_count));
+
+    let mut pinned_count = 0usize;
+    for cc in ordered {
+        if pinned_count >= MAX_PINNED_COMMUNITY {
+            break;
+        }
+
+        // EXACT viewer span — verbatim. A viewer-made clip already has
+        // human-chosen boundaries; do NOT optimize/expand. Guard only against
+        // degenerate data.
+        if cc.duration_seconds <= 0.0 {
+            continue;
+        }
+        let start = cc.vod_offset_seconds.max(0.0);
+        let end = (cc.vod_offset_seconds + cc.duration_seconds).min(duration);
+        if end - start < 1.0 {
+            continue;
+        }
+        // Strong score (NOT score_clip_candidate): a human/Twitch validated this.
+        let score = community_display_score(cc.view_count);
+        let mut pin = ClipCandidate {
+            start_time: start,
+            end_time: end,
+            peak_time: (start + end) / 2.0, // midpoint of the viewer's exact span
+            transcript_excerpt: if cc.title.is_empty() { None } else { Some(cc.title.clone()) },
+            event_tags: vec!["community-clip".to_string()],
+            emotion_tags: Vec::new(),
+            payoff_summary: if cc.title.is_empty() { None } else { Some(cc.title.clone()) },
+            outcome_label: None,
+            signal_sources: vec![SignalSource::Community],
+            // Dimensions kept strong/consistent with the score; they only feed
+            // ranking displays, not whether the clip appears (pinning guarantees
+            // presence) and not the rating (total_score below drives that).
+            hook_strength: score,
+            emotional_spike: score,
+            payoff_clarity: score,
+            event_reaction_alignment: score,
+            context_simplicity: score,
+            replay_value: score,
+            // total_score is the user-facing rating (persisted as virality_score).
+            // selection_score keeps ranking among pins consistent (view-weighted).
+            total_score: score,
+            ai_score: None,
+            similarity_fingerprint: String::new(),
+            novelty_score: 0.0,
+            diversity_penalty: 0.0,
+            selection_score: score,
+            selected_reason: Some(format!("pinned — viewer clip ({} views)", cc.view_count)),
+            rejection_reason: None,
+            // Carry the Twitch clip URL so the persist loop can download the
+            // actual viewer-made MP4 and use it as the clip's video verbatim.
+            community_url: cc.clip_url.clone(),
+        };
+        // NOTE: deliberately NO optimize_clip_boundaries and NO score_clip_candidate.
+        pin.similarity_fingerprint = compute_similarity_fingerprint(&pin);
+
+        // Dedup against the remaining NON-community clips only (all community
+        // clips were purged above, so anything overlapping here is an auto clip).
+        // When a pin overlaps an auto clip of the same moment, KEEP the community
+        // one (drop the auto clip) — the exact-boundary version always wins.
+        let mut replaced = false;
+        let mut i = 0;
+        while i < selected.len() {
+            if windows_overlap(pin.start_time, pin.end_time, selected[i].start_time, selected[i].end_time) {
+                log::info!(
+                    "Clip selector: pinned community clip [{:.0}s..{:.0}s] ({} views, score {:.0}%) replaces overlapping auto clip [{:.0}s]",
+                    pin.start_time, pin.end_time, cc.view_count, pin.total_score * 100.0, selected[i].peak_time
+                );
+                selected.remove(i);
+                replaced = true;
+                continue;
+            }
+            i += 1;
+        }
+
+        if !replaced {
+            log::info!(
+                "Clip selector: pinned community clip [{:.0}s..{:.0}s] ({} views, score {:.0}%) — exact viewer span, guaranteed into output",
+                pin.start_time, pin.end_time, cc.view_count, pin.total_score * 100.0
+            );
+        }
+        selected.push(pin);
+        pinned_count += 1;
+    }
+}
+
 fn stream_region(time: f64, duration: f64) -> &'static str {
     let pct = time / duration.max(1.0);
     if pct < 0.33 { "early" } else if pct < 0.66 { "mid" } else { "late" }
@@ -1258,25 +1447,44 @@ pub fn select_candidate_windows(
     duration: f64,
 ) -> Vec<(f64, f64)> {
     const PADDING_SECS: f64 = 30.0;
-    const MERGE_GAP_SECS: f64 = 60.0;
+    // Only TRULY adjacent windows merge (overlap or touch within this gap). This
+    // is deliberately small: the old 60s gap chained spike→spike→spike across a
+    // busy stream until the merged window swallowed the whole VOD ("1 window,
+    // 5598s"), which defeated the windowing and made the judge read everything.
+    const MERGE_GAP_SECS: f64 = 8.0;
+    // GENEROUS caps to protect recall: "talky"/banter content carries no audio,
+    // chat, or emote signal and is only caught by transcribing broadly, so the
+    // (now Sonnet) judge gets starved when the window cap is tight. We trim only
+    // CLEARLY-dead VODs — keep the strongest windows by signal strength up to ~85%
+    // coverage / 60 windows. The cap-first-merge logic below still GUARANTEES we
+    // never hand the judge (or whisper) one full-VOD blob.
+    const MAX_WINDOWS: usize = 60;
+    const MAX_COVERAGE_FRAC: f64 = 0.85; // ≤85% of VOD duration (trim only dead air)
 
-    let mut raw: Vec<(f64, f64)> = Vec::new();
+    // (start, end, strength) — strength lets us rank when capping.
+    let mut raw: Vec<(f64, f64, f64)> = Vec::new();
 
-    // Audio peaks: each spike-second contributes a ±30s window.
+    // Audio peaks: each spike-second contributes a ±30s window. Strength = the
+    // spike second's OWN RMS relative to the stream average (how much it stands
+    // out), not the ±30s mean — the mean dilutes a sharp spike toward the
+    // baseline and makes periodic spikes look falsely uniform when ranking.
     if let Some(audio_ctx) = audio {
+        let avg = audio_ctx.avg_rms.max(1e-6);
         for &spike in &audio_ctx.spike_seconds {
             let start = ((spike as f64) - PADDING_SECS).max(0.0);
             let end = ((spike as f64) + PADDING_SECS).min(duration);
-            raw.push((start, end));
+            let peak_rms = audio_ctx.rms_per_second.get(spike).copied().unwrap_or(avg);
+            let strength = peak_rms / avg;
+            raw.push((start, end, strength));
         }
     }
 
-    // Chat-rate peaks: window around the peak start time.
+    // Chat-rate peaks: window around the peak start time. Strength = virality.
     for peak in chat_peaks {
         let center = peak.start_seconds;
         let start = (center - PADDING_SECS).max(0.0);
         let end = (center + PADDING_SECS).min(duration);
-        raw.push((start, end));
+        raw.push((start, end, peak.virality_score.max(0.0) + 1.0));
     }
 
     // Emote-burst peaks: same treatment.
@@ -1284,26 +1492,56 @@ pub fn select_candidate_windows(
         let center = peak.start_seconds;
         let start = (center - PADDING_SECS).max(0.0);
         let end = (center + PADDING_SECS).min(duration);
-        raw.push((start, end));
+        raw.push((start, end, peak.virality_score.max(0.0) + 1.0));
     }
 
-    // Community clips: use the clipper's chosen span with padding.
+    // Community clips: use the clipper's chosen span with padding. Multiple
+    // viewers clipping a moment is the strongest human signal there is — rank it
+    // high via log(views) so a 10k-view clip outranks a lone audio spike.
     for cc in community_clips {
         let start = (cc.vod_offset_seconds - PADDING_SECS).max(0.0);
         let end = (cc.vod_offset_seconds + cc.duration_seconds + PADDING_SECS).min(duration);
-        raw.push((start, end));
+        let strength = 2.0 + (cc.view_count.max(1) as f64).ln();
+        raw.push((start, end, strength));
     }
 
     if raw.is_empty() {
         return Vec::new();
     }
 
-    // Sort by start time, then merge ranges that overlap or sit within
-    // MERGE_GAP_SECS of each other. The merge is in-place: each iteration
-    // either extends the last accepted range or starts a new one.
-    raw.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    // ── Cap FIRST, merge second ──
+    // Rank the raw windows by signal strength and keep the strongest until either
+    // the window-count cap or the (summed-duration) coverage budget is hit. Doing
+    // this BEFORE the merge is what structurally prevents the whole-VOD blob: on a
+    // busy stream every ±30s window overlaps its neighbours, so merging first
+    // chains them into one range spanning the entire VOD ("1 window, 5598s"). By
+    // bounding the kept set first, the post-merge UNION can never exceed the kept
+    // summed duration (≤ MAX_WINDOWS × window-width, and ≤ the coverage budget).
+    let raw_count = raw.len();
+    let coverage_budget = duration * MAX_COVERAGE_FRAC;
+    raw.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut picked: Vec<(f64, f64)> = Vec::new();
+    let mut picked_secs = 0.0_f64;
+    for (s, e, _) in raw {
+        if picked.len() >= MAX_WINDOWS {
+            break;
+        }
+        let dur = e - s;
+        // Always keep the single strongest window; past that, respect the budget.
+        if !picked.is_empty() && picked_secs + dur > coverage_budget {
+            continue;
+        }
+        picked_secs += dur;
+        picked.push((s, e));
+    }
+
+    // Now merge the survivors: sort by start, fuse ranges that overlap or sit
+    // within MERGE_GAP_SECS (cuts whisper session count without re-expanding —
+    // the union of a bounded set stays bounded).
+    picked.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     let mut merged: Vec<(f64, f64)> = Vec::new();
-    for w in raw {
+    for w in picked {
         if let Some(last) = merged.last_mut() {
             if w.0 - last.1 <= MERGE_GAP_SECS {
                 last.1 = w.1.max(last.1);
@@ -1313,6 +1551,14 @@ pub fn select_candidate_windows(
         merged.push(w);
     }
 
+    let union_secs: f64 = merged.iter().map(|(s, e)| e - s).sum();
+    log::info!(
+        "Clip selector: {} candidate window(s) from {} raw signal window(s), covering {:.0}s ({:.1}% of VOD)",
+        merged.len(),
+        raw_count,
+        union_secs,
+        if duration > 0.0 { union_secs / duration * 100.0 } else { 0.0 },
+    );
     merged
 }
 
@@ -1404,6 +1650,7 @@ pub fn select_clips(
             similarity_fingerprint: String::new(),
             novelty_score: 0.0, diversity_penalty: 0.0, selection_score: 0.0,
             selected_reason: None, rejection_reason: None,
+            community_url: None,
         };
         score_clip_candidate(&mut c);
         // Baseline-relative boost: reward a moment that spikes above the stream's
@@ -1448,8 +1695,13 @@ pub fn select_clips(
     // Fuse the AI verdict (no-op when AI detection is off / found nothing).
     fuse_ai_moments(&mut candidates, ai_moments, duration);
     let before_gate = candidates.len();
-    let final_clips = apply_two_gate_selection(&mut candidates, audio, transcript, duration, &cfg);
+    let mut final_clips = apply_two_gate_selection(&mut candidates, audio, transcript, duration, &cfg);
     let rejected = before_gate.saturating_sub(candidates.len());
+
+    // ── Stage 6b: Pin community clips — GUARANTEE viewer-clipped moments survive
+    // the gates/dedup/caps (deduped against what's already selected, preferring
+    // the community version so the same moment never shows twice). ──
+    pin_community_clips(&mut final_clips, community_clips, audio, duration);
 
     log::info!("Clip selector: final {} clips from {} candidates (scores: {})",
         final_clips.len(), candidates_found,
@@ -1497,6 +1749,7 @@ mod tests {
             similarity_fingerprint: String::new(),
             novelty_score: 0.0, diversity_penalty: 0.0, selection_score: 0.0,
             selected_reason: None, rejection_reason: None,
+            community_url: None,
         }
     }
 
@@ -1531,6 +1784,50 @@ mod tests {
         assert!(qmax > 1.0 && lmax > 1.0, "both spikes should register: q={qmax} l={lmax}");
         assert!((qmax - lmax).abs() < qmax.max(lmax) * 0.5,
             "same-shape spikes should give comparable peak z: q={qmax} l={lmax}");
+    }
+
+    #[test]
+    fn candidate_windows_cap_never_swallows_the_vod() {
+        // A 6000s VOD with an audio spike every ~20s (300 spikes) — the exact
+        // shape that made the old 60s-merge collapse to "1 window, ~full VOD".
+        // The cap must keep many windows but cover well under the whole VOD.
+        let duration = 6000.0;
+        let rms: Vec<f64> = (0..duration as usize)
+            .map(|s| if s % 20 == 0 { 0.9 } else { 0.2 })
+            .collect();
+        let spikes: Vec<usize> = (0..duration as usize).step_by(20).collect();
+        let audio = AudioContext::new(rms, spikes);
+
+        let windows = select_candidate_windows(Some(&audio), &[], &[], &[], duration);
+
+        assert!(!windows.is_empty(), "should still produce windows");
+        assert!(windows.len() <= 60, "window count must be capped: {}", windows.len());
+        let total: f64 = windows.iter().map(|(s, e)| e - s).sum();
+        assert!(
+            total <= duration * 0.85 + 1.0,
+            "coverage must stay under the cap, got {total}s of {duration}s"
+        );
+        assert!(
+            total < duration * 0.9,
+            "must NEVER approach the whole VOD, got {total}s of {duration}s"
+        );
+        // Returned windows must be chronological (transcription expects that).
+        assert!(
+            windows.windows(2).all(|w| w[0].0 <= w[1].0),
+            "windows must be time-ordered"
+        );
+    }
+
+    #[test]
+    fn candidate_windows_below_cap_pass_through() {
+        // A handful of well-separated spikes stays under the caps → no capping,
+        // every window survives.
+        let duration = 6000.0;
+        let rms = vec![0.2; duration as usize];
+        let spikes = vec![100, 1000, 2000, 3000, 5000];
+        let audio = AudioContext::new(rms, spikes);
+        let windows = select_candidate_windows(Some(&audio), &[], &[], &[], duration);
+        assert_eq!(windows.len(), 5, "all five distinct windows should survive");
     }
 
     #[test]

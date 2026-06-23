@@ -282,6 +282,22 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
         [],
     ).ok();
 
+    // ─── Community clip = actual downloaded Twitch clip MP4 ─────────
+    // For viewer-made (community) clips: the path to the actual Twitch clip MP4
+    // downloaded via yt-dlp. When set, the clip's video IS this file (played /
+    // exported whole, 0-based) instead of a re-cut from the VOD using the
+    // unreliable vod_offset. NULL = unchanged VOD-cut behavior. Lives on BOTH
+    // tables: written to `highlights` at analysis-persist time, then carried onto
+    // the `clips` row at clip-creation so export + the frontend Clip type see it.
+    conn.execute(
+        "ALTER TABLE highlights ADD COLUMN community_clip_mp4_path TEXT",
+        [],
+    ).ok();
+    conn.execute(
+        "ALTER TABLE clips ADD COLUMN community_clip_mp4_path TEXT",
+        [],
+    ).ok();
+
     Ok(())
 }
 
@@ -351,6 +367,11 @@ pub struct HighlightRow {
     pub review_rating: Option<String>,
     /// Free-form user note from the dev-only Review UI. `None` if no note set.
     pub review_note: Option<String>,
+    /// For viewer-made (community) clips: path to the actual Twitch clip MP4
+    /// downloaded via yt-dlp. When `Some`, this file IS the clip's video (played
+    /// /exported whole, 0-based) rather than a VOD re-cut. `None` = VOD-cut.
+    #[serde(default)]
+    pub community_clip_mp4_path: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -386,6 +407,12 @@ pub struct ClipRow {
     /// 'fit' | 'fill' | 'stretch'. NULL is treated as 'fit' (default).
     #[serde(default)]
     pub cam_fit_mode: Option<String>,
+    /// For viewer-made (community) clips: path to the actual Twitch clip MP4
+    /// downloaded via yt-dlp. When `Some`, export uses THIS file as the source
+    /// and exports it whole (start 0.0, no trim) instead of the VOD + start/end.
+    /// Carried from the parent highlight at clip-creation. `None` = VOD-cut.
+    #[serde(default)]
+    pub community_clip_mp4_path: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -547,6 +574,38 @@ pub fn upsert_vod(conn: &Connection, vod: &VodRow) -> SqliteResult<()> {
     Ok(())
 }
 
+/// Delete OWN-channel VODs that Twitch no longer lists (deleted past its
+/// retention window) and that were never downloaded — dead, unplayable pointers
+/// with no Twitch source and no local copy. `live_ids` is the set of
+/// `twitch_video_id`s Twitch currently returns for this channel. Preserved:
+/// downloaded/downloading VODs (the local file outlives Twitch) and rows from a
+/// different `channel_id` (foreign-channel imports, which never appear in this
+/// user's /videos fetch). Returns the number of rows deleted.
+pub fn purge_expired_vods(
+    conn: &Connection,
+    channel_id: &str,
+    live_ids: &std::collections::HashSet<String>,
+) -> SqliteResult<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT id, twitch_video_id FROM vods \
+         WHERE channel_id = ?1 AND download_status NOT IN ('downloaded', 'downloading')",
+    )?;
+    let candidates: Vec<(String, String)> = stmt
+        .query_map(params![channel_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .filter_map(Result::ok)
+        .collect();
+    let mut deleted = 0usize;
+    for (id, twitch_video_id) in candidates {
+        if !live_ids.contains(&twitch_video_id) {
+            conn.execute("DELETE FROM vods WHERE id = ?1", params![id])?;
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
 pub fn get_vods_by_channel(conn: &Connection, channel_id: &str) -> SqliteResult<Vec<VodRow>> {
     let mut stmt = conn.prepare(&format!("{} WHERE channel_id = ?1 ORDER BY stream_date DESC", VOD_SELECT))?;
     let rows = stmt.query_map(params![channel_id], |row| {
@@ -675,7 +734,7 @@ pub fn update_vod_analysis_progress(conn: &Connection, id: &str, progress: i64) 
 
 pub fn get_highlights_by_vod(conn: &Connection, vod_id: &str) -> SqliteResult<Vec<HighlightRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, vod_id, start_seconds, end_seconds, virality_score, audio_score, visual_score, chat_score, transcript_snippet, description, tags, thumbnail_path, created_at, confidence_score, explanation, event_summary, scoring_dimensions, signal_sources, review_rating, review_note
+        "SELECT id, vod_id, start_seconds, end_seconds, virality_score, audio_score, visual_score, chat_score, transcript_snippet, description, tags, thumbnail_path, created_at, confidence_score, explanation, event_summary, scoring_dimensions, signal_sources, review_rating, review_note, community_clip_mp4_path
          FROM highlights WHERE vod_id = ?1 ORDER BY COALESCE(confidence_score, virality_score * 0.75 + 0.05) DESC"
     )?;
     let rows = stmt.query_map(params![vod_id], |row| {
@@ -700,6 +759,7 @@ pub fn get_highlights_by_vod(conn: &Connection, vod_id: &str) -> SqliteResult<Ve
             signal_sources: row.get(17)?,
             review_rating: row.get(18)?,
             review_note: row.get(19)?,
+            community_clip_mp4_path: row.get(20)?,
         })
     })?;
     rows.collect()
@@ -707,8 +767,8 @@ pub fn get_highlights_by_vod(conn: &Connection, vod_id: &str) -> SqliteResult<Ve
 
 pub fn insert_highlight(conn: &Connection, h: &HighlightRow) -> SqliteResult<()> {
     conn.execute(
-        "INSERT INTO highlights (id, vod_id, start_seconds, end_seconds, virality_score, audio_score, visual_score, chat_score, transcript_snippet, description, tags, thumbnail_path, created_at, confidence_score, explanation, event_summary, scoring_dimensions, signal_sources, review_rating, review_note)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+        "INSERT INTO highlights (id, vod_id, start_seconds, end_seconds, virality_score, audio_score, visual_score, chat_score, transcript_snippet, description, tags, thumbnail_path, created_at, confidence_score, explanation, event_summary, scoring_dimensions, signal_sources, review_rating, review_note, community_clip_mp4_path)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
          ON CONFLICT(id) DO UPDATE SET
            vod_id = excluded.vod_id,
            start_seconds = excluded.start_seconds,
@@ -725,8 +785,9 @@ pub fn insert_highlight(conn: &Connection, h: &HighlightRow) -> SqliteResult<()>
            explanation = excluded.explanation,
            event_summary = excluded.event_summary,
            scoring_dimensions = excluded.scoring_dimensions,
-           signal_sources = excluded.signal_sources",
-        params![h.id, h.vod_id, h.start_seconds, h.end_seconds, h.virality_score, h.audio_score, h.visual_score, h.chat_score, h.transcript_snippet, h.description, h.tags, h.thumbnail_path, h.created_at, h.confidence_score, h.explanation, h.event_summary, h.scoring_dimensions, h.signal_sources, h.review_rating, h.review_note],
+           signal_sources = excluded.signal_sources,
+           community_clip_mp4_path = excluded.community_clip_mp4_path",
+        params![h.id, h.vod_id, h.start_seconds, h.end_seconds, h.virality_score, h.audio_score, h.visual_score, h.chat_score, h.transcript_snippet, h.description, h.tags, h.thumbnail_path, h.created_at, h.confidence_score, h.explanation, h.event_summary, h.scoring_dimensions, h.signal_sources, h.review_rating, h.review_note, h.community_clip_mp4_path],
     )?;
     Ok(())
 }
@@ -757,8 +818,8 @@ pub fn set_clip_review(
 
 pub fn insert_clip(conn: &Connection, c: &ClipRow) -> SqliteResult<()> {
     conn.execute(
-        "INSERT INTO clips (id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, render_status, output_path, thumbnail_path, created_at, game)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+        "INSERT INTO clips (id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, render_status, output_path, thumbnail_path, created_at, game, community_clip_mp4_path)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
          ON CONFLICT(id) DO UPDATE SET
            highlight_id = excluded.highlight_id,
            vod_id = excluded.vod_id,
@@ -778,8 +839,9 @@ pub fn insert_clip(conn: &Connection, c: &ClipRow) -> SqliteResult<()> {
            render_status = excluded.render_status,
            output_path = excluded.output_path,
            thumbnail_path = excluded.thumbnail_path,
-           game = excluded.game",
-        params![c.id, c.highlight_id, c.vod_id, c.title, c.start_seconds, c.end_seconds, c.aspect_ratio, c.crop_x, c.crop_y, c.crop_width, c.crop_height, c.captions_enabled, c.captions_text, c.captions_position, c.caption_style, c.facecam_layout, c.render_status, c.output_path, c.thumbnail_path, c.created_at, c.game],
+           game = excluded.game,
+           community_clip_mp4_path = excluded.community_clip_mp4_path",
+        params![c.id, c.highlight_id, c.vod_id, c.title, c.start_seconds, c.end_seconds, c.aspect_ratio, c.crop_x, c.crop_y, c.crop_width, c.crop_height, c.captions_enabled, c.captions_text, c.captions_position, c.caption_style, c.facecam_layout, c.render_status, c.output_path, c.thumbnail_path, c.created_at, c.game, c.community_clip_mp4_path],
     )?;
     Ok(())
 }
@@ -826,6 +888,7 @@ fn read_clip_row(row: &rusqlite::Row) -> rusqlite::Result<ClipRow> {
         publish_hashtags: row.get(22)?,
         cam_region_norm_override: row.get(23)?,
         cam_fit_mode: row.get(24)?,
+        community_clip_mp4_path: row.get(25)?,
     })
 }
 
@@ -835,7 +898,7 @@ fn read_clip_row(row: &rusqlite::Row) -> rusqlite::Result<ClipRow> {
 /// `VodRow` so positional `row.get(idx)?` calls stay in sync.
 const VOD_SELECT: &str = "SELECT id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress, game_name, cam_region_norm FROM vods";
 
-const CLIP_SELECT: &str = "SELECT id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, render_status, output_path, thumbnail_path, created_at, game, publish_description, publish_hashtags, cam_region_norm_override, cam_fit_mode FROM clips";
+const CLIP_SELECT: &str = "SELECT id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, render_status, output_path, thumbnail_path, created_at, game, publish_description, publish_hashtags, cam_region_norm_override, cam_fit_mode, community_clip_mp4_path FROM clips";
 
 pub fn get_all_clips(conn: &Connection) -> SqliteResult<Vec<ClipRow>> {
     let mut stmt = conn.prepare(&format!("{} ORDER BY created_at DESC, start_seconds ASC", CLIP_SELECT))?;
@@ -1224,7 +1287,7 @@ pub struct CreatorProfileRow {
 
 pub fn get_all_highlights(conn: &Connection) -> SqliteResult<Vec<HighlightRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, vod_id, start_seconds, end_seconds, virality_score, audio_score, visual_score, chat_score, transcript_snippet, description, tags, thumbnail_path, created_at, confidence_score, explanation, event_summary, scoring_dimensions, signal_sources, review_rating, review_note
+        "SELECT id, vod_id, start_seconds, end_seconds, virality_score, audio_score, visual_score, chat_score, transcript_snippet, description, tags, thumbnail_path, created_at, confidence_score, explanation, event_summary, scoring_dimensions, signal_sources, review_rating, review_note, community_clip_mp4_path
          FROM highlights ORDER BY vod_id, COALESCE(confidence_score, virality_score * 0.75 + 0.05) DESC"
     )?;
     let rows = stmt.query_map([], |row| {
@@ -1249,6 +1312,7 @@ pub fn get_all_highlights(conn: &Connection) -> SqliteResult<Vec<HighlightRow>> 
             signal_sources: row.get(17)?,
             review_rating: row.get(18)?,
             review_note: row.get(19)?,
+            community_clip_mp4_path: row.get(20)?,
         })
     })?;
     rows.collect()
@@ -1578,6 +1642,7 @@ mod tests {
             signal_sources: None,
             review_rating: None,
             review_note: None,
+            community_clip_mp4_path: None,
         };
         insert_highlight(conn, &h).unwrap();
     }
@@ -1648,6 +1713,7 @@ mod tests {
             signal_sources: Some(r#"["audio","transcript"]"#.to_string()),
             review_rating: None,
             review_note: None,
+            community_clip_mp4_path: None,
         };
         insert_highlight(&conn, &h).unwrap();
 

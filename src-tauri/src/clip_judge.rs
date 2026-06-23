@@ -11,7 +11,7 @@
 //! tested with no network. The HTTP call lives in `call_llm` / `judge`.
 
 use crate::ai_provider::Provider;
-use crate::commands::vod::TranscriptResult;
+use crate::commands::vod::{TranscriptResult, TranscriptSegment};
 use crate::error::AppError;
 
 /// One clip-worthy moment the AI identified in the transcript.
@@ -27,12 +27,100 @@ pub struct JudgedMoment {
     pub reason: String,
 }
 
+/// Normalize a segment's text for repetition/dup comparison: lowercased, trimmed,
+/// inner whitespace collapsed, trailing punctuation stripped. So "Wait, wait!" and
+/// "wait wait" compare equal when detecting a loop.
+fn normalize_for_dedup(text: &str) -> String {
+    let lowered = text.to_lowercase();
+    let collapsed = lowered.split_whitespace().collect::<Vec<_>>().join(" ");
+    collapsed.trim_matches(|c: char| !c.is_alphanumeric()).to_string()
+}
+
+/// True if a segment is a whisper artifact carrying no real dialogue: empty after
+/// trimming, all-punctuation, or a SINGLE fully-wrapped non-speech token — the
+/// whole segment bracketed/parenthesized/asterisked/music-noted (`[_TT_]`,
+/// `[BLANK_AUDIO]`, `[Music]`, `(music)`, `(applause)`, `*laughs*`, `♪ … ♪`).
+/// A line with dialogue OUTSIDE the brackets (e.g. `(laughing) that was great`)
+/// is real and is kept — it doesn't end with the closing bracket.
+fn is_artifact_segment(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() {
+        return true;
+    }
+    // No alphanumerics at all → pure punctuation/symbols (e.g. "...", "??", "♪♪").
+    if !t.chars().any(|c| c.is_alphanumeric()) {
+        return true;
+    }
+    // The ENTIRE segment is one wrapped token → non-speech tag.
+    let wrapped = (t.starts_with('[') && t.ends_with(']'))
+        || (t.starts_with('(') && t.ends_with(')'))
+        || (t.starts_with('*') && t.ends_with('*'))
+        || (t.starts_with('♪') && t.ends_with('♪'));
+    wrapped
+}
+
+/// Clean whisper output before it reaches the judge: drop empty/`[_TT_]`-style
+/// artifacts, and collapse repetition-loops — a short phrase (≤ MAX_LOOP_WORDS)
+/// repeated across many consecutive segments (whisper's classic "wait, wait,
+/// wait…" / "I'm not sure." ×N stall) into ONE segment spanning the run. This
+/// also covers simple adjacent-duplicate de-duplication. Cuts judge input tokens
+/// ~20–40% and removes noise that skews the verdict.
+///
+/// A run of identical normalized text is only collapsed when the phrase is short
+/// (a legitimately repeated long sentence is rare and informative); a 2× repeat
+/// is left alone (`MIN_LOOP_RUN`), so real back-to-back callouts survive.
+pub fn clean_segments(segs: &[TranscriptSegment]) -> Vec<TranscriptSegment> {
+    /// Phrases longer than this (in words) are never treated as a loop.
+    const MAX_LOOP_WORDS: usize = 6;
+    /// Need at least this many identical consecutive segments to collapse.
+    const MIN_LOOP_RUN: usize = 3;
+
+    // Pass 1: drop artifacts, keeping original order/timing.
+    let kept: Vec<&TranscriptSegment> =
+        segs.iter().filter(|s| !is_artifact_segment(&s.text)).collect();
+
+    // Pass 2: collapse runs of identical normalized text.
+    let mut out: Vec<TranscriptSegment> = Vec::with_capacity(kept.len());
+    let mut i = 0usize;
+    while i < kept.len() {
+        let norm = normalize_for_dedup(&kept[i].text);
+        // Extend the run while the next segment normalizes to the same text.
+        let mut j = i + 1;
+        while j < kept.len() && normalize_for_dedup(&kept[j].text) == norm {
+            j += 1;
+        }
+        let run_len = j - i;
+        let word_count = norm.split_whitespace().count();
+        let is_loop = run_len >= MIN_LOOP_RUN && word_count <= MAX_LOOP_WORDS && !norm.is_empty();
+        // An exact adjacent duplicate (run of 2 identical) also collapses — no
+        // value in feeding the judge the same line twice in a row.
+        let is_adjacent_dup = run_len >= 2 && !norm.is_empty();
+
+        if is_loop || is_adjacent_dup {
+            // Keep one segment spanning the whole run (first text, run's time span).
+            let mut merged = kept[i].clone();
+            merged.end = kept[j - 1].end.max(merged.end);
+            merged.words = Vec::new(); // word timings no longer line up after a collapse
+            out.push(merged);
+        } else {
+            for seg in &kept[i..j] {
+                out.push((*seg).clone());
+            }
+        }
+        i = j;
+    }
+    out
+}
+
 /// Build the timestamped transcript text the judge reads. Timestamps are whole
 /// seconds from the start of the VOD, matching the `start`/`end` the model must
 /// return — so it never has to convert m:ss → seconds (a common hallucination).
+/// Segments are cleaned first (`clean_segments`): artifacts dropped, whisper
+/// repetition-loops collapsed — fewer tokens, clearer signal.
 pub fn build_transcript_text(t: &TranscriptResult) -> String {
-    let mut s = String::with_capacity(t.full_text.len() + t.segments.len() * 8);
-    for seg in &t.segments {
+    let cleaned = clean_segments(&t.segments);
+    let mut s = String::with_capacity(t.full_text.len() + cleaned.len() * 8);
+    for seg in &cleaned {
         let line = seg.text.trim();
         if line.is_empty() {
             continue;
@@ -271,6 +359,119 @@ pub async fn judge(
     Ok((moments, tin, tout))
 }
 
+// ═══════════════════════════════════════════════════════════════════
+//  Sonnet final-pass — taste re-rank over the top survivors (cheap)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Build the final-pass prompt: the bulk (Haiku) judge already found the
+/// candidates; one stronger model now reads only their short snippets and
+/// curates the final cut. Candidates are presented by index so the model
+/// returns a compact ordering, not re-derived timestamps.
+fn build_final_pass_prompt(candidates: &[(JudgedMoment, String)], vod_title: &str) -> String {
+    let mut list = String::new();
+    for (i, (m, snippet)) in candidates.iter().enumerate() {
+        let snip = snippet.trim();
+        // Cap snippet length on a CHAR boundary (byte-slicing can panic on UTF-8).
+        let snip: String = snip.chars().take(600).collect();
+        list.push_str(&format!(
+            "{i}. [{start:.0}-{end:.0}s] ({cat}, judge {score:.0}) {snip}\n",
+            i = i,
+            start = m.start_sec,
+            end = m.end_sec,
+            cat = m.category,
+            score = m.score * 100.0,
+            snip = snip,
+        ));
+    }
+    format!(
+        r#"You are the senior editor making the FINAL clip cut for "{title}". A first-pass judge already shortlisted these moments; pick and ORDER the ones that will actually perform as TikTok / Shorts / Reels, best first. Drop weak or redundant ones. Do NOT invent new moments — only choose from the numbered list. Keep the strong ones; a tight final set is better than a long one.
+
+CANDIDATES (index. [start-end] (category, first-pass score) snippet):
+{list}
+Return ONLY this JSON, best first, no prose:
+{{"final":[{{"index":<n>,"score":<0-100>}}]}}"#,
+        title = vod_title,
+        list = list,
+    )
+}
+
+/// Parse the final-pass response: ordered indices into the candidate list, with
+/// an optional re-score. Out-of-range / duplicate indices are dropped. Returns
+/// the curated moments in the model's order (the new score overrides the
+/// first-pass one; start/end/category/reason are preserved from the candidate).
+fn parse_final_pass(text: &str, candidates: &[(JudgedMoment, String)]) -> Vec<JudgedMoment> {
+    let json_str = match (text.find('{'), text.rfind('}')) {
+        (Some(s), Some(e)) if e > s => &text[s..=e],
+        _ => return Vec::new(),
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("clip_judge final-pass: could not parse model JSON: {e}");
+            return Vec::new();
+        }
+    };
+    let arr = parsed
+        .get("final")
+        .or_else(|| parsed.get("selected"))
+        .or_else(|| parsed.get("clips"))
+        .and_then(|v| v.as_array());
+    let Some(arr) = arr else { return Vec::new() };
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for item in arr {
+        // Accept either {"index":n,"score":s} or a bare index number.
+        let idx = item
+            .get("index")
+            .and_then(|v| v.as_u64())
+            .or_else(|| item.as_u64());
+        let Some(idx) = idx else { continue };
+        let idx = idx as usize;
+        if idx >= candidates.len() || !seen.insert(idx) {
+            continue;
+        }
+        let mut m = candidates[idx].0.clone();
+        if let Some(s) = item.get("score").and_then(|v| v.as_f64()) {
+            m.score = (s / 100.0).clamp(0.0, 1.0);
+        }
+        out.push(m);
+    }
+    out
+}
+
+/// Run ONE cheap Sonnet final-pass over the top survivors (their snippets only,
+/// not the VOD) to pick/re-order the final clip set. Returns the curated moments
+/// plus (input, output) token counts for cost logging. Errors propagate so the
+/// caller can fall back to the first-pass ranking.
+pub async fn final_pass(
+    provider: Provider,
+    api_key: &str,
+    model: &str,
+    candidates: &[(JudgedMoment, String)],
+    vod_title: &str,
+) -> Result<(Vec<JudgedMoment>, u64, u64), AppError> {
+    if candidates.is_empty() {
+        return Ok((Vec::new(), 0, 0));
+    }
+    let prompt = build_final_pass_prompt(candidates, vod_title);
+    log::info!(
+        "clip_judge: final-pass over {} candidates via {} ({})",
+        candidates.len(),
+        match provider {
+            Provider::Claude => "Claude",
+            Provider::OpenAI => "OpenAI",
+            Provider::Gemini => "Gemini",
+            Provider::Free => "Free",
+        },
+        model
+    );
+    let (response, tin, tout) = call_llm(provider, api_key, model, &prompt).await?;
+    let moments = parse_final_pass(&response, candidates);
+    log::info!("clip_judge: final-pass selected {} of {} moments", moments.len(), candidates.len());
+    Ok((moments, tin, tout))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,5 +556,115 @@ mod tests {
         assert!(parse_judge_response(r#"{"moments":[]}"#, 600.0).is_empty());
         assert!(parse_judge_response("no json here", 600.0).is_empty());
         assert!(parse_judge_response("{bad json", 600.0).is_empty());
+    }
+
+    // ── Transcript cleanup ──
+
+    #[test]
+    fn clean_collapses_whisper_repetition_loop() {
+        // "wait, wait, wait" ×6 (whisper stall) collapses to ONE segment that
+        // spans the whole run.
+        let mut segs = vec![seg(10.0, 11.0, "okay here we go")];
+        for k in 0..6 {
+            let t = 12.0 + k as f64;
+            segs.push(seg(t, t + 1.0, "wait, wait"));
+        }
+        segs.push(seg(30.0, 31.0, "that was wild"));
+        let out = clean_segments(&segs);
+        let waits = out.iter().filter(|s| s.text.starts_with("wait")).count();
+        assert_eq!(waits, 1, "loop collapses to a single segment");
+        // The kept loop segment spans the run (12 → 18).
+        let loop_seg = out.iter().find(|s| s.text.starts_with("wait")).unwrap();
+        assert!((loop_seg.start - 12.0).abs() < 1e-6);
+        assert!(loop_seg.end >= 18.0, "collapsed segment spans the run end");
+        assert_eq!(out.len(), 3, "intro + collapsed loop + outro");
+    }
+
+    #[test]
+    fn clean_drops_artifacts_and_adjacent_dupes() {
+        let segs = vec![
+            seg(0.0, 1.0, "[_TT_]"),
+            seg(1.0, 2.0, "[BLANK_AUDIO]"),
+            seg(2.0, 3.0, "(music)"),
+            seg(3.0, 4.0, "   "),
+            seg(4.0, 5.0, "real line"),
+            seg(5.0, 6.0, "real line"), // adjacent exact dup
+            seg(6.0, 7.0, "different line"),
+        ];
+        let out = clean_segments(&segs);
+        assert_eq!(out.len(), 2, "artifacts dropped, adjacent dup collapsed");
+        assert_eq!(out[0].text, "real line");
+        assert_eq!(out[1].text, "different line");
+    }
+
+    #[test]
+    fn clean_keeps_distinct_lines() {
+        // Distinct consecutive lines are never collapsed (no loop, no dup).
+        let segs = vec![
+            seg(0.0, 1.0, "nice shot"),
+            seg(1.0, 2.0, "let's go"),
+            seg(2.0, 3.0, "clutch"),
+        ];
+        let out = clean_segments(&segs);
+        assert_eq!(out.len(), 3, "three distinct lines all survive");
+    }
+
+    // ── Sonnet final-pass parsing ──
+
+    fn jm(start: f64, end: f64, score: f64) -> JudgedMoment {
+        JudgedMoment {
+            start_sec: start,
+            end_sec: end,
+            category: "banter".into(),
+            score,
+            reason: "r".into(),
+        }
+    }
+
+    #[test]
+    fn final_pass_reorders_and_rescores_by_index() {
+        let cands = vec![
+            (jm(10.0, 30.0, 0.60), "a".to_string()),
+            (jm(50.0, 70.0, 0.55), "b".to_string()),
+            (jm(90.0, 110.0, 0.50), "c".to_string()),
+        ];
+        // Model picks index 2 then 0, drops 1, re-scores.
+        let resp = r#"{"final":[{"index":2,"score":95},{"index":0,"score":80}]}"#;
+        let out = parse_final_pass(resp, &cands);
+        assert_eq!(out.len(), 2, "only the two chosen survive");
+        assert!((out[0].start_sec - 90.0).abs() < 1e-6, "index 2 first");
+        assert!((out[0].score - 0.95).abs() < 1e-6, "re-scored");
+        assert!((out[1].start_sec - 10.0).abs() < 1e-6, "index 0 second");
+    }
+
+    #[test]
+    fn final_pass_drops_bad_and_duplicate_indices() {
+        let cands = vec![(jm(10.0, 30.0, 0.6), "a".to_string())];
+        // Out-of-range index 9 dropped; duplicate index 0 deduped.
+        let resp = r#"{"final":[{"index":9},{"index":0},{"index":0}]}"#;
+        let out = parse_final_pass(resp, &cands);
+        assert_eq!(out.len(), 1);
+        assert!((out[0].start_sec - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn final_pass_parse_garbage_is_safe() {
+        let cands = vec![(jm(10.0, 30.0, 0.6), "a".to_string())];
+        assert!(parse_final_pass("no json", &cands).is_empty());
+        assert!(parse_final_pass(r#"{"final":[]}"#, &cands).is_empty());
+    }
+
+    #[test]
+    fn final_pass_prompt_lists_indexed_candidates() {
+        let cands = vec![
+            (jm(10.0, 30.0, 0.6), "savage roast here".to_string()),
+            (jm(50.0, 70.0, 0.5), "clutch escape".to_string()),
+        ];
+        let p = build_final_pass_prompt(&cands, "My Stream");
+        assert!(p.contains("My Stream"));
+        assert!(p.contains("0. [10-30s]"));
+        assert!(p.contains("1. [50-70s]"));
+        assert!(p.contains("savage roast here"));
+        assert!(p.contains("\"final\""));
     }
 }

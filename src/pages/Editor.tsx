@@ -713,6 +713,10 @@ export default function Editor() {
   })
 
   const clipDuration = Math.max(0, endSeconds - startSeconds)
+  // When the clip is backed by a standalone community-clip MP4, the preview
+  // plays that whole file (no VOD seek/trim window). Used to switch ClipPlayer
+  // into fullFile mode and to skip the VOD-relative trim timeline.
+  const isCommunityClip = !!clip?.community_clip_mp4_path
   const captionStyle = CAPTION_STYLES.find(s => s.id === captionStyleId) || CAPTION_STYLES[0]
   const exportPreset = EXPORT_PRESETS.find(p => p.id === exportPresetId) || EXPORT_PRESETS[0]
 
@@ -1068,7 +1072,14 @@ export default function Editor() {
         console.log('[Editor] Game loaded — clip.game:', JSON.stringify(c.game), '| vod.game_name:', JSON.stringify(v.game_name), '→', JSON.stringify(storedGame))
         setGame(storedGame)
 
-        if (v.local_path) setVideoSrc(convertFileSrc(v.local_path))
+        // Community-clip MP4: a standalone, already-trimmed file. When present
+        // the preview plays THAT file directly (0 → its own duration) instead
+        // of seeking into the VOD. Falls back to the VOD source otherwise.
+        if (c.community_clip_mp4_path) {
+          setVideoSrc(convertFileSrc(c.community_clip_mp4_path))
+        } else if (v.local_path) {
+          setVideoSrc(convertFileSrc(v.local_path))
+        }
 
         // Auto-generate publish description via AI when BYOK is active and no saved description
         if (!c.publish_description && aiStore.isByok() && clipId) {
@@ -1375,6 +1386,7 @@ export default function Editor() {
                   src={videoSrc}
                   clipStart={startSeconds}
                   clipEnd={endSeconds}
+                  fullFile={isCommunityClip}
                   mode="full"
                   controlsOverlay
                   className="h-full"
@@ -1653,38 +1665,49 @@ export default function Editor() {
 
           {/* Timing */}
           <Section title="Hook Trim">
-            <TrimTimeline
-              startTime={startSeconds}
-              endTime={endSeconds}
-              originalStart={originalStart}
-              originalEnd={originalEnd}
-              videoDuration={vod?.duration_seconds || endSeconds + 30}
-              currentTime={playbackTime}
-              isPlaying={isPlaying}
-              markers={timelineMarkers}
-              suggestedHookStart={suggestedHookStart}
-              onChange={(s, e) => { setStartSeconds(s); setEndSeconds(e) }}
-              onSeekTo={(t) => playerSeekRef.current?.(t)}
-            />
+            {isCommunityClip ? (
+              /* Community-clip MP4: the file is already the full, trimmed clip
+                 (0-based, standalone). There is no VOD sub-range to trim, so the
+                 VOD-relative timeline/handles don't apply here. */
+              <p className="text-xs text-slate-400">
+                This is an imported Twitch clip — it plays as a standalone, already-trimmed file, so there's no VOD trim window to adjust.
+              </p>
+            ) : (
+              <>
+                <TrimTimeline
+                  startTime={startSeconds}
+                  endTime={endSeconds}
+                  originalStart={originalStart}
+                  originalEnd={originalEnd}
+                  videoDuration={vod?.duration_seconds || endSeconds + 30}
+                  currentTime={playbackTime}
+                  isPlaying={isPlaying}
+                  markers={timelineMarkers}
+                  suggestedHookStart={suggestedHookStart}
+                  onChange={(s, e) => { setStartSeconds(s); setEndSeconds(e) }}
+                  onSeekTo={(t) => playerSeekRef.current?.(t)}
+                />
 
-            {/* Precise time inputs (collapsed, for fine-tuning) */}
-            <details className="mt-3">
-              <summary className="text-[10px] text-slate-500 cursor-pointer hover:text-slate-400">Fine-tune seconds</summary>
-              <div className="grid grid-cols-2 gap-2 mt-2">
-                <div>
-                  <label className="block text-[10px] text-slate-500 mb-0.5">Start</label>
-                  <input type="number" value={startSeconds} onChange={e => setStartSeconds(parseFloat(e.target.value) || 0)}
-                    step="0.1" min="0"
-                    className="w-full px-2 py-1 bg-surface-900 border border-surface-600 rounded text-white text-xs focus:outline-none focus:border-violet-500 font-mono" />
-                </div>
-                <div>
-                  <label className="block text-[10px] text-slate-500 mb-0.5">End</label>
-                  <input type="number" value={endSeconds} onChange={e => setEndSeconds(parseFloat(e.target.value) || 0)}
-                    step="0.1" min="0"
-                    className="w-full px-2 py-1 bg-surface-900 border border-surface-600 rounded text-white text-xs focus:outline-none focus:border-violet-500 font-mono" />
-                </div>
-              </div>
-            </details>
+                {/* Precise time inputs (collapsed, for fine-tuning) */}
+                <details className="mt-3">
+                  <summary className="text-[10px] text-slate-500 cursor-pointer hover:text-slate-400">Fine-tune seconds</summary>
+                  <div className="grid grid-cols-2 gap-2 mt-2">
+                    <div>
+                      <label className="block text-[10px] text-slate-500 mb-0.5">Start</label>
+                      <input type="number" value={startSeconds} onChange={e => setStartSeconds(parseFloat(e.target.value) || 0)}
+                        step="0.1" min="0"
+                        className="w-full px-2 py-1 bg-surface-900 border border-surface-600 rounded text-white text-xs focus:outline-none focus:border-violet-500 font-mono" />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] text-slate-500 mb-0.5">End</label>
+                      <input type="number" value={endSeconds} onChange={e => setEndSeconds(parseFloat(e.target.value) || 0)}
+                        step="0.1" min="0"
+                        className="w-full px-2 py-1 bg-surface-900 border border-surface-600 rounded text-white text-xs focus:outline-none focus:border-violet-500 font-mono" />
+                    </div>
+                  </div>
+                </details>
+              </>
+            )}
           </Section>
 
           {/* Export Preset */}

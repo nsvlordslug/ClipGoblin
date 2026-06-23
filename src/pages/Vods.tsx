@@ -3,7 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import { Video, Download, Search, Eye, Tv, LogIn, Check, RotateCcw, RefreshCw, Trash2, X, Gamepad2, Plus, Play } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
 import { useUiStore } from '../stores/uiStore'
-import { invoke } from '@tauri-apps/api/core'
+import { useAiStore } from '../stores/aiStore'
+import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import ImportVodDialog from '../components/ImportVodDialog'
 
 function formatDuration(seconds: number) {
@@ -23,6 +24,50 @@ function formatDate(dateStr: string) {
   } catch {
     return dateStr
   }
+}
+
+// Per-card thumbnail with robust error handling. Shows the Twitch preview as
+// soon as the image loads (works before the VOD is downloaded); falls back to
+// the title over the card's gradient background only when there's no URL or the
+// image genuinely fails. Tracks the errored URL in React state instead of a
+// sticky `display:none` DOM mutation, so a transient load failure can't
+// permanently hide a valid thumbnail across the frequent progress-poll
+// re-renders, and a URL healed by Re-fetch retries automatically.
+function VodThumb({ vodId, downloaded, thumbnailUrl, title }: { vodId: string; downloaded: boolean; thumbnailUrl?: string | null; title: string }) {
+  const [erroredUrl, setErroredUrl] = useState<string | null>(null)
+  const [localThumb, setLocalThumb] = useState<string | null>(null)
+  const twitchUsable = !!thumbnailUrl && erroredUrl !== thumbnailUrl
+
+  // For a downloaded VOD whose Twitch thumbnail is missing or has 404'd (Twitch
+  // deletes VOD thumbnails past its retention window), lazily grab a frame from
+  // the local video file via the backend so the card still shows a real preview.
+  useEffect(() => {
+    if (!downloaded || twitchUsable || localThumb) return
+    let cancelled = false
+    invoke<string | null>('ensure_vod_thumbnail', { vodId })
+      .then(p => { if (!cancelled && p) setLocalThumb(convertFileSrc(p)) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [downloaded, twitchUsable, localThumb, vodId])
+
+  if (twitchUsable) {
+    return (
+      <img
+        src={thumbnailUrl as string}
+        alt={title}
+        className="w-full h-full object-cover absolute inset-0"
+        onError={() => setErroredUrl(thumbnailUrl as string)}
+      />
+    )
+  }
+  if (localThumb) {
+    return <img src={localThumb} alt={title} className="w-full h-full object-cover absolute inset-0" />
+  }
+  return (
+    <div className="w-full h-full flex items-center justify-center absolute inset-0 px-3 text-center">
+      <span className="text-[11px] font-medium text-white/70 line-clamp-2">{title}</span>
+    </div>
+  )
 }
 
 // Maps the backend's analysis_progress percentage to a human-readable stage
@@ -104,6 +149,8 @@ export default function Vods() {
   const showReviewTools = useUiStore(
     (s) => s.settings.developerModeUnlocked && s.settings.showReviewTools,
   )
+  // BYOK cost UI: only show estimates/actuals when a paid provider is active.
+  const aiNotFree = useAiStore((s) => s.effectiveMode() !== 'free')
   const navigate = useNavigate()
   const [refreshingId, setRefreshingId] = useState<string | null>(null)
   const [refreshedId, setRefreshedId] = useState<string | null>(null)
@@ -115,6 +162,11 @@ export default function Vods() {
   const [restoringVods, setRestoringVods] = useState(false)
   const [showImportDialog, setShowImportDialog] = useState(false)
   const [detectionStats, setDetectionStats] = useState<Record<string, { candidatesFound: number; candidatesRejected: number; duplicatesSuppressed: number; clipsSelected: number; sensitivity: string }>>({})
+  // Pre-run cost estimate per VOD (USD), keyed by vod.id. Only fetched when a
+  // paid AI provider is active. null = not yet fetched / unavailable.
+  const [analyzeEstimates, setAnalyzeEstimates] = useState<Record<string, number>>({})
+  // After an analyze completes we surface the actual spend in a brief toast.
+  const [analyzeCostUsd, setAnalyzeCostUsd] = useState<number | null>(null)
 
   // Load detection stats for completed VODs
   useEffect(() => {
@@ -142,9 +194,37 @@ export default function Vods() {
     if (vods.length > 0) loadStats()
   }, [vods])
 
+  // Pre-run cost estimates: ask the backend what an analyze would cost for each
+  // VOD's duration. Only when a paid provider is active; free mode shows nothing.
+  useEffect(() => {
+    if (!aiNotFree) {
+      setAnalyzeEstimates({})
+      return
+    }
+    let cancelled = false
+    const loadEstimates = async () => {
+      for (const vod of vods) {
+        if (analyzeEstimates[vod.id] !== undefined) continue
+        try {
+          const usd = await invoke<number>('estimate_analyze_cost', { durationSecs: vod.duration_seconds })
+          if (!cancelled) setAnalyzeEstimates(prev => ({ ...prev, [vod.id]: usd }))
+        } catch { /* estimate unavailable — show nothing for this VOD */ }
+      }
+    }
+    if (vods.length > 0) loadEstimates()
+    return () => { cancelled = true }
+  }, [vods, aiNotFree])
+
   useEffect(() => {
     checkLogin()
   }, [checkLogin])
+
+  // Auto-dismiss the "this analyze cost" toast a few seconds after it appears.
+  useEffect(() => {
+    if (analyzeCostUsd === null) return
+    const t = setTimeout(() => setAnalyzeCostUsd(null), 6000)
+    return () => clearTimeout(t)
+  }, [analyzeCostUsd])
 
   useEffect(() => {
     if (loggedInUser) {
@@ -243,6 +323,15 @@ export default function Vods() {
           if (vod.analysis_status === 'completed') {
             clearInterval(poll)
             if (loggedInUser) refreshVods(loggedInUser.id)
+            // Surface the actual spend for this analyze (paid providers only),
+            // in an understated toast. Fetch before navigating so the value is
+            // ready; a small nav delay lets the toast paint on this page first.
+            if (aiNotFree) {
+              try {
+                const usd = await invoke<number>('get_analysis_cost', { vodId })
+                if (usd > 0) setAnalyzeCostUsd(usd)
+              } catch { /* cost unavailable — skip the toast */ }
+            }
             // Pass the just-completed VOD's id through navigation state so the
             // Clips page can scroll directly to its section instead of landing
             // somewhere in the middle of the (potentially long) clip list.
@@ -484,17 +573,14 @@ export default function Vods() {
             <div key={vod.id} className="v4-vod-card flex flex-col">
               {/* Thumbnail */}
               <div className="v4-vod-thumb" style={{height:150}}>
-                {vod.thumbnail_url ? (
-                  <img
-                    src={vod.thumbnail_url}
-                    alt={vod.title}
-                    className="w-full h-full object-cover absolute inset-0"
-                  />
-                ) : (
-                  <div className="w-full h-full flex items-center justify-center absolute inset-0">
-                    <Video className="w-8 h-8 text-white/40" />
-                  </div>
-                )}
+                {/* Preview: a working Twitch thumbnail, else a frame from the
+                    local file for downloaded VODs, else the card gradient + title. */}
+                <VodThumb
+                  vodId={vod.id}
+                  downloaded={vod.download_status === 'downloaded'}
+                  thumbnailUrl={vod.thumbnail_url}
+                  title={vod.title}
+                />
                 <span className={`v4-vod-status ${v4StatusClass(vod)}`}>
                   {v4StatusLabel(vod)}
                 </span>
@@ -643,6 +729,14 @@ export default function Vods() {
                   </div>
                 )}
 
+                {/* Pre-run AI cost estimate — paid providers only, when ready to analyze */}
+                {aiNotFree && vod.download_status === 'downloaded' && vod.analysis_status !== 'analyzing'
+                  && analyzeEstimates[vod.id] !== undefined && analyzeEstimates[vod.id] > 0 && (
+                  <p className="text-[10px] text-slate-500" title="Estimated AI provider cost for analyzing this VOD">
+                    ~${analyzeEstimates[vod.id].toFixed(2)} est.
+                  </p>
+                )}
+
                 {/* Actions — primary row */}
                 <div className="flex gap-2 mt-auto">
                   {vod.download_status === 'failed' ? (
@@ -788,6 +882,13 @@ export default function Vods() {
         open={showImportDialog}
         onClose={() => setShowImportDialog(false)}
       />
+
+      {/* Post-analyze cost toast (paid providers only). Understated, auto-dismisses. */}
+      {analyzeCostUsd !== null && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-surface-700 border border-surface-600 rounded-xl px-4 py-3 shadow-2xl flex items-center gap-2 animate-slide-up">
+          <span className="text-sm text-slate-300">this analyze: ~${analyzeCostUsd.toFixed(2)}</span>
+        </div>
+      )}
     </div>
   )
 }

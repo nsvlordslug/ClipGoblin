@@ -19,6 +19,13 @@ interface Props {
   clipStart: number
   /** Clip end within the source video (seconds) */
   clipEnd: number
+  /**
+   * When true, `src` is a STANDALONE, already-trimmed file (e.g. a downloaded
+   * Twitch community clip). The player ignores clipStart/clipEnd and plays the
+   * WHOLE file (0 → the file's natural duration) with no seek/trim. Default:
+   * false — keeps the normal VOD-seek behavior driven by clipStart/clipEnd.
+   */
+  fullFile?: boolean
   /** 'compact' = card-sized (no volume), 'full' = editor-sized (all controls) */
   mode?: 'compact' | 'full'
   /** Extra CSS class for the container */
@@ -44,7 +51,7 @@ interface Props {
 export default function ClipPlayer({
   src, poster, clipStart, clipEnd, mode = 'compact', className = '', overlay,
   controlsOverlay = false, onPlayChange, onTimeUpdate, seekRef: externalSeekRef,
-  objectFit = 'cover', videoElementRef,
+  objectFit = 'cover', videoElementRef, fullFile = false,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
   // Mirror our internal video ref into the external ref (if provided)
@@ -68,10 +75,21 @@ export default function ClipPlayer({
   const [draggingSeek, setDraggingSeek] = useState(false)
   const [draggingVol, setDraggingVol] = useState(false)
   const [showVolume, setShowVolume] = useState(false)
+  // Natural duration of the loaded file — only used in fullFile mode (a
+  // standalone community-clip MP4) to bound playback to the file itself.
+  const [fileDuration, setFileDuration] = useState(0)
 
-  const clipDuration = Math.max(0, clipEnd - clipStart)
-  const elapsed = Math.max(0, currentTime - clipStart)
-  const progress = clipDuration > 0 ? Math.min(1, elapsed / clipDuration) : 0
+  // Effective clip bounds. In fullFile mode the source IS the clip, so we play
+  // 0 → the file's own duration and ignore the VOD-relative clipStart/clipEnd.
+  // Until metadata loads (fileDuration === 0) we use a sentinel so the boundary
+  // check below never trims the file early. When fullFile is false these are
+  // exactly clipStart/clipEnd, so normal VOD clips are unaffected.
+  const effClipStart = fullFile ? 0 : clipStart
+  const effClipEnd = fullFile ? (fileDuration > 0 ? fileDuration : Number.MAX_SAFE_INTEGER) : clipEnd
+
+  const clipDuration = Math.max(0, effClipEnd - effClipStart)
+  const elapsed = Math.max(0, currentTime - effClipStart)
+  const progress = clipDuration > 0 && clipDuration < Number.MAX_SAFE_INTEGER ? Math.min(1, elapsed / clipDuration) : 0
   const isFull = mode === 'full'
 
   // ── Centralized playback: register this player, coordinate with others ──
@@ -98,14 +116,23 @@ export default function ClipPlayer({
     setLoaded(false)
     setError('')
     setPlaying(false)
+    setFileDuration(0)
 
     video.src = src
     video.volume = volume
     video.muted = muted
 
     const onMeta = () => {
-      video.currentTime = clipStart
-      setCurrentTime(clipStart)
+      if (fullFile) {
+        // Standalone clip: it's already trimmed — start at 0 and bound to the
+        // file's own duration. No VOD-relative seek.
+        setFileDuration(Number.isFinite(video.duration) ? video.duration : 0)
+        video.currentTime = 0
+        setCurrentTime(0)
+      } else {
+        video.currentTime = clipStart
+        setCurrentTime(clipStart)
+      }
       setLoaded(true)
     }
     const onErr = () => {
@@ -132,16 +159,16 @@ export default function ClipPlayer({
     const onTime = () => {
       setCurrentTime(video.currentTime)
       onTimeUpdateRef.current?.(video.currentTime)
-      if (video.currentTime >= clipEnd) {
+      if (video.currentTime >= effClipEnd) {
         video.pause()
-        video.currentTime = clipStart
-        setCurrentTime(clipStart)
+        video.currentTime = effClipStart
+        setCurrentTime(effClipStart)
         setPlayingState(false)
       }
     }
     video.addEventListener('timeupdate', onTime)
     return () => video.removeEventListener('timeupdate', onTime)
-  }, [clipStart, clipEnd])
+  }, [effClipStart, effClipEnd])
 
   // ── Expose seek function to parent via ref ──
   useEffect(() => {
@@ -184,7 +211,7 @@ export default function ClipPlayer({
     if (!loaded) {
       // First click — wait for metadata
       const onReady = () => {
-        video.currentTime = clipStart
+        video.currentTime = effClipStart
         video.play().then(() => setPlayingState(true)).catch(() => setError(PLAYBACK_FAILED_MSG))
       }
       if (video.readyState >= 1) onReady()
@@ -196,18 +223,18 @@ export default function ClipPlayer({
       video.pause()
       setPlayingState(false)
     } else {
-      if (video.currentTime >= clipEnd - 0.5 || video.currentTime < clipStart) {
-        video.currentTime = clipStart
+      if ((effClipEnd < Number.MAX_SAFE_INTEGER && video.currentTime >= effClipEnd - 0.5) || video.currentTime < effClipStart) {
+        video.currentTime = effClipStart
       }
       video.play().then(() => setPlayingState(true)).catch(() => setError(PLAYBACK_FAILED_MSG))
     }
-  }, [loaded, playing, error, clipStart, clipEnd])
+  }, [loaded, playing, error, effClipStart, effClipEnd])
 
   const restart = () => {
     const video = videoRef.current
     if (!video || !loaded) return
-    video.currentTime = clipStart
-    setCurrentTime(clipStart)
+    video.currentTime = effClipStart
+    setCurrentTime(effClipStart)
     video.play().then(() => setPlayingState(true)).catch(() => {})
   }
 
@@ -218,10 +245,10 @@ export default function ClipPlayer({
     if (!bar || !video || !loaded) return
     const rect = bar.getBoundingClientRect()
     const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
-    const t = clipStart + pct * clipDuration
+    const t = effClipStart + pct * clipDuration
     video.currentTime = t
     setCurrentTime(t)
-  }, [loaded, clipStart, clipDuration])
+  }, [loaded, effClipStart, clipDuration])
 
   const onSeekDown = (e: React.MouseEvent) => {
     e.preventDefault(); e.stopPropagation()

@@ -489,6 +489,13 @@ pub fn parse_duration(duration: &str) -> i64 {
 /// Raw clip record from the `/helix/clips` endpoint. Only the fields we need.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct TwitchCommunityClip {
+    /// Twitch clip slug/id (e.g. "AwkwardHelplessSalamanderSwiftRage").
+    #[serde(default)]
+    pub id: String,
+    /// Clip page URL (e.g. "https://clips.twitch.tv/<slug>"). This is what
+    /// yt-dlp downloads to fetch the actual viewer-made clip MP4.
+    #[serde(default)]
+    pub url: String,
     /// VOD the clip was cut from. Some clips aren't tied to a VOD (null).
     #[serde(default)]
     pub video_id: Option<String>,

@@ -22,6 +22,12 @@ export interface AiSettings {
   useForTitles: boolean
   useForCaptions: boolean
 
+  /** Claude model used for the clip-detection judge (separate from `claudeModel`,
+   *  which drives titles/captions). Default: cheap Haiku. */
+  claudeJudgeModel: string
+  /** Run a final Sonnet pass to make the last clip picks. Default: true. */
+  useSonnetFinalPass: boolean
+
   /** Fall back to Free mode if BYOK call fails. Default: true. */
   fallbackToFree: boolean
 }
@@ -36,6 +42,8 @@ export const AI_DEFAULTS: AiSettings = {
   geminiModel: 'gemini-2.5-flash',
   useForTitles: true,
   useForCaptions: true,
+  claudeJudgeModel: 'claude-sonnet-4-6',
+  useSonnetFinalPass: true,
   fallbackToFree: true,
 }
 

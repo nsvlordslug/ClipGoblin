@@ -79,6 +79,7 @@ use commands::settings::{
     save_setting, get_setting, open_url, get_app_info, get_hardware_info,
     list_jobs, get_job, remove_job, pick_download_folder, get_download_dir,
     get_storage_paths, open_folder, get_detection_stats, get_ai_cost_summary,
+    estimate_analyze_cost, get_analysis_cost,
 };
 use commands::social::{
     connect_platform, disconnect_platform, get_connected_account,
@@ -86,7 +87,7 @@ use commands::social::{
     get_clip_upload_history, restore_deleted_vods, refresh_upload_stats,
 };
 use commands::vod::{
-    download_vod, get_cached_vods, analyze_vod, open_vod, get_vods,
+    download_vod, get_cached_vods, ensure_vod_thumbnail, analyze_vod, open_vod, get_vods,
     get_highlights, get_all_highlights, get_clips, delete_clip,
     refresh_vod_metadata, import_vod_by_url, get_stream_status, set_clip_game, set_clip_title, set_clip_publish_meta,
     set_vod_game, delete_vod_file, delete_vod_and_clips, get_vod_disk_usage,
@@ -201,6 +202,8 @@ pub fn run() {
             get_app_info,
             get_hardware_info,
             get_ai_cost_summary,
+            estimate_analyze_cost,
+            get_analysis_cost,
             list_jobs,
             get_job,
             remove_job,
@@ -208,6 +211,7 @@ pub fn run() {
             analyze_vod,
             open_vod,
             get_cached_vods,
+            ensure_vod_thumbnail,
             pick_download_folder,
             get_download_dir,
             get_vod_detail,

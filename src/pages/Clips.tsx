@@ -180,13 +180,19 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
 
   const ensureSrc = useCallback(async () => {
     if (videoSrc) return
+    // Community-clip MP4: a standalone, already-trimmed file. Play it directly
+    // (no VOD lookup, no seek/trim window). Falls back to the VOD source.
+    if (clip.community_clip_mp4_path) {
+      setVideoSrc(convertFileSrc(clip.community_clip_mp4_path))
+      return
+    }
     try {
       const v = await invoke<Vod>('get_vod_detail', { vodId: clip.vod_id })
       if (v.local_path) setVideoSrc(convertFileSrc(v.local_path))
     } catch {
       console.warn(`[Clips] Failed to load VOD source for clip ${clip.id}`)
     }
-  }, [videoSrc, clip.vod_id])
+  }, [videoSrc, clip.vod_id, clip.community_clip_mp4_path])
 
   const handleClick = () => {
     if (selectMode) onToggleSelect()
@@ -220,6 +226,7 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
           poster={posterSrc}
           clipStart={clip.start_seconds}
           clipEnd={clip.end_seconds}
+          fullFile={!!clip.community_clip_mp4_path}
           mode="compact"
           className="w-full h-full"
           objectFit="contain"

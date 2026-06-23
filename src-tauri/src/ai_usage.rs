@@ -190,6 +190,60 @@ pub fn estimate_cost(conn: &Connection, lookback_vods: u32) -> CostSummary {
     }
 }
 
+/// Total USD already spent on a single VOD across every logged AI call
+/// (clip judge + analysis-time titles/captions + any later regens tagged
+/// with this `vod_id`). Backs the post-analyze "this analyze cost ~$Y"
+/// readout. Returns 0.0 for an unknown VOD or any query error.
+pub fn sum_cost_for_vod(conn: &Connection, vod_id: &str) -> f64 {
+    conn.query_row(
+        "SELECT COALESCE(SUM(cost_usd), 0) FROM ai_usage_log WHERE vod_id = ?1",
+        params![vod_id],
+        |row| row.get::<_, f64>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .unwrap_or(0.0)
+}
+
+/// Duration-based projection of the BYOK cost to analyze a VOD of
+/// `duration_secs`, used for the pre-run estimate when there's no prior
+/// analyze history to average. Pure (no DB) so it's easy to unit-test.
+///
+/// Model is the resolved clip-judge model, priced via [`compute_cost`].
+///
+/// Assumptions (deliberately rough — this is a "you won't be surprised"
+/// number, not a billing guarantee; refined toward the real rolling
+/// average as soon as the first analyze logs):
+///   - The judge reads the (windowed) transcript once. Spoken content is
+///     ~150 wpm ≈ 2.5 words/sec, and ~0.75 words/token, so ≈ 3.3 input
+///     tokens/sec of VOD. We round to **4 tokens/sec** to leave headroom
+///     for the prompt scaffold, signal tags, and whisper verbosity. The
+///     judge's JSON reply is small and roughly fixed; budget **600
+///     output tokens** for the whole run.
+///   - Analysis-time titles run one cheap LLM call per *expected* clip.
+///     Clip count tracks length at ~1 clip / 6 min (matches the detector's
+///     `duration_minutes / 6` heuristic), floored at 6. Each title call is
+///     ~**500 in / 80 out** tokens.
+pub fn project_analyze_cost(provider: Provider, model: &str, duration_secs: f64) -> f64 {
+    let secs = duration_secs.max(0.0);
+
+    // Judge: one pass over the transcript.
+    const JUDGE_TOKENS_IN_PER_SEC: f64 = 4.0;
+    const JUDGE_TOKENS_OUT: u64 = 600;
+    let judge_in = (secs * JUDGE_TOKENS_IN_PER_SEC) as u64;
+    let judge_cost = compute_cost(provider, model, judge_in, JUDGE_TOKENS_OUT);
+
+    // Analysis-time titles: ~1 call per expected clip.
+    const TITLE_TOKENS_IN: u64 = 500;
+    const TITLE_TOKENS_OUT: u64 = 80;
+    let expected_clips = ((secs / 60.0) / 6.0).floor().max(6.0) as u64;
+    let titles_cost =
+        expected_clips as f64 * compute_cost(provider, model, TITLE_TOKENS_IN, TITLE_TOKENS_OUT);
+
+    judge_cost + titles_cost
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +344,80 @@ mod tests {
         let summary = estimate_cost(&conn, 10);
         assert!((summary.avg_per_analyze_usd - 0.15).abs() < 1e-6);
         assert_eq!(summary.vod_count, 2);
+    }
+
+    fn make_log_table(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE ai_usage_log (
+                id TEXT PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                feature TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                tokens_in INTEGER NOT NULL,
+                tokens_out INTEGER NOT NULL,
+                cost_usd REAL NOT NULL,
+                vod_id TEXT,
+                clip_id TEXT,
+                context TEXT
+            )",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn sum_cost_for_vod_sums_matching_rows_only() {
+        let conn = Connection::open_in_memory().unwrap();
+        make_log_table(&conn);
+        let now = chrono::Utc::now().to_rfc3339();
+        for (vod, cost) in [("A", 0.04), ("A", 0.06), ("B", 0.20)] {
+            conn.execute(
+                "INSERT INTO ai_usage_log VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    uuid::Uuid::new_v4().to_string(),
+                    now,
+                    "clip_judge",
+                    "claude",
+                    "claude-sonnet-4-6",
+                    100i64,
+                    100i64,
+                    cost as f64,
+                    vod,
+                    Option::<&str>::None,
+                    Option::<&str>::None,
+                ],
+            )
+            .unwrap();
+        }
+        assert!((sum_cost_for_vod(&conn, "A") - 0.10).abs() < 1e-6);
+        assert!((sum_cost_for_vod(&conn, "B") - 0.20).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sum_cost_for_unknown_vod_is_zero() {
+        let conn = Connection::open_in_memory().unwrap();
+        make_log_table(&conn);
+        assert_eq!(sum_cost_for_vod(&conn, "nope"), 0.0);
+    }
+
+    #[test]
+    fn project_analyze_cost_free_is_zero() {
+        assert_eq!(project_analyze_cost(Provider::Free, "anything", 3600.0), 0.0);
+    }
+
+    #[test]
+    fn project_analyze_cost_scales_with_duration() {
+        // Longer VODs cost more (more transcript tokens + more expected clips).
+        let short = project_analyze_cost(Provider::Claude, "claude-sonnet-4-6", 600.0);
+        let long = project_analyze_cost(Provider::Claude, "claude-sonnet-4-6", 7200.0);
+        assert!(short > 0.0);
+        assert!(long > short);
+    }
+
+    #[test]
+    fn project_analyze_cost_haiku_cheaper_than_sonnet() {
+        let haiku = project_analyze_cost(Provider::Claude, "claude-haiku-4-5", 3600.0);
+        let sonnet = project_analyze_cost(Provider::Claude, "claude-sonnet-4-6", 3600.0);
+        assert!(haiku < sonnet);
     }
 }

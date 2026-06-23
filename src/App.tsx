@@ -248,7 +248,7 @@ export default function App() {
           </button>
         </Tooltip>
         <ErrorBoundary>
-          <div className="py-6 px-8 max-w-[1400px]">
+          <div className="py-6 px-8">
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/vods" element={<Vods />} />
