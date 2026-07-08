@@ -82,14 +82,8 @@ struct VideosResponse {
 /// Build the Twitch OAuth authorization URL with CSRF state.
 /// Uses the embedded client_id (confidential client with client_secret).
 pub fn get_auth_url() -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    // Generate a random-ish state token for CSRF protection
-    let mut hasher = DefaultHasher::new();
-    Instant::now().hash(&mut hasher);
-    std::process::id().hash(&mut hasher);
-    let state = format!("{:x}", hasher.finish());
+    // Generate cryptographically random CSRF state via UUID v4
+    let state = uuid::Uuid::new_v4().to_string();
 
     // Store state for verification on callback
     if let Ok(mut guard) = OAUTH_STATE.lock() {

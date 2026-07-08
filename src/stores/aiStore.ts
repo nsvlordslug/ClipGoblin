@@ -18,7 +18,9 @@ export interface AiSettings {
   geminiModel: string
 
   /** Which features use the AI provider (only applies to BYOK).
-   *  Clip detection always runs in Free mode. */
+   *  Local signal detection always runs free; the optional AI clip judge
+   *  (claudeJudgeModel / useSonnetFinalPass below) uses the BYOK provider
+   *  when enabled. */
   useForTitles: boolean
   useForCaptions: boolean
 

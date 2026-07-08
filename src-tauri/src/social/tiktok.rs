@@ -504,7 +504,7 @@ impl PlatformAdapter for TikTokAdapter {
 
         // 4. Upload via Content Posting API
         log::info!("TikTok upload: calling do_upload_net (title='{}', visibility='{}', handle='{}')", title, visibility, tiktok_handle);
-        let (publish_id, video_url) = do_upload_net(
+        let (publish_id, status) = do_upload_net(
             &access_token,
             &title,
             &description,
@@ -520,12 +520,16 @@ impl PlatformAdapter for TikTokAdapter {
         )
         .await?;
 
-        // 5. Record in upload history
-        db::upsert_upload(db, &meta.clip_id, "tiktok", &video_url)
-            .map_err(|e| AppError::Database(e.to_string()))?;
+        // 5. Record upload history ONLY on a confirmed publish. A Failed/unconfirmed
+        //    result must not be logged as a completed upload — that was the bug:
+        //    failed/pending posts were recorded as success with a profile URL.
+        if let UploadResultStatus::Complete { video_url } = &status {
+            db::upsert_upload(db, &meta.clip_id, "tiktok", video_url)
+                .map_err(|e| AppError::Database(e.to_string()))?;
+        }
 
         Ok(UploadResult {
-            status: UploadResultStatus::Complete { video_url },
+            status,
             job_id: publish_id,
         })
     }
@@ -836,7 +840,7 @@ async fn do_upload_net(
     brand_organic: bool,
     branded_content: bool,
     clip_id: &str,
-) -> Result<(String, String), AppError> {
+) -> Result<(String, UploadResultStatus), AppError> {
     let client = reqwest::Client::new();
     let total_size = file_bytes.len();
 
@@ -998,23 +1002,25 @@ async fn do_upload_net(
 
     log::info!("TikTok upload complete — all {} chunks sent. Polling for video URL...", chunk_count);
 
-    // Poll the publish status endpoint to get the real video URL.
+    // Poll the publish status endpoint to resolve the real outcome.
     // TikTok needs time to process the upload before returning a post ID.
     crate::social::emit_upload_status("tiktok", clip_id, "processing", None);
-    let video_url = poll_publish_status(&client, access_token, &publish_id, tiktok_handle).await;
+    let status = poll_publish_status(&client, access_token, &publish_id, tiktok_handle).await;
 
-    Ok((publish_id, video_url))
+    Ok((publish_id, status))
 }
 
-/// Poll TikTok's publish status endpoint until we get a video URL or timeout.
-/// Returns the best URL we can build: a direct video link if the post ID is
-/// available, otherwise falls back to the user's profile page.
+/// Poll TikTok's publish status endpoint until the post is confirmed or the
+/// window elapses. Returns `Complete` ONLY when TikTok reports a real published
+/// video id; `Failed` if TikTok rejects it, or if it can't be confirmed within
+/// the window (it may still be processing). Never reports success without a
+/// genuine video URL.
 async fn poll_publish_status(
     client: &reqwest::Client,
     access_token: &str,
     publish_id: &str,
     tiktok_handle: &str,
-) -> String {
+) -> UploadResultStatus {
     // Poll every 5s for up to 30 seconds. If the status endpoint doesn't
     // work (common in sandbox), we fall back quickly to the profile URL.
     const MAX_ATTEMPTS: u32 = 6;
@@ -1091,14 +1097,16 @@ async fn poll_publish_status(
                 if let Some(pid) = post_id.filter(|s| !s.is_empty() && s != "0") {
                     let url = format!("https://www.tiktok.com/video/{}", pid);
                     log::info!("TikTok video URL resolved: {}", url);
-                    return url;
+                    return UploadResultStatus::Complete { video_url: url };
                 }
                 log::info!("TikTok PUBLISH_COMPLETE but no post ID yet (moderation pending)");
             }
             "FAILED" => {
                 let reason = data["fail_reason"].as_str().unwrap_or("unknown");
                 log::error!("TikTok publish failed: {}", reason);
-                break;
+                return UploadResultStatus::Failed {
+                    error: format!("TikTok rejected the post: {}", reason),
+                };
             }
             "" => {
                 log::info!("TikTok status poll: no status field in response");
@@ -1109,13 +1117,14 @@ async fn poll_publish_status(
         }
     }
 
-    // Fallback: link to user's TikTok profile page using their handle.
-    if !tiktok_handle.is_empty() {
-        log::info!("TikTok status poll done — falling back to profile @{}", tiktok_handle);
-        format!("https://www.tiktok.com/@{}", tiktok_handle)
-    } else {
-        log::info!("TikTok status poll done — no handle set, using tiktok.com");
-        "https://www.tiktok.com".to_string()
+    // Polling window elapsed without a confirmed video id. Do NOT report success:
+    // the post may still be processing on TikTok's side, or it may have failed.
+    // Returning Failed keeps it from being recorded as a completed upload (the
+    // scheduler treats it as a failure; a direct upload surfaces the message).
+    let _ = tiktok_handle;
+    log::warn!("TikTok status poll ended without a confirmed video URL for publish_id={}", publish_id);
+    UploadResultStatus::Failed {
+        error: "TikTok didn't confirm the post within 30s — it may still be processing. Check your TikTok before re-uploading.".to_string(),
     }
 }
 

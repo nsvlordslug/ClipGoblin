@@ -840,7 +840,8 @@ export default function Vods() {
 
                 {deleteConfirmId === vod.id && (
                   <div className="mt-3 p-3 bg-red-950/40 border border-red-500/30 rounded-lg space-y-2">
-                    <p className="text-xs text-red-300 font-medium">Delete this VOD?</p>
+                    <p className="text-xs text-red-300 font-medium">Free up disk for this VOD?</p>
+                    <p className="text-[11px] text-slate-400">Removes the local files only — the VOD stays in your list and re-downloadable from Twitch. If it's aged off Twitch, freeing it means it's gone for good.</p>
                     {diskUsage && (
                       <div className="text-xs text-slate-400 space-y-1">
                         {diskUsage.has_file && <p>VOD file: {formatBytes(diskUsage.vod_size)}</p>}
@@ -854,7 +855,7 @@ export default function Vods() {
                           disabled={deleting}
                           className="w-full text-left px-2.5 py-1.5 text-xs rounded-lg bg-surface-800 border border-surface-600 text-slate-300 hover:border-red-500/50 hover:text-red-300 transition-colors cursor-pointer disabled:opacity-40"
                         >
-                          Delete file only {diskUsage ? `(frees ${formatBytes(diskUsage.vod_size)})` : ''} — keeps clips
+                          Delete download only {diskUsage ? `(frees ${formatBytes(diskUsage.vod_size)})` : ''} — keeps clips
                         </button>
                       )}
                       <button
@@ -862,7 +863,7 @@ export default function Vods() {
                         disabled={deleting}
                         className="w-full text-left px-2.5 py-1.5 text-xs rounded-lg bg-red-900/30 border border-red-500/30 text-red-300 hover:bg-red-900/50 transition-colors cursor-pointer disabled:opacity-40"
                       >
-                        Delete everything {diskUsage ? `(frees ${formatBytes(diskUsage.total_size)})` : ''} — removes VOD + clips
+                        Delete download + clips {diskUsage ? `(frees ${formatBytes(diskUsage.total_size)})` : ''}
                       </button>
                       <button
                         onClick={() => { setDeleteConfirmId(null); setDiskUsage(null) }}

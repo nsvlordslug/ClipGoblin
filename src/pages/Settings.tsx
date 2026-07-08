@@ -593,7 +593,7 @@ export default function SettingsPage() {
             {/* Clip detection note */}
             <div className="flex items-center gap-2 text-xs text-slate-500 pt-2 border-t border-surface-700">
               <Info className="w-3.5 h-3.5 shrink-0" />
-              <span>Clip detection always runs in Free mode for speed and zero cost.</span>
+              <span>Core clip detection runs free and locally. The optional AI clip judge below (off by default) uses your own AI provider and may cost a few cents per VOD.</span>
             </div>
 
             <label className="flex items-center gap-3 cursor-pointer mt-1">

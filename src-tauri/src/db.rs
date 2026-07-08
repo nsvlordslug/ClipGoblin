@@ -541,19 +541,10 @@ pub fn delete_all_channels(conn: &Connection) -> SqliteResult<()> {
 // ── VOD helpers ──
 
 pub fn upsert_vod(conn: &Connection, vod: &VodRow) -> SqliteResult<()> {
-    // Skip VODs that were explicitly deleted by the user
-    let deleted_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM deleted_vods WHERE twitch_video_id = ?1",
-            params![vod.twitch_video_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(0);
-    if deleted_count > 0 {
-        log::warn!("[upsert_vod] SKIPPING twitch_video_id={} — found in deleted_vods table", vod.twitch_video_id);
-        return Ok(());
-    }
-
+    // Option A (2026-06-23): user "Delete" frees the disk (removes the downloaded
+    // file + clips) but the VOD stays re-downloadable, so re-import is NOT
+    // suppressed here. (The old `deleted_vods` suppression was always undone by
+    // `restore_deleted_vods` before every fetch anyway — a dead contradiction.)
     conn.execute(
         "INSERT INTO vods (id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress, game_name)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
