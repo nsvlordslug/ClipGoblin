@@ -68,6 +68,11 @@ pub fn get_setting(
 
 #[tauri::command]
 pub fn open_url(url: String) -> Result<(), String> {
+    // Only hand web URLs to the OS opener — never a local path, file://, or other
+    // scheme that explorer/open/xdg-open would route to an arbitrary handler.
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("Refusing to open a non-http(s) URL".to_string());
+    }
     #[cfg(target_os = "windows")]
     {
         // explorer.exe properly delegates to the default browser using the
@@ -267,6 +272,11 @@ pub fn get_storage_paths(db: State<'_, DbConn>) -> Result<StoragePaths, String> 
 #[tauri::command]
 pub fn open_folder(path: String) -> Result<(), String> {
     let dir = std::path::Path::new(&path);
+    // Only ever open a real absolute filesystem directory — never a URL or a
+    // relative / oddly-formed path handed in from the renderer.
+    if !dir.is_absolute() || path.contains("://") {
+        return Err("Refusing to open a non-absolute or non-filesystem path".to_string());
+    }
     std::fs::create_dir_all(dir)
         .map_err(|e| format!("Failed to create directory: {e}"))?;
 

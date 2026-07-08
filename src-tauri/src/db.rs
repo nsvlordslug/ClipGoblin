@@ -444,14 +444,19 @@ fn is_sensitive_key(key: &str) -> bool {
     SENSITIVE_KEYS.contains(&key)
 }
 
-/// Encrypt value before storage if the key is sensitive.
-fn encrypt_for_storage(key: &str, value: &str) -> String {
+/// Encrypt value before storage if the key is sensitive. Fails CLOSED: if
+/// encryption fails we refuse to store the value rather than silently writing a
+/// token / API key in plaintext (which would break the at-rest guarantee in
+/// gotcha #9). Callers get an error and the secret simply isn't saved.
+fn encrypt_for_storage(key: &str, value: &str) -> SqliteResult<String> {
     if !is_sensitive_key(key) || value.is_empty() {
-        return value.to_string();
+        return Ok(value.to_string());
     }
-    crypto::encrypt_sensitive(value).unwrap_or_else(|e| {
-        log::warn!("Failed to encrypt setting '{}': {} — storing plaintext", key, e);
-        value.to_string()
+    crypto::encrypt_sensitive(value).map_err(|e| {
+        log::error!("Refusing to store sensitive setting '{}' in plaintext — encryption failed: {}", key, e);
+        rusqlite::Error::ToSqlConversionFailure(
+            format!("encrypt failed for '{}': {}", key, e).into(),
+        )
     })
 }
 
@@ -469,7 +474,7 @@ fn decrypt_from_storage(key: &str, value: &str) -> String {
 // ── Settings helpers ──
 
 pub fn save_setting(conn: &Connection, key: &str, value: &str) -> SqliteResult<()> {
-    let stored = encrypt_for_storage(key, value);
+    let stored = encrypt_for_storage(key, value)?;
     conn.execute(
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
