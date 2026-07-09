@@ -272,10 +272,22 @@ pub fn get_storage_paths(db: State<'_, DbConn>) -> Result<StoragePaths, String> 
 #[tauri::command]
 pub fn open_folder(path: String) -> Result<(), String> {
     let dir = std::path::Path::new(&path);
-    // Only ever open a real absolute filesystem directory — never a URL or a
-    // relative / oddly-formed path handed in from the renderer.
-    if !dir.is_absolute() || path.contains("://") {
-        return Err("Refusing to open a non-absolute or non-filesystem path".to_string());
+    // Only ever open a plain, local, absolute directory — never a URL, a
+    // relative path, or (critically) a UNC (\\host\share) or device (\\.\, \\?\)
+    // path. Those are absolute and scheme-free, so the old check let them
+    // through, but a compromised renderer could hand us a UNC path to make
+    // Windows authenticate to an attacker's SMB share (NTLM-hash leak) — and we
+    // create_dir_all() below, so we'd reach out even before opening anything.
+    let has_remote_or_device_prefix = {
+        use std::path::{Component, Prefix};
+        matches!(dir.components().next(), Some(Component::Prefix(pc)) if matches!(
+            pc.kind(),
+            Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(..)
+                | Prefix::Verbatim(..) | Prefix::VerbatimDisk(..)
+        ))
+    };
+    if !dir.is_absolute() || path.contains("://") || has_remote_or_device_prefix {
+        return Err("Refusing to open a non-absolute, remote, or non-filesystem path".to_string());
     }
     std::fs::create_dir_all(dir)
         .map_err(|e| format!("Failed to create directory: {e}"))?;

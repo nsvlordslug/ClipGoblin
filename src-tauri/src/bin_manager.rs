@@ -158,24 +158,38 @@ async fn read_leading_bytes(path: &std::path::Path) -> Result<[u8; 2], AppError>
     Ok(buf)
 }
 
+/// Conservative minimum sizes for the download integrity gate. An error page is
+/// KB-sized while the real binaries are many MB, so a 1 MB floor cleanly
+/// separates them without risking a false reject if upstream repackaging shifts
+/// the exact size.
+const YTDLP_MIN_BYTES: u64 = 1_000_000;
+const FFMPEG_ZIP_MIN_BYTES: u64 = 1_000_000;
+
 /// Integrity gate for a freshly-downloaded binary before its tmp file is
 /// promoted into place. Both binaries track the upstream `latest` release, so
-/// there is no stable checksum to pin — but we can still reject the two failure
+/// there is no stable checksum to pin — but we can still reject the failure
 /// modes that actually occur: a silently-truncated transfer (byte count won't
-/// match the advertised `Content-Length`) and a non-binary response such as an
-/// HTML error page (wrong leading magic bytes). This is integrity-against-
-/// corruption, not supply-chain attestation — TLS already authenticates the
-/// GitHub origin the bytes come from.
+/// match the advertised `Content-Length`), a suspiciously tiny response (below
+/// `min_size` — the backstop when no `Content-Length` is sent), and a non-binary
+/// response such as an HTML error page (wrong leading magic bytes). This is
+/// integrity-against-corruption, not supply-chain attestation — TLS already
+/// authenticates the GitHub origin the bytes come from.
 fn validate_download(
     name: &str,
     downloaded: u64,
     total: u64,
     magic: &[u8],
     expect_magic: &[u8],
+    min_size: u64,
 ) -> Result<(), AppError> {
     if total > 0 && downloaded != total {
         return Err(AppError::Download(format!(
             "{name} download incomplete: got {downloaded} of {total} bytes (truncated transfer)"
+        )));
+    }
+    if downloaded < min_size {
+        return Err(AppError::Download(format!(
+            "{name} download too small: {downloaded} bytes (expected at least {min_size})"
         )));
     }
     if magic.len() < expect_magic.len() || &magic[..expect_magic.len()] != expect_magic {
@@ -217,9 +231,13 @@ pub async fn download_ytdlp(progress: &ProgressCb) -> Result<(), AppError> {
     drop(file);
 
     // Integrity gate: reject a truncated/error-page download before it is
-    // promoted to yt-dlp.exe (a bad exe would only surface at run time).
-    let magic = read_leading_bytes(&tmp_path).await?;
-    if let Err(e) = validate_download("yt-dlp", downloaded, total, &magic, b"MZ") {
+    // promoted to yt-dlp.exe (a bad exe would only surface at run time). Any
+    // failure here — including a file too short to even read the magic — cleans
+    // up the tmp file.
+    let gate = read_leading_bytes(&tmp_path).await.and_then(|magic| {
+        validate_download("yt-dlp", downloaded, total, &magic, b"MZ", YTDLP_MIN_BYTES)
+    });
+    if let Err(e) = gate {
         let _ = tokio::fs::remove_file(&tmp_path).await;
         return Err(e);
     }
@@ -313,9 +331,12 @@ pub async fn download_ffmpeg(progress: &ProgressCb) -> Result<(), AppError> {
     drop(file);
 
     // Integrity gate before extraction: a truncated/error-page download would
-    // otherwise fail deeper in the zip parser with a murkier message.
-    let magic = read_leading_bytes(&zip_path).await?;
-    if let Err(e) = validate_download("ffmpeg", downloaded, total, &magic, b"PK") {
+    // otherwise fail deeper in the zip parser with a murkier message. Any
+    // failure here cleans up the tmp zip.
+    let gate = read_leading_bytes(&zip_path).await.and_then(|magic| {
+        validate_download("ffmpeg", downloaded, total, &magic, b"PK", FFMPEG_ZIP_MIN_BYTES)
+    });
+    if let Err(e) = gate {
         let _ = tokio::fs::remove_file(&zip_path).await;
         return Err(e);
     }
@@ -412,25 +433,32 @@ mod tests {
 
     #[test]
     fn validate_download_accepts_complete_binary() {
-        // Exact size match + correct magic.
-        assert!(validate_download("yt-dlp", 100, 100, b"MZxx", b"MZ").is_ok());
-        // Unknown Content-Length (0) skips the size check; magic still enforced.
-        assert!(validate_download("yt-dlp", 100, 0, b"MZxx", b"MZ").is_ok());
-        assert!(validate_download("ffmpeg", 50, 50, b"PK\x03\x04", b"PK").is_ok());
+        // Exact size match + correct magic, comfortably above the floor.
+        assert!(validate_download("yt-dlp", 100, 100, b"MZxx", b"MZ", 10).is_ok());
+        // Unknown Content-Length (0) skips the exact check; magic + floor enforced.
+        assert!(validate_download("yt-dlp", 100, 0, b"MZxx", b"MZ", 10).is_ok());
+        assert!(validate_download("ffmpeg", 50, 50, b"PK\x03\x04", b"PK", 10).is_ok());
     }
 
     #[test]
     fn validate_download_rejects_truncated_transfer() {
         // Magic is correct; only the byte count is short → still rejected.
-        assert!(validate_download("yt-dlp", 90, 100, b"MZxx", b"MZ").is_err());
+        assert!(validate_download("yt-dlp", 90, 100, b"MZxx", b"MZ", 10).is_err());
+    }
+
+    #[test]
+    fn validate_download_rejects_undersized_download() {
+        // No Content-Length, correct magic, but far below the sane floor
+        // (e.g. a tiny error page that happens to start with "MZ").
+        assert!(validate_download("yt-dlp", 20, 0, b"MZxx", b"MZ", 1000).is_err());
     }
 
     #[test]
     fn validate_download_rejects_non_binary_response() {
         // Full size but an HTML error page ("<!doctype…") instead of a PE.
-        assert!(validate_download("yt-dlp", 100, 100, b"<!", b"MZ").is_err());
+        assert!(validate_download("yt-dlp", 100, 100, b"<!", b"MZ", 10).is_err());
         // Fewer bytes than the signature length → rejected.
-        assert!(validate_download("ffmpeg", 1, 0, b"P", b"PK").is_err());
+        assert!(validate_download("ffmpeg", 1, 0, b"P", b"PK", 0).is_err());
     }
 
     /// Real network + filesystem test. Downloads ~150 MB to

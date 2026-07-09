@@ -463,7 +463,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
           <button onClick={() => {
             const sep = downloadResult.includes('\\') ? '\\' : '/'
             const folder = downloadResult.substring(0, downloadResult.lastIndexOf(sep))
-            invoke('open_url', { url: folder }).catch(() => {})
+            invoke('open_folder', { path: folder }).catch((e) => console.error('Failed to open folder:', e))
           }}
             className="ml-auto text-[10px] text-emerald-400 hover:text-emerald-300 underline shrink-0 cursor-pointer">
             Open folder
