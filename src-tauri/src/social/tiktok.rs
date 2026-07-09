@@ -415,7 +415,7 @@ impl PlatformAdapter for TikTokAdapter {
 
     async fn upload_video(
         &self,
-        db: &Connection,
+        db: &crate::DbConn,
         file_path: &str,
         meta: &UploadMeta,
     ) -> Result<UploadResult, AppError> {
@@ -425,63 +425,56 @@ impl PlatformAdapter for TikTokAdapter {
         validate_export_file(Some(file_path))?;
         log::info!("TikTok upload: file validated OK");
 
-        // 2. Duplicate check — skip if the stored URL is a stale fallback
-        if !meta.force {
-            if let Some(existing) = db::get_upload_for_clip(db, &meta.clip_id, "tiktok")
-                .map_err(|e| AppError::Database(e.to_string()))?
-            {
-                let url = existing.video_url.unwrap_or_default();
-                // Only treat as duplicate if the URL points to an actual video,
-                // not a generic fallback like "tiktok.com" or a profile page.
-                let has_real_url = url.contains("/video/") || url.contains("publish_id=");
-                if has_real_url {
-                    return Ok(UploadResult {
-                        status: UploadResultStatus::Duplicate {
-                            existing_url: url,
-                        },
-                        job_id: String::new(),
-                    });
+        // DB lock (single shared Mutex<Connection>) held ONLY for the dup check +
+        // token refresh + token read, then dropped for the network upload below.
+        let access_token = {
+            let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+
+            // 2. Duplicate check — skip if the stored URL is a stale fallback
+            if !meta.force {
+                if let Some(existing) = db::get_upload_for_clip(&conn, &meta.clip_id, "tiktok")
+                    .map_err(|e| AppError::Database(e.to_string()))?
+                {
+                    let url = existing.video_url.unwrap_or_default();
+                    let has_real_url = url.contains("/video/") || url.contains("publish_id=");
+                    if has_real_url {
+                        return Ok(UploadResult {
+                            status: UploadResultStatus::Duplicate { existing_url: url },
+                            job_id: String::new(),
+                        });
+                    }
+                    log::info!("TikTok: existing upload has stale URL '{}' — allowing re-upload", url);
                 }
-                log::info!("TikTok: existing upload has stale URL '{}' — allowing re-upload", url);
             }
-        }
 
-        // 3. Ensure token is fresh
-        let expiry_str = db::get_setting(db, "tiktok_token_expiry")
-            .map_err(|e| AppError::Database(e.to_string()))?;
-
-        let needs_refresh = match expiry_str {
-            Some(s) => {
-                let expiry: i64 = s.parse().unwrap_or(0);
-                let now = chrono::Utc::now().timestamp();
-                now >= expiry - 60
+            // 3. Ensure token is fresh
+            let expiry_str = db::get_setting(&conn, "tiktok_token_expiry")
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            let needs_refresh = match expiry_str {
+                Some(s) => {
+                    let expiry: i64 = s.parse().unwrap_or(0);
+                    chrono::Utc::now().timestamp() >= expiry - 60
+                }
+                None => true,
+            };
+            if needs_refresh {
+                let refresh_tok = db::get_setting(&conn, "tiktok_refresh_token")
+                    .map_err(|e| AppError::Database(e.to_string()))?
+                    .ok_or_else(|| AppError::Api("No TikTok refresh token found — please reconnect.".into()))?;
+                let new_tokens = do_refresh_token_net(&refresh_tok).await?;
+                let new_expiry = chrono::Utc::now().timestamp() + new_tokens.expires_in as i64;
+                db::save_setting(&conn, "tiktok_access_token", &new_tokens.access_token)
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                db::save_setting(&conn, "tiktok_token_expiry", &new_expiry.to_string())
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                db::save_setting(&conn, "tiktok_refresh_token", &new_tokens.refresh_token)
+                    .map_err(|e| AppError::Database(e.to_string()))?;
             }
-            None => true,
-        };
 
-        if needs_refresh {
-            let refresh_tok = db::get_setting(db, "tiktok_refresh_token")
+            db::get_setting(&conn, "tiktok_access_token")
                 .map_err(|e| AppError::Database(e.to_string()))?
-                .ok_or_else(|| {
-                    AppError::Api("No TikTok refresh token found — please reconnect.".into())
-                })?;
-
-            let new_tokens = do_refresh_token_net(&refresh_tok).await?;
-
-            let new_expiry = chrono::Utc::now().timestamp() + new_tokens.expires_in as i64;
-            db::save_setting(db, "tiktok_access_token", &new_tokens.access_token)
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            db::save_setting(db, "tiktok_token_expiry", &new_expiry.to_string())
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            db::save_setting(db, "tiktok_refresh_token", &new_tokens.refresh_token)
-                .map_err(|e| AppError::Database(e.to_string()))?;
-        }
-
-        let access_token = db::get_setting(db, "tiktok_access_token")
-            .map_err(|e| AppError::Database(e.to_string()))?
-            .ok_or_else(|| {
-                AppError::Api("No TikTok access token — please reconnect.".into())
-            })?;
+                .ok_or_else(|| AppError::Api("No TikTok access token — please reconnect.".into()))?
+        };
 
         log::info!("TikTok upload: access token present (len={})", access_token.len());
 
@@ -494,13 +487,14 @@ impl PlatformAdapter for TikTokAdapter {
         let title = meta.title.clone();
         let description = meta.description.clone();
         let visibility = meta.visibility.clone();
-        // Prefer the explicit handle setting; fall back to display_name
-        let tiktok_handle = db::get_setting(db, "tiktok_handle")
-            .map_err(|e| AppError::Database(e.to_string()))?
-            .or_else(|| {
-                db::get_setting(db, "tiktok_display_name").ok().flatten()
-            })
-            .unwrap_or_default();
+        // Prefer the explicit handle setting; fall back to display_name (short lock)
+        let tiktok_handle = {
+            let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+            db::get_setting(&conn, "tiktok_handle")
+                .map_err(|e| AppError::Database(e.to_string()))?
+                .or_else(|| db::get_setting(&conn, "tiktok_display_name").ok().flatten())
+                .unwrap_or_default()
+        };
 
         // 4. Upload via Content Posting API
         log::info!("TikTok upload: calling do_upload_net (title='{}', visibility='{}', handle='{}')", title, visibility, tiktok_handle);
@@ -524,7 +518,8 @@ impl PlatformAdapter for TikTokAdapter {
         //    result must not be logged as a completed upload — that was the bug:
         //    failed/pending posts were recorded as success with a profile URL.
         if let UploadResultStatus::Complete { video_url } = &status {
-            db::upsert_upload(db, &meta.clip_id, "tiktok", video_url)
+            let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+            db::upsert_upload(&conn, &meta.clip_id, "tiktok", video_url)
                 .map_err(|e| AppError::Database(e.to_string()))?;
         }
 

@@ -191,13 +191,10 @@ pub(crate) fn process_due_uploads(handle: &tauri::AppHandle) -> Result<(), Strin
             }
         };
 
-        let result = {
-            let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(adapter.upload_video(&conn, &output_path, &meta))
-            })
-        };
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(adapter.upload_video(&*db, &output_path, &meta))
+        });
 
         match result {
             Ok(ref upload_result) => {

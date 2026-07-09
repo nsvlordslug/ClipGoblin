@@ -100,7 +100,10 @@ pub trait PlatformAdapter: Send + Sync {
     async fn start_auth(&self) -> Result<String, AppError>;
     async fn handle_callback(&self, db: &Connection, code: &str) -> Result<ConnectedAccount, AppError>;
     async fn refresh_token(&self, db: &Connection) -> Result<(), AppError>;
-    async fn upload_video(&self, db: &Connection, file_path: &str, meta: &UploadMeta) -> Result<UploadResult, AppError>;
+    /// Takes the shared `DbConn` (not a held guard) so the impl can lock only
+    /// for the DB reads/refresh and the final record, releasing the lock for the
+    /// long network upload in between.
+    async fn upload_video(&self, db: &crate::DbConn, file_path: &str, meta: &UploadMeta) -> Result<UploadResult, AppError>;
     fn disconnect(&self, db: &Connection) -> Result<(), AppError>;
     fn get_account(&self, db: &Connection) -> Result<Option<ConnectedAccount>, AppError>;
 }

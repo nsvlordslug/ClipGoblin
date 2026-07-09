@@ -321,64 +321,66 @@ impl PlatformAdapter for YouTubeAdapter {
 
     async fn upload_video(
         &self,
-        db: &Connection,
+        db: &crate::DbConn,
         file_path: &str,
         meta: &UploadMeta,
     ) -> Result<UploadResult, AppError> {
         // 1. Validate the export file (sync)
         validate_export_file(Some(file_path))?;
 
-        // 2. Duplicate check (sync, unless force=true)
-        if !meta.force {
-            if let Some(existing) = db::get_upload_for_clip(db, &meta.clip_id, "youtube")
-                .map_err(|e| AppError::Database(e.to_string()))?
-            {
-                return Ok(UploadResult {
-                    status: UploadResultStatus::Duplicate {
-                        existing_url: existing.video_url.unwrap_or_default(),
-                    },
-                    job_id: String::new(),
-                });
+        // DB lock (the single shared Mutex<Connection>) is held ONLY for the
+        // duplicate check, token refresh, and token read — then dropped so the
+        // long network upload below doesn't block every other DB op. Re-acquired
+        // briefly at the end to record the result.
+        let access_token = {
+            let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+
+            // 2. Duplicate check (unless force=true)
+            if !meta.force {
+                if let Some(existing) = db::get_upload_for_clip(&conn, &meta.clip_id, "youtube")
+                    .map_err(|e| AppError::Database(e.to_string()))?
+                {
+                    return Ok(UploadResult {
+                        status: UploadResultStatus::Duplicate {
+                            existing_url: existing.video_url.unwrap_or_default(),
+                        },
+                        job_id: String::new(),
+                    });
+                }
             }
-        }
 
-        // 3. Ensure token is fresh — read expiry (sync), refresh if needed (async), read token (sync)
-        let expiry_str = db::get_setting(db, "youtube_token_expiry")
-            .map_err(|e| AppError::Database(e.to_string()))?;
-
-        let needs_refresh = match expiry_str {
-            Some(s) => {
-                let expiry: i64 = s.parse().unwrap_or(0);
-                let now = chrono::Utc::now().timestamp();
-                now >= expiry - 60
-            }
-            None => true,
-        };
-
-        if needs_refresh {
-            // Read refresh token (sync) then do network call (async) then save (sync)
-            let refresh_tok = db::get_setting(db, "youtube_refresh_token")
-                .map_err(|e| AppError::Database(e.to_string()))?
-                .ok_or_else(|| {
-                    AppError::Api("No YouTube refresh token found — please reconnect.".into())
-                })?;
-
-            let new_tokens = youtube_refresh_or_clear(db, &refresh_tok).await?;
-
-            let new_expiry = chrono::Utc::now().timestamp() + new_tokens.expires_in as i64;
-            db::save_setting(db, "youtube_access_token", &new_tokens.access_token)
+            // 3. Ensure token is fresh — read expiry, refresh if needed (network), read token
+            let expiry_str = db::get_setting(&conn, "youtube_token_expiry")
                 .map_err(|e| AppError::Database(e.to_string()))?;
-            db::save_setting(db, "youtube_token_expiry", &new_expiry.to_string())
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            if let Some(ref rt) = new_tokens.refresh_token {
-                db::save_setting(db, "youtube_refresh_token", rt)
+            let needs_refresh = match expiry_str {
+                Some(s) => {
+                    let expiry: i64 = s.parse().unwrap_or(0);
+                    chrono::Utc::now().timestamp() >= expiry - 60
+                }
+                None => true,
+            };
+            if needs_refresh {
+                let refresh_tok = db::get_setting(&conn, "youtube_refresh_token")
+                    .map_err(|e| AppError::Database(e.to_string()))?
+                    .ok_or_else(|| {
+                        AppError::Api("No YouTube refresh token found — please reconnect.".into())
+                    })?;
+                let new_tokens = youtube_refresh_or_clear(&conn, &refresh_tok).await?;
+                let new_expiry = chrono::Utc::now().timestamp() + new_tokens.expires_in as i64;
+                db::save_setting(&conn, "youtube_access_token", &new_tokens.access_token)
                     .map_err(|e| AppError::Database(e.to_string()))?;
+                db::save_setting(&conn, "youtube_token_expiry", &new_expiry.to_string())
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                if let Some(ref rt) = new_tokens.refresh_token {
+                    db::save_setting(&conn, "youtube_refresh_token", rt)
+                        .map_err(|e| AppError::Database(e.to_string()))?;
+                }
             }
-        }
 
-        let access_token = db::get_setting(db, "youtube_access_token")
-            .map_err(|e| AppError::Database(e.to_string()))?
-            .ok_or_else(|| AppError::Api("No YouTube access token — please reconnect.".into()))?;
+            db::get_setting(&conn, "youtube_access_token")
+                .map_err(|e| AppError::Database(e.to_string()))?
+                .ok_or_else(|| AppError::Api("No YouTube access token — please reconnect.".into()))?
+        };
 
         // Read file bytes (sync, before async upload)
         let file_bytes = std::fs::read(file_path)
@@ -404,9 +406,12 @@ impl PlatformAdapter for YouTubeAdapter {
         )
         .await?;
 
-        // 6. Record in upload history (sync)
-        db::upsert_upload(db, &meta.clip_id, "youtube", &video_url)
-            .map_err(|e| AppError::Database(e.to_string()))?;
+        // 6. Record in upload history (re-acquire the lock briefly)
+        {
+            let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+            db::upsert_upload(&conn, &meta.clip_id, "youtube", &video_url)
+                .map_err(|e| AppError::Database(e.to_string()))?;
+        }
 
         Ok(UploadResult {
             status: UploadResultStatus::Complete { video_url },

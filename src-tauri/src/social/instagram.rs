@@ -24,7 +24,7 @@ impl PlatformAdapter for InstagramAdapter {
         Err(AppError::NotSupported("Instagram publishing coming soon".into()))
     }
 
-    async fn upload_video(&self, _db: &Connection, _file_path: &str, _meta: &UploadMeta) -> Result<UploadResult, AppError> {
+    async fn upload_video(&self, _db: &crate::DbConn, _file_path: &str, _meta: &UploadMeta) -> Result<UploadResult, AppError> {
         Err(AppError::NotSupported("Instagram publishing coming soon".into()))
     }
 

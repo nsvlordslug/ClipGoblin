@@ -121,14 +121,13 @@ pub async fn upload_to_platform(
             .to_string()
     };
 
-    // Upload: adapter.upload_video is async(?Send), needs &Connection for
-    // duplicate checks, token refresh, and recording upload history.
-    // Must use block_in_place because the trait future is !Send (same
-    // pattern as connect_platform — see that command for details).
-    let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
+    // Upload: adapter.upload_video takes the shared DbConn and locks internally
+    // only for its DB reads/refresh + record — releasing the lock for the network
+    // upload so it no longer blocks the whole app's DB. block_in_place because the
+    // trait future is !Send (same pattern as connect_platform).
     let result = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current()
-            .block_on(adapter.upload_video(&conn, &output_path, &meta))
+            .block_on(adapter.upload_video(&*db, &output_path, &meta))
     })
     .map_err(|e| {
         log::error!("[Upload] {} upload failed: {}", platform, e);
@@ -139,8 +138,9 @@ pub async fn upload_to_platform(
     // Record this direct upload in the analytics ledger (scheduled_uploads) so it
     // appears in Analytics + the ScheduledUploads "Completed" section and gets
     // view-count refreshes. The scheduler creates its own row, so this only fires
-    // for direct "Upload now" uploads — no duplicate rows.
+    // for direct "Upload now" uploads — no duplicate rows. (Re-acquire the lock.)
     if let social::UploadResultStatus::Complete { video_url } = &result.status {
+        let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
         if let Err(e) = db::record_direct_upload_for_analytics(&conn, &meta.clip_id, &platform, video_url) {
             log::warn!("[Upload] failed to record analytics row for {}: {}", meta.clip_id, e);
         }
