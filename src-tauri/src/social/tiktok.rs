@@ -425,9 +425,10 @@ impl PlatformAdapter for TikTokAdapter {
         validate_export_file(Some(file_path))?;
         log::info!("TikTok upload: file validated OK");
 
-        // DB lock (single shared Mutex<Connection>) held ONLY for the dup check +
-        // token refresh + token read, then dropped for the network upload below.
-        let access_token = {
+        // Phase 1 — hold the DB lock ONLY for the dup check and to read the token
+        // state, then release it so neither the network refresh below nor the long
+        // upload runs under the lock. `refresh_tok` is Some only when due.
+        let refresh_tok = {
             let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
 
             // 2. Duplicate check — skip if the stored URL is a stale fallback
@@ -447,7 +448,7 @@ impl PlatformAdapter for TikTokAdapter {
                 }
             }
 
-            // 3. Ensure token is fresh
+            // 3a. Is the access token stale? If so, read the refresh token now.
             let expiry_str = db::get_setting(&conn, "tiktok_token_expiry")
                 .map_err(|e| AppError::Database(e.to_string()))?;
             let needs_refresh = match expiry_str {
@@ -458,19 +459,33 @@ impl PlatformAdapter for TikTokAdapter {
                 None => true,
             };
             if needs_refresh {
-                let refresh_tok = db::get_setting(&conn, "tiktok_refresh_token")
-                    .map_err(|e| AppError::Database(e.to_string()))?
-                    .ok_or_else(|| AppError::Api("No TikTok refresh token found — please reconnect.".into()))?;
-                let new_tokens = do_refresh_token_net(&refresh_tok).await?;
-                let new_expiry = chrono::Utc::now().timestamp() + new_tokens.expires_in as i64;
-                db::save_setting(&conn, "tiktok_access_token", &new_tokens.access_token)
-                    .map_err(|e| AppError::Database(e.to_string()))?;
-                db::save_setting(&conn, "tiktok_token_expiry", &new_expiry.to_string())
-                    .map_err(|e| AppError::Database(e.to_string()))?;
-                db::save_setting(&conn, "tiktok_refresh_token", &new_tokens.refresh_token)
-                    .map_err(|e| AppError::Database(e.to_string()))?;
+                Some(
+                    db::get_setting(&conn, "tiktok_refresh_token")
+                        .map_err(|e| AppError::Database(e.to_string()))?
+                        .ok_or_else(|| AppError::Api("No TikTok refresh token found — please reconnect.".into()))?,
+                )
+            } else {
+                None
             }
+        };
 
+        // 3b. Refresh over the network WITHOUT the DB lock, then persist under a
+        // brief re-lock.
+        if let Some(refresh_tok) = refresh_tok {
+            let new_tokens = do_refresh_token_net(&refresh_tok).await?;
+            let new_expiry = chrono::Utc::now().timestamp() + new_tokens.expires_in as i64;
+            let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+            db::save_setting(&conn, "tiktok_access_token", &new_tokens.access_token)
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            db::save_setting(&conn, "tiktok_token_expiry", &new_expiry.to_string())
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            db::save_setting(&conn, "tiktok_refresh_token", &new_tokens.refresh_token)
+                .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+
+        // 3c. Read the (now fresh) access token under a brief lock.
+        let access_token = {
+            let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
             db::get_setting(&conn, "tiktok_access_token")
                 .map_err(|e| AppError::Database(e.to_string()))?
                 .ok_or_else(|| AppError::Api("No TikTok access token — please reconnect.".into()))?

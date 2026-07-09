@@ -141,7 +141,8 @@ pub fn get_ai_cost_summary(
 /// of `duration_secs` BEFORE the user kicks it off, so spend is never a
 /// surprise. Rendered next to the Analyze action.
 ///
-/// Returns 0.0 when the clip-judge provider resolves to Free (no API spend).
+/// Returns 0.0 when no paid AI step will run for an analyze (clip-judge toggle
+/// off or its provider Free, and LLM titles off too — mirrors the pipeline gates).
 /// Otherwise prefers the rolling per-analyze average from recent history
 /// (most accurate once a few VODs have run); falls back to a duration-based
 /// projection on the configured judge model for the very first analyze
@@ -153,27 +154,45 @@ pub fn estimate_analyze_cost(
 ) -> Result<f64, String> {
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
 
-    // Detection uses the ClipJudge scope; if it resolves to Free there's no
-    // BYOK spend to estimate.
-    let resolved = crate::ai_provider::resolve(&conn, crate::ai_provider::Scope::ClipJudge);
-    if !resolved.is_llm() {
+    // Two independent BYOK costs can occur during an analyze, so mirror the exact
+    // gates the pipeline uses:
+    //  • the clip judge — only when the detection toggle is on AND the ClipJudge
+    //    scope resolves to a real provider (see `run_ai_judge`);
+    //  • best-effort LLM clip titles — only when the Titles scope resolves to a
+    //    real provider (see `upgrade_titles_with_llm`).
+    // If neither will run, there is no BYOK spend to estimate.
+    let judge_enabled = crate::db::get_setting(&conn, "ai_clip_detection_enabled")
+        .ok()
+        .flatten()
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    let judge = crate::ai_provider::resolve(&conn, crate::ai_provider::Scope::ClipJudge);
+    let judge_will_run = judge_enabled && judge.is_llm();
+    let titles_will_run =
+        crate::ai_provider::resolve(&conn, crate::ai_provider::Scope::Titles).is_llm();
+    if !judge_will_run && !titles_will_run {
         return Ok(0.0);
     }
 
-    // Prefer the measured rolling average over the last 10 analyses when we
-    // have any history — it already folds in this user's real VOD lengths,
-    // model, and titles/captions usage. Fall back to a per-length projection
-    // for the first run, when there's nothing to average.
+    // Prefer the measured rolling average over the last 10 analyses when we have
+    // any history — it already folds in whatever actually ran (judge + titles) at
+    // this user's real VOD lengths and models.
     let summary = crate::ai_usage::estimate_cost(&conn, 10);
     if summary.vod_count > 0 {
         return Ok(summary.avg_per_analyze_usd);
     }
 
-    Ok(crate::ai_usage::project_analyze_cost(
-        resolved.provider,
-        &resolved.model,
-        duration_secs,
-    ))
+    // First analyze (no history): project the clip-judge cost when it will run.
+    // The title calls are tiny and best-effort, so they're left out of the
+    // cold-start projection rather than mis-modeled.
+    if judge_will_run {
+        return Ok(crate::ai_usage::project_analyze_cost(
+            judge.provider,
+            &judge.model,
+            duration_secs,
+        ));
+    }
+    Ok(0.0)
 }
 
 /// Phase 1 (BYOK cost visibility) — total BYOK spend already logged for one

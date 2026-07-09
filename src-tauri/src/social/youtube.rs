@@ -328,11 +328,11 @@ impl PlatformAdapter for YouTubeAdapter {
         // 1. Validate the export file (sync)
         validate_export_file(Some(file_path))?;
 
-        // DB lock (the single shared Mutex<Connection>) is held ONLY for the
-        // duplicate check, token refresh, and token read — then dropped so the
-        // long network upload below doesn't block every other DB op. Re-acquired
-        // briefly at the end to record the result.
-        let access_token = {
+        // Phase 1 — hold the DB lock ONLY for the duplicate check and to read the
+        // token state, then release it so NEITHER the network refresh below nor the
+        // long upload runs under the lock. `refresh_tok` is Some only when a
+        // refresh is actually due.
+        let refresh_tok = {
             let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
 
             // 2. Duplicate check (unless force=true)
@@ -349,7 +349,7 @@ impl PlatformAdapter for YouTubeAdapter {
                 }
             }
 
-            // 3. Ensure token is fresh — read expiry, refresh if needed (network), read token
+            // 3a. Is the access token stale? If so, read the refresh token now.
             let expiry_str = db::get_setting(&conn, "youtube_token_expiry")
                 .map_err(|e| AppError::Database(e.to_string()))?;
             let needs_refresh = match expiry_str {
@@ -360,23 +360,48 @@ impl PlatformAdapter for YouTubeAdapter {
                 None => true,
             };
             if needs_refresh {
-                let refresh_tok = db::get_setting(&conn, "youtube_refresh_token")
-                    .map_err(|e| AppError::Database(e.to_string()))?
-                    .ok_or_else(|| {
-                        AppError::Api("No YouTube refresh token found — please reconnect.".into())
-                    })?;
-                let new_tokens = youtube_refresh_or_clear(&conn, &refresh_tok).await?;
-                let new_expiry = chrono::Utc::now().timestamp() + new_tokens.expires_in as i64;
-                db::save_setting(&conn, "youtube_access_token", &new_tokens.access_token)
-                    .map_err(|e| AppError::Database(e.to_string()))?;
-                db::save_setting(&conn, "youtube_token_expiry", &new_expiry.to_string())
-                    .map_err(|e| AppError::Database(e.to_string()))?;
-                if let Some(ref rt) = new_tokens.refresh_token {
-                    db::save_setting(&conn, "youtube_refresh_token", rt)
-                        .map_err(|e| AppError::Database(e.to_string()))?;
-                }
+                Some(
+                    db::get_setting(&conn, "youtube_refresh_token")
+                        .map_err(|e| AppError::Database(e.to_string()))?
+                        .ok_or_else(|| {
+                            AppError::Api("No YouTube refresh token found — please reconnect.".into())
+                        })?,
+                )
+            } else {
+                None
             }
+        };
 
+        // 3b. Refresh over the network WITHOUT the DB lock, then persist the new
+        // tokens under a brief re-lock. On invalid_grant, clear the stale
+        // connection — same behavior as `youtube_refresh_or_clear`, just with the
+        // network call moved out from under the lock.
+        if let Some(refresh_tok) = refresh_tok {
+            match do_refresh_token_net(&refresh_tok).await {
+                Ok(new_tokens) => {
+                    let new_expiry = chrono::Utc::now().timestamp() + new_tokens.expires_in as i64;
+                    let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+                    db::save_setting(&conn, "youtube_access_token", &new_tokens.access_token)
+                        .map_err(|e| AppError::Database(e.to_string()))?;
+                    db::save_setting(&conn, "youtube_token_expiry", &new_expiry.to_string())
+                        .map_err(|e| AppError::Database(e.to_string()))?;
+                    if let Some(ref rt) = new_tokens.refresh_token {
+                        db::save_setting(&conn, "youtube_refresh_token", rt)
+                            .map_err(|e| AppError::Database(e.to_string()))?;
+                    }
+                }
+                Err(AppError::AuthExpired(msg)) => {
+                    let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+                    let _ = db::delete_settings_for_platform(&conn, "youtube");
+                    return Err(AppError::AuthExpired(msg));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        // 3c. Read the (now fresh) access token under a brief lock.
+        let access_token = {
+            let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
             db::get_setting(&conn, "youtube_access_token")
                 .map_err(|e| AppError::Database(e.to_string()))?
                 .ok_or_else(|| AppError::Api("No YouTube access token — please reconnect.".into()))?
