@@ -6,9 +6,8 @@
 //! - Resumable (chunked) video upload with 5 MB chunks
 //! - Automatic token refresh via refresh_token grant
 //!
-//! The trait uses `#[async_trait(?Send)]` because `rusqlite::Connection` is
-//! `!Sync`, preventing `&Connection` from being held across `.await` points
-//! in a `Send` future.
+//! Database guards are kept out of network awaits so OAuth and uploads do not
+//! block unrelated app state reads.
 
 use crate::auth_proxy::AuthProxy;
 use crate::db;
@@ -24,6 +23,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncReadExt;
 
 // ═══════════════════════════════════════════════════════════════════
 //  Constants
@@ -42,6 +42,8 @@ const AUTH_TIMEOUT_SECS: u64 = 120;
 
 /// 5 MB per chunk for resumable uploads.
 const UPLOAD_CHUNK_SIZE: usize = 5 * 1024 * 1024;
+
+static YOUTUBE_REFRESH_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Embedded YouTube OAuth client ID — safe to ship in the binary since OAuth
 /// client IDs are public identifiers (the actual client *secret* stays in the
@@ -260,27 +262,27 @@ impl PlatformAdapter for YouTubeAdapter {
 
     async fn handle_callback(
         &self,
-        db: &Connection,
+        db: &crate::DbConn,
         code: &str,
     ) -> Result<ConnectedAccount, AppError> {
-        // --- async portion (no db reference used) ---
         let code_owned = code.to_string();
         let (tokens, channel) = do_handle_callback_net(&code_owned).await?;
-
-        // --- sync: persist to db ---
         let expiry = chrono::Utc::now().timestamp() + tokens.expires_in as i64;
 
-        db::save_setting(db, "youtube_access_token", &tokens.access_token)
+        let conn = db
+            .lock()
+            .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+        db::save_setting(&conn, "youtube_access_token", &tokens.access_token)
             .map_err(|e| AppError::Database(e.to_string()))?;
         if let Some(ref rt) = tokens.refresh_token {
-            db::save_setting(db, "youtube_refresh_token", rt)
+            db::save_setting(&conn, "youtube_refresh_token", rt)
                 .map_err(|e| AppError::Database(e.to_string()))?;
         }
-        db::save_setting(db, "youtube_token_expiry", &expiry.to_string())
+        db::save_setting(&conn, "youtube_token_expiry", &expiry.to_string())
             .map_err(|e| AppError::Database(e.to_string()))?;
-        db::save_setting(db, "youtube_channel_name", &channel.name)
+        db::save_setting(&conn, "youtube_channel_name", &channel.name)
             .map_err(|e| AppError::Database(e.to_string()))?;
-        db::save_setting(db, "youtube_channel_id", &channel.id)
+        db::save_setting(&conn, "youtube_channel_id", &channel.id)
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let now = chrono::Utc::now().to_rfc3339();
@@ -292,30 +294,8 @@ impl PlatformAdapter for YouTubeAdapter {
         })
     }
 
-    async fn refresh_token(&self, db: &Connection) -> Result<(), AppError> {
-        // --- sync: read refresh token from db ---
-        let refresh_tok = db::get_setting(db, "youtube_refresh_token")
-            .map_err(|e| AppError::Database(e.to_string()))?
-            .ok_or_else(|| {
-                AppError::Api("No YouTube refresh token found — please reconnect.".into())
-            })?;
-
-        // --- async: exchange with Google ---
-        let tokens = youtube_refresh_or_clear(db, &refresh_tok).await?;
-
-        // --- sync: persist new tokens ---
-        let expiry = chrono::Utc::now().timestamp() + tokens.expires_in as i64;
-        db::save_setting(db, "youtube_access_token", &tokens.access_token)
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        db::save_setting(db, "youtube_token_expiry", &expiry.to_string())
-            .map_err(|e| AppError::Database(e.to_string()))?;
-
-        // Google sometimes rotates refresh tokens
-        if let Some(ref rt) = tokens.refresh_token {
-            db::save_setting(db, "youtube_refresh_token", rt)
-                .map_err(|e| AppError::Database(e.to_string()))?;
-        }
-
+    async fn refresh_token(&self, db: &crate::DbConn) -> Result<(), AppError> {
+        refresh_access_token(db, true).await?;
         Ok(())
     }
 
@@ -325,93 +305,33 @@ impl PlatformAdapter for YouTubeAdapter {
         file_path: &str,
         meta: &UploadMeta,
     ) -> Result<UploadResult, AppError> {
-        // 1. Validate the export file (sync)
         validate_export_file(Some(file_path))?;
 
-        // Phase 1 — hold the DB lock ONLY for the duplicate check and to read the
-        // token state, then release it so NEITHER the network refresh below nor the
-        // long upload runs under the lock. `refresh_tok` is Some only when a
-        // refresh is actually due.
-        let refresh_tok = {
-            let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
-
-            // 2. Duplicate check (unless force=true)
-            if !meta.force {
-                if let Some(existing) = db::get_upload_for_clip(&conn, &meta.clip_id, "youtube")
-                    .map_err(|e| AppError::Database(e.to_string()))?
-                {
-                    return Ok(UploadResult {
-                        status: UploadResultStatus::Duplicate {
-                            existing_url: existing.video_url.unwrap_or_default(),
-                        },
-                        job_id: String::new(),
-                    });
-                }
-            }
-
-            // 3a. Is the access token stale? If so, read the refresh token now.
-            let expiry_str = db::get_setting(&conn, "youtube_token_expiry")
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            let needs_refresh = match expiry_str {
-                Some(s) => {
-                    let expiry: i64 = s.parse().unwrap_or(0);
-                    chrono::Utc::now().timestamp() >= expiry - 60
-                }
-                None => true,
-            };
-            if needs_refresh {
-                Some(
-                    db::get_setting(&conn, "youtube_refresh_token")
-                        .map_err(|e| AppError::Database(e.to_string()))?
-                        .ok_or_else(|| {
-                            AppError::Api("No YouTube refresh token found — please reconnect.".into())
-                        })?,
-                )
-            } else {
-                None
-            }
+        let claim = {
+            let conn = db
+                .lock()
+                .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+            db::begin_upload(&conn, &meta.clip_id, "youtube", meta.force)
+                .map_err(|e| AppError::Database(e.to_string()))?
         };
-
-        // 3b. Refresh over the network WITHOUT the DB lock, then persist the new
-        // tokens under a brief re-lock. On invalid_grant, clear the stale
-        // connection — same behavior as `youtube_refresh_or_clear`, just with the
-        // network call moved out from under the lock.
-        if let Some(refresh_tok) = refresh_tok {
-            match do_refresh_token_net(&refresh_tok).await {
-                Ok(new_tokens) => {
-                    let new_expiry = chrono::Utc::now().timestamp() + new_tokens.expires_in as i64;
-                    let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
-                    db::save_setting(&conn, "youtube_access_token", &new_tokens.access_token)
-                        .map_err(|e| AppError::Database(e.to_string()))?;
-                    db::save_setting(&conn, "youtube_token_expiry", &new_expiry.to_string())
-                        .map_err(|e| AppError::Database(e.to_string()))?;
-                    if let Some(ref rt) = new_tokens.refresh_token {
-                        db::save_setting(&conn, "youtube_refresh_token", rt)
-                            .map_err(|e| AppError::Database(e.to_string()))?;
-                    }
-                }
-                Err(AppError::AuthExpired(msg)) => {
-                    let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
-                    let _ = db::delete_settings_for_platform(&conn, "youtube");
-                    return Err(AppError::AuthExpired(msg));
-                }
-                Err(e) => return Err(e),
+        match claim {
+            db::UploadClaim::Completed { video_url } => {
+                return Ok(UploadResult {
+                    status: UploadResultStatus::Duplicate {
+                        existing_url: video_url,
+                    },
+                    job_id: String::new(),
+                });
             }
+            db::UploadClaim::InProgress { job_id } => {
+                return Ok(UploadResult {
+                    status: UploadResultStatus::Processing,
+                    job_id: job_id.unwrap_or_default(),
+                });
+            }
+            db::UploadClaim::Acquired => {}
         }
 
-        // 3c. Read the (now fresh) access token under a brief lock.
-        let access_token = {
-            let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
-            db::get_setting(&conn, "youtube_access_token")
-                .map_err(|e| AppError::Database(e.to_string()))?
-                .ok_or_else(|| AppError::Api("No YouTube access token — please reconnect.".into()))?
-        };
-
-        // Read file bytes (sync, before async upload)
-        let file_bytes = std::fs::read(file_path)
-            .map_err(|e| AppError::Unknown(format!("Failed to read export file: {}", e)))?;
-
-        // Collect owned copies of metadata for the async portion
         let title = meta.title.clone();
         let description = meta.description.clone();
         let tags = meta.tags.clone();
@@ -420,28 +340,50 @@ impl PlatformAdapter for YouTubeAdapter {
             _ => "private".to_string(),
         };
 
-        // 4-5. Initiate resumable upload + send chunks (async, no db ref)
-        let (video_id, video_url) = do_upload_net(
-            &access_token,
-            &title,
-            &description,
-            &tags,
-            &visibility,
-            file_bytes,
-        )
-        .await?;
-
-        // 6. Record in upload history (re-acquire the lock briefly)
-        {
-            let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
-            db::upsert_upload(&conn, &meta.clip_id, "youtube", &video_url)
-                .map_err(|e| AppError::Database(e.to_string()))?;
+        let upload_result = async {
+            let access_token = ensure_fresh_access_token(db).await?;
+            do_upload_net(
+                &access_token,
+                &title,
+                &description,
+                &tags,
+                &visibility,
+                file_path,
+            )
+            .await
         }
+        .await;
 
-        Ok(UploadResult {
-            status: UploadResultStatus::Complete { video_url },
-            job_id: video_id,
-        })
+        match upload_result {
+            Ok((video_id, video_url)) => {
+                let conn = db
+                    .lock()
+                    .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+                db::mark_upload_complete(
+                    &conn,
+                    &meta.clip_id,
+                    "youtube",
+                    Some(&video_url),
+                    Some(&video_id),
+                    Some(&video_id),
+                )
+                .map_err(|e| AppError::Database(e.to_string()))?;
+                Ok(UploadResult {
+                    status: UploadResultStatus::Complete {
+                        video_url: Some(video_url),
+                        platform_video_id: Some(video_id.clone()),
+                    },
+                    job_id: video_id,
+                })
+            }
+            Err(error) => {
+                if let Ok(conn) = db.lock() {
+                    let _ =
+                        db::mark_upload_failed(&conn, &meta.clip_id, "youtube", &error.to_string());
+                }
+                Err(error)
+            }
+        }
     }
 
     fn disconnect(&self, db: &Connection) -> Result<(), AppError> {
@@ -518,24 +460,25 @@ async fn do_refresh_token_net(refresh_tok: &str) -> Result<TokenResponse, AppErr
     })
 }
 
-/// Refresh YouTube tokens; if the refresh token is dead (`invalid_grant` →
-/// `AuthExpired`), wipe the stale YouTube connection so the account shows as
-/// disconnected and a fresh reconnect works in one step (no manual disconnect).
 async fn youtube_refresh_or_clear(
-    db: &Connection,
+    db: &crate::DbConn,
     refresh_tok: &str,
 ) -> Result<TokenResponse, AppError> {
     match do_refresh_token_net(refresh_tok).await {
         Err(AppError::AuthExpired(msg)) => {
-            log::warn!("[YouTube] refresh token rejected (invalid_grant) — clearing stale connection");
-            let _ = db::delete_settings_for_platform(db, "youtube");
+            log::warn!(
+                "[YouTube] refresh token rejected (invalid_grant); clearing stale connection"
+            );
+            if let Ok(conn) = db.lock() {
+                let _ = db::delete_settings_for_platform(&conn, "youtube");
+            }
             Err(AppError::AuthExpired(msg))
         }
         other => other,
     }
 }
 
-/// Initiate a resumable upload and send file bytes in chunks.
+/// Initiate a resumable upload and stream the file in bounded chunks.
 /// Returns `(video_id, video_url)`.
 async fn do_upload_net(
     access_token: &str,
@@ -543,7 +486,7 @@ async fn do_upload_net(
     description: &str,
     tags: &[String],
     visibility: &str,
-    file_bytes: Vec<u8>,
+    file_path: &str,
 ) -> Result<(String, String), AppError> {
     let snippet = serde_json::json!({
         "snippet": {
@@ -587,26 +530,40 @@ async fn do_upload_net(
         .get("location")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
-        .ok_or_else(|| {
-            AppError::Api("YouTube did not return a resumable upload URL.".into())
-        })?;
+        .ok_or_else(|| AppError::Api("YouTube did not return a resumable upload URL.".into()))?;
 
-    // Send file in chunks
-    let total = file_bytes.len();
-    let mut offset: usize = 0;
+    let mut file = tokio::fs::File::open(file_path)
+        .await
+        .map_err(|e| AppError::Unknown(format!("Failed to open export file: {}", e)))?;
+    let total = file
+        .metadata()
+        .await
+        .map_err(|e| AppError::Unknown(format!("Failed to inspect export file: {}", e)))?
+        .len();
+    if total == 0 {
+        return Err(AppError::NotFound(
+            "Export file is empty; re-export the clip".into(),
+        ));
+    }
+
+    let mut offset: u64 = 0;
     let mut video_id = String::new();
 
     while offset < total {
-        let end = std::cmp::min(offset + UPLOAD_CHUNK_SIZE, total);
-        let chunk = &file_bytes[offset..end];
+        let chunk_len = std::cmp::min(UPLOAD_CHUNK_SIZE as u64, total - offset) as usize;
+        let mut chunk = vec![0_u8; chunk_len];
+        file.read_exact(&mut chunk)
+            .await
+            .map_err(|e| AppError::Unknown(format!("Failed to read export file: {}", e)))?;
+        let end = offset + chunk_len as u64;
 
         let content_range = format!("bytes {}-{}/{}", offset, end - 1, total);
 
         let chunk_resp = client
             .put(&upload_url)
             .header("Content-Range", &content_range)
-            .header("Content-Length", chunk.len().to_string())
-            .body(chunk.to_vec())
+            .header("Content-Length", chunk_len.to_string())
+            .body(chunk)
             .send()
             .await?;
 
@@ -794,41 +751,61 @@ pub fn extract_video_id(url: &str) -> Option<String> {
     None
 }
 
-/// Ensure we have a valid YouTube access token, refreshing if the stored one
-/// is expired or about to expire. Returns the current bearer token.
-/// Callers must hold a `&Connection` (not `State`) because the adapter pattern
-/// assumes sync DB access interleaved with async network calls.
-pub async fn ensure_fresh_access_token(conn: &Connection) -> Result<String, AppError> {
-    let expiry_str = db::get_setting(conn, "youtube_token_expiry")
-        .map_err(|e| AppError::Database(e.to_string()))?;
-    let needs_refresh = match expiry_str {
-        Some(s) => {
-            let expiry: i64 = s.parse().unwrap_or(0);
-            let now = chrono::Utc::now().timestamp();
-            now >= expiry - 60
-        }
-        None => true,
-    };
+fn valid_access_token(conn: &Connection) -> Result<Option<String>, AppError> {
+    let expiry = db::get_setting(conn, "youtube_token_expiry")
+        .map_err(|e| AppError::Database(e.to_string()))?
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    if chrono::Utc::now().timestamp() >= expiry - 60 {
+        return Ok(None);
+    }
+    db::get_setting(conn, "youtube_access_token").map_err(|e| AppError::Database(e.to_string()))
+}
 
-    if needs_refresh {
-        let refresh_tok = db::get_setting(conn, "youtube_refresh_token")
-            .map_err(|e| AppError::Database(e.to_string()))?
-            .ok_or_else(|| AppError::Api("No YouTube refresh token — please reconnect.".into()))?;
-        let new_tokens = youtube_refresh_or_clear(conn, &refresh_tok).await?;
-        let new_expiry = chrono::Utc::now().timestamp() + new_tokens.expires_in as i64;
-        db::save_setting(conn, "youtube_access_token", &new_tokens.access_token)
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        db::save_setting(conn, "youtube_token_expiry", &new_expiry.to_string())
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        if let Some(ref rt) = new_tokens.refresh_token {
-            db::save_setting(conn, "youtube_refresh_token", rt)
-                .map_err(|e| AppError::Database(e.to_string()))?;
+async fn refresh_access_token(db_conn: &crate::DbConn, force: bool) -> Result<String, AppError> {
+    if !force {
+        let conn = db_conn
+            .lock()
+            .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+        if let Some(token) = valid_access_token(&conn)? {
+            return Ok(token);
         }
     }
 
-    db::get_setting(conn, "youtube_access_token")
-        .map_err(|e| AppError::Database(e.to_string()))?
-        .ok_or_else(|| AppError::Api("No YouTube access token — please reconnect.".into()))
+    let _refresh_guard = YOUTUBE_REFRESH_MUTEX.lock().await;
+    let refresh_tok = {
+        let conn = db_conn
+            .lock()
+            .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+        if !force {
+            if let Some(token) = valid_access_token(&conn)? {
+                return Ok(token);
+            }
+        }
+        db::get_setting(&conn, "youtube_refresh_token")
+            .map_err(|e| AppError::Database(e.to_string()))?
+            .ok_or_else(|| AppError::Api("No YouTube refresh token; please reconnect.".into()))?
+    };
+
+    let new_tokens = youtube_refresh_or_clear(db_conn, &refresh_tok).await?;
+    let new_expiry = chrono::Utc::now().timestamp() + new_tokens.expires_in as i64;
+    let conn = db_conn
+        .lock()
+        .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+    db::save_setting(&conn, "youtube_access_token", &new_tokens.access_token)
+        .map_err(|e| AppError::Database(e.to_string()))?;
+    db::save_setting(&conn, "youtube_token_expiry", &new_expiry.to_string())
+        .map_err(|e| AppError::Database(e.to_string()))?;
+    if let Some(ref rt) = new_tokens.refresh_token {
+        db::save_setting(&conn, "youtube_refresh_token", rt)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+    }
+    Ok(new_tokens.access_token)
+}
+
+/// Return a valid YouTube bearer token, serializing refreshes per platform.
+pub async fn ensure_fresh_access_token(db_conn: &crate::DbConn) -> Result<String, AppError> {
+    refresh_access_token(db_conn, false).await
 }
 
 /// Fetch view + like counts for a single YouTube video via the Data API.

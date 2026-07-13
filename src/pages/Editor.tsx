@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Save, Download, Check, Loader2, Type, MessageSquare, Upload, Film, Link2, Undo2, Redo2, RotateCcw, RefreshCw, Bookmark, ChevronDown, X, Plus, Clock, CalendarClock } from 'lucide-react'
+import { ArrowLeft, Save, Download, Check, Loader2, MessageSquare, Upload, Film, Link2, Undo2, Redo2, RefreshCw, Bookmark, ChevronDown, X, Plus, Clock, CalendarClock } from 'lucide-react'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 // Use our own Tauri command to open URLs in the system default browser
@@ -8,7 +8,7 @@ const openUrl = (url: string) => invoke('open_url', { url })
 import type { Clip, Vod } from '../types'
 import type { UploadResult } from '../stores/platformStore'
 import { CAPTION_STYLES, EXPORT_PRESETS, LAYOUT_OPTIONS } from '../lib/editTypes'
-import type { TextOverlay } from '../lib/editTypes'
+import type { LayoutMode, TextOverlay } from '../lib/editTypes'
 import type { Highlight } from '../types'
 import ClipPlayer from '../components/ClipPlayer'
 import TrimTimeline from '../components/TrimTimeline'
@@ -22,8 +22,9 @@ import CamRegionRow from '../components/CamRegionRow'
 import CamRegionModal from '../components/CamRegionModal'
 import CamRegionPreview from '../components/CamRegionPreview'
 import type { RegionNorm } from '../components/CamRegionSetter'
-import FacecamEditor, { DraggablePipOverlay, DraggableSplitDivider, DEFAULT_FACECAM, computeSubtitleCollision } from '../components/FacecamEditor'
-import type { FacecamSettings } from '../components/FacecamEditor'
+import FacecamEditor, { DraggablePipOverlay, DraggableSplitDivider } from '../components/FacecamEditor'
+import { DEFAULT_FACECAM, computeSubtitleCollision } from '../lib/facecam'
+import type { FacecamSettings } from '../lib/facecam'
 import SubtitleEditor from '../components/SubtitleEditor'
 import { parseSrt, serializeSrt, findActiveSegment } from '../lib/subtitleUtils'
 import type { SubtitleSegment } from '../lib/subtitleUtils'
@@ -33,26 +34,28 @@ import { useMontageStore } from '../stores/montageStore'
 import Tooltip from '../components/Tooltip'
 import PublishComposer from '../components/PublishComposer'
 import type { PublishMetadata } from '../components/PublishComposer'
-import TikTokComplianceFields, { EMPTY_TIKTOK_COMPLIANCE } from '../components/TikTokComplianceFields'
-import type { TikTokComplianceValue } from '../components/TikTokComplianceFields'
+import TikTokComplianceFields from '../components/TikTokComplianceFields'
+import { EMPTY_TIKTOK_COMPLIANCE } from '../lib/tiktokCompliance'
+import type { TikTokComplianceValue } from '../lib/tiktokCompliance'
 import { useScheduleStore } from '../stores/scheduleStore'
-import PlatformUploadSelector, { getPresetForPlatform, getDefaultVisibility, getDefaultYouTubeSubFormat, expandYouTubeSubFormat } from '../components/PlatformUploadSelector'
-import type { PlatformUploadState, YouTubeSubFormat } from '../components/PlatformUploadSelector'
+import PlatformUploadSelector from '../components/PlatformUploadSelector'
+import { expandYouTubeSubFormat, getDefaultVisibility, getDefaultYouTubeSubFormat, getPresetForPlatform, isSuccessfulUploadHandoff } from '../lib/platformUpload'
+import type { PlatformUploadState, YouTubeSubFormat } from '../lib/platformUpload'
 import { useEditorHistory } from '../hooks/useEditorHistory'
 import type { EditorSnapshot } from '../hooks/useEditorHistory'
 import ExportProgressBar from '../components/ExportProgressBar'
 import { useTemplateStore } from '../stores/templateStore'
-import { useAiStore } from '../stores/aiStore'
 import type { ClipTemplate } from '../stores/templateStore'
 import { generateStandaloneTitle } from '../lib/publishCopyGenerator'
 import type { ClipContext } from '../lib/publishCopyGenerator'
+import { errorMessage } from '../lib/errors'
+import { localDateTimeAfter } from '../lib/dateTime'
 
 function formatTime(seconds: number) {
   const m = Math.floor(seconds / 60)
   const s = Math.floor(seconds % 60)
   return `${m}:${String(s).padStart(2, '0')}`
 }
-
 // ── Reusable section component ──
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -62,7 +65,6 @@ function Section({ title, children }: { title: string; children: React.ReactNode
     </div>
   )
 }
-
 // ── Pill selector ──
 function PillGroup<T extends string>({ value, options, onChange }: {
   value: T
@@ -127,6 +129,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
   const { schedule: scheduleUpload, getForClip: getScheduledForClip } = useScheduleStore()
   const [scheduleMode, setScheduleMode] = useState(false)
   const [scheduleTime, setScheduleTime] = useState('')
+  const [minimumScheduleTime, setMinimumScheduleTime] = useState('')
   const [scheduledUploads, setScheduledUploads] = useState<Array<{ id: string; platform: string; scheduled_time: string }>>([])
   const [scheduling, setScheduling] = useState(false)
 
@@ -182,14 +185,19 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
   const [tiktokComplianceValid, setTiktokComplianceValid] = useState(false)
 
   const selectedPlatforms = Object.entries(platformSelections)
-    .filter(([_, checked]) => checked)
+    .filter(([, checked]) => checked)
     .flatMap(([platform]) =>
       platform === 'youtube' ? expandYouTubeSubFormat(youtubeSubFormat) : [platform]
     )
 
   const anyUploading = multiUploading
-  const allDone = selectedPlatforms.length > 0 &&
-    selectedPlatforms.every(p => platformStates[p]?.status === 'done')
+  const hasProcessingUpload = selectedPlatforms.some(
+    platform => platformStates[platform]?.status === 'processing',
+  )
+  const allSubmitted = selectedPlatforms.length > 0 &&
+    selectedPlatforms.every(platform =>
+      isSuccessfulUploadHandoff(platformStates[platform]?.status)
+    )
 
   // Build upload metadata — includes title from main field, caption, and hashtags
   const buildUploadMeta = (platform: string, force = false) => {
@@ -236,16 +244,20 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
       })
       if (result.status.status === 'complete') {
         const url = result.status.video_url
-        onUploadHistoryChange(platform, url)
-        return { status: 'done', progress: 100, videoUrl: url }
+        if (url) onUploadHistoryChange(platform, url)
+        return { status: 'done', progress: 100, videoUrl: url ?? undefined }
       } else if (result.status.status === 'duplicate') {
-        return { status: 'done', progress: 100, duplicateUrl: result.status.existing_url }
+        return { status: 'done', progress: 100, duplicateUrl: result.status.existing_url ?? undefined }
       } else if (result.status.status === 'failed') {
         return { status: 'error', progress: 0, error: result.status.error }
+      } else if (result.status.status === 'processing') {
+        return { status: 'processing', progress: 100 }
+      } else if (result.status.status === 'uploading') {
+        return { status: 'uploading', progress: result.status.progress_pct }
       }
-      return { status: 'done', progress: 100 }
-    } catch (e: any) {
-      return { status: 'error', progress: 0, error: typeof e === 'string' ? e : e?.message || 'Upload failed' }
+      return { status: 'error', progress: 0, error: 'Unexpected upload state' }
+    } catch (error: unknown) {
+      return { status: 'error', progress: 0, error: errorMessage(error, 'Upload failed') }
     }
   }
 
@@ -303,11 +315,11 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
       try {
         await onExportForFormat(aspectRatio)
         await new Promise(r => setTimeout(r, 500))
-      } catch (e: any) {
+      } catch (error: unknown) {
         for (const p of platforms) {
           setPlatformStates(prev => ({
             ...prev,
-            [p]: { status: 'error', progress: 0, error: `Export failed: ${e}` },
+            [p]: { status: 'error', progress: 0, error: `Export failed: ${errorMessage(error, 'Unknown error')}` },
           }))
         }
         continue
@@ -347,8 +359,8 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
       try {
         await onExportForFormat(aspectRatio)
         await new Promise(r => setTimeout(r, 500))
-      } catch (e: any) {
-        console.error('[Schedule] Export failed:', e)
+      } catch (error: unknown) {
+        console.error('[Schedule] Export failed:', error)
         setScheduling(false)
         return
       }
@@ -361,8 +373,8 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
         try {
           const id = await scheduleUpload(clipId, adapterPlatform, isoTime, metaJson)
           setScheduledUploads(prev => [...prev, { id, platform: adapterPlatform, scheduled_time: isoTime }])
-        } catch (e: any) {
-          console.error(`[Schedule] Failed to schedule ${platform}:`, e)
+        } catch (error: unknown) {
+          console.error(`[Schedule] Failed to schedule ${platform}:`, error)
         }
       }
     }
@@ -495,7 +507,18 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
           disabled={anyUploading}
           onViewUrl={(url) => openUrl(url)}
           onConnect={async (platform) => {
-            try { await connect(platform) } catch {}
+            try {
+              await connect(platform)
+            } catch (error: unknown) {
+              setPlatformStates((previous) => ({
+                ...previous,
+                [platform]: {
+                  status: 'error',
+                  progress: 0,
+                  error: errorMessage(error, 'Connection failed'),
+                },
+              }))
+            }
           }}
           youtubeSubFormat={youtubeSubFormat}
           onYouTubeSubFormatChange={handleYouTubeSubFormatChange}
@@ -503,7 +526,9 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
         />
 
         {/* TikTok Content Posting API compliance panel (required for audit) */}
-        {selectedPlatforms.includes('tiktok') && (
+        {selectedPlatforms.includes('tiktok')
+          && !isSuccessfulUploadHandoff(platformStates.tiktok?.status)
+          && (
           <TikTokComplianceFields
             value={tiktokCompliance}
             onChange={setTiktokCompliance}
@@ -534,7 +559,8 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
                 type="datetime-local"
                 value={scheduleTime}
                 onChange={(e) => setScheduleTime(e.target.value)}
-                min={new Date(Date.now() + 60000).toISOString().slice(0, 16)}
+                onFocus={() => setMinimumScheduleTime(localDateTimeAfter(60_000))}
+                min={minimumScheduleTime}
                 className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-1.5 text-sm text-white focus:border-violet-500 focus:outline-none"
               />
             )}
@@ -557,9 +583,9 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
             ) : (
               <button
                 onClick={handleMultiUpload}
-                disabled={anyUploading || !vodPath || allDone || (selectedPlatforms.includes('tiktok') && !tiktokComplianceValid)}
+                disabled={anyUploading || !vodPath || allSubmitted || (selectedPlatforms.includes('tiktok') && !tiktokComplianceValid)}
                 className={`w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors cursor-pointer border ${
-                  allDone
+                  allSubmitted
                     ? 'bg-green-600/20 text-green-400 border-green-500/30'
                     : anyUploading
                     ? 'bg-violet-600/20 text-violet-400 border-violet-500/30'
@@ -570,8 +596,10 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
                   <><Loader2 className="w-3.5 h-3.5 animate-spin" />
                     {exporting ? 'Exporting...' : 'Uploading...'}
                   </>
-                ) : allDone ? (
-                  <><Check className="w-3.5 h-3.5" /> All uploads complete</>
+                ) : allSubmitted ? (
+                  <><Check className="w-3.5 h-3.5" />
+                    {hasProcessingUpload ? 'Upload submitted — processing' : 'All uploads complete'}
+                  </>
                 ) : (
                   <><Upload className="w-3.5 h-3.5" />
                     Export & Upload to {selectedPlatforms.length === 1
@@ -632,7 +660,7 @@ export default function Editor() {
   const stopAll = usePlaybackStore(s => s.stopAll)
 
   // Stop all other playback when editor opens
-  useEffect(() => { stopAll() }, [])
+  useEffect(() => { stopAll() }, [stopAll])
 
   const [clip, setClip] = useState<Clip | null>(null)
   const [highlight, setHighlight] = useState<Highlight | null>(null)
@@ -702,11 +730,11 @@ export default function Editor() {
   const [aiEmphasisEnabled, setAiEmphasisEnabled] = useState(true)
   const [generatingCaptions, setGeneratingCaptions] = useState(false)
   const [captionError, setCaptionError] = useState('')
-  const [facecamLayout, setFacecamLayout] = useState('none')
+  const [facecamLayout, setFacecamLayout] = useState<LayoutMode>('none')
   const [facecamSettings, setFacecamSettings] = useState<FacecamSettings>(DEFAULT_FACECAM)
   const [layoutPickerOpen, setLayoutPickerOpen] = useState(false)
   const [exportPresetId, setExportPresetId] = useState('tiktok')
-  const [textOverlays, setTextOverlays] = useState<TextOverlay[]>([])
+  const [textOverlays] = useState<TextOverlay[]>([])
   const [game, setGame] = useState<string>('')
   const [publishMeta, setPublishMeta] = useState<PublishMetadata>({
     title: '', description: '', hashtags: [], visibility: 'public',
@@ -722,7 +750,6 @@ export default function Editor() {
 
   // ── Templates ──
   const templateStore = useTemplateStore()
-  const aiStore = useAiStore()
   const [templateDropdownOpen, setTemplateDropdownOpen] = useState(false)
   const [templateSaveOpen, setTemplateSaveOpen] = useState(false)
   const [templateSaveName, setTemplateSaveName] = useState('')
@@ -770,7 +797,7 @@ export default function Editor() {
 
   // ── Undo / Redo history ──
   const history = useEditorHistory()
-  const [historyTick, setHistoryTick] = useState(0) // bumped on undo/redo to re-render buttons
+  const [, setHistoryTick] = useState(0) // bumped on undo/redo to re-render buttons
   const historyRestoringRef = useRef(false)          // true while applying a snapshot
 
   const takeSnapshot = useCallback((): EditorSnapshot => ({
@@ -892,6 +919,14 @@ export default function Editor() {
   // SRT-relative trim bounds
   const srtTrimStart = startSeconds - originalStart
   const srtTrimEnd = endSeconds - originalStart
+  const trimmedTranscriptText = useMemo(() => {
+    const visibleSegments = subtitleSegments.filter(segment =>
+      segment.endTime >= srtTrimStart && segment.startTime <= srtTrimEnd
+    )
+    const relevantSegments = visibleSegments.length > 0 ? visibleSegments : subtitleSegments
+    const transcript = relevantSegments.map(segment => segment.text.trim()).filter(Boolean).join(' ')
+    return transcript || undefined
+  }, [subtitleSegments, srtTrimStart, srtTrimEnd])
 
   // Active subtitle segment
   const activeSubtitle = useMemo(
@@ -1016,7 +1051,10 @@ export default function Editor() {
         setCaptionsText(c.captions_text || '')
         setCaptionsPosition(c.captions_position || 'bottom')
         setCaptionStyleId(c.caption_style || 'clean')
-        setFacecamLayout(c.facecam_layout || 'none')
+        const savedLayout = LAYOUT_OPTIONS.some((layout) => layout.id === c.facecam_layout)
+          ? c.facecam_layout as LayoutMode
+          : 'none'
+        setFacecamLayout(savedLayout)
         setExportDone(c.render_status === 'completed')
         setOriginalStart(c.start_seconds)
         setOriginalEnd(c.end_seconds)
@@ -1081,31 +1119,11 @@ export default function Editor() {
           setVideoSrc(convertFileSrc(v.local_path))
         }
 
-        // Auto-generate publish description via AI when BYOK is active and no saved description
-        if (!c.publish_description && aiStore.isByok() && clipId) {
-          console.log('[Editor] No saved publish_description + BYOK active — auto-generating via AI')
-          invoke<{ captions: Array<{ mode: string; text: string }>; source: string }>('generate_post_captions', {
-            clipId,
-            seed: (Date.now() % 1_000_000) >>> 0,
-            transcriptText: null,
-            currentTitle: c.title || null,
-            currentGame: c.game || storedGame || null,
-            selectedMode: 'punchy',
-          }).then(bc => {
-            if (bc.source === 'llm' && bc.captions.length > 0) {
-              const aiDesc = bc.captions[0].text
-              console.log('[Editor] AI auto-generated publish description:', aiDesc.substring(0, 80))
-              setPublishMeta(prev => prev.description ? prev : { ...prev, description: aiDesc })
-            }
-          }).catch(err => {
-            console.warn('[Editor] AI publish description auto-gen failed:', err)
-          })
-        }
       } catch (err) {
         console.error('Failed to load clip:', err)
       }
     })()
-  }, [clipId])
+  }, [clipId, history])
 
   // ── Sync aspect ratio when export preset changes ──
   useEffect(() => {
@@ -1200,28 +1218,6 @@ export default function Editor() {
         })
       })
     })
-  }
-
-  // ── Text overlay management ──
-  const addOverlay = () => {
-    setTextOverlays(prev => [...prev, {
-      id: crypto.randomUUID(),
-      text: 'Text',
-      startTime: 0,
-      endTime: Math.min(clipDuration, 5),
-      position: 'top',
-      style: 'label',
-      fontSize: 48,
-      color: '#FFFFFF',
-    }])
-  }
-
-  const updateOverlay = (id: string, patch: Partial<TextOverlay>) => {
-    setTextOverlays(prev => prev.map(o => o.id === id ? { ...o, ...patch } : o))
-  }
-
-  const removeOverlay = (id: string) => {
-    setTextOverlays(prev => prev.filter(o => o.id !== id))
   }
 
   // ── Preview frame sizing (single source of truth for frame dimensions) ──
@@ -1608,13 +1604,11 @@ export default function Editor() {
                   onClick={async () => {
                     const ctx: ClipContext = {
                       title: '', // don't seed from current title — generate fresh
-                      eventTags: highlight ? (highlight.tags || []) as string[] : [],
+                      eventTags: highlight?.tags ?? [],
                       emotionTags: [],
                       transcriptExcerpt: highlight?.transcript_snippet || undefined,
                       eventSummary: highlight?.event_summary || undefined,
-                      transcript: subtitleSegments.length > 0
-                        ? subtitleSegments.map(s => s.text).join(' ')
-                        : undefined,
+                      transcript: trimmedTranscriptText,
                       vodTitle: vod?.title || undefined,
                       game: game || undefined,
                       duration: clipDuration,
@@ -1625,9 +1619,7 @@ export default function Editor() {
                     // Try AI title generation first (uses BYOK provider if configured)
                     if (clipId) {
                       try {
-                        const transcriptText = subtitleSegments.length > 0
-                          ? subtitleSegments.map(s => s.text).join(' ')
-                          : null
+                        const transcriptText = trimmedTranscriptText || null
                         const aiTitle = await invoke<string>('generate_ai_title', {
                           clipId,
                           transcriptText,
@@ -1869,13 +1861,11 @@ export default function Editor() {
                   clipId={clipId}
                   clipContext={{
                     title: title,
-                    eventTags: highlight ? (highlight.tags || []) as string[] : [],
+                    eventTags: highlight?.tags ?? [],
                     emotionTags: [],
                     transcriptExcerpt: highlight?.transcript_snippet || undefined,
                     eventSummary: highlight?.event_summary || undefined,
-                    transcript: subtitleSegments.length > 0
-                      ? subtitleSegments.map(s => s.text).join(' ')
-                      : undefined,
+                    transcript: trimmedTranscriptText,
                     vodTitle: vod?.title || undefined,
                     game: game || undefined,
                     duration: clipDuration,
@@ -1911,7 +1901,7 @@ export default function Editor() {
             {/* Layout picker modal */}
             {layoutPickerOpen && (
               <LayoutPicker
-                current={facecamLayout as any}
+                current={facecamLayout}
                 aspectRatio={aspectRatio as '9:16' | '16:9'}
                 platformName={exportPreset.platform}
                 onSelect={(layout) => { setFacecamLayout(layout); setLayoutPickerOpen(false) }}
@@ -2164,4 +2154,3 @@ export default function Editor() {
     </div>
   )
 }
-   

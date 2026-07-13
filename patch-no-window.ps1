@@ -150,7 +150,6 @@ if ($curlStart -gt 0 -and $curlEnd -gt 0) {
         '            "-s", "-S",'
         '            "--max-time", "15",'
         '            "-X", "POST",'
-        '            "-H", &format!("X-Proxy-Key: {}", self.api_key),'
         '            "-H", "Content-Type: application/json",'
         '            "-d", &body_str,'
         '            &url,'

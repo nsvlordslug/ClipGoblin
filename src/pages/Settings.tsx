@@ -149,7 +149,6 @@ function TemplateManager() {
 }
 
 export default function SettingsPage() {
-  const [dataDir, setDataDir] = useState('—')
   const [downloadDir, setDownloadDir] = useState('—')
   const [aiSaved, setAiSaved] = useState(false)
   const [testing, setTesting] = useState(false)
@@ -202,8 +201,6 @@ export default function SettingsPage() {
   useEffect(() => {
     const load = async () => {
       try {
-        const info = await invoke<{ data_dir: string; db_path: string; version: string }>('get_app_info')
-        setDataDir(info.data_dir)
         const dlDir = await invoke<string>('get_download_dir')
         setDownloadDir(dlDir)
         const paths = await invoke<{ exportsDir: string; downloadsDir: string; dataDir: string }>('get_storage_paths')
@@ -231,8 +228,9 @@ export default function SettingsPage() {
       // Only load AI settings from DB if they haven't been loaded yet.
       // Re-loading on every Settings mount would overwrite in-memory changes
       // (e.g. keys the user just typed but auto-save hasn't flushed yet).
-      if (!ai.loaded) {
-        await ai.load()
+      const aiState = useAiStore.getState()
+      if (!aiState.loaded) {
+        await aiState.load()
       }
       // Phase 6.0 — fetch rolling cost summary for Settings display.
       try {

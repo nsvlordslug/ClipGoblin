@@ -15,7 +15,7 @@ type Phase = 'idle' | 'checking' | 'available' | 'downloading' | 'installing' | 
  * "updater not configured" which we swallow.
  */
 export default function UpdateChecker() {
-  const [phase, setPhase] = useState<Phase>('idle')
+  const [phase, setPhase] = useState<Phase>('checking')
   const [update, setUpdate] = useState<Update | null>(null)
   const [progress, setProgress] = useState(0)
   const [errMsg, setErrMsg] = useState<string | null>(null)
@@ -24,7 +24,6 @@ export default function UpdateChecker() {
   useEffect(() => {
     if (checkedOnce.current) return
     checkedOnce.current = true
-    setPhase('checking')
     ;(async () => {
       try {
         const result = await check()

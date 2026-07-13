@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import type { TikTokComplianceValue } from '../lib/tiktokCompliance'
 
 // Mirrors the Rust `TikTokCreatorInfo` struct (src-tauri/src/social/tiktok.rs).
 interface CreatorInfo {
@@ -11,28 +12,6 @@ interface CreatorInfo {
   duet_disabled: boolean
   stitch_disabled: boolean
   max_video_post_duration_sec: number
-}
-
-/** Compliance state the parent owns and threads into the upload meta. */
-export interface TikTokComplianceValue {
-  /** TikTok privacy enum (PUBLIC_TO_EVERYONE | MUTUAL_FOLLOW_FRIENDS | FOLLOWER_OF_CREATOR | SELF_ONLY). null = not chosen yet. */
-  privacyLevel: string | null
-  disableComment: boolean
-  disableDuet: boolean
-  disableStitch: boolean
-  discloseContent: boolean
-  yourBrand: boolean       // → brand_organic
-  brandedContent: boolean  // → brand_content
-}
-
-export const EMPTY_TIKTOK_COMPLIANCE: TikTokComplianceValue = {
-  privacyLevel: null,
-  disableComment: false,
-  disableDuet: false,
-  disableStitch: false,
-  discloseContent: false,
-  yourBrand: false,
-  brandedContent: false,
 }
 
 const PRIVACY_LABELS: Record<string, string> = {

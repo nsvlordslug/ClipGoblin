@@ -97,10 +97,12 @@ export interface ScheduledUpload {
   clip_id: string
   platform: string
   scheduled_time: string
-  status: 'pending' | 'uploading' | 'completed' | 'failed'
+  status: 'pending' | 'uploading' | 'processing' | 'completed' | 'failed' | 'cancelled'
   retry_count: number
   error_message: string | null
   video_url: string | null
+  job_id: string | null
+  platform_video_id: string | null
   upload_meta_json: string | null
   created_at: string
   /** Views reported by the platform's API. null = never fetched. */

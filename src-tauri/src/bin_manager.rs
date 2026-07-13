@@ -11,20 +11,22 @@ use std::process::Stdio;
 
 use futures_util::StreamExt;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
 use crate::error::AppError;
 
 // ── Download URLs ──
 
-/// BtbN FFmpeg-Builds latest Win64 GPL release. Contains `bin/ffmpeg.exe` and
-/// `bin/ffprobe.exe` inside a zip (~130 MB compressed).
+/// Pinned upstream artifacts. Updating either URL requires updating its digest
+/// from the corresponding release's official checksum manifest.
 const FFMPEG_ZIP_URL: &str =
-    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-11-13-13/ffmpeg-N-125519-g300cac3078-win64-gpl.zip";
+const FFMPEG_ZIP_SHA256: &str = "d8e51551c89fa6b509bf8d627ab08c53beae3d25479d075bf88feeb8eb5e67dd";
 
-/// yt-dlp's GitHub "latest" redirect to the most recent Windows exe (~20 MB).
-const YTDLP_URL: &str =
-    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
+const YTDLP_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/download/2026.06.09/yt-dlp.exe";
+const YTDLP_SHA256: &str = "3a48cb955d55c8821b60ccbdbbc6f61bc958f2f3d3b7ad5eaf3d83a543293a27";
+const YTDLP_VERSION: &str = "2026.06.09";
 
 // ── Paths ──
 
@@ -41,22 +43,6 @@ pub fn bin_dir() -> Result<PathBuf, AppError> {
 fn bundled_path(name: &str) -> Option<PathBuf> {
     let p = bin_dir().ok()?.join(name);
     if p.exists() { Some(p) } else { None }
-}
-
-/// Returns `true` if the bundled yt-dlp should be refreshed: no prior
-/// refresh recorded, an unparseable timestamp, or the last refresh is
-/// older than `threshold_days`. Pure — caller supplies the stored value.
-pub fn ytdlp_is_stale(last_refresh_rfc3339: Option<&str>, threshold_days: i64) -> bool {
-    match last_refresh_rfc3339 {
-        None => true,
-        Some(s) => match chrono::DateTime::parse_from_rfc3339(s) {
-            Ok(ts) => {
-                let age = chrono::Utc::now().signed_duration_since(ts.with_timezone(&chrono::Utc));
-                age > chrono::Duration::days(threshold_days)
-            }
-            Err(_) => true,
-        },
-    }
 }
 
 /// Returns `true` if `<name>` runs successfully with `version_flag` via the
@@ -200,6 +186,77 @@ fn validate_download(
     Ok(())
 }
 
+fn validate_checksum(name: &str, actual: &str, expected: &str) -> Result<(), AppError> {
+    if actual.eq_ignore_ascii_case(expected) {
+        return Ok(());
+    }
+    Err(AppError::Download(format!(
+        "{name} SHA-256 mismatch; expected {expected}, got {actual}"
+    )))
+}
+
+#[cfg(windows)]
+fn replace_file_atomically(
+    tmp: &std::path::Path,
+    final_path: &std::path::Path,
+) -> Result<(), AppError> {
+    if !final_path.exists() {
+        return std::fs::rename(tmp, final_path)
+            .map_err(|e| AppError::Download(format!("install {}: {e}", final_path.display())));
+    }
+
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{ReplaceFileW, REPLACEFILE_IGNORE_MERGE_ERRORS};
+
+    let replaced: Vec<u16> = final_path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let replacement: Vec<u16> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        ReplaceFileW(
+            PCWSTR(replaced.as_ptr()),
+            PCWSTR(replacement.as_ptr()),
+            PCWSTR::null(),
+            REPLACEFILE_IGNORE_MERGE_ERRORS,
+            None,
+            None,
+        )
+    }
+    .map_err(|e| AppError::Download(format!("replace {}: {e}", final_path.display())))
+}
+
+#[cfg(not(windows))]
+fn replace_file_atomically(
+    tmp: &std::path::Path,
+    final_path: &std::path::Path,
+) -> Result<(), AppError> {
+    std::fs::rename(tmp, final_path)
+        .map_err(|e| AppError::Download(format!("install {}: {e}", final_path.display())))
+}
+
+fn write_version_marker(dir: &std::path::Path) -> Result<(), AppError> {
+    let marker = dir.join("yt-dlp.version");
+    let tmp = dir.join("yt-dlp.version.tmp");
+    {
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|e| AppError::Download(format!("create version marker: {e}")))?;
+        file.write_all(YTDLP_VERSION.as_bytes())
+            .map_err(|e| AppError::Download(format!("write version marker: {e}")))?;
+        file.sync_all()
+            .map_err(|e| AppError::Download(format!("sync version marker: {e}")))?;
+    }
+    replace_file_atomically(&tmp, &marker)
+}
+
+fn installed_ytdlp_version(dir: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(dir.join("yt-dlp.version"))
+        .ok()
+        .map(|value| value.trim().to_string())
+}
+
 pub async fn download_ytdlp(progress: &ProgressCb) -> Result<(), AppError> {
     let dir = bin_dir()?;
     let final_path = dir.join("yt-dlp.exe");
@@ -208,27 +265,37 @@ pub async fn download_ytdlp(progress: &ProgressCb) -> Result<(), AppError> {
     log::info!("[bin_manager] downloading yt-dlp from {}", YTDLP_URL);
 
     let client = reqwest::Client::new();
-    let resp = client.get(YTDLP_URL).send().await
+    let resp = client
+        .get(YTDLP_URL)
+        .send()
+        .await
         .map_err(|e| AppError::Download(format!("yt-dlp request: {e}")))?;
     if !resp.status().is_success() {
         return Err(AppError::Download(format!("yt-dlp HTTP {}", resp.status())));
     }
 
     let total = resp.content_length().unwrap_or(0);
-    let mut file = tokio::fs::File::create(&tmp_path).await
+    let mut file = tokio::fs::File::create(&tmp_path)
+        .await
         .map_err(|e| AppError::Download(format!("create tmp: {e}")))?;
     let mut stream = resp.bytes_stream();
     let mut downloaded: u64 = 0;
+    let mut hasher = Sha256::new();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| AppError::Download(format!("stream: {e}")))?;
-        file.write_all(&chunk).await
+        hasher.update(&chunk);
+        file.write_all(&chunk)
+            .await
             .map_err(|e| AppError::Download(format!("write: {e}")))?;
         downloaded += chunk.len() as u64;
         progress(downloaded, total);
     }
-    file.flush().await.map_err(|e| AppError::Download(format!("flush: {e}")))?;
+    file.sync_all()
+        .await
+        .map_err(|e| AppError::Download(format!("sync: {e}")))?;
     drop(file);
+    let actual_sha256 = format!("{:x}", hasher.finalize());
 
     // Integrity gate: reject a truncated/error-page download before it is
     // promoted to yt-dlp.exe (a bad exe would only surface at run time). Any
@@ -236,15 +303,15 @@ pub async fn download_ytdlp(progress: &ProgressCb) -> Result<(), AppError> {
     // up the tmp file.
     let gate = read_leading_bytes(&tmp_path).await.and_then(|magic| {
         validate_download("yt-dlp", downloaded, total, &magic, b"MZ", YTDLP_MIN_BYTES)
+            .and_then(|_| validate_checksum("yt-dlp", &actual_sha256, YTDLP_SHA256))
     });
     if let Err(e) = gate {
         let _ = tokio::fs::remove_file(&tmp_path).await;
         return Err(e);
     }
 
-    let _ = tokio::fs::remove_file(&final_path).await;
-    tokio::fs::rename(&tmp_path, &final_path).await
-        .map_err(|e| AppError::Download(format!("rename: {e}")))?;
+    replace_file_atomically(&tmp_path, &final_path)?;
+    write_version_marker(&dir)?;
 
     log::info!("[bin_manager] yt-dlp installed to {}", final_path.display());
     Ok(())
@@ -254,8 +321,8 @@ pub async fn download_ytdlp(progress: &ProgressCb) -> Result<(), AppError> {
 /// bundled-yt-dlp refresh.
 pub const YTDLP_LAST_REFRESH_KEY: &str = "ytdlp_last_refresh";
 
-/// Force a yt-dlp refresh regardless of staleness. Downloads the latest
-/// release over the bundled binary and returns Ok on success. Caller is
+/// Force a yt-dlp refresh regardless of the installed marker. Downloads the
+/// app-pinned release and returns Ok on success. Caller is
 /// responsible for recording the refresh timestamp (it owns the DB conn).
 pub async fn force_refresh_ytdlp(progress: &ProgressCb) -> Result<(), AppError> {
     log::info!("[bin_manager] force-refreshing yt-dlp");
@@ -266,17 +333,32 @@ pub async fn force_refresh_ytdlp(progress: &ProgressCb) -> Result<(), AppError> 
 /// AND the recorded last refresh is missing/older than 7 days. Never
 /// errors hard — a stale binary still beats no binary. Returns `true`
 /// if a refresh was performed (so the caller can record the timestamp).
-pub async fn refresh_ytdlp_if_stale(last_refresh_rfc3339: Option<String>) -> bool {
+pub async fn refresh_ytdlp_if_stale(_last_refresh_rfc3339: Option<String>) -> bool {
     // Strictly gate on a bundled binary — never touch a user's PATH yt-dlp.
     if bundled_path("yt-dlp.exe").is_none() {
-        log::info!("[bin_manager] no bundled yt-dlp; skipping staleness refresh (system-PATH user)");
+        log::info!(
+            "[bin_manager] no bundled yt-dlp; skipping staleness refresh (system-PATH user)"
+        );
         return false;
     }
-    if !ytdlp_is_stale(last_refresh_rfc3339.as_deref(), 7) {
-        log::info!("[bin_manager] bundled yt-dlp is fresh; no refresh needed");
+    let dir = match bin_dir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            log::warn!(
+                "[bin_manager] cannot inspect yt-dlp version marker: {}",
+                error
+            );
+            return false;
+        }
+    };
+    if installed_ytdlp_version(&dir).as_deref() == Some(YTDLP_VERSION) {
+        log::info!("[bin_manager] bundled yt-dlp {} is current", YTDLP_VERSION);
         return false;
     }
-    log::info!("[bin_manager] bundled yt-dlp is stale; refreshing in background");
+    log::info!(
+        "[bin_manager] bundled yt-dlp differs from pinned {}; refreshing",
+        YTDLP_VERSION
+    );
     let noop: ProgressCb = Box::new(|_, _| {});
     match download_ytdlp(&noop).await {
         Ok(()) => {
@@ -284,7 +366,10 @@ pub async fn refresh_ytdlp_if_stale(last_refresh_rfc3339: Option<String>) -> boo
             true
         }
         Err(e) => {
-            log::warn!("[bin_manager] background yt-dlp refresh failed (keeping existing binary): {}", e);
+            log::warn!(
+                "[bin_manager] background yt-dlp refresh failed (keeping existing binary): {}",
+                e
+            );
             false
         }
     }
@@ -302,17 +387,22 @@ pub async fn download_ffmpeg(progress: &ProgressCb) -> Result<(), AppError> {
     log::info!("[bin_manager] downloading ffmpeg from {}", FFMPEG_ZIP_URL);
 
     let client = reqwest::Client::new();
-    let resp = client.get(FFMPEG_ZIP_URL).send().await
+    let resp = client
+        .get(FFMPEG_ZIP_URL)
+        .send()
+        .await
         .map_err(|e| AppError::Download(format!("ffmpeg request: {e}")))?;
     if !resp.status().is_success() {
         return Err(AppError::Download(format!("ffmpeg HTTP {}", resp.status())));
     }
 
     let total = resp.content_length().unwrap_or(0);
-    let mut file = tokio::fs::File::create(&zip_path).await
+    let mut file = tokio::fs::File::create(&zip_path)
+        .await
         .map_err(|e| AppError::Download(format!("create zip tmp: {e}")))?;
     let mut stream = resp.bytes_stream();
     let mut downloaded: u64 = 0;
+    let mut hasher = Sha256::new();
 
     while let Some(chunk) = stream.next().await {
         let chunk = match chunk {
@@ -322,19 +412,32 @@ pub async fn download_ffmpeg(progress: &ProgressCb) -> Result<(), AppError> {
                 return Err(AppError::Download(format!("stream: {e}")));
             }
         };
-        file.write_all(&chunk).await
+        hasher.update(&chunk);
+        file.write_all(&chunk)
+            .await
             .map_err(|e| AppError::Download(format!("write zip: {e}")))?;
         downloaded += chunk.len() as u64;
         progress(downloaded, total);
     }
-    file.flush().await.map_err(|e| AppError::Download(format!("flush: {e}")))?;
+    file.sync_all()
+        .await
+        .map_err(|e| AppError::Download(format!("sync: {e}")))?;
     drop(file);
+    let actual_sha256 = format!("{:x}", hasher.finalize());
 
     // Integrity gate before extraction: a truncated/error-page download would
     // otherwise fail deeper in the zip parser with a murkier message. Any
     // failure here cleans up the tmp zip.
     let gate = read_leading_bytes(&zip_path).await.and_then(|magic| {
-        validate_download("ffmpeg", downloaded, total, &magic, b"PK", FFMPEG_ZIP_MIN_BYTES)
+        validate_download(
+            "ffmpeg",
+            downloaded,
+            total,
+            &magic,
+            b"PK",
+            FFMPEG_ZIP_MIN_BYTES,
+        )
+        .and_then(|_| validate_checksum("ffmpeg", &actual_sha256, FFMPEG_ZIP_SHA256))
     });
     if let Err(e) = gate {
         let _ = tokio::fs::remove_file(&zip_path).await;
@@ -353,23 +456,30 @@ pub async fn download_ffmpeg(progress: &ProgressCb) -> Result<(), AppError> {
 
     extract_result?;
 
-    log::info!("[bin_manager] ffmpeg + ffprobe installed to {}", dir.display());
+    log::info!(
+        "[bin_manager] ffmpeg + ffprobe installed to {}",
+        dir.display()
+    );
     Ok(())
 }
 
 fn extract_ffmpeg_bins(zip_path: &std::path::Path, dir: &std::path::Path) -> Result<(), AppError> {
-    let f = std::fs::File::open(zip_path)
-        .map_err(|e| AppError::Download(format!("open zip: {e}")))?;
-    let mut archive = zip::ZipArchive::new(f)
-        .map_err(|e| AppError::Download(format!("read zip: {e}")))?;
+    let f =
+        std::fs::File::open(zip_path).map_err(|e| AppError::Download(format!("open zip: {e}")))?;
+    let mut archive =
+        zip::ZipArchive::new(f).map_err(|e| AppError::Download(format!("read zip: {e}")))?;
 
     let targets = ["ffmpeg.exe", "ffprobe.exe"];
     let mut extracted = [false; 2];
+    let temp_paths = [dir.join("ffmpeg.exe.tmp"), dir.join("ffprobe.exe.tmp")];
 
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)
+        let mut entry = archive
+            .by_index(i)
             .map_err(|e| AppError::Download(format!("zip entry {i}: {e}")))?;
-        if !entry.is_file() { continue; }
+        if !entry.is_file() {
+            continue;
+        }
 
         let name = entry.name().to_string();
         let leaf = std::path::Path::new(&name)
@@ -379,25 +489,20 @@ fn extract_ffmpeg_bins(zip_path: &std::path::Path, dir: &std::path::Path) -> Res
 
         for (idx, target) in targets.iter().enumerate() {
             if leaf.eq_ignore_ascii_case(target) && !extracted[idx] {
-                let out = dir.join(target);
-                let tmp = dir.join(format!("{target}.tmp"));
-                let mut buf = Vec::with_capacity(entry.size() as usize);
-                entry.read_to_end(&mut buf)
-                    .map_err(|e| AppError::Download(format!("read {target}: {e}")))?;
-                let mut f = std::fs::File::create(&tmp)
+                let mut f = std::fs::File::create(&temp_paths[idx])
                     .map_err(|e| AppError::Download(format!("create {target}.tmp: {e}")))?;
-                f.write_all(&buf)
-                    .map_err(|e| AppError::Download(format!("write {target}: {e}")))?;
-                drop(f);
-                let _ = std::fs::remove_file(&out);
-                std::fs::rename(&tmp, &out)
-                    .map_err(|e| AppError::Download(format!("rename {target}: {e}")))?;
+                std::io::copy(&mut entry, &mut f)
+                    .map_err(|e| AppError::Download(format!("extract {target}: {e}")))?;
+                f.sync_all()
+                    .map_err(|e| AppError::Download(format!("sync {target}: {e}")))?;
                 extracted[idx] = true;
                 break;
             }
         }
 
-        if extracted.iter().all(|b| *b) { break; }
+        if extracted.iter().all(|b| *b) {
+            break;
+        }
     }
 
     if !extracted[0] {
@@ -406,30 +511,34 @@ fn extract_ffmpeg_bins(zip_path: &std::path::Path, dir: &std::path::Path) -> Res
     if !extracted[1] {
         return Err(AppError::Download("ffprobe.exe not found in zip".into()));
     }
+
+    for (idx, target) in targets.iter().enumerate() {
+        let mut file = std::fs::File::open(&temp_paths[idx])
+            .map_err(|e| AppError::Download(format!("open extracted {target}: {e}")))?;
+        let mut magic = [0_u8; 2];
+        file.read_exact(&mut magic)
+            .map_err(|e| AppError::Download(format!("read extracted {target}: {e}")))?;
+        let size = file
+            .metadata()
+            .map_err(|e| AppError::Download(format!("inspect extracted {target}: {e}")))?
+            .len();
+        validate_download(target, size, 0, &magic, b"MZ", 1_000_000)?;
+    }
+
+    for (idx, target) in targets.iter().enumerate() {
+        if let Err(error) = replace_file_atomically(&temp_paths[idx], &dir.join(target)) {
+            for path in temp_paths.iter().skip(idx) {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(error);
+        }
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ytdlp_is_stale_logic() {
-        use chrono::{Duration, Utc};
-        // No prior refresh recorded → stale.
-        assert!(ytdlp_is_stale(None, 7));
-        // Refreshed just now → fresh.
-        let now = Utc::now().to_rfc3339();
-        assert!(!ytdlp_is_stale(Some(&now), 7));
-        // Refreshed 3 days ago, 7-day threshold → fresh.
-        let three_days = (Utc::now() - Duration::days(3)).to_rfc3339();
-        assert!(!ytdlp_is_stale(Some(&three_days), 7));
-        // Refreshed 8 days ago, 7-day threshold → stale.
-        let eight_days = (Utc::now() - Duration::days(8)).to_rfc3339();
-        assert!(ytdlp_is_stale(Some(&eight_days), 7));
-        // Unparseable timestamp → treat as stale (safe default).
-        assert!(ytdlp_is_stale(Some("not-a-date"), 7));
-    }
 
     #[test]
     fn validate_download_accepts_complete_binary() {
@@ -461,6 +570,13 @@ mod tests {
         assert!(validate_download("ffmpeg", 1, 0, b"P", b"PK", 0).is_err());
     }
 
+    #[test]
+    fn validate_checksum_rejects_any_digest_change() {
+        let expected = "3a48cb955d55c8821b60ccbdbbc6f61bc958f2f3d3b7ad5eaf3d83a543293a27";
+        assert!(validate_checksum("yt-dlp", expected, expected).is_ok());
+        assert!(validate_checksum("yt-dlp", &format!("0{}", &expected[1..]), expected).is_err());
+    }
+
     /// Real network + filesystem test. Downloads ~150 MB to
     /// `%APPDATA%\clipviral\bin\`. Run explicitly:
     ///   cargo test --lib bin_manager::tests::download_real -- --ignored --nocapture
@@ -477,7 +593,12 @@ mod tests {
 
         let cb: ProgressCb = Box::new(|d, t| {
             if t > 0 && d % (5 * 1024 * 1024) < 64 * 1024 {
-                eprintln!("  progress: {} / {} MB ({}%)", d / 1_000_000, t / 1_000_000, (d * 100) / t);
+                eprintln!(
+                    "  progress: {} / {} MB ({}%)",
+                    d / 1_000_000,
+                    t / 1_000_000,
+                    (d * 100) / t
+                );
             }
         });
 
@@ -486,7 +607,10 @@ mod tests {
         assert!(yt.exists(), "yt-dlp.exe missing after download");
         let yt_size = std::fs::metadata(&yt).unwrap().len();
         eprintln!("  yt-dlp.exe {} MB", yt_size / 1_000_000);
-        assert!(yt_size > 5_000_000, "yt-dlp.exe suspiciously small: {yt_size}");
+        assert!(
+            yt_size > 5_000_000,
+            "yt-dlp.exe suspiciously small: {yt_size}"
+        );
 
         eprintln!("-- downloading ffmpeg --");
         download_ffmpeg(&cb).await.expect("ffmpeg download failed");

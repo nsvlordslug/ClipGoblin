@@ -1,103 +1,8 @@
-import { Check, Link2, Loader2, Upload, AlertCircle } from 'lucide-react'
+import { Check, Link2, Loader2, AlertCircle } from 'lucide-react'
 import { PLATFORM_INFO, usePlatformStore } from '../stores/platformStore'
-import { EXPORT_PRESETS } from '../lib/editTypes'
+import { getPresetForPlatform, PLATFORM_VISIBILITY } from '../lib/platformUpload'
+import type { PlatformUploadState, YouTubeSubFormat } from '../lib/platformUpload'
 import Tooltip from './Tooltip'
-
-// ── Platform → default export preset mapping ──
-
-export const PLATFORM_PRESET_MAP: Record<string, string> = {
-  tiktok: 'tiktok',            // 9:16
-  youtube: 'youtube',           // 16:9
-  youtube_shorts: 'shorts',     // 9:16
-  instagram: 'reels',           // 9:16
-}
-
-export function getPresetForPlatform(platform: string) {
-  const presetId = PLATFORM_PRESET_MAP[platform] || 'tiktok'
-  return EXPORT_PRESETS.find(p => p.id === presetId) || EXPORT_PRESETS[0]
-}
-
-// ── YouTube sub-format types ──
-
-export type YouTubeSubFormat = 'regular' | 'shorts' | 'both'
-
-/** Determine smart default: Shorts if vertical + under 60s, else Regular */
-export function getDefaultYouTubeSubFormat(clipDurationSec: number, currentAspectRatio: string): YouTubeSubFormat {
-  if (currentAspectRatio === '9:16' && clipDurationSec <= 60) return 'shorts'
-  return 'regular'
-}
-
-/** Expand a YouTube sub-format selection into platform upload keys */
-export function expandYouTubeSubFormat(sub: YouTubeSubFormat): string[] {
-  if (sub === 'both') return ['youtube', 'youtube_shorts']
-  if (sub === 'shorts') return ['youtube_shorts']
-  return ['youtube']
-}
-
-// ── Per-platform visibility options ──
-
-export interface VisibilityOption {
-  value: string
-  label: string
-  hint: string
-}
-
-export const PLATFORM_VISIBILITY: Record<string, { options: VisibilityOption[]; default: string }> = {
-  youtube: {
-    default: 'unlisted',
-    options: [
-      { value: 'unlisted', label: 'Unlisted', hint: 'Link only' },
-      { value: 'public', label: 'Public', hint: 'Visible on channel' },
-      { value: 'private', label: 'Private', hint: 'Only you' },
-    ],
-  },
-  youtube_shorts: {
-    default: 'unlisted',
-    options: [
-      { value: 'unlisted', label: 'Unlisted', hint: 'Link only' },
-      { value: 'public', label: 'Public', hint: 'Visible on channel' },
-      { value: 'private', label: 'Private', hint: 'Only you' },
-    ],
-  },
-  tiktok: {
-    default: 'private',
-    options: [
-      { value: 'private', label: 'Draft', hint: 'Only you' },
-      { value: 'friends', label: 'Friends', hint: 'Friends only' },
-      { value: 'public', label: 'Public', hint: 'On your feed' },
-    ],
-  },
-  instagram: {
-    default: 'private',
-    options: [
-      { value: 'private', label: 'Private', hint: 'Only you' },
-      { value: 'public', label: 'Public', hint: 'On your feed' },
-    ],
-  },
-}
-
-export function getDefaultVisibility(platform: string): string {
-  return PLATFORM_VISIBILITY[platform]?.default || 'unlisted'
-}
-
-// ── Per-platform upload status ──
-
-export type PlatformUploadStatus =
-  | 'idle'
-  | 'waiting'       // queued, hasn't started yet
-  | 'exporting'     // re-exporting in required format
-  | 'uploading'     // uploading to platform
-  | 'processing'    // platform is processing the upload (e.g. TikTok post-upload)
-  | 'done'          // success
-  | 'error'         // failed
-
-export interface PlatformUploadState {
-  status: PlatformUploadStatus
-  progress: number   // 0-100
-  error?: string
-  videoUrl?: string
-  duplicateUrl?: string
-}
 
 // ── Visibility row (reusable for each sub-format) ──
 
@@ -216,7 +121,7 @@ export default function PlatformUploadSelector({
 
   // Platforms that have adapters (available or connected)
   const platforms = Object.entries(PLATFORM_INFO)
-    .filter(([_, info]) => info.available)
+    .filter(([, info]) => info.available)
     .map(([key]) => key)
 
   return (

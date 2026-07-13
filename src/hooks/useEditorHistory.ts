@@ -1,4 +1,4 @@
-import { useRef, useCallback } from 'react'
+import { useRef, useCallback, useMemo } from 'react'
 
 // ── Editor History (Undo / Redo) ──
 // Tracks snapshots of editor-relevant state.  Each snapshot is a plain
@@ -109,5 +109,8 @@ export function useEditorHistory(): EditorHistory {
   const undoCount = useCallback(() => indexRef.current, [])
   const redoCount = useCallback(() => stackRef.current.length - 1 - indexRef.current, [])
 
-  return { push, undo, redo, canUndo, canRedo, undoCount, redoCount, reset }
+  return useMemo(
+    () => ({ push, undo, redo, canUndo, canRedo, undoCount, redoCount, reset }),
+    [canRedo, canUndo, push, redo, redoCount, reset, undo, undoCount],
+  )
 }

@@ -2,7 +2,6 @@
 
 use std::io::{BufRead, BufReader};
 use std::process::Stdio;
-use std::path::PathBuf;
 
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_opener::OpenerExt;
@@ -11,7 +10,6 @@ use crate::db;
 use crate::DbConn;
 use crate::error::AppError;
 use crate::hardware::HardwareInfo;
-use crate::job_queue::JobQueue;
 use crate::twitch;
 use crate::report_error;
 use crate::commands::auth::try_refresh_twitch_token;
@@ -1792,34 +1790,63 @@ fn run_auto_ship_for_vod(
     candidate_clip_ids: &[String],
 ) -> Result<AutoShipReport, String> {
     // Read enable-flag out of the uiStore JSON blob (single source of truth).
-    let ui_json = db::get_setting(conn, "ui_settings").ok().flatten().unwrap_or_default();
+    let ui_json = db::get_setting(conn, "ui_settings")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     let auto_ship_enabled = serde_json::from_str::<serde_json::Value>(&ui_json)
         .ok()
         .and_then(|v| v.get("autoShipHighConfidence").and_then(|b| b.as_bool()))
         .unwrap_or(false);
     if !auto_ship_enabled {
-        return Ok(AutoShipReport { clips_queued: 0, platforms: Vec::new(), next_publish_at: None });
+        return Ok(AutoShipReport {
+            clips_queued: 0,
+            platforms: Vec::new(),
+            next_publish_at: None,
+        });
     }
     if candidate_clip_ids.is_empty() {
-        return Ok(AutoShipReport { clips_queued: 0, platforms: Vec::new(), next_publish_at: None });
+        return Ok(AutoShipReport {
+            clips_queued: 0,
+            platforms: Vec::new(),
+            next_publish_at: None,
+        });
     }
 
     // Detect which platforms are connected (non-empty access token).
     let mut platforms: Vec<&'static str> = Vec::new();
-    if db::get_setting(conn, "youtube_access_token").ok().flatten().map_or(false, |s| !s.is_empty()) {
+    if db::get_setting(conn, "youtube_access_token")
+        .ok()
+        .flatten()
+        .map_or(false, |s| !s.is_empty())
+    {
         platforms.push("youtube");
     }
-    if db::get_setting(conn, "tiktok_access_token").ok().flatten().map_or(false, |s| !s.is_empty()) {
+    if db::get_setting(conn, "tiktok_access_token")
+        .ok()
+        .flatten()
+        .map_or(false, |s| !s.is_empty())
+    {
         platforms.push("tiktok");
     }
     if platforms.is_empty() {
-        log::info!("[auto-ship] enabled but no platforms connected for VOD {}", vod_id);
-        return Ok(AutoShipReport { clips_queued: 0, platforms: Vec::new(), next_publish_at: None });
+        log::info!(
+            "[auto-ship] enabled but no platforms connected for VOD {}",
+            vod_id
+        );
+        return Ok(AutoShipReport {
+            clips_queued: 0,
+            platforms: Vec::new(),
+            next_publish_at: None,
+        });
     }
 
     // Cap per analysis to prevent a 20-highlight VOD from flood-queuing.
     const MAX_AUTO_SHIPS_PER_ANALYSIS: usize = 3;
-    let target_clips: Vec<&String> = candidate_clip_ids.iter().take(MAX_AUTO_SHIPS_PER_ANALYSIS).collect();
+    let target_clips: Vec<&String> = candidate_clip_ids
+        .iter()
+        .take(MAX_AUTO_SHIPS_PER_ANALYSIS)
+        .collect();
 
     let grace = chrono::Utc::now() + chrono::Duration::minutes(5);
     let scheduled_time = grace.to_rfc3339();
@@ -1828,25 +1855,38 @@ fn run_auto_ship_for_vod(
 
     for clip_id in &target_clips {
         // Idempotency: skip if an auto-ship row already exists for this clip.
-        let existing_for_clip = db::get_scheduled_uploads_for_clip(conn, clip_id)
-            .unwrap_or_default();
+        let existing_for_clip =
+            db::get_scheduled_uploads_for_clip(conn, clip_id).unwrap_or_default();
         // Load clip to build the upload metadata stub.
         let clip = match db::get_clip_by_id(conn, clip_id) {
             Ok(Some(c)) => c,
-            _ => { log::warn!("[auto-ship] clip {} not found, skipping", clip_id); continue }
+            _ => {
+                log::warn!("[auto-ship] clip {} not found, skipping", clip_id);
+                continue;
+            }
         };
 
         for platform in &platforms {
             if existing_for_clip.iter().any(|u| u.platform == *platform) {
-                log::info!("[auto-ship] {} / {} already scheduled, skipping", clip_id, platform);
+                log::info!(
+                    "[auto-ship] {} / {} already scheduled, skipping",
+                    clip_id,
+                    platform
+                );
                 continue;
             }
             let meta = crate::social::UploadMeta {
                 title: clip.title.clone(),
                 description: clip.publish_description.clone().unwrap_or_default(),
-                tags: clip.publish_hashtags
+                tags: clip
+                    .publish_hashtags
                     .as_deref()
-                    .map(|s| s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect())
+                    .map(|s| {
+                        s.split(',')
+                            .map(|t| t.trim().to_string())
+                            .filter(|t| !t.is_empty())
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 visibility: "public".to_string(),
                 clip_id: (*clip_id).clone(),
@@ -1859,7 +1899,10 @@ fn run_auto_ship_for_vod(
             };
             let meta_json = match serde_json::to_string(&meta) {
                 Ok(s) => s,
-                Err(e) => { log::error!("[auto-ship] meta serialize failed: {}", e); continue }
+                Err(e) => {
+                    log::error!("[auto-ship] meta serialize failed: {}", e);
+                    continue;
+                }
             };
 
             let row = db::ScheduledUploadRow {
@@ -1871,6 +1914,8 @@ fn run_auto_ship_for_vod(
                 retry_count: 0,
                 error_message: None,
                 video_url: None,
+                job_id: None,
+                platform_video_id: None,
                 upload_meta_json: Some(meta_json),
                 created_at: now.clone(),
                 view_count: None,
@@ -1879,10 +1924,21 @@ fn run_auto_ship_for_vod(
                 stats_updated_at: None,
             };
             if let Err(e) = db::insert_scheduled_upload(conn, &row) {
-                log::error!("[auto-ship] insert failed for {} / {}: {}", clip_id, platform, e);
+                log::error!(
+                    "[auto-ship] insert failed for {} / {}: {}",
+                    clip_id,
+                    platform,
+                    e
+                );
                 continue;
             }
-            log::info!("[auto-ship] queued upload {} for clip {} to {} at {}", row.id, clip_id, platform, scheduled_time);
+            log::info!(
+                "[auto-ship] queued upload {} for clip {} to {} at {}",
+                row.id,
+                clip_id,
+                platform,
+                scheduled_time
+            );
             queued += 1;
         }
     }
@@ -1890,7 +1946,11 @@ fn run_auto_ship_for_vod(
     Ok(AutoShipReport {
         clips_queued: target_clips.len().min(queued),
         platforms: platforms.iter().map(|s| s.to_string()).collect(),
-        next_publish_at: if queued > 0 { Some(scheduled_time) } else { None },
+        next_publish_at: if queued > 0 {
+            Some(scheduled_time)
+        } else {
+            None
+        },
     })
 }
 
@@ -1968,6 +2028,11 @@ async fn fetch_community_clips_for_vod(
                     view_count: c.view_count,
                     title: c.title,
                     clip_url,
+                    is_streamer_created: !c.creator_id.is_empty()
+                        && c.creator_id == broadcaster_id,
+                    creator_name: c.creator_name,
+                    creator_id: c.creator_id,
+                    is_featured: c.is_featured,
                 })
             }).collect()
         }

@@ -36,24 +36,34 @@ pub struct UsageEntry<'a> {
 /// Cost in USD per 1K tokens for (input, output) at the given provider+model.
 /// Returns a sensible default for unknown models so logging never fails.
 ///
-/// Pricing snapshot 2026-04-24. Update when providers change rates.
+/// Pricing snapshot 2026-07-12. Update when providers change rates.
 pub fn token_cost_per_1k(provider: Provider, model: &str) -> (f64, f64) {
     let m = model.to_lowercase();
     match provider {
         Provider::Claude => {
             if m.contains("haiku") {
-                (0.0008, 0.004)
+                if m.contains("3-5") || m.contains("3.5") {
+                    (0.0008, 0.004)
+                } else {
+                    (0.001, 0.005)
+                }
             } else if m.contains("sonnet") {
                 (0.003, 0.015)
             } else if m.contains("opus") {
-                (0.015, 0.075)
+                if m.contains("4-1") || m.contains("4.1") {
+                    (0.015, 0.075)
+                } else {
+                    (0.005, 0.025)
+                }
             } else {
                 (0.003, 0.015) // sensible default to Sonnet pricing
             }
         }
         Provider::OpenAI => {
-            if m.contains("4o-mini") || m.contains("4-mini") {
+            if m.contains("4o-mini") {
                 (0.00015, 0.0006)
+            } else if m.contains("4.1-mini") {
+                (0.0004, 0.0016)
             } else if m.contains("4o") {
                 (0.0025, 0.01)
             } else if m.contains("o1") {
@@ -63,12 +73,18 @@ pub fn token_cost_per_1k(provider: Provider, model: &str) -> (f64, f64) {
             }
         }
         Provider::Gemini => {
-            if m.contains("flash") {
-                (0.000075, 0.0003)
+            if m.contains("2.5-flash-lite") {
+                (0.0001, 0.0004)
+            } else if m.contains("2.5-flash") {
+                (0.0003, 0.0025)
+            } else if m.contains("2.5-pro") {
+                (0.00125, 0.01)
+            } else if m.contains("flash") {
+                (0.0003, 0.0025)
             } else if m.contains("pro") {
-                (0.00125, 0.005)
+                (0.00125, 0.01)
             } else {
-                (0.000075, 0.0003)
+                (0.0003, 0.0025)
             }
         }
         Provider::Free => (0.0, 0.0),
@@ -206,42 +222,41 @@ pub fn sum_cost_for_vod(conn: &Connection, vod_id: &str) -> f64 {
     .unwrap_or(0.0)
 }
 
-/// Duration-based projection of the BYOK cost to analyze a VOD of
-/// `duration_secs`, used for the pre-run estimate when there's no prior
-/// analyze history to average. Pure (no DB) so it's easy to unit-test.
-///
-/// Model is the resolved clip-judge model, priced via [`compute_cost`].
-///
-/// Assumptions (deliberately rough — this is a "you won't be surprised"
-/// number, not a billing guarantee; refined toward the real rolling
-/// average as soon as the first analyze logs):
-///   - The judge reads the (windowed) transcript once. Spoken content is
-///     ~150 wpm ≈ 2.5 words/sec, and ~0.75 words/token, so ≈ 3.3 input
-///     tokens/sec of VOD. We round to **4 tokens/sec** to leave headroom
-///     for the prompt scaffold, signal tags, and whisper verbosity. The
-///     judge's JSON reply is small and roughly fixed; budget **600
-///     output tokens** for the whole run.
-///   - Analysis-time titles run one cheap LLM call per *expected* clip.
-///     Clip count tracks length at ~1 clip / 6 min (matches the detector's
-///     `duration_minutes / 6` heuristic), floored at 6. Each title call is
-///     ~**500 in / 80 out** tokens.
-pub fn project_analyze_cost(provider: Provider, model: &str, duration_secs: f64) -> f64 {
+/// Conservative pre-run projection using each enabled step's actual resolved
+/// provider and model. Regeneration calls and old provider configurations are
+/// deliberately excluded.
+pub fn project_analyze_cost(
+    duration_secs: f64,
+    judge: Option<(Provider, &str)>,
+    final_pass: Option<(Provider, &str)>,
+    titles: Option<(Provider, &str)>,
+) -> f64 {
     let secs = duration_secs.max(0.0);
+    if secs == 0.0 {
+        return 0.0;
+    }
 
-    // Judge: one pass over the transcript.
     const JUDGE_TOKENS_IN_PER_SEC: f64 = 4.0;
+    const JUDGE_PROMPT_TOKENS: u64 = 800;
     const JUDGE_TOKENS_OUT: u64 = 600;
-    let judge_in = (secs * JUDGE_TOKENS_IN_PER_SEC) as u64;
-    let judge_cost = compute_cost(provider, model, judge_in, JUDGE_TOKENS_OUT);
+    const FINAL_PASS_TOKENS_IN: u64 = 2_500;
+    const FINAL_PASS_TOKENS_OUT: u64 = 600;
+    const TITLE_TOKENS_IN: u64 = 1_200;
+    const TITLE_TOKENS_OUT: u64 = 300;
 
-    // Analysis-time titles: ~1 call per expected clip.
-    const TITLE_TOKENS_IN: u64 = 500;
-    const TITLE_TOKENS_OUT: u64 = 80;
-    let expected_clips = ((secs / 60.0) / 6.0).floor().max(6.0) as u64;
-    let titles_cost =
-        expected_clips as f64 * compute_cost(provider, model, TITLE_TOKENS_IN, TITLE_TOKENS_OUT);
+    let judge_cost = judge.map_or(0.0, |(provider, model)| {
+        let tokens_in = (secs * JUDGE_TOKENS_IN_PER_SEC).ceil() as u64 + JUDGE_PROMPT_TOKENS;
+        compute_cost(provider, model, tokens_in, JUDGE_TOKENS_OUT)
+    });
+    let final_pass_cost = final_pass.map_or(0.0, |(provider, model)| {
+        compute_cost(provider, model, FINAL_PASS_TOKENS_IN, FINAL_PASS_TOKENS_OUT)
+    });
+    let expected_clips = ((secs / 60.0) / 6.0).round().clamp(6.0, 35.0) as u64;
+    let titles_cost = titles.map_or(0.0, |(provider, model)| {
+        expected_clips as f64 * compute_cost(provider, model, TITLE_TOKENS_IN, TITLE_TOKENS_OUT)
+    });
 
-    judge_cost + titles_cost
+    judge_cost + final_pass_cost + titles_cost
 }
 
 #[cfg(test)]
@@ -250,9 +265,9 @@ mod tests {
 
     #[test]
     fn cost_calc_haiku() {
-        // 1k in + 1k out = 0.0008 + 0.004 = 0.0048
+        // Claude Haiku 4.5: $1/M input + $5/M output.
         let cost = compute_cost(Provider::Claude, "claude-haiku-4-5", 1000, 1000);
-        assert!((cost - 0.0048).abs() < 1e-6);
+        assert!((cost - 0.006).abs() < 1e-6);
     }
 
     #[test]
@@ -402,22 +417,59 @@ mod tests {
 
     #[test]
     fn project_analyze_cost_free_is_zero() {
-        assert_eq!(project_analyze_cost(Provider::Free, "anything", 3600.0), 0.0);
+        assert_eq!(project_analyze_cost(3600.0, None, None, None), 0.0);
     }
 
     #[test]
     fn project_analyze_cost_scales_with_duration() {
         // Longer VODs cost more (more transcript tokens + more expected clips).
-        let short = project_analyze_cost(Provider::Claude, "claude-sonnet-4-6", 600.0);
-        let long = project_analyze_cost(Provider::Claude, "claude-sonnet-4-6", 7200.0);
+        let short = project_analyze_cost(
+            600.0,
+            Some((Provider::Claude, "claude-sonnet-4-6")),
+            None,
+            Some((Provider::OpenAI, "gpt-4o-mini")),
+        );
+        let long = project_analyze_cost(
+            7200.0,
+            Some((Provider::Claude, "claude-sonnet-4-6")),
+            None,
+            Some((Provider::OpenAI, "gpt-4o-mini")),
+        );
         assert!(short > 0.0);
         assert!(long > short);
     }
 
     #[test]
     fn project_analyze_cost_haiku_cheaper_than_sonnet() {
-        let haiku = project_analyze_cost(Provider::Claude, "claude-haiku-4-5", 3600.0);
-        let sonnet = project_analyze_cost(Provider::Claude, "claude-sonnet-4-6", 3600.0);
+        let haiku = project_analyze_cost(
+            3600.0,
+            Some((Provider::Claude, "claude-haiku-4-5")),
+            None,
+            None,
+        );
+        let sonnet = project_analyze_cost(
+            3600.0,
+            Some((Provider::Claude, "claude-sonnet-4-6")),
+            None,
+            None,
+        );
         assert!(haiku < sonnet);
+    }
+
+    #[test]
+    fn project_analyze_cost_prices_titles_with_their_own_model() {
+        let cheap_titles = project_analyze_cost(
+            3600.0,
+            Some((Provider::Claude, "claude-sonnet-4-6")),
+            None,
+            Some((Provider::OpenAI, "gpt-4o-mini")),
+        );
+        let sonnet_titles = project_analyze_cost(
+            3600.0,
+            Some((Provider::Claude, "claude-sonnet-4-6")),
+            None,
+            Some((Provider::Claude, "claude-sonnet-4-6")),
+        );
+        assert!(cheap_titles < sonnet_titles);
     }
 }

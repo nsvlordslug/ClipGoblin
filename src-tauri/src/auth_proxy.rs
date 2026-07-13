@@ -20,22 +20,20 @@ pub struct TokenResponse {
 /// keeping client secrets out of the desktop binary in Steam builds.
 pub struct AuthProxy {
     client: reqwest::Client,
-    api_key: String,
 }
 
 impl AuthProxy {
-    /// Create a new proxy client. Reads `PROXY_API_KEY` from the environment.
+    /// Create a client for the OAuth proxy. A desktop binary cannot keep a
+    /// shared proxy credential secret, so the Worker validates routes, redirect
+    /// URIs, payloads, and rate limits instead.
     pub fn new() -> Result<Self, String> {
-        let api_key = option_env!("PROXY_API_KEY")
-            .map(|s| s.to_string())
-            .or_else(|| std::env::var("PROXY_API_KEY").ok())
-            .ok_or_else(|| "PROXY_API_KEY not set at build or runtime".to_string())?;
         let client = reqwest::Client::builder()
             .use_native_tls()
             .http1_only()
             .timeout(std::time::Duration::from_secs(15))
-            .build()            .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
-        Ok(Self { client, api_key })
+            .build()
+            .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+        Ok(Self { client })
     }
 
     // ── Twitch ──────────────────────────────────────────────
@@ -123,18 +121,14 @@ impl AuthProxy {
 
     // ── Internal ────────────────────────────────────────────
 
-    async fn post(
-        &self,
-        path: &str,
-        body: serde_json::Value,
-    ) -> Result<TokenResponse, String> {
+    async fn post(&self, path: &str, body: serde_json::Value) -> Result<TokenResponse, String> {
         let url = format!("{}{}", PROXY_BASE, path);
-        let body_str = serde_json::to_string(&body)
-            .map_err(|e| format!("Failed to serialize body: {e}"))?;
+        let body_str =
+            serde_json::to_string(&body).map_err(|e| format!("Failed to serialize body: {e}"))?;
 
-        let resp = self.client
+        let resp = self
+            .client
             .post(&url)
-            .header("X-Proxy-Key", &self.api_key)
             .header("Content-Type", "application/json")
             .body(body_str)
             .send()
@@ -142,7 +136,9 @@ impl AuthProxy {
             .map_err(|e| format!("HTTP request failed: {e}"))?;
 
         let status = resp.status();
-        let text = resp.text().await
+        let text = resp
+            .text()
+            .await
             .map_err(|e| format!("Failed to read response body: {e}"))?;
 
         if !status.is_success() {

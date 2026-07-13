@@ -64,7 +64,12 @@ export default function ClipPlayer({
   // Keep a stable ref to onTimeUpdate to avoid re-registering the timeupdate
   // listener on every parent render (the callback fires on every video frame)
   const onTimeUpdateRef = useRef(onTimeUpdate)
-  onTimeUpdateRef.current = onTimeUpdate
+  const onPlayChangeRef = useRef(onPlayChange)
+
+  useEffect(() => {
+    onTimeUpdateRef.current = onTimeUpdate
+    onPlayChangeRef.current = onPlayChange
+  }, [onPlayChange, onTimeUpdate])
 
   const [loaded, setLoaded] = useState(false)
   const [playing, setPlaying] = useState(false)
@@ -78,6 +83,13 @@ export default function ClipPlayer({
   // Natural duration of the loaded file — only used in fullFile mode (a
   // standalone community-clip MP4) to bound playback to the file itself.
   const [fileDuration, setFileDuration] = useState(0)
+  const fullFileRef = useRef(fullFile)
+  const clipStartRef = useRef(clipStart)
+
+  useEffect(() => {
+    fullFileRef.current = fullFile
+    clipStartRef.current = clipStart
+  }, [clipStart, fullFile])
 
   // Effective clip bounds. In fullFile mode the source IS the clip, so we play
   // 0 → the file's own duration and ignore the VOD-relative clipStart/clipEnd.
@@ -96,6 +108,16 @@ export default function ClipPlayer({
   const playerId = useId()
   const { requestPlay, notifyPause, register } = usePlaybackStore()
 
+  const setPlayingState = useCallback((state: boolean) => {
+    setPlaying(state)
+    onPlayChangeRef.current?.(state)
+    if (state) {
+      requestPlay(playerId)
+    } else {
+      notifyPause(playerId)
+    }
+  }, [notifyPause, playerId, requestPlay])
+
   // Register a pause callback so other players can pause this one
   useEffect(() => {
     const unregister = register(playerId, () => {
@@ -103,7 +125,7 @@ export default function ClipPlayer({
       if (video && !video.paused) {
         video.pause()
         setPlaying(false)
-        onPlayChange?.(false)
+        onPlayChangeRef.current?.(false)
       }
     })
     return unregister
@@ -112,26 +134,24 @@ export default function ClipPlayer({
   // ── Load video when src changes ──
   useEffect(() => {
     const video = videoRef.current
-    if (!video || !src) return
-    setLoaded(false)
-    setError('')
-    setPlaying(false)
-    setFileDuration(0)
+    if (!video) return
 
-    video.src = src
-    video.volume = volume
-    video.muted = muted
-
+    const onReset = () => {
+      setLoaded(false)
+      setError('')
+      setPlaying(false)
+      setFileDuration(0)
+    }
     const onMeta = () => {
-      if (fullFile) {
+      if (fullFileRef.current) {
         // Standalone clip: it's already trimmed — start at 0 and bound to the
         // file's own duration. No VOD-relative seek.
         setFileDuration(Number.isFinite(video.duration) ? video.duration : 0)
         video.currentTime = 0
         setCurrentTime(0)
       } else {
-        video.currentTime = clipStart
-        setCurrentTime(clipStart)
+        video.currentTime = clipStartRef.current
+        setCurrentTime(clipStartRef.current)
       }
       setLoaded(true)
     }
@@ -142,11 +162,23 @@ export default function ClipPlayer({
       console.error(`[ClipPlayer] Video error — code: ${code}, message: ${msg}, src: ${src}`)
       setError('Cannot play video')
     }
+    video.addEventListener('loadstart', onReset)
+    video.addEventListener('emptied', onReset)
     video.addEventListener('loadedmetadata', onMeta, { once: true })
     video.addEventListener('error', onErr, { once: true })
-    video.load()
+
+    if (src) {
+      video.src = src
+      video.load()
+    } else {
+      video.pause()
+      video.removeAttribute('src')
+      video.load()
+    }
 
     return () => {
+      video.removeEventListener('loadstart', onReset)
+      video.removeEventListener('emptied', onReset)
       video.removeEventListener('loadedmetadata', onMeta)
       video.removeEventListener('error', onErr)
     }
@@ -168,7 +200,7 @@ export default function ClipPlayer({
     }
     video.addEventListener('timeupdate', onTime)
     return () => video.removeEventListener('timeupdate', onTime)
-  }, [effClipStart, effClipEnd])
+  }, [effClipStart, effClipEnd, setPlayingState])
 
   // ── Expose seek function to parent via ref ──
   useEffect(() => {
@@ -178,7 +210,7 @@ export default function ClipPlayer({
         if (!video) return
         video.currentTime = absoluteTime
         setCurrentTime(absoluteTime)
-        onTimeUpdate?.(absoluteTime)
+        onTimeUpdateRef.current?.(absoluteTime)
       }
     }
     return () => { if (externalSeekRef) externalSeekRef.current = null }
@@ -191,16 +223,6 @@ export default function ClipPlayer({
     video.volume = volume
     video.muted = muted
   }, [volume, muted])
-
-  const setPlayingState = (state: boolean) => {
-    setPlaying(state)
-    onPlayChange?.(state)
-    if (state) {
-      requestPlay(playerId) // pause all other players
-    } else {
-      notifyPause(playerId) // clear active status
-    }
-  }
 
   // ── Play / Pause ──
   const togglePlay = useCallback(async () => {
@@ -228,7 +250,7 @@ export default function ClipPlayer({
       }
       video.play().then(() => setPlayingState(true)).catch(() => setError(PLAYBACK_FAILED_MSG))
     }
-  }, [loaded, playing, error, effClipStart, effClipEnd])
+  }, [loaded, playing, error, effClipStart, effClipEnd, setPlayingState])
 
   const restart = () => {
     const video = videoRef.current

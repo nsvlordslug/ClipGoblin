@@ -68,6 +68,13 @@ function StatusBadge({ upload }: { upload: ScheduledUpload }) {
           Uploading
         </span>
       )
+    case 'processing':
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+          <Loader2 className="w-3 h-3 animate-spin" />
+          Processing
+        </span>
+      )
     case 'completed':
       return (
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/20 text-green-300 border border-green-500/30">
@@ -80,6 +87,12 @@ function StatusBadge({ upload }: { upload: ScheduledUpload }) {
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-500/20 text-red-300 border border-red-500/30">
           <AlertCircle className="w-3 h-3" />
           Failed
+        </span>
+      )
+    case 'cancelled':
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-slate-500/20 text-slate-300 border border-slate-500/30">
+          Cancelled
         </span>
       )
   }
@@ -102,7 +115,7 @@ export default function ScheduledUploads() {
 
   const clipMap = Object.fromEntries(clips.map(c => [c.id, c]))
 
-  const pending = uploads.filter(u => u.status === 'pending' || u.status === 'uploading')
+  const pending = uploads.filter(u => u.status === 'pending' || u.status === 'uploading' || u.status === 'processing')
   const completed = uploads.filter(u => u.status === 'completed')
   const failed = uploads.filter(u => u.status === 'failed')
 

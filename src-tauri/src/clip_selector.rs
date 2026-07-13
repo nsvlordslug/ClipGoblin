@@ -47,6 +47,14 @@ pub struct CommunityClip {
     /// MP4). `None` when the clip wasn't fetched with a URL. Threaded onto the
     /// pinned `ClipCandidate.community_url` so the persist loop can download it.
     pub clip_url: Option<String>,
+    /// True when the broadcaster created the clip on their own channel.
+    pub is_streamer_created: bool,
+    /// Display name of the user who created the clip, when Twitch returned it.
+    pub creator_name: String,
+    /// Stable Twitch user ID used to count unique clippers for consensus.
+    pub creator_id: String,
+    /// The broadcaster explicitly featured this clip on Twitch.
+    pub is_featured: bool,
 }
 
 /// Multi-signal moment after fusion.
@@ -359,14 +367,26 @@ pub fn generate_emote_candidates(emote_peaks: &[db::HighlightRow]) -> Vec<RawSig
 ///   1k+ views → 1.0   (ceiling)
 pub fn generate_community_candidates(clips: &[CommunityClip]) -> Vec<RawSignal> {
     clips.iter().map(|c| {
-        let raw = ((c.view_count as f64 + 1.0).ln() / 1000.0_f64.ln()).clamp(0.45, 1.0);
+        let view_intensity =
+            ((c.view_count as f64 + 1.0).ln() / 1000.0_f64.ln()).clamp(0.45, 1.0);
+        let provenance_boost = if c.is_streamer_created { 0.12 } else { 0.0 }
+            + if c.is_featured { 0.14 } else { 0.0 };
+        let mut tags = vec!["community-clip".to_string()];
+        tags.push(if c.is_streamer_created {
+            "streamer-created".to_string()
+        } else {
+            "viewer-created".to_string()
+        });
+        if c.is_featured {
+            tags.push("featured-clip".to_string());
+        }
         RawSignal {
             // Center the signal mid-clip so the fusion window catches nearby
             // audio/chat/transcript peaks.
             center: c.vod_offset_seconds + c.duration_seconds / 2.0,
-            intensity: raw,
+            intensity: (view_intensity + provenance_boost).min(1.0),
             source: SignalSource::Community,
-            tags: vec!["community-clip".to_string(), "viewer-validated".to_string()],
+            tags,
             transcript_snippet: if c.title.is_empty() { None } else { Some(c.title.clone()) },
             spike_delta: 0.0,
         }
@@ -1253,23 +1273,241 @@ fn diversify_final_selection(
 /// the user-facing rating — so setting it here drives the displayed strong score.
 const COMMUNITY_SCORE_FLOOR: f64 = 0.70;
 const COMMUNITY_SCORE_CEIL: f64 = 0.95;
-fn community_display_score(view_count: i64) -> f64 {
-    let frac = ((view_count as f64 + 1.0).ln() / 1000.0_f64.ln()).clamp(0.0, 1.0);
-    (COMMUNITY_SCORE_FLOOR + frac * (COMMUNITY_SCORE_CEIL - COMMUNITY_SCORE_FLOOR))
-        .clamp(COMMUNITY_SCORE_FLOOR, COMMUNITY_SCORE_CEIL)
+const COMMUNITY_ENRICHED_SCORE_CEIL: f64 = 0.99;
+const COMMUNITY_CONSENSUS_CENTER_WINDOW: f64 = 12.0;
+
+fn normalized_community_views(view_count: i64) -> f64 {
+    let frac = (((view_count.max(0) as f64) + 1.0).ln() / 1000.0_f64.ln())
+        .clamp(0.0, 1.0);
+    frac
 }
 
-/// Force the most-watched community (viewer-clipped) moments into the final set,
+#[derive(Clone, Debug)]
+struct CommunityMoment<'a> {
+    representative: &'a CommunityClip,
+    clip_count: usize,
+    creator_keys: Vec<String>,
+    total_views: i64,
+    has_streamer_created: bool,
+    has_viewer_created: bool,
+    is_featured: bool,
+}
+
+impl CommunityMoment<'_> {
+    fn start(&self) -> f64 {
+        self.representative.vod_offset_seconds
+    }
+
+    fn end(&self) -> f64 {
+        self.start() + self.representative.duration_seconds
+    }
+
+    fn center(&self) -> f64 {
+        (self.start() + self.end()) / 2.0
+    }
+
+    fn consensus_count(&self) -> usize {
+        self.creator_keys.len()
+    }
+}
+
+fn community_clip_preference(clip: &CommunityClip) -> (bool, bool, i64) {
+    (clip.is_featured, clip.is_streamer_created, clip.view_count)
+}
+
+fn community_creator_key(clip: &CommunityClip) -> String {
+    if !clip.creator_id.trim().is_empty() {
+        return format!("user:{}", clip.creator_id.trim());
+    }
+    if let Some(url) = clip.clip_url.as_deref().filter(|url| !url.trim().is_empty()) {
+        return format!("clip:{}", url.trim());
+    }
+    format!(
+        "anonymous:{:.3}:{:.3}:{}",
+        clip.vod_offset_seconds, clip.duration_seconds, clip.title
+    )
+}
+
+fn community_clips_share_moment(
+    moment: &CommunityMoment<'_>,
+    clip_start: f64,
+    clip_end: f64,
+) -> bool {
+    let clip_center = (clip_start + clip_end) / 2.0;
+    if (moment.center() - clip_center).abs() <= COMMUNITY_CONSENSUS_CENTER_WINDOW {
+        return true;
+    }
+    let overlap = (moment.end().min(clip_end) - moment.start().max(clip_start)).max(0.0);
+    let shorter_duration = (moment.end() - moment.start())
+        .min(clip_end - clip_start)
+        .max(0.0);
+    shorter_duration > 0.0 && overlap / shorter_duration >= 0.5
+}
+
+/// Collapse clips of the same event into one moment. Multiple independent clips
+/// become consensus evidence instead of duplicate output rows.
+fn cluster_community_clips(clips: &[CommunityClip]) -> Vec<CommunityMoment<'_>> {
+    let mut sorted: Vec<&CommunityClip> = clips.iter().collect();
+    sorted.sort_by(|a, b| {
+        a.vod_offset_seconds
+            .partial_cmp(&b.vod_offset_seconds)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut moments: Vec<CommunityMoment<'_>> = Vec::new();
+    for clip in sorted {
+        let creator_key = community_creator_key(clip);
+        let clip_start = clip.vod_offset_seconds;
+        let clip_end = clip_start + clip.duration_seconds;
+        if let Some(moment) = moments.iter_mut().find(|moment| {
+            community_clips_share_moment(moment, clip_start, clip_end)
+        }) {
+            let prefer_clip = community_clip_preference(clip)
+                > community_clip_preference(moment.representative);
+            moment.clip_count += 1;
+            if !moment.creator_keys.contains(&creator_key) {
+                moment.creator_keys.push(creator_key);
+            }
+            moment.total_views = moment.total_views.saturating_add(clip.view_count.max(0));
+            moment.has_streamer_created |= clip.is_streamer_created;
+            moment.has_viewer_created |= !clip.is_streamer_created;
+            moment.is_featured |= clip.is_featured;
+            if prefer_clip {
+                moment.representative = clip;
+            }
+        } else {
+            moments.push(CommunityMoment {
+                representative: clip,
+                clip_count: 1,
+                creator_keys: vec![creator_key],
+                total_views: clip.view_count.max(0),
+                has_streamer_created: clip.is_streamer_created,
+                has_viewer_created: !clip.is_streamer_created,
+                is_featured: clip.is_featured,
+            });
+        }
+    }
+    moments
+}
+
+fn candidate_has_local_signal(candidate: &ClipCandidate) -> bool {
+    candidate
+        .signal_sources
+        .iter()
+        .any(|source| *source != SignalSource::Community)
+}
+
+fn moment_overlaps_candidate(moment: &CommunityMoment<'_>, candidate: &ClipCandidate) -> bool {
+    windows_overlap(
+        moment.start(),
+        moment.end(),
+        candidate.start_time,
+        candidate.end_time,
+    )
+}
+
+fn community_has_local_support(
+    moment: &CommunityMoment<'_>,
+    selected: &[ClipCandidate],
+    fused_community: &[ClipCandidate],
+) -> bool {
+    selected
+        .iter()
+        .chain(fused_community.iter())
+        .any(|candidate| {
+            candidate_has_local_signal(candidate) && moment_overlaps_candidate(moment, candidate)
+        })
+}
+
+fn community_priority_score(moment: &CommunityMoment<'_>, locally_corroborated: bool) -> f64 {
+    normalized_community_views(moment.total_views)
+        + if moment.is_featured { 0.90 } else { 0.0 }
+        + if moment.has_streamer_created { 0.70 } else { 0.0 }
+        + ((moment.consensus_count().saturating_sub(1) as f64) * 0.22).min(0.66)
+        + if locally_corroborated { 0.55 } else { 0.0 }
+}
+
+fn community_display_score(
+    moment: &CommunityMoment<'_>,
+    locally_corroborated: bool,
+) -> f64 {
+    let base = COMMUNITY_SCORE_FLOOR
+        + normalized_community_views(moment.total_views)
+            * (COMMUNITY_SCORE_CEIL - COMMUNITY_SCORE_FLOOR);
+    let metadata_boost = if moment.is_featured { 0.04 } else { 0.0 }
+        + if moment.has_streamer_created { 0.03 } else { 0.0 }
+        + ((moment.consensus_count().saturating_sub(1) as f64) * 0.025).min(0.075)
+        + if locally_corroborated { 0.04 } else { 0.0 };
+    (base + metadata_boost).clamp(COMMUNITY_SCORE_FLOOR, COMMUNITY_ENRICHED_SCORE_CEIL)
+}
+
+fn merge_candidate_evidence(pin: &mut ClipCandidate, evidence: &ClipCandidate) {
+    for source in &evidence.signal_sources {
+        if !pin.signal_sources.contains(source) {
+            pin.signal_sources.push(source.clone());
+        }
+    }
+    for tag in &evidence.event_tags {
+        if !pin.event_tags.contains(tag) {
+            pin.event_tags.push(tag.clone());
+        }
+    }
+    for tag in &evidence.emotion_tags {
+        if !pin.emotion_tags.contains(tag) {
+            pin.emotion_tags.push(tag.clone());
+        }
+    }
+
+    let has_transcript = evidence.signal_sources.contains(&SignalSource::Transcript)
+        && evidence
+            .transcript_excerpt
+            .as_ref()
+            .map(|text| !text.trim().is_empty())
+            .unwrap_or(false);
+    if has_transcript || pin.transcript_excerpt.is_none() {
+        if evidence.transcript_excerpt.is_some() {
+            pin.transcript_excerpt = evidence.transcript_excerpt.clone();
+        }
+    }
+    if evidence.signal_sources.contains(&SignalSource::Semantic)
+        || pin.payoff_summary.is_none()
+    {
+        if evidence.payoff_summary.is_some() {
+            pin.payoff_summary = evidence.payoff_summary.clone();
+        }
+    }
+    if pin.outcome_label.is_none() {
+        pin.outcome_label = evidence.outcome_label.clone();
+    }
+
+    pin.hook_strength = pin.hook_strength.max(evidence.hook_strength);
+    pin.emotional_spike = pin.emotional_spike.max(evidence.emotional_spike);
+    pin.payoff_clarity = pin.payoff_clarity.max(evidence.payoff_clarity);
+    pin.event_reaction_alignment = pin
+        .event_reaction_alignment
+        .max(evidence.event_reaction_alignment);
+    pin.context_simplicity = pin.context_simplicity.max(evidence.context_simplicity);
+    pin.replay_value = pin.replay_value.max(evidence.replay_value);
+    pin.total_score = pin.total_score.max(evidence.total_score).min(0.99);
+    pin.selection_score = pin.selection_score.max(evidence.selection_score).min(0.99);
+    pin.ai_score = match (pin.ai_score, evidence.ai_score) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (None, score) => score,
+        (score, None) => score,
+    };
+}
+
+/// Force the strongest Twitch-clipped moments into the final set,
 /// GUARANTEEING they survive — the gate-A floor, near-duplicate suppression, the
 /// min-gap drop, and the max-clips/type caps can otherwise quietly evict a clip a
 /// human already validated. Pinned from the authoritative `community_clips` slice
-/// (which still carries `view_count`, lost after fusion), capped at
-/// MAX_PINNED_COMMUNITY and prioritized by view_count so a flood of low-view clips
-/// can't bury the app's own detections.
+/// (which still carries provenance and view counts lost after fusion), capped at
+/// MAX_PINNED_COMMUNITY. Ranking considers featured/streamer provenance, viewer
+/// consensus, local signal corroboration, and views.
 ///
-/// Two non-negotiables for a viewer-made clip (it ALREADY has human-chosen
-/// boundaries and human validation):
-///   1. EXACT span — use the viewer's `vod_offset_seconds`..`+duration_seconds`
+/// Two non-negotiables for a Twitch clip (it already has chosen boundaries and
+/// channel/community validation):
+///   1. EXACT span — use its `vod_offset_seconds`..`+duration_seconds`
 ///      verbatim. NEVER run `optimize_clip_boundaries` / boundary expansion on it
 ///      (that re-cut the clip and lost the viewer's context).
 ///   2. STRONG rating — a hardcoded strong score (see `community_display_score`),
@@ -1292,6 +1530,14 @@ fn pin_community_clips(
         return;
     }
 
+    // Preserve fused candidates as supporting evidence before replacing their
+    // boundaries with the exact Twitch clip span.
+    let fused_community: Vec<ClipCandidate> = selected
+        .iter()
+        .filter(|candidate| is_community_sourced(candidate))
+        .cloned()
+        .collect();
+
     // ── Step 1: purge any community-sourced clip already selected. Those carry
     // the re-cut boundaries + low score from the normal pipeline (community clips
     // are gate-exempt, so a viewer moment can reach `selected` that way). We
@@ -1305,19 +1551,32 @@ fn pin_community_clips(
         );
     }
 
-    // Most-watched first, then keep at most MAX_PINNED_COMMUNITY.
-    let mut ordered: Vec<&CommunityClip> = community_clips.iter().collect();
-    ordered.sort_by(|a, b| b.view_count.cmp(&a.view_count));
+    // Cluster duplicate clips of the same event, then rank unique moments.
+    let mut ordered = cluster_community_clips(community_clips);
+    ordered.sort_by(|a, b| {
+        let a_score = community_priority_score(
+            a,
+            community_has_local_support(a, selected, &fused_community),
+        );
+        let b_score = community_priority_score(
+            b,
+            community_has_local_support(b, selected, &fused_community),
+        );
+        b_score
+            .partial_cmp(&a_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut pinned_count = 0usize;
-    for cc in ordered {
+    for moment in ordered {
         if pinned_count >= MAX_PINNED_COMMUNITY {
             break;
         }
 
-        // EXACT viewer span — verbatim. A viewer-made clip already has
-        // human-chosen boundaries; do NOT optimize/expand. Guard only against
+        // EXACT Twitch span — verbatim. The clip already has chosen boundaries;
+        // do NOT optimize/expand. Guard only against
         // degenerate data.
+        let cc = moment.representative;
         if cc.duration_seconds <= 0.0 {
             continue;
         }
@@ -1326,14 +1585,46 @@ fn pin_community_clips(
         if end - start < 1.0 {
             continue;
         }
-        // Strong score (NOT score_clip_candidate): a human/Twitch validated this.
-        let score = community_display_score(cc.view_count);
+        let mut evidence: Vec<ClipCandidate> = fused_community
+            .iter()
+            .filter(|candidate| moment_overlaps_candidate(&moment, candidate))
+            .cloned()
+            .collect();
+        let mut replaced = false;
+        let mut i = 0;
+        while i < selected.len() {
+            if moment_overlaps_candidate(&moment, &selected[i]) {
+                evidence.push(selected.remove(i));
+                replaced = true;
+            } else {
+                i += 1;
+            }
+        }
+        let locally_corroborated = evidence.iter().any(candidate_has_local_signal);
+
+        // Strong score (NOT score_clip_candidate): Twitch/community validation
+        // drives the base, while provenance, consensus, and local evidence boost it.
+        let score = community_display_score(&moment, locally_corroborated)
+            .clamp(COMMUNITY_SCORE_FLOOR, COMMUNITY_ENRICHED_SCORE_CEIL);
+        let mut event_tags = vec!["community-clip".to_string()];
+        if moment.has_streamer_created {
+            event_tags.push("streamer-created".to_string());
+        }
+        if moment.has_viewer_created {
+            event_tags.push("viewer-created".to_string());
+        }
+        if moment.is_featured {
+            event_tags.push("featured-clip".to_string());
+        }
+        if moment.consensus_count() > 1 {
+            event_tags.push("community-consensus".to_string());
+        }
         let mut pin = ClipCandidate {
             start_time: start,
             end_time: end,
             peak_time: (start + end) / 2.0, // midpoint of the viewer's exact span
             transcript_excerpt: if cc.title.is_empty() { None } else { Some(cc.title.clone()) },
-            event_tags: vec!["community-clip".to_string()],
+            event_tags,
             emotion_tags: Vec::new(),
             payoff_summary: if cc.title.is_empty() { None } else { Some(cc.title.clone()) },
             outcome_label: None,
@@ -1355,38 +1646,67 @@ fn pin_community_clips(
             novelty_score: 0.0,
             diversity_penalty: 0.0,
             selection_score: score,
-            selected_reason: Some(format!("pinned — viewer clip ({} views)", cc.view_count)),
+            selected_reason: None,
             rejection_reason: None,
             // Carry the Twitch clip URL so the persist loop can download the
             // actual viewer-made MP4 and use it as the clip's video verbatim.
             community_url: cc.clip_url.clone(),
         };
+        for candidate in &evidence {
+            merge_candidate_evidence(&mut pin, candidate);
+        }
+
+        let source_label = if moment.is_featured && moment.has_streamer_created {
+            "featured streamer clip"
+        } else if moment.is_featured {
+            "featured Twitch clip"
+        } else if moment.has_streamer_created {
+            "streamer clip"
+        } else {
+            "viewer clip"
+        };
+        let creator = if cc.creator_name.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" by {}", cc.creator_name.trim())
+        };
+        let consensus = if moment.consensus_count() > 1 {
+            format!(", {} creators clipped it", moment.consensus_count())
+        } else {
+            String::new()
+        };
+        let corroboration = if locally_corroborated {
+            ", backed by local signals"
+        } else {
+            ""
+        };
+        pin.selected_reason = Some(format!(
+            "pinned: {}{} ({} total views{}{})",
+            source_label, creator, moment.total_views, consensus, corroboration
+        ));
+
         // NOTE: deliberately NO optimize_clip_boundaries and NO score_clip_candidate.
         pin.similarity_fingerprint = compute_similarity_fingerprint(&pin);
 
-        // Dedup against the remaining NON-community clips only (all community
-        // clips were purged above, so anything overlapping here is an auto clip).
-        // When a pin overlaps an auto clip of the same moment, KEEP the community
-        // one (drop the auto clip) — the exact-boundary version always wins.
-        let mut replaced = false;
-        let mut i = 0;
-        while i < selected.len() {
-            if windows_overlap(pin.start_time, pin.end_time, selected[i].start_time, selected[i].end_time) {
-                log::info!(
-                    "Clip selector: pinned community clip [{:.0}s..{:.0}s] ({} views, score {:.0}%) replaces overlapping auto clip [{:.0}s]",
-                    pin.start_time, pin.end_time, cc.view_count, pin.total_score * 100.0, selected[i].peak_time
-                );
-                selected.remove(i);
-                replaced = true;
-                continue;
-            }
-            i += 1;
-        }
-
-        if !replaced {
+        if replaced || locally_corroborated {
             log::info!(
-                "Clip selector: pinned community clip [{:.0}s..{:.0}s] ({} views, score {:.0}%) — exact viewer span, guaranteed into output",
-                pin.start_time, pin.end_time, cc.view_count, pin.total_score * 100.0
+                "Clip selector: pinned {} [{:.0}s..{:.0}s] ({} clips, {} views, score {:.0}%) and merged overlapping local evidence",
+                source_label,
+                pin.start_time,
+                pin.end_time,
+                moment.clip_count,
+                moment.total_views,
+                pin.total_score * 100.0,
+            );
+        } else {
+            log::info!(
+                "Clip selector: pinned {} [{:.0}s..{:.0}s] ({} clips, {} views, score {:.0}%)",
+                source_label,
+                pin.start_time,
+                pin.end_time,
+                moment.clip_count,
+                moment.total_views,
+                pin.total_score * 100.0,
             );
         }
         selected.push(pin);
@@ -1751,6 +2071,110 @@ mod tests {
             selected_reason: None, rejection_reason: None,
             community_url: None,
         }
+    }
+
+    fn build_community_clip(
+        offset: f64,
+        duration: f64,
+        views: i64,
+        streamer_created: bool,
+        featured: bool,
+        url: &str,
+    ) -> CommunityClip {
+        CommunityClip {
+            vod_offset_seconds: offset,
+            duration_seconds: duration,
+            view_count: views,
+            title: format!("clip at {offset}"),
+            clip_url: Some(url.to_string()),
+            is_streamer_created: streamer_created,
+            creator_name: if streamer_created {
+                "TheStreamer".to_string()
+            } else {
+                "AViewer".to_string()
+            },
+            creator_id: url.to_string(),
+            is_featured: featured,
+        }
+    }
+
+    #[test]
+    fn community_candidates_preserve_provenance_in_tags_and_weight() {
+        let viewer = build_community_clip(100.0, 30.0, 10, false, false, "viewer-url");
+        let streamer = build_community_clip(200.0, 30.0, 10, true, true, "streamer-url");
+
+        let signals = generate_community_candidates(&[viewer, streamer]);
+
+        assert!(signals[0].tags.contains(&"viewer-created".to_string()));
+        assert!(signals[1].tags.contains(&"streamer-created".to_string()));
+        assert!(signals[1].tags.contains(&"featured-clip".to_string()));
+        assert!(signals[1].intensity > signals[0].intensity);
+    }
+
+    #[test]
+    fn community_pinning_clusters_consensus_and_merges_local_evidence() {
+        let clips = vec![
+            build_community_clip(100.0, 30.0, 25, false, false, "viewer-one"),
+            build_community_clip(105.0, 30.0, 40, false, false, "viewer-two"),
+            build_community_clip(102.0, 30.0, 5, true, false, "streamer"),
+        ];
+        let mut local = build_test_candidate(vec![SignalSource::Audio, SignalSource::Transcript]);
+        local.start_time = 95.0;
+        local.end_time = 140.0;
+        local.peak_time = 115.0;
+        local.transcript_excerpt = Some("the actual spoken setup and payoff".to_string());
+        local.event_tags = vec!["reaction".to_string()];
+        local.total_score = 0.82;
+        local.selection_score = 0.82;
+        let mut selected = vec![local];
+
+        pin_community_clips(&mut selected, &clips, None, 1000.0);
+
+        assert_eq!(selected.len(), 1, "one event should produce one output clip");
+        let pinned = &selected[0];
+        assert_eq!(pinned.start_time, 102.0, "streamer's exact span should win");
+        assert_eq!(pinned.community_url.as_deref(), Some("streamer"));
+        assert!(pinned.event_tags.contains(&"community-consensus".to_string()));
+        assert!(pinned.event_tags.contains(&"streamer-created".to_string()));
+        assert!(pinned.event_tags.contains(&"viewer-created".to_string()));
+        assert!(pinned.event_tags.contains(&"reaction".to_string()));
+        assert!(pinned.signal_sources.contains(&SignalSource::Community));
+        assert!(pinned.signal_sources.contains(&SignalSource::Audio));
+        assert!(pinned.signal_sources.contains(&SignalSource::Transcript));
+        assert_eq!(
+            pinned.transcript_excerpt.as_deref(),
+            Some("the actual spoken setup and payoff")
+        );
+        assert!(pinned
+            .selected_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("3 creators clipped it"));
+    }
+
+    #[test]
+    fn community_clustering_keeps_nearby_distinct_events_separate() {
+        let clips = vec![
+            build_community_clip(100.0, 60.0, 10, false, false, "first"),
+            build_community_clip(145.0, 60.0, 10, false, false, "second"),
+        ];
+
+        assert_eq!(cluster_community_clips(&clips).len(), 2);
+    }
+
+    #[test]
+    fn community_consensus_counts_unique_creators_only() {
+        let mut first = build_community_clip(100.0, 30.0, 10, false, false, "first");
+        let mut second = build_community_clip(104.0, 30.0, 10, false, false, "second");
+        first.creator_id = "same-user".to_string();
+        second.creator_id = "same-user".to_string();
+
+        let clips = [first, second];
+        let moments = cluster_community_clips(&clips);
+
+        assert_eq!(moments.len(), 1);
+        assert_eq!(moments[0].clip_count, 2);
+        assert_eq!(moments[0].consensus_count(), 1);
     }
 
     #[test]

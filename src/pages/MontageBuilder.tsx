@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ArrowLeft, Trash2, Download, Film, Clock } from 'lucide-react'
 import { useMontageStore } from '../stores/montageStore'
@@ -30,14 +30,14 @@ export default function MontageBuilder() {
     } else if (!activeProjectId) {
       setActive(projects[0].id)
     }
-  }, [projects.length])
+  }, [activeProjectId, createProject, projects, setActive])
 
   const project = projects.find(p => p.id === activeProjectId)
 
   const totalDuration = project?.segments.reduce((sum, s) => sum + (s.endSeconds - s.startSeconds), 0) || 0
 
   // Aggregate context from all clips in the montage for metadata generation
-  const montageContext = useMemo(() => {
+  const montageContext = (() => {
     if (!project) return { eventTags: [] as string[], emotionTags: [] as string[], clipTitles: [] as string[], game: undefined as string | undefined }
 
     const eventTags = new Set<string>()
@@ -70,7 +70,7 @@ export default function MontageBuilder() {
       clipTitles,
       game: undefined, // TODO: detect from VOD metadata
     }
-  }, [project?.segments, clips, highlights])
+  })()
 
   const handleAddClip = (clip: Clip) => {
     if (!project) return

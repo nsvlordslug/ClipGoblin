@@ -1,6 +1,13 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import type { TwitchChannel, Vod, Highlight, Clip } from '../types'
+import { parseStoredTags } from '../lib/tags'
+
+type HighlightPayload = Omit<Highlight, 'tags'> & { tags: unknown }
+
+function normalizeHighlight(highlight: HighlightPayload): Highlight {
+  return { ...highlight, tags: parseStoredTags(highlight.tags) }
+}
 
 interface AppState {
   channels: TwitchChannel[]
@@ -116,9 +123,9 @@ export const useAppStore = create<AppState>((set) => ({
   fetchHighlights: async (vodId?: string) => {
     try {
       const highlights = vodId
-        ? await invoke<Highlight[]>('get_highlights', { vodId })
-        : await invoke<Highlight[]>('get_all_highlights')
-      set({ highlights })
+        ? await invoke<HighlightPayload[]>('get_highlights', { vodId })
+        : await invoke<HighlightPayload[]>('get_all_highlights')
+      set({ highlights: highlights.map(normalizeHighlight) })
     } catch (err) {
       console.error('Failed to fetch highlights:', err)
     }

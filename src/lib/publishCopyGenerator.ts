@@ -328,19 +328,19 @@ const CAPTION_POOLS: Record<string, CaptionTemplate[]> = {
     ({ game }) => game ? `me pretending I'm fine after that ${game} round` : 'Me pretending I\'m fine after that round',
     ({ game }) => game ? `my ${game} arc is just suffering with better graphics` : 'My gaming arc is just suffering with better graphics',
     ({ game }) => game ? `the inner dialogue of a ${game} player would get you banned` : 'My inner dialogue would get me banned from twitch',
-    ({}) => 'I think about this play when I can\'t sleep',
-    ({}) => 'quiet on the outside. absolute chaos on the inside.',
-    ({}) => 'externally calm. internally: AAAAAAA.',
-    ({}) => 'some moments teach you something. this was not one of them.',
-    ({}) => 'I saw it coming. I watched it happen. I did nothing.',
-    ({}) => 'this clip lives rent free in my head',
+    () => 'I think about this play when I can\'t sleep',
+    () => 'quiet on the outside. absolute chaos on the inside.',
+    () => 'externally calm. internally: AAAAAAA.',
+    () => 'some moments teach you something. this was not one of them.',
+    () => 'I saw it coming. I watched it happen. I did nothing.',
+    () => 'this clip lives rent free in my head',
     ({ ctype }) => ctype === 'scare' ? 'my brain screamed run. my hands disagreed.' : 'the thoughts during this clip were not stream-appropriate',
     ({ ctype }) => ctype === 'clutch' ? 'acting like I planned that. I did not plan that.' : 'still processing what just happened honestly',
     ({ game }) => game ? `I didn't choose the ${game} life. the ${game} life chose poorly.` : 'I didn\'t choose the gaming life. The gaming life chose poorly.',
     ({ game }) => game ? `${game} gave me an existential crisis and called it gameplay` : 'This game gave me an existential crisis and called it gameplay',
   ],
   observation: [
-    ({ game, action }) => game ? `Watch the exact moment it all goes wrong in ${game}` : `Watch the exact moment it all goes wrong`,
+    ({ game }) => game ? `Watch the exact moment it all goes wrong in ${game}` : `Watch the exact moment it all goes wrong`,
     ({ game }) => game ? `This is what peak ${game} content looks like` : 'This is what peak content looks like',
     ({ quote }) => quote ? `The way they said "${quote}" — you can feel it` : 'You can feel the emotion in this one',
     ({ game }) => game ? `A perfectly normal ${game} stream` : 'A perfectly normal stream',
@@ -402,7 +402,7 @@ const CAPTION_POOLS: Record<string, CaptionTemplate[]> = {
     ({ game }) => game ? `${game}` : '',
     ({ game }) => game ? `${game} moment` : 'Stream moment',
     ({ game, action }) => game ? `${action}. ${game}.` : action,
-    ({}) => 'Live on Twitch',
+    () => 'Live on Twitch',
   ],
 }
 
@@ -590,6 +590,16 @@ function buildInstagramCaption(hook: string, ctx: ClipContext, tone: CopyTone, c
 
 /** Build a short descriptor for what happened in the clip based on content type and tags. */
 function describeAction(ctype: ContentType, ctx: ClipContext): string {
+  const storedSummary = ctx.eventSummary?.replace(/\s+/g, ' ').trim().replace(/[.!?]+$/, '')
+  if (
+    storedSummary
+    && storedSummary.length >= 8
+    && storedSummary.length <= 140
+    && !/^(something happened|a moment hit|this moment)$/i.test(storedSummary)
+  ) {
+    return storedSummary
+  }
+
   const tags = [...ctx.eventTags, ...ctx.emotionTags].map(t => t.toLowerCase())
   switch (ctype) {
     case 'clutch': {
@@ -1231,15 +1241,27 @@ export function generateStandaloneTitle(ctx: ClipContext): string {
   return title
 }
 
+const LOCAL_SIMILARITY_STOP_WORDS = new Set([
+  'and', 'are', 'but', 'for', 'from', 'had', 'has', 'have', 'into', 'its',
+  'just', 'not', 'that', 'the', 'their', 'then', 'this', 'was', 'were',
+  'what', 'when', 'with', 'you', 'your',
+])
+
 /**
  * Generate a standalone caption from the template pool.
  * Uses game, transcript, content type, and tone to produce a platform-ready caption.
  * No hashtags included. Each call randomizes from the pool.
  */
-export function generateStandaloneCaption(ctx: ClipContext, tone: CopyTone): string {
+export function generateStandaloneCaption(
+  ctx: ClipContext,
+  tone: CopyTone,
+  variation = 0,
+  avoidCaption = '',
+  avoidCaptions: string[] = [],
+): string {
   const ctype = classifyContent(ctx)
   const action = describeAction(ctype, ctx)
-  const quote = extractTranscriptHook(ctx.transcript || ctx.transcriptExcerpt, Math.floor(Math.random() * 50))
+  const quote = extractTranscriptHook(ctx.transcript || ctx.transcriptExcerpt, variation)
 
   // Look up tone pool — fall back to 'punchy' if unknown
   const pool = CAPTION_POOLS[tone]
@@ -1250,19 +1272,54 @@ export function generateStandaloneCaption(ctx: ClipContext, tone: CopyTone): str
   }
   const activePool = pool && pool.length > 0 ? pool : CAPTION_POOLS.punchy
 
-  const shuffled = shuffle([...activePool])
   const tctx = { game: ctx.game, quote: quote || undefined, action, ctype, title: ctx.title || undefined }
-  // Try all templates in shuffled order — return first non-empty result
-  for (let i = 0; i < shuffled.length; i++) {
-    const result = shuffled[i](tctx)
-    if (result && result.trim().length > 0) {
-      console.log(`[CaptionGen] tone="${tone}" pool_size=${activePool.length} picked_index=${i} result="${result.trim().slice(0, 60)}..."`)
-      return result.trim()
-    }
+  const uniqueCandidates = [...new Set(
+    activePool
+      .map(template => template(tctx).trim())
+      .filter(Boolean),
+  )]
+
+  const normalizeCaption = (caption: string) => caption.trim().replace(/\s+/g, ' ').toLowerCase()
+  const avoided = [...new Set([avoidCaption, ...avoidCaptions].map(normalizeCaption).filter(Boolean))]
+  const contentWords = (caption: string): Set<string> => new Set(
+    normalizeCaption(caption)
+      .replace(/[^a-z0-9' ]/g, ' ')
+      .split(/\s+/)
+      .filter(word => word.length > 2 && !LOCAL_SIMILARITY_STOP_WORDS.has(word)),
+  )
+  const isTooClose = (candidate: string): boolean => {
+    const normalized = normalizeCaption(candidate)
+    const candidateWords = contentWords(candidate)
+    return avoided.some(previous => {
+      if (normalized === previous) return true
+      const previousWords = contentWords(previous)
+      if (candidateWords.size === 0 || previousWords.size === 0) return false
+      const shared = [...candidateWords].filter(word => previousWords.has(word)).length
+      return shared / Math.min(candidateWords.size, previousWords.size) >= 0.7
+    })
   }
-  // Absolute fallback — shouldn't happen if pools have no-quote entries
-  console.warn(`[CaptionGen] All ${activePool.length} templates for tone "${tone}" returned empty`)
-  return ctx.title || action || 'Check this out'
+  const score = (candidate: string): number => {
+    const lower = candidate.toLowerCase()
+    let relevance = 0
+    if (quote && lower.includes(quote.toLowerCase())) relevance += 6
+    if (action.length >= 5 && lower.includes(action.toLowerCase())) relevance += 5
+    if (ctx.game && lower.includes(ctx.game.toLowerCase())) relevance += 1
+    if (ctx.title && ctx.title.length >= 5 && lower.includes(ctx.title.toLowerCase())) relevance += 1
+    return relevance
+  }
+
+  const ranked = uniqueCandidates
+    .map((caption, index) => ({ caption, index, relevance: score(caption) }))
+    .sort((left, right) => right.relevance - left.relevance || left.index - right.index)
+  const grounded = ranked.filter(candidate => candidate.relevance >= 4)
+  const preferred = grounded.length > 0 ? grounded : ranked
+  const fresh = preferred.filter(({ caption }) => !isTooClose(caption))
+  const choices = fresh.length > 0 ? fresh : preferred
+
+  if (choices.length > 0) {
+    return choices[Math.abs(variation) % choices.length].caption
+  }
+  return ctx.eventSummary || ctx.title || action || 'Check this out'
 }
 
 export const TONE_LABELS: Record<CopyTone, { label: string; emoji: string }> = {

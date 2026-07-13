@@ -16,7 +16,7 @@ export default function Player() {
   const [error, setError] = useState('')
 
   // Stop any other playback when VOD player opens
-  useEffect(() => { stopAll() }, [])
+  useEffect(() => { stopAll() }, [stopAll])
 
   useEffect(() => {
     if (!vodId) return

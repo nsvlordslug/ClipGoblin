@@ -7,7 +7,6 @@ pub mod youtube;
 pub mod tiktok;
 pub mod instagram;
 
-use crate::db;
 use crate::error::AppError;
 use rusqlite::Connection;
 use std::path::Path;
@@ -58,11 +57,14 @@ pub enum UploadResultStatus {
     #[serde(rename = "processing")]
     Processing,
     #[serde(rename = "complete")]
-    Complete { video_url: String },
+    Complete {
+        video_url: Option<String>,
+        platform_video_id: Option<String>,
+    },
     #[serde(rename = "failed")]
     Failed { error: String },
     #[serde(rename = "duplicate")]
-    Duplicate { existing_url: String },
+    Duplicate { existing_url: Option<String> },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -98,12 +100,21 @@ pub trait PlatformAdapter: Send + Sync {
     fn platform_id(&self) -> &'static str;
     fn is_ready(&self, db: &Connection) -> Result<bool, AppError>;
     async fn start_auth(&self) -> Result<String, AppError>;
-    async fn handle_callback(&self, db: &Connection, code: &str) -> Result<ConnectedAccount, AppError>;
-    async fn refresh_token(&self, db: &Connection) -> Result<(), AppError>;
+    async fn handle_callback(
+        &self,
+        db: &crate::DbConn,
+        code: &str,
+    ) -> Result<ConnectedAccount, AppError>;
+    async fn refresh_token(&self, db: &crate::DbConn) -> Result<(), AppError>;
     /// Takes the shared `DbConn` (not a held guard) so the impl can lock only
     /// for the DB reads/refresh and the final record, releasing the lock for the
     /// long network upload in between.
-    async fn upload_video(&self, db: &crate::DbConn, file_path: &str, meta: &UploadMeta) -> Result<UploadResult, AppError>;
+    async fn upload_video(
+        &self,
+        db: &crate::DbConn,
+        file_path: &str,
+        meta: &UploadMeta,
+    ) -> Result<UploadResult, AppError>;
     fn disconnect(&self, db: &Connection) -> Result<(), AppError>;
     fn get_account(&self, db: &Connection) -> Result<Option<ConnectedAccount>, AppError>;
 }

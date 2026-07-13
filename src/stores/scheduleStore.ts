@@ -14,6 +14,15 @@ interface ScheduleState {
   startListening: () => () => void
 }
 
+interface ScheduledUploadStatusEvent {
+  id: string
+  status: ScheduledUpload['status'] | 'exporting' | 'uploading' | 'retrying'
+  clip_id: string
+  platform: string
+  video_url?: string | null
+  error?: string | null
+}
+
 export const useScheduleStore = create<ScheduleState>((set, get) => ({
   uploads: [],
   loading: false,
@@ -57,14 +66,19 @@ export const useScheduleStore = create<ScheduleState>((set, get) => ({
   },
 
   startListening: () => {
-    const unlisten = listen<any>('scheduled-upload-status', (event) => {
+    const unlisten = listen<ScheduledUploadStatusEvent>('scheduled-upload-status', (event) => {
       const payload = event.payload
       set(state => {
         const uploads = state.uploads.map(u => {
           if (u.id === payload.id) {
+            const status = payload.status === 'retrying'
+              ? 'pending'
+              : payload.status === 'exporting' || payload.status === 'uploading'
+                ? 'processing'
+                : payload.status
             return {
               ...u,
-              status: payload.status === 'retrying' ? 'pending' as const : payload.status,
+              status,
               video_url: payload.video_url || u.video_url,
               error_message: payload.error || u.error_message,
             }

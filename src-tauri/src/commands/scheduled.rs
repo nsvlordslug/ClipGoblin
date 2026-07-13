@@ -25,6 +25,8 @@ pub fn schedule_upload(
         retry_count: 0,
         error_message: None,
         video_url: None,
+        job_id: None,
+        platform_video_id: None,
         upload_meta_json: Some(meta_json),
         created_at: now,
         view_count: None,
@@ -76,7 +78,9 @@ pub(crate) fn start_upload_scheduler(handle: tauri::AppHandle) {
             tokio::time::sleep(Duration::from_secs(10)).await;
 
             loop {
-                // Process due uploads
+                if let Err(e) = reconcile_processing_uploads(&handle).await {
+                    log::error!("[Scheduler] Error reconciling TikTok uploads: {}", e);
+                }
                 if let Err(e) = process_due_uploads(&handle) {
                     log::error!("[Scheduler] Error processing scheduled uploads: {}", e);
                 }
@@ -88,8 +92,8 @@ pub(crate) fn start_upload_scheduler(handle: tauri::AppHandle) {
 }
 
 pub(crate) fn process_due_uploads(handle: &tauri::AppHandle) -> Result<(), String> {
-    use tauri::Manager;
     use tauri::Emitter;
+    use tauri::Manager;
 
     let db: tauri::State<'_, DbConn> = handle.state();
     let now = chrono::Utc::now().to_rfc3339();
@@ -103,7 +107,10 @@ pub(crate) fn process_due_uploads(handle: &tauri::AppHandle) -> Result<(), Strin
         return Ok(());
     }
 
-    log::info!("[Scheduler] Found {} due scheduled upload(s)", due_uploads.len());
+    log::info!(
+        "[Scheduler] Found {} due scheduled upload(s)",
+        due_uploads.len()
+    );
 
     for upload in due_uploads {
         // Mark as uploading
@@ -123,13 +130,29 @@ pub(crate) fn process_due_uploads(handle: &tauri::AppHandle) -> Result<(), Strin
                 Ok(m) => m,
                 Err(e) => {
                     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-                    db::update_scheduled_upload_status(&conn, &upload.id, "failed", Some(&format!("Invalid meta: {}", e)), None, None).ok();
+                    db::update_scheduled_upload_status(
+                        &conn,
+                        &upload.id,
+                        "failed",
+                        Some(&format!("Invalid meta: {}", e)),
+                        None,
+                        None,
+                    )
+                    .ok();
                     continue;
                 }
             },
             None => {
                 let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-                db::update_scheduled_upload_status(&conn, &upload.id, "failed", Some("Missing upload metadata"), None, None).ok();
+                db::update_scheduled_upload_status(
+                    &conn,
+                    &upload.id,
+                    "failed",
+                    Some("Missing upload metadata"),
+                    None,
+                    None,
+                )
+                .ok();
                 continue;
             }
         };
@@ -142,7 +165,15 @@ pub(crate) fn process_due_uploads(handle: &tauri::AppHandle) -> Result<(), Strin
                 match db::get_clip_by_id(&conn, &upload.clip_id) {
                     Ok(Some(c)) => c,
                     _ => {
-                        db::update_scheduled_upload_status(&conn, &upload.id, "failed", Some("Clip not found"), None, None).ok();
+                        db::update_scheduled_upload_status(
+                            &conn,
+                            &upload.id,
+                            "failed",
+                            Some("Clip not found"),
+                            None,
+                            None,
+                        )
+                        .ok();
                         continue;
                     }
                 }
@@ -161,19 +192,26 @@ pub(crate) fn process_due_uploads(handle: &tauri::AppHandle) -> Result<(), Strin
                         "id": upload.id, "status": "exporting", "clip_id": upload.clip_id, "platform": upload.platform,
                     }));
                     match tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(
-                            crate::commands::export::render_clip_by_id(&upload.clip_id)
-                        )
+                        tokio::runtime::Handle::current()
+                            .block_on(crate::commands::export::render_clip_by_id(&upload.clip_id))
                     }) {
                         Ok(path) => path.to_string_lossy().to_string(),
                         Err(e) => {
                             let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
                             db::update_scheduled_upload_status(
-                                &conn, &upload.id, "failed",
+                                &conn,
+                                &upload.id,
+                                "failed",
                                 Some(&format!("Auto-export failed: {}", e)),
-                                None, None,
-                            ).ok();
-                            log::error!("[Scheduler] Auto-export failed for {}: {}", upload.clip_id, e);
+                                None,
+                                None,
+                            )
+                            .ok();
+                            log::error!(
+                                "[Scheduler] Auto-export failed for {}: {}",
+                                upload.clip_id,
+                                e
+                            );
                             continue;
                         }
                     }
@@ -186,52 +224,255 @@ pub(crate) fn process_due_uploads(handle: &tauri::AppHandle) -> Result<(), Strin
             Ok(a) => a,
             Err(e) => {
                 let conn = db.lock().map_err(|e2| format!("DB lock: {}", e2))?;
-                db::update_scheduled_upload_status(&conn, &upload.id, "failed", Some(&format!("No adapter: {}", e)), None, None).ok();
+                db::update_scheduled_upload_status(
+                    &conn,
+                    &upload.id,
+                    "failed",
+                    Some(&format!("No adapter: {}", e)),
+                    None,
+                    None,
+                )
+                .ok();
                 continue;
             }
         };
 
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(adapter.upload_video(&*db, &output_path, &meta))
+            tokio::runtime::Handle::current().block_on(adapter.upload_video(
+                &*db,
+                &output_path,
+                &meta,
+            ))
         });
 
         match result {
-            Ok(ref upload_result) => {
-                match &upload_result.status {
-                    social::UploadResultStatus::Complete { video_url } => {
-                        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-                        db::update_scheduled_upload_status(&conn, &upload.id, "completed", None, Some(video_url), None).ok();
-                        db::upsert_upload(&conn, &upload.clip_id, &upload.platform, video_url).ok();
-                        log::info!("[Scheduler] Upload completed: {} -> {}", upload.id, video_url);
-                        let _ = handle.emit("scheduled-upload-status", serde_json::json!({
+            Ok(ref upload_result) => match &upload_result.status {
+                social::UploadResultStatus::Complete {
+                    video_url,
+                    platform_video_id,
+                } => {
+                    let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                    db::update_scheduled_upload_complete(
+                        &conn,
+                        &upload.id,
+                        video_url.as_deref(),
+                        (!upload_result.job_id.is_empty()).then_some(upload_result.job_id.as_str()),
+                        platform_video_id.as_deref(),
+                    )
+                    .ok();
+                    log::info!("[Scheduler] Upload completed: {}", upload.id);
+                    let _ = handle.emit(
+                        "scheduled-upload-status",
+                        serde_json::json!({
                             "id": upload.id, "status": "completed", "clip_id": upload.clip_id,
                             "platform": upload.platform, "video_url": video_url,
-                        }));
-                    }
-                    social::UploadResultStatus::Duplicate { existing_url } => {
-                        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-                        db::update_scheduled_upload_status(&conn, &upload.id, "completed", None, Some(existing_url), None).ok();
-                        let _ = handle.emit("scheduled-upload-status", serde_json::json!({
+                        }),
+                    );
+                }
+                social::UploadResultStatus::Duplicate { existing_url } => {
+                    let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                    let history = db::get_upload_for_clip(&conn, &upload.clip_id, &upload.platform)
+                        .ok()
+                        .flatten();
+                    db::update_scheduled_upload_complete(
+                        &conn,
+                        &upload.id,
+                        existing_url.as_deref(),
+                        history.as_ref().and_then(|row| row.job_id.as_deref()),
+                        history
+                            .as_ref()
+                            .and_then(|row| row.platform_video_id.as_deref()),
+                    )
+                    .ok();
+                    let _ = handle.emit(
+                        "scheduled-upload-status",
+                        serde_json::json!({
                             "id": upload.id, "status": "completed", "clip_id": upload.clip_id,
                             "platform": upload.platform, "video_url": existing_url,
-                        }));
-                    }
-                    social::UploadResultStatus::Failed { error } => {
-                        handle_scheduled_failure(handle, &db, &upload, error);
-                    }
-                    _ => {
-                        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-                        db::update_scheduled_upload_status(&conn, &upload.id, "completed", None, None, None).ok();
-                    }
+                        }),
+                    );
                 }
-            }
+                social::UploadResultStatus::Failed { error } => {
+                    handle_scheduled_failure(handle, &db, &upload, error);
+                }
+                social::UploadResultStatus::Processing => {
+                    let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                    if upload_result.job_id.is_empty() {
+                        db::update_scheduled_upload_status(
+                            &conn,
+                            &upload.id,
+                            "processing",
+                            None,
+                            None,
+                            None,
+                        )
+                        .ok();
+                    } else {
+                        db::update_scheduled_upload_processing(
+                            &conn,
+                            &upload.id,
+                            &upload_result.job_id,
+                        )
+                        .ok();
+                    }
+                    let _ = handle.emit(
+                        "scheduled-upload-status",
+                        serde_json::json!({
+                            "id": upload.id, "status": "processing", "clip_id": upload.clip_id,
+                            "platform": upload.platform,
+                        }),
+                    );
+                }
+                social::UploadResultStatus::Uploading { .. } => {
+                    log::warn!(
+                        "[Scheduler] Adapter returned a transient uploading result for {}",
+                        upload.id
+                    );
+                }
+            },
             Err(e) => {
                 handle_scheduled_failure(handle, &db, &upload, &e.to_string());
             }
         }
     }
 
+    Ok(())
+}
+
+async fn reconcile_processing_uploads(handle: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::{Emitter, Manager};
+
+    let db: tauri::State<'_, DbConn> = handle.state();
+    let uploads = {
+        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+        db::get_processing_uploads(&conn, "tiktok").map_err(|e| format!("DB error: {}", e))?
+    };
+    if uploads.is_empty() {
+        return Ok(());
+    }
+
+    let access_token = social::tiktok::ensure_fresh_access_token(&*db)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    for upload in uploads {
+        let Some(publish_id) = upload.job_id.as_deref() else {
+            continue;
+        };
+        match social::tiktok::fetch_publish_status(&access_token, publish_id).await {
+            Ok(social::tiktok::PublishPollResult::Processing) => {
+                let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                db::record_direct_upload_state_for_analytics(
+                    &conn,
+                    &upload.clip_id,
+                    "tiktok",
+                    "processing",
+                    None,
+                    Some(publish_id),
+                    None,
+                    None,
+                )
+                .map_err(|e| format!("DB error: {}", e))?;
+                let ids: Vec<String> = db::get_scheduled_uploads_for_clip(&conn, &upload.clip_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|row| row.job_id.as_deref() == Some(publish_id))
+                    .map(|row| row.id)
+                    .collect();
+                drop(conn);
+                for id in ids {
+                    let _ = handle.emit(
+                        "scheduled-upload-status",
+                        serde_json::json!({
+                            "id": id, "status": "processing", "clip_id": &upload.clip_id,
+                            "platform": "tiktok",
+                        }),
+                    );
+                }
+            }
+            Ok(social::tiktok::PublishPollResult::Complete {
+                video_url,
+                platform_video_id,
+            }) => {
+                let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                db::mark_upload_complete(
+                    &conn,
+                    &upload.clip_id,
+                    "tiktok",
+                    video_url.as_deref(),
+                    Some(publish_id),
+                    platform_video_id.as_deref(),
+                )
+                .map_err(|e| format!("DB error: {}", e))?;
+                db::record_direct_upload_state_for_analytics(
+                    &conn,
+                    &upload.clip_id,
+                    "tiktok",
+                    "completed",
+                    video_url.as_deref(),
+                    Some(publish_id),
+                    platform_video_id.as_deref(),
+                    None,
+                )
+                .map_err(|e| format!("DB error: {}", e))?;
+                let ids: Vec<String> = db::get_scheduled_uploads_for_clip(&conn, &upload.clip_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|row| row.job_id.as_deref() == Some(publish_id))
+                    .map(|row| row.id)
+                    .collect();
+                drop(conn);
+                for id in ids {
+                    let _ = handle.emit(
+                        "scheduled-upload-status",
+                        serde_json::json!({
+                            "id": id, "status": "completed", "clip_id": &upload.clip_id,
+                            "platform": "tiktok", "video_url": &video_url,
+                        }),
+                    );
+                }
+            }
+            Ok(social::tiktok::PublishPollResult::Failed { error }) => {
+                let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                db::mark_upload_failed(&conn, &upload.clip_id, "tiktok", &error)
+                    .map_err(|e| format!("DB error: {}", e))?;
+                db::record_direct_upload_state_for_analytics(
+                    &conn,
+                    &upload.clip_id,
+                    "tiktok",
+                    "failed",
+                    None,
+                    Some(publish_id),
+                    None,
+                    Some(&error),
+                )
+                .map_err(|e| format!("DB error: {}", e))?;
+                let ids: Vec<String> = db::get_scheduled_uploads_for_clip(&conn, &upload.clip_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|row| row.job_id.as_deref() == Some(publish_id))
+                    .map(|row| row.id)
+                    .collect();
+                drop(conn);
+                for id in ids {
+                    let _ = handle.emit(
+                        "scheduled-upload-status",
+                        serde_json::json!({
+                            "id": id, "status": "failed", "clip_id": &upload.clip_id,
+                            "platform": "tiktok", "error": &error,
+                        }),
+                    );
+                }
+            }
+            Err(error) => {
+                log::warn!(
+                    "[Scheduler] TikTok status check failed for {}: {}",
+                    publish_id,
+                    error
+                );
+            }
+        }
+    }
     Ok(())
 }
 

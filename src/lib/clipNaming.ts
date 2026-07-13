@@ -434,7 +434,6 @@ export function buildClipContext(
     audio_score?: number
     chat_score?: number
   },
-  _vod?: { title?: string },
 ): ClipContext {
   // Parse tags
   const rawTags: string[] = Array.isArray(highlight?.tags)
@@ -473,7 +472,6 @@ export function enhanceClipTitle(
     tags?: string | string[]
     transcript_snippet?: string
   },
-  vod?: { title?: string },
 ): string {
   // If the current title is already good (not banned, scores well), keep it
   if (!isBannedTitle(currentTitle) && scoreTitle(currentTitle) >= 60) {
@@ -481,7 +479,7 @@ export function enhanceClipTitle(
   }
 
   // Build context and try to generate a better title
-  const ctx = buildClipContext({ title: currentTitle }, highlight, vod)
+  const ctx = buildClipContext({ title: currentTitle }, highlight)
   const generated = generateClipTitle(ctx)
 
   // Only replace if the generated title is actually better

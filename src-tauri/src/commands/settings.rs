@@ -1,6 +1,7 @@
 //! Settings, utility, and system info commands.
 
-use tauri::{AppHandle, State};
+use std::path::{Component, Path, PathBuf};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::db;
@@ -29,7 +30,6 @@ const ALLOWED_SETTING_KEYS: &[&str] = &[
     "gemini_api_key",
     "ai_provider",
     "ai_settings",
-    "download_dir",
     "theme",
     "auto_analyze",
     "tiktok_handle",
@@ -40,6 +40,111 @@ const ALLOWED_SETTING_KEYS: &[&str] = &[
     "use_twitch_community_clips",
     "ai_clip_detection_enabled",
 ];
+
+pub(crate) fn app_data_root() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("clipviral")
+}
+
+fn is_plain_local_absolute(path: &Path) -> bool {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::path::Prefix;
+        return matches!(
+            path.components().next(),
+            Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_))
+        );
+    }
+    #[cfg(not(windows))]
+    true
+}
+
+fn canonical_candidate(path: &Path) -> Result<PathBuf, String> {
+    if path.exists() {
+        return path
+            .canonicalize()
+            .map_err(|e| format!("Failed to resolve path: {e}"));
+    }
+
+    let mut ancestor = path.parent();
+    while let Some(current) = ancestor {
+        if current.exists() {
+            let canonical_ancestor = current
+                .canonicalize()
+                .map_err(|e| format!("Failed to resolve parent directory: {e}"))?;
+            let suffix = path
+                .strip_prefix(current)
+                .map_err(|_| "Failed to normalize path".to_string())?;
+            return Ok(canonical_ancestor.join(suffix));
+        }
+        ancestor = current.parent();
+    }
+    Err("Path has no existing local parent".to_string())
+}
+
+fn is_within_root(path: &Path, root: &Path) -> bool {
+    let Ok(candidate) = canonical_candidate(path) else {
+        return false;
+    };
+    let Ok(root) = root.canonicalize() else {
+        return false;
+    };
+    candidate.starts_with(root)
+}
+
+pub(crate) fn persist_download_directory(
+    app: &AppHandle,
+    db_conn: &DbConn,
+    path: &Path,
+) -> Result<String, String> {
+    if !is_plain_local_absolute(path) || !path.is_dir() {
+        return Err("Selected download folder must be an existing local directory".to_string());
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve selected folder: {e}"))?;
+    app.asset_protocol_scope()
+        .allow_directory(&canonical, true)
+        .map_err(|e| format!("Failed to allow selected media folder: {e}"))?;
+    let path_str = canonical.to_string_lossy().to_string();
+    let conn = db_conn.lock().map_err(|e| format!("DB lock: {e}"))?;
+    db::save_setting(&conn, "download_dir", &path_str).map_err(|e| format!("DB error: {e}"))?;
+    Ok(path_str)
+}
+
+pub(crate) fn allow_configured_asset_directories(
+    app: &AppHandle,
+    db_conn: &DbConn,
+) -> Result<(), String> {
+    let base = app_data_root();
+    std::fs::create_dir_all(&base)
+        .map_err(|e| format!("Failed to create app data directory: {e}"))?;
+    app.asset_protocol_scope()
+        .allow_directory(&base, true)
+        .map_err(|e| format!("Failed to allow app media directory: {e}"))?;
+
+    let configured = {
+        let conn = db_conn.lock().map_err(|e| format!("DB lock: {e}"))?;
+        db::get_setting(&conn, "download_dir").map_err(|e| format!("DB error: {e}"))?
+    };
+    if let Some(path) = configured
+        .map(PathBuf::from)
+        .filter(|path| is_plain_local_absolute(path) && path.is_dir())
+    {
+        app.asset_protocol_scope()
+            .allow_directory(path, true)
+            .map_err(|e| format!("Failed to allow configured media folder: {e}"))?;
+    }
+    Ok(())
+}
 
 #[tauri::command]
 pub fn save_setting(
@@ -143,15 +248,10 @@ pub fn get_ai_cost_summary(
 ///
 /// Returns 0.0 when no paid AI step will run for an analyze (clip-judge toggle
 /// off or its provider Free, and LLM titles off too — mirrors the pipeline gates).
-/// Otherwise prefers the rolling per-analyze average from recent history
-/// (most accurate once a few VODs have run); falls back to a duration-based
-/// projection on the configured judge model for the very first analyze
-/// (see `ai_usage::project_analyze_cost`).
+/// The projection prices the judge, optional final pass, and per-clip title
+/// calls independently using their currently resolved models.
 #[tauri::command]
-pub fn estimate_analyze_cost(
-    duration_secs: f64,
-    db: State<'_, DbConn>,
-) -> Result<f64, String> {
+pub fn estimate_analyze_cost(duration_secs: f64, db: State<'_, DbConn>) -> Result<f64, String> {
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
 
     // Two independent BYOK costs can occur during an analyze, so mirror the exact
@@ -168,31 +268,24 @@ pub fn estimate_analyze_cost(
         .unwrap_or(false);
     let judge = crate::ai_provider::resolve(&conn, crate::ai_provider::Scope::ClipJudge);
     let judge_will_run = judge_enabled && judge.is_llm();
-    let titles_will_run =
-        crate::ai_provider::resolve(&conn, crate::ai_provider::Scope::Titles).is_llm();
+    let titles = crate::ai_provider::resolve(&conn, crate::ai_provider::Scope::Titles);
+    let titles_will_run = titles.is_llm();
     if !judge_will_run && !titles_will_run {
         return Ok(0.0);
     }
 
-    // Prefer the measured rolling average over the last 10 analyses when we have
-    // any history — it already folds in whatever actually ran (judge + titles) at
-    // this user's real VOD lengths and models.
-    let summary = crate::ai_usage::estimate_cost(&conn, 10);
-    if summary.vod_count > 0 {
-        return Ok(summary.avg_per_analyze_usd);
-    }
+    let judge_step = judge_will_run.then_some((judge.provider, judge.model.as_str()));
+    let final_model = crate::ai_provider::final_pass_model();
+    let final_step = (judge_will_run && judge.use_sonnet_final_pass)
+        .then_some((crate::ai_provider::Provider::Claude, final_model.as_str()));
+    let title_step = titles_will_run.then_some((titles.provider, titles.model.as_str()));
 
-    // First analyze (no history): project the clip-judge cost when it will run.
-    // The title calls are tiny and best-effort, so they're left out of the
-    // cold-start projection rather than mis-modeled.
-    if judge_will_run {
-        return Ok(crate::ai_usage::project_analyze_cost(
-            judge.provider,
-            &judge.model,
-            duration_secs,
-        ));
-    }
-    Ok(0.0)
+    Ok(crate::ai_usage::project_analyze_cost(
+        duration_secs,
+        judge_step,
+        final_step,
+        title_step,
+    ))
 }
 
 /// Phase 1 (BYOK cost visibility) — total BYOK spend already logged for one
@@ -227,18 +320,22 @@ pub fn remove_job(id: String, queue: State<'_, JobQueue>) -> bool {
 
 /// Open a folder picker dialog and save the selected path as the download directory.
 #[tauri::command]
-pub fn pick_download_folder(app: AppHandle, db: State<'_, DbConn>) -> Result<Option<String>, String> {
-    let path = app.dialog()
+pub fn pick_download_folder(
+    app: AppHandle,
+    db: State<'_, DbConn>,
+) -> Result<Option<String>, String> {
+    let path = app
+        .dialog()
         .file()
         .set_title("Select Download Folder")
         .blocking_pick_folder();
 
     match path {
         Some(file_path) => {
-            let path_str = file_path.to_string();
-            let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-            db::save_setting(&conn, "download_dir", &path_str)
-                .map_err(|e| format!("DB error: {}", e))?;
+            let path = file_path
+                .into_path()
+                .map_err(|e| format!("Invalid selected folder: {e}"))?;
+            let path_str = persist_download_directory(&app, &*db, &path)?;
             Ok(Some(path_str))
         }
         None => Ok(None),
@@ -287,29 +384,36 @@ pub fn get_storage_paths(db: State<'_, DbConn>) -> Result<StoragePaths, String> 
     })
 }
 
-/// Open a folder in the system file manager, creating it first if it doesn't exist.
+/// Open an app-owned or explicitly selected folder in the system file manager.
 #[tauri::command]
-pub fn open_folder(path: String) -> Result<(), String> {
-    let dir = std::path::Path::new(&path);
-    // Only ever open a plain, local, absolute directory — never a URL, a
-    // relative path, or (critically) a UNC (\\host\share) or device (\\.\, \\?\)
-    // path. Those are absolute and scheme-free, so the old check let them
-    // through, but a compromised renderer could hand us a UNC path to make
-    // Windows authenticate to an attacker's SMB share (NTLM-hash leak) — and we
-    // create_dir_all() below, so we'd reach out even before opening anything.
-    let has_remote_or_device_prefix = {
-        use std::path::{Component, Prefix};
-        matches!(dir.components().next(), Some(Component::Prefix(pc)) if matches!(
-            pc.kind(),
-            Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(..)
-                | Prefix::Verbatim(..) | Prefix::VerbatimDisk(..)
-        ))
-    };
-    if !dir.is_absolute() || path.contains("://") || has_remote_or_device_prefix {
-        return Err("Refusing to open a non-absolute, remote, or non-filesystem path".to_string());
+pub fn open_folder(path: String, app: AppHandle, db: State<'_, DbConn>) -> Result<(), String> {
+    let dir = Path::new(&path);
+    if !is_plain_local_absolute(dir) {
+        return Err("Refusing to open a non-local filesystem path".to_string());
     }
-    std::fs::create_dir_all(dir)
-        .map_err(|e| format!("Failed to create directory: {e}"))?;
+
+    let base = app_data_root();
+    std::fs::create_dir_all(&base)
+        .map_err(|e| format!("Failed to create app data directory: {e}"))?;
+    let configured = {
+        let conn = db.lock().map_err(|e| format!("DB lock: {e}"))?;
+        db::get_setting(&conn, "download_dir")
+            .ok()
+            .flatten()
+            .map(PathBuf::from)
+    };
+    let allowed = is_within_root(dir, &base)
+        || configured
+            .as_deref()
+            .filter(|root| is_plain_local_absolute(root) && root.is_dir())
+            .is_some_and(|root| is_within_root(dir, root));
+    if !allowed {
+        return Err("Refusing to open a folder outside ClipGoblin storage".to_string());
+    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create directory: {e}"))?;
+    app.asset_protocol_scope()
+        .allow_directory(dir, true)
+        .map_err(|e| format!("Failed to allow media folder: {e}"))?;
 
     #[cfg(target_os = "windows")]
     {
@@ -337,7 +441,10 @@ pub fn open_folder(path: String) -> Result<(), String> {
 
 /// Get detection stats for a VOD (stored after analysis completes).
 #[tauri::command]
-pub fn get_detection_stats(vod_id: String, db: State<'_, DbConn>) -> Result<Option<serde_json::Value>, String> {
+pub fn get_detection_stats(
+    vod_id: String,
+    db: State<'_, DbConn>,
+) -> Result<Option<serde_json::Value>, String> {
     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
     let key = format!("detection_stats_{}", vod_id);
     match db::get_setting(&conn, &key) {
@@ -347,5 +454,46 @@ pub fn get_detection_stats(vod_id: String, db: State<'_, DbConn>) -> Result<Opti
             Ok(Some(val))
         }
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn local_path_validation_rejects_relative_unc_device_and_traversal_paths() {
+        assert!(is_plain_local_absolute(Path::new(
+            r"C:\Users\tester\Videos\ClipGoblin"
+        )));
+        assert!(!is_plain_local_absolute(Path::new(r"Videos\ClipGoblin")));
+        assert!(!is_plain_local_absolute(Path::new(
+            r"C:\Users\tester\..\Windows"
+        )));
+        assert!(!is_plain_local_absolute(Path::new(
+            r"\\server\share\ClipGoblin"
+        )));
+        assert!(!is_plain_local_absolute(Path::new(
+            r"\\?\C:\Users\tester\Videos"
+        )));
+    }
+
+    #[test]
+    fn root_containment_accepts_children_and_rejects_siblings() {
+        let test_root =
+            std::env::temp_dir().join(format!("clipviral-settings-test-{}", uuid::Uuid::new_v4()));
+        let allowed_root = test_root.join("allowed");
+        let sibling = test_root.join("outside");
+        std::fs::create_dir_all(&allowed_root).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+
+        assert!(is_within_root(
+            &allowed_root.join("nested").join("future"),
+            &allowed_root
+        ));
+        assert!(!is_within_root(&sibling, &allowed_root));
+
+        std::fs::remove_dir_all(test_root).unwrap();
     }
 }

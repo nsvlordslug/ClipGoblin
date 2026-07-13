@@ -51,7 +51,9 @@ pub fn save_clip_to_disk(
         if clip.render_status != "completed" {
             return Err("Clip has not been exported yet — export it first".into());
         }
-        let path = clip.output_path.ok_or("No export file found for this clip")?;
+        let path = clip
+            .output_path
+            .ok_or("No export file found for this clip")?;
         (path, clip.title, clip.aspect_ratio)
     };
 
@@ -61,8 +63,15 @@ pub fn save_clip_to_disk(
     }
 
     // Build descriptive filename: [title]_[format].mp4
-    let safe_title: String = clip_title.chars()
-        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })
+    let safe_title: String = clip_title
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let safe_title = safe_title.trim().to_string();
     let format_tag = aspect_ratio.replace(':', "x"); // "9:16" → "9x16"
@@ -73,32 +82,36 @@ pub fn save_clip_to_disk(
     };
 
     // Resolve destination folder: use saved setting, or prompt user to pick one
-    let dest_folder = {
+    let saved_folder = {
         let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-        match db::get_setting(&conn, "download_dir") {
-            Ok(Some(dir)) if !dir.is_empty() && std::path::Path::new(&dir).is_dir() => dir,
-            _ => {
-                // No folder configured — open picker
-                drop(conn); // release lock before blocking dialog
-                let picked = app.dialog()
-                    .file()
-                    .set_title("Choose a folder to save clips to")
-                    .blocking_pick_folder();
-                match picked {
-                    Some(folder) => {
-                        let folder_str = folder.to_string();
-                        // Save for future use
-                        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-                        db::save_setting(&conn, "download_dir", &folder_str)
-                            .map_err(|e| format!("DB error: {}", e))?;
-                        log::info!("[save_clip_to_disk] Saved download folder: {}", folder_str);
-                        folder_str
-                    }
-                    None => return Ok(None), // User cancelled
-                }
-            }
-        }
+        db::get_setting(&conn, "download_dir").ok().flatten()
     };
+    let dest_folder =
+        if let Some(dir) = saved_folder.filter(|dir| std::path::Path::new(dir).is_dir()) {
+            crate::commands::settings::persist_download_directory(
+                &app,
+                &*db,
+                std::path::Path::new(&dir),
+            )?
+        } else {
+            let picked = app
+                .dialog()
+                .file()
+                .set_title("Choose a folder to save clips to")
+                .blocking_pick_folder();
+            match picked {
+                Some(folder) => {
+                    let path = folder
+                        .into_path()
+                        .map_err(|e| format!("Invalid selected folder: {e}"))?;
+                    let folder_str =
+                        crate::commands::settings::persist_download_directory(&app, &*db, &path)?;
+                    log::info!("[save_clip_to_disk] Saved download folder: {}", folder_str);
+                    folder_str
+                }
+                None => return Ok(None),
+            }
+        };
 
     // Ensure folder exists
     std::fs::create_dir_all(&dest_folder)
@@ -114,11 +127,14 @@ pub fn save_clip_to_disk(
         counter += 1;
     }
 
-    std::fs::copy(src, &dest_path)
-        .map_err(|e| format!("Failed to save clip: {}", e))?;
+    std::fs::copy(src, &dest_path).map_err(|e| format!("Failed to save clip: {}", e))?;
 
     let dest_str = dest_path.to_string_lossy().to_string();
-    log::info!("[save_clip_to_disk] Saved clip {} to: {}", clip_id, dest_str);
+    log::info!(
+        "[save_clip_to_disk] Saved clip {} to: {}",
+        clip_id,
+        dest_str
+    );
     Ok(Some(dest_str))
 }
 

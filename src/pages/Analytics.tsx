@@ -169,7 +169,7 @@ export default function Analytics() {
             onClick={refreshStats}
             disabled={refreshing || completed.length === 0}
             className="v4-btn primary"
-            title={completed.length === 0 ? 'Ship at least one clip first' : 'Pull view counts from YouTube / TikTok'}
+            title={completed.length === 0 ? 'Ship at least one clip first' : 'Pull available view counts from YouTube'}
           >
             <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
             {refreshing ? 'Refreshing...' : 'Refresh stats'}
@@ -179,7 +179,7 @@ export default function Analytics() {
 
       {totalViews == null && (
         <div className="v4-tip">
-          💡 Click <b>Refresh stats</b> to pull view counts from YouTube / TikTok for your published clips.
+          Click <b>Refresh stats</b> to pull YouTube view counts. TikTok analytics will be enabled after scope approval.
         </div>
       )}
 
@@ -196,7 +196,7 @@ export default function Analytics() {
           <div className="v4-kpi-label">Total likes</div>
           <div className="v4-kpi-value">{totalLikes != null ? formatViewerCount(totalLikes) : '—'}</div>
           <div className="v4-kpi-delta neutral">
-            {totalLikes != null ? 'across YouTube + TikTok' : 'Refresh to pull likes'}
+            {totalLikes != null ? 'across available platform data' : 'Refresh to pull likes'}
           </div>
         </div>
         <div className="v4-kpi">

@@ -151,20 +151,48 @@ export default function Vods() {
   )
   // BYOK cost UI: only show estimates/actuals when a paid provider is active.
   const aiNotFree = useAiStore((s) => s.effectiveMode() !== 'free')
+  const aiEstimateKey = useAiStore((s) => {
+    const settings = s.settings
+    const titleModel = settings[`${settings.provider}Model` as keyof typeof settings]
+    return [
+      settings.provider,
+      titleModel,
+      settings.claudeJudgeModel,
+      settings.useSonnetFinalPass,
+      settings.useForTitles,
+    ].join(':')
+  })
   const navigate = useNavigate()
   const [refreshingId, setRefreshingId] = useState<string | null>(null)
   const [refreshedId, setRefreshedId] = useState<string | null>(null)
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
-  const [diskUsage, setDiskUsage] = useState<any>(null)
+  const [diskUsage, setDiskUsage] = useState<{
+    has_file: boolean
+    vod_size: number
+    clip_count: number
+    clips_size: number
+    total_size: number
+  } | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [editingGameId, setEditingGameId] = useState<string | null>(null)
   const [gameInput, setGameInput] = useState('')
   const [restoringVods, setRestoringVods] = useState(false)
   const [showImportDialog, setShowImportDialog] = useState(false)
   const [detectionStats, setDetectionStats] = useState<Record<string, { candidatesFound: number; candidatesRejected: number; duplicatesSuppressed: number; clipsSelected: number; sensitivity: string }>>({})
+  const detectionStatsRequestedRef = useRef(new Set<string>())
   // Pre-run cost estimate per VOD (USD), keyed by vod.id. Only fetched when a
   // paid AI provider is active. null = not yet fetched / unavailable.
-  const [analyzeEstimates, setAnalyzeEstimates] = useState<Record<string, number>>({})
+  const [analyzeEstimateState, setAnalyzeEstimateState] = useState<{
+    key: string
+    values: Record<string, number>
+  }>({ key: '', values: {} })
+  const analyzeEstimates = analyzeEstimateState.key === aiEstimateKey
+    ? analyzeEstimateState.values
+    : {}
+  const analyzeEstimateRequestsRef = useRef<{ key: string; vodIds: Set<string> }>({
+    key: '',
+    vodIds: new Set(),
+  })
   // After an analyze completes we surface the actual spend in a brief toast.
   const [analyzeCostUsd, setAnalyzeCostUsd] = useState<number | null>(null)
 
@@ -172,7 +200,8 @@ export default function Vods() {
   useEffect(() => {
     const loadStats = async () => {
       for (const vod of vods) {
-        if (vod.analysis_status === 'completed' && !detectionStats[vod.id]) {
+        if (vod.analysis_status === 'completed' && !detectionStatsRequestedRef.current.has(vod.id)) {
+          detectionStatsRequestedRef.current.add(vod.id)
           try {
             const stats = await invoke<{ candidates_found: number; candidates_rejected: number; duplicates_suppressed: number; clips_selected: number; sensitivity: string } | null>('get_detection_stats', { vodId: vod.id })
             if (stats) {
@@ -187,7 +216,9 @@ export default function Vods() {
                 },
               }))
             }
-          } catch { /* stats not available for this VOD */ }
+          } catch {
+            detectionStatsRequestedRef.current.delete(vod.id)
+          }
         }
       }
     }
@@ -197,23 +228,34 @@ export default function Vods() {
   // Pre-run cost estimates: ask the backend what an analyze would cost for each
   // VOD's duration. Only when a paid provider is active; free mode shows nothing.
   useEffect(() => {
-    if (!aiNotFree) {
-      setAnalyzeEstimates({})
-      return
+    if (analyzeEstimateRequestsRef.current.key !== aiEstimateKey) {
+      analyzeEstimateRequestsRef.current = { key: aiEstimateKey, vodIds: new Set() }
     }
+    if (!aiNotFree) return
     let cancelled = false
     const loadEstimates = async () => {
       for (const vod of vods) {
-        if (analyzeEstimates[vod.id] !== undefined) continue
+        if (analyzeEstimateRequestsRef.current.vodIds.has(vod.id)) continue
+        analyzeEstimateRequestsRef.current.vodIds.add(vod.id)
         try {
           const usd = await invoke<number>('estimate_analyze_cost', { durationSecs: vod.duration_seconds })
-          if (!cancelled) setAnalyzeEstimates(prev => ({ ...prev, [vod.id]: usd }))
-        } catch { /* estimate unavailable — show nothing for this VOD */ }
+          if (!cancelled) {
+            setAnalyzeEstimateState((previous) => ({
+              key: aiEstimateKey,
+              values: {
+                ...(previous.key === aiEstimateKey ? previous.values : {}),
+                [vod.id]: usd,
+              },
+            }))
+          }
+        } catch {
+          analyzeEstimateRequestsRef.current.vodIds.delete(vod.id)
+        }
       }
     }
     if (vods.length > 0) loadEstimates()
     return () => { cancelled = true }
-  }, [vods, aiNotFree])
+  }, [vods, aiNotFree, aiEstimateKey])
 
   useEffect(() => {
     checkLogin()
@@ -257,7 +299,7 @@ export default function Vods() {
     }
   }, [vods, loggedInUser, refreshVods])
 
-  const handleExportReviewData = async (vodId: string, _vodTitle: string) => {
+  const handleExportReviewData = async (vodId: string) => {
     try {
       const json = await invoke<string>('export_review_data_for_vod', { vodId })
       await navigator.clipboard.writeText(json)
@@ -394,7 +436,7 @@ export default function Vods() {
   const handleShowDeleteConfirm = async (vodId: string) => {
     setDeleteConfirmId(vodId)
     try {
-      const usage = await invoke('get_vod_disk_usage', { vodId })
+      const usage = await invoke<NonNullable<typeof diskUsage>>('get_vod_disk_usage', { vodId })
       setDiskUsage(usage)
     } catch {
       setDiskUsage(null)
@@ -407,7 +449,7 @@ export default function Vods() {
       await invoke('delete_vod_file', { vodId })
       // Immediately update local state — file-only delete resets download status
       updateVod(vodId, {
-        download_status: 'pending' as any,
+        download_status: 'pending',
         local_path: null,
         download_progress: 0,
       })
@@ -627,7 +669,7 @@ export default function Vods() {
 
               {/* Info */}
               <div className="v4-vod-body flex-1 flex flex-col gap-3">
-                <h3 className="v4-vod-title" title={vod.title} style={{whiteSpace:'normal',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical' as any,overflow:'hidden'}}>
+                <h3 className="v4-vod-title" title={vod.title} style={{whiteSpace:'normal',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical',overflow:'hidden'}}>
                   {vod.title}
                 </h3>
                 <p className="text-xs text-slate-500">{formatDate(vod.stream_date)}</p>
@@ -779,7 +821,7 @@ export default function Vods() {
                   )}
                   {showReviewTools && vod.analysis_status === 'completed' && (
                     <button
-                      onClick={() => handleExportReviewData(vod.id, vod.title)}
+                      onClick={() => handleExportReviewData(vod.id)}
                       className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg transition-colors cursor-pointer bg-amber-500/20 text-amber-400 border border-amber-500/30 hover:bg-amber-500/30"
                       title="Copy clip-by-clip review data to clipboard for offline analysis"
                     >

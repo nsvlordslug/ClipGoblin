@@ -66,7 +66,7 @@ src-tauri/src/
 │   └── instagram.rs        # stub — TODO(v2)
 ├── db.rs                   # SQLite schema, migrations, all CRUD helpers
 ├── twitch.rs               # Twitch OAuth (token exchange/refresh via the Cloudflare auth proxy)
-├── auth_proxy.rs           # client for the clipgoblin-auth-proxy Worker (X-Proxy-Key header)
+├── auth_proxy.rs           # client for the clipgoblin-auth-proxy Worker (no embedded/shared client secret)
 ├── crypto.rs               # DPAPI encryption for tokens at rest ("dpapi:" prefix, per-Windows-user)
 ├── post_captions.rs        # AI + pattern-based caption/title generation (FINALIZED)
 ├── ai_provider.rs          # BYOK provider resolution (Claude/OpenAI/Gemini/Free)
@@ -153,17 +153,17 @@ See worker/wrangler.toml for the proxy configuration.
 
 ## Known Gotchas
 
-1. **Twitch PKCE doesn't work** — Twitch rejects token exchange for Public clients with "Invalid client credentials". Use Confidential with embedded secret instead.
+1. **Twitch desktop token exchange needs a Confidential client** — the client secret belongs only in the Cloudflare Worker; never embed it in the desktop app.
 2. **TikTok redirect URI must match website domain** — Uses GitHub Pages callback page that forwards to localhost.
 3. **VOD channel_id goes stale on reconnect** — upsert now includes `channel_id = excluded.channel_id`.
 4. **restore_deleted_vods must run before fetchVods** — otherwise upsert skips previously deleted VODs.
 5. **CUDA cublas64_12.dll missing** — user needs CUDA Toolkit 12 installed for GPU transcription.
-6. **Asset protocol 403 on external drives** — scope set to `["**"]` in tauri.conf.json.
+6. **Asset protocol scope is runtime-only** — `tauri.conf.json` starts with an empty scope. The app allows its data root and a user-selected download folder after canonical path validation; do not restore `["**"]`.
 7. **lib.rs truncation** — was 4359 lines, now split into 8 modules. NEVER let it grow large again.
 8. **Cargo.toml is in src-tauri/** — run `cargo check` from there, not project root.
 9. **Tokens are DPAPI-encrypted at rest** (crypto.rs, `dpapi:` prefix in the settings table). Any tooling that reads tokens outside the app must CryptUnprotectData first — raw values are ciphertext.
-10. **Two clip ledgers:** direct uploads write `upload_history`; the Analytics pipeline reads `scheduled_uploads` (status='completed'). Direct uploads are mirrored into the ledger via `db::record_direct_upload_for_analytics` (v1.4.3) — keep that in mind when touching either table.
-11. **Repo `.env` `PROXY_API_KEY` is STALE** — the deployed worker rejects it (403), so Twitch/YouTube/TikTok token refresh fails in local dev builds. Release builds are fine (key embedded from GitHub secrets at CI build time). Fix = paste the real key into `.env` (Slug has it). Do NOT rotate the worker secret — shipped builds have the current key baked in.
+10. **Two clip ledgers:** direct uploads write `upload_history`; the Analytics pipeline reads `scheduled_uploads`. Direct uploads are mirrored through `db::record_direct_upload_state_for_analytics`, including processing/private posts that do not yet have a public URL.
+11. **OAuth proxy has no desktop shared key** — provider client secrets stay in Cloudflare Worker secrets. The Worker enforces exact routes, redirect allowlists, PKCE where applicable, body limits, and rate limits. Deploy Worker changes separately; never add `PROXY_API_KEY` or `X-Proxy-Key` back to the app.
 12. **Unaudited TikTok client = SELF_ONLY posting.** Until the Content Posting API audit passes, posts only succeed with the TikTok account set to Private (`unaudited_client_can_only_post_to_private_accounts`).
 13. **A running `clipviral.exe` locks its own binary — rebuilds SILENTLY fail.** On Windows, while the app is open, `cargo build` / `cargo tauri dev` cannot overwrite `src-tauri/target/debug/clipviral.exe` (error: `failed to remove file … Access is denied. (os error 5)`), so the rebuild no-ops and the OLD binary keeps running — code edits never take effect. Symptom: "I rebuilt but nothing changed." Fix: fully CLOSE the app (or `Stop-Process -Name clipviral -Force`) BEFORE rebuilding. Verify the build actually landed with `(Get-Item src-tauri\target\debug\clipviral.exe).LastWriteTime` — if it isn't fresh, you're still on stale code.
 14. **Frontend (.tsx) edits don't appear even after rebuilding → stale WebView2 cache.** The dev app loads the frontend from the Vite dev server (`devUrl` = localhost:5173), but Chromium/WebView2 caches compiled JS under `%LOCALAPPDATA%\com.clipgoblin.desktop\EBWebView\Default\{Cache, Code Cache}` and serves it across BOTH app restarts and Vite restarts. Symptom: a new Settings toggle / UI fix never shows no matter how many times you close + `cargo tauri dev` (cost a full debugging session — both a Settings toggle and a scroll fix "didn't work" because they never loaded; the cache had grown to ~550 MB). Confirm by writing a diagnostic to the DB from the effect and checking it never appears. Fix: close the app, delete `EBWebView\Default\Cache` + `Code Cache` (KEEP `Local Storage` so AI keys/settings survive), then restart. A hard-reload (Ctrl+Shift+R) in the webview can also bust it. **Now auto-handled in dev:** `lib.rs run()` wipes `Cache` + `Code Cache` on every debug-build startup (before the webview loads), so a fresh `cargo tauri dev` always serves current code — the manual steps above are just the fallback. (Header tricks like a Vite `Cache-Control: no-store` middleware do NOT work: Vite overrides module responses with `no-cache`, which WebView2 then ignores.)

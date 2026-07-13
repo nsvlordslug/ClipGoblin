@@ -12,7 +12,7 @@
     "app":  {
                 "windows":  [
                                 {
-                                    "title":  "ClipGoblin â€” Twitch Stream Clip Generator",
+                                    "title":  "ClipGoblin - Twitch Stream Clip Generator",
                                     "width":  1280,
                                     "height":  800,
                                     "minWidth":  900,
@@ -25,9 +25,8 @@
                 "security":  {
                                  "csp":  "default-src \u0027self\u0027 asset: http://asset.localhost https://asset.localhost; img-src \u0027self\u0027 asset: http://asset.localhost https://asset.localhost https://static-cdn.jtvnw.net https://*.twitch.tv https://*.jtvnw.net https://*.cloudfront.net; connect-src \u0027self\u0027 https://api.twitch.tv https://id.twitch.tv https://api.anthropic.com asset: http://asset.localhost https://asset.localhost; media-src \u0027self\u0027 asset: http://asset.localhost https://asset.localhost blob:",
                                  "assetProtocol":  {
-                                                       "scope":  [
-                                                                     "**"
-                                                                 ]
+                                                       "enable": true,
+                                                       "scope":  []
                                                    }
                              }
             },

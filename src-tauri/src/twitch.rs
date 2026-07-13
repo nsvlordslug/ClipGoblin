@@ -505,6 +505,15 @@ pub struct TwitchCommunityClip {
     pub view_count: i64,
     #[serde(default)]
     pub title: String,
+    /// User who created the clip. Comparing this with `broadcaster_id` lets the
+    /// selector distinguish streamer-created clips from audience clips.
+    #[serde(default)]
+    pub creator_id: String,
+    #[serde(default)]
+    pub creator_name: String,
+    /// Twitch exposes featured clips as an explicit editorial signal.
+    #[serde(default)]
+    pub is_featured: bool,
 }
 
 /// Fetch every community-created clip cut from the given broadcaster between

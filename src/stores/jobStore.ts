@@ -48,7 +48,7 @@ const MAX_ERRORS = 50
 /** Guard: prevent duplicate listener registration across React strict-mode / re-renders. */
 let _listenerCleanup: UnlistenFn | null = null
 
-export const useJobStore = create<JobState>((set, _get) => ({
+export const useJobStore = create<JobState>((set) => ({
   jobs: {},
   errors: [],
 
@@ -97,8 +97,9 @@ export const useJobStore = create<JobState>((set, _get) => ({
     try {
       await invoke('remove_job', { id: jobId })
       set((state) => {
-        const { [jobId]: _, ...rest } = state.jobs
-        return { jobs: rest }
+        const jobs = { ...state.jobs }
+        delete jobs[jobId]
+        return { jobs }
       })
     } catch (err) {
       console.error('Failed to remove job:', err)

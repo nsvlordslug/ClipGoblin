@@ -64,8 +64,36 @@ pub(crate) const EVENTS: &[(&str, &str)] = &[
 ];
 
 pub(crate) fn parse_tags(tags: Option<&str>) -> Vec<String> {
-    tags.map(|t| t.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect())
-        .unwrap_or_default()
+    let Some(raw) = tags.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Vec::new();
+    };
+
+    if let Ok(parsed) = serde_json::from_str::<Vec<String>>(raw) {
+        return parsed
+            .into_iter()
+            .map(|tag| tag.trim().to_lowercase())
+            .filter(|tag| !tag.is_empty())
+            .collect();
+    }
+
+    raw.split(',')
+        .map(|tag| tag.trim().to_lowercase())
+        .filter(|tag| !tag.is_empty())
+        .collect()
+}
+
+#[cfg(test)]
+mod tag_parsing_tests {
+    use super::parse_tags;
+
+    #[test]
+    fn parses_json_and_csv_highlight_tags() {
+        assert_eq!(
+            parse_tags(Some(r#"["Fight", "Panic"]"#)),
+            vec!["fight", "panic"]
+        );
+        assert_eq!(parse_tags(Some("Fight, Panic")), vec!["fight", "panic"]);
+    }
 }
 
 pub(crate) fn classify(tags: &[String], vocab: &[(&str, &str)]) -> Vec<String> {
@@ -672,15 +700,16 @@ pub async fn upgrade_titles_with_llm(
         // one API call per clip. Money quote still extracts on regenerate.
         let mut usage = post_captions::TokenUsage::default();
         match post_captions::generate_llm_titles(
+            resolved.provider,
             &resolved.api_key,
             &resolved.model,
             &event_summary,
-            None,                  // money_quote — skip at analyze
+            None, // money_quote — skip at analyze
             transcript_for_clip,
             &tags,
             vod_game,
-            None,                  // streamer_history — fresh analyze, no prior titles
-            None,                  // target_platform — defaults to TikTok
+            None, // streamer_history — fresh analyze, no prior titles
+            None, // target_platform — defaults to TikTok
             Some(&mut usage),
         )
         .await
@@ -718,7 +747,8 @@ pub async fn upgrade_titles_with_llm(
             Err(e) => {
                 log::warn!(
                     "Save-path Wave 3 failed for highlight {}: {} — keeping heuristic",
-                    h.id, e
+                    h.id,
+                    e
                 );
             }
         }
@@ -804,10 +834,12 @@ pub async fn generate_post_captions(
     transcript_text: Option<String>,
     current_title: Option<String>,
     current_game: Option<String>,
+    current_description: Option<String>,
+    previous_descriptions: Option<Vec<String>>,
     selected_mode: Option<String>,
     db: State<'_, DbConn>,
 ) -> Result<post_captions::PostCaptions, String> {
-    let (clip, tags, transcript, highlight_scores, resolved) = {
+    let (clip, tags, transcript, highlight_scores, stored_event_summary, resolved) = {
         let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
 
         let clip = db::get_clip_by_id(&conn, &clip_id)
@@ -818,10 +850,15 @@ pub async fn generate_post_captions(
             .map_err(|e| format!("DB error: {}", e))?;
         let highlight = highlights.iter().find(|h| h.id == clip.highlight_id);
 
-        let tags: Vec<String> = highlight
-            .and_then(|h| h.tags.as_ref())
-            .map(|t| t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
-            .unwrap_or_default();
+        let tags = parse_tags(highlight.and_then(|h| h.tags.as_deref()));
+        let stored_event_summary = highlight
+            .and_then(|h| h.event_summary.clone())
+            .filter(|summary| !summary.trim().is_empty())
+            .or_else(|| {
+                highlight
+                    .and_then(|h| h.description.clone())
+                    .filter(|summary| !summary.trim().is_empty())
+            });
 
         // Prefer full subtitle transcript from frontend; fall back to highlight snippet
         let transcript = transcript_text
@@ -836,75 +873,131 @@ pub async fn generate_post_captions(
         // Resolve provider for captions scope
         let resolved = ai_provider::resolve(&conn, ai_provider::Scope::Captions);
 
-        (clip, tags, transcript, scores, resolved)
+        (clip, tags, transcript, scores, stored_event_summary, resolved)
     };
 
     // Use frontend title if provided, otherwise fall back to clip title
-    let title = current_title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| clip.title.clone());
+    let title = current_title
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| clip.title.clone());
 
     let (audio, visual, chat) = highlight_scores;
 
-    // Default to direct_quote if no mode specified
-    let mode = selected_mode.unwrap_or_else(|| "direct_quote".into());
+    let generation_seed = seed.unwrap_or(0);
+    // Action-first is a safer default than quote mode when transcript quality is weak.
+    let mode = selected_mode.unwrap_or_else(|| "punchy".into());
 
     // ── Try LLM generation if provider is configured ──
     if resolved.is_llm() {
-        let tone = post_captions::classify_tone_pub(
-            &tags, transcript.as_deref(), audio, visual, chat,
-        );
+        let tone =
+            post_captions::classify_tone_pub(&tags, transcript.as_deref(), audio, visual, chat);
         let event = post_captions::primary_event_pub(&tags);
-        let event_summary = post_captions::synthesize_event_pub(
-            event, tone, &tags, seed.unwrap_or(0) as usize,
-        );
+        let event_summary = stored_event_summary.unwrap_or_else(|| {
+            post_captions::synthesize_event_pub(event, tone, &tags, generation_seed as usize)
+        });
         let tone_label = tone.label();
         let quote = post_captions::strong_quote_pub(transcript.as_deref());
 
         // Prefer live game value from frontend; fall back to DB value
-        let game_name = current_game.as_deref()
+        let game_name = current_game
+            .as_deref()
             .filter(|s| !s.is_empty())
             .or(clip.game.as_deref());
 
-        log::info!("Caption generation: using {:?} (model: {})", resolved.provider, resolved.model);
-        log::info!("Caption generation: mode = {}, game = {:?}", mode, game_name);
+        log::info!(
+            "Caption generation: using {:?} (model: {})",
+            resolved.provider,
+            resolved.model
+        );
+        log::info!(
+            "Caption generation: mode = {}, game = {:?}",
+            mode,
+            game_name
+        );
 
         // Wave 3: extract a money-quote first (tiny, separate API call). Non-fatal
         // if it fails — captions still generate without one, just less punchy.
         let mut quote_usage = post_captions::TokenUsage::default();
-        let money_quote: Option<String> = match transcript.as_deref().filter(|t| !t.trim().is_empty()) {
-            Some(ft) => match post_captions::extract_money_quote_llm(
-                &resolved.api_key, &resolved.model, &event_summary, ft, &tags,
-                Some(&mut quote_usage),
-            ).await {
-                Ok(q) => {
-                    if let Ok(conn) = db.lock() {
-                        crate::ai_usage::log_usage(&conn, crate::ai_usage::UsageEntry {
-                            feature: "money_quote_caption",
-                            provider: resolved.provider,
-                            model: &resolved.model,
-                            tokens_in: quote_usage.tokens_in,
-                            tokens_out: quote_usage.tokens_out,
-                            vod_id: Some(&clip.vod_id),
-                            clip_id: Some(&clip_id),
-                            context: None,
-                        });
+        let money_quote: Option<String> =
+            match transcript.as_deref().filter(|t| !t.trim().is_empty()) {
+                Some(ft) => match post_captions::extract_money_quote_llm(
+                    resolved.provider,
+                    &resolved.api_key,
+                    &resolved.model,
+                    &event_summary,
+                    ft,
+                    &tags,
+                    Some(&mut quote_usage),
+                )
+                .await
+                {
+                    Ok(q) => {
+                        if let Ok(conn) = db.lock() {
+                            crate::ai_usage::log_usage(
+                                &conn,
+                                crate::ai_usage::UsageEntry {
+                                    feature: "money_quote_caption",
+                                    provider: resolved.provider,
+                                    model: &resolved.model,
+                                    tokens_in: quote_usage.tokens_in,
+                                    tokens_out: quote_usage.tokens_out,
+                                    vod_id: Some(&clip.vod_id),
+                                    clip_id: Some(&clip_id),
+                                    context: None,
+                                },
+                            );
+                        }
+                        q
                     }
-                    q
-                }
-                Err(e) => { log::debug!("Money-quote extraction skipped: {}", e); None }
-            },
-            None => None,
-        };
+                    Err(e) => {
+                        log::debug!("Money-quote extraction skipped: {}", e);
+                        None
+                    }
+                },
+                None => None,
+            };
 
         let mut caption_usage = post_captions::TokenUsage::default();
+        let mut avoid_captions = Vec::new();
+        for caption in current_description
+            .iter()
+            .chain(previous_descriptions.iter().flatten())
+            .chain(clip.publish_description.iter())
+        {
+            let trimmed = caption.trim();
+            if trimmed.is_empty()
+                || avoid_captions
+                    .iter()
+                    .any(|existing: &String| existing.eq_ignore_ascii_case(trimmed))
+            {
+                continue;
+            }
+            avoid_captions.push(trimmed.to_string());
+            if avoid_captions.len() == 6 {
+                break;
+            }
+        }
         match post_captions::generate_llm_caption(
-            &resolved.api_key, &resolved.model, &mode,
+            resolved.provider,
+            &resolved.api_key,
+            &resolved.model,
+            &mode,
             None, // platform — defaults to TikTok; a future frontend selector can override
-            &event_summary, money_quote.as_deref(), quote.as_deref(), tone_label,
-            &tags, transcript.as_deref(), &title, game_name,
+            &event_summary,
+            money_quote.as_deref(),
+            quote.as_deref(),
+            tone_label,
+            &tags,
+            transcript.as_deref(),
+            &title,
+            game_name,
             &[], // streamer_niche_tags — surface from settings in future work
-            clip.publish_description.as_deref(), // avoid_caption — breaks regen determinism
+            &avoid_captions,
+            generation_seed,
             Some(&mut caption_usage),
-        ).await {
+        )
+        .await
+        {
             Ok(candidates) if !candidates.is_empty() => {
                 let top = &candidates[0];
                 log::info!(
@@ -913,16 +1006,19 @@ pub async fn generate_post_captions(
                 );
                 // Phase 6.0: log caption regen call.
                 if let Ok(conn) = db.lock() {
-                    crate::ai_usage::log_usage(&conn, crate::ai_usage::UsageEntry {
-                        feature: "caption_regen",
-                        provider: resolved.provider,
-                        model: &resolved.model,
-                        tokens_in: caption_usage.tokens_in,
-                        tokens_out: caption_usage.tokens_out,
-                        vod_id: Some(&clip.vod_id),
-                        clip_id: Some(&clip_id),
-                        context: Some(&mode),
-                    });
+                    crate::ai_usage::log_usage(
+                        &conn,
+                        crate::ai_usage::UsageEntry {
+                            feature: "caption_regen",
+                            provider: resolved.provider,
+                            model: &resolved.model,
+                            tokens_in: caption_usage.tokens_in,
+                            tokens_out: caption_usage.tokens_out,
+                            vod_id: Some(&clip.vod_id),
+                            clip_id: Some(&clip_id),
+                            context: Some(&mode),
+                        },
+                    );
                 }
                 // Top-scored only. Candidates are pre-sorted descending by score.
                 let llm_captions = vec![post_captions::caption_candidate_to_variant(top, &mode)];
@@ -937,14 +1033,25 @@ pub async fn generate_post_captions(
                     &[],
                     game_name,
                 );
-                let casual = llm_captions.first().map(|c| c.text.clone()).unwrap_or_default();
-                let funny  = llm_captions.get(1).map(|c| c.text.clone()).unwrap_or_default();
-                let hype   = llm_captions.get(2).map(|c| c.text.clone()).unwrap_or_default();
+                let casual = llm_captions
+                    .first()
+                    .map(|c| c.text.clone())
+                    .unwrap_or_default();
+                let funny = llm_captions
+                    .get(1)
+                    .map(|c| c.text.clone())
+                    .unwrap_or_default();
+                let hype = llm_captions
+                    .get(2)
+                    .map(|c| c.text.clone())
+                    .unwrap_or_default();
                 return Ok(post_captions::PostCaptions {
                     captions: llm_captions,
                     hashtags,
                     source: "llm".into(),
-                    casual, funny, hype,
+                    casual,
+                    funny,
+                    hype,
                 });
             }
             Ok(_) => {
@@ -970,7 +1077,9 @@ pub async fn generate_post_captions(
         transcript.as_deref(),
         &title,
         clip.start_seconds,
-        audio, visual, chat,
+        audio,
+        visual,
+        chat,
         seed.unwrap_or(0),
     ))
 }
@@ -1000,7 +1109,12 @@ pub async fn generate_ai_title(
 
         let tags: Vec<String> = highlight
             .and_then(|h| h.tags.as_ref())
-            .map(|t| t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+            .map(|t| {
+                t.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
             .unwrap_or_default();
 
         let transcript = transcript_text
@@ -1020,47 +1134,63 @@ pub async fn generate_ai_title(
     let (audio, visual, chat) = highlight_scores;
 
     if resolved.is_llm() {
-        let tone = post_captions::classify_tone_pub(
-            &tags, transcript.as_deref(), audio, visual, chat,
-        );
+        let tone =
+            post_captions::classify_tone_pub(&tags, transcript.as_deref(), audio, visual, chat);
         let event = post_captions::primary_event_pub(&tags);
-        let event_summary = post_captions::synthesize_event_pub(
-            event, tone, &tags, 0,
-        );
+        let event_summary = post_captions::synthesize_event_pub(event, tone, &tags, 0);
 
-        let game_name = current_game.as_deref()
+        let game_name = current_game
+            .as_deref()
             .filter(|s| !s.is_empty())
             .or(clip.game.as_deref());
 
-        log::info!("AI title generation: using {:?} (model: {})", resolved.provider, resolved.model);
+        log::info!(
+            "AI title generation: using {:?} (model: {})",
+            resolved.provider,
+            resolved.model
+        );
 
         // Wave 3: extract a money-quote first so the titles prompt can inherit it
         // (enables QuoteTwist pattern). Non-fatal on failure.
         let mut quote_usage = post_captions::TokenUsage::default();
-        let money_quote: Option<String> = match transcript.as_deref().filter(|t| !t.trim().is_empty()) {
-            Some(ft) => match post_captions::extract_money_quote_llm(
-                &resolved.api_key, &resolved.model, &event_summary, ft, &tags,
-                Some(&mut quote_usage),
-            ).await {
-                Ok(q) => {
-                    if let Ok(conn) = db.lock() {
-                        crate::ai_usage::log_usage(&conn, crate::ai_usage::UsageEntry {
-                            feature: "money_quote_title",
-                            provider: resolved.provider,
-                            model: &resolved.model,
-                            tokens_in: quote_usage.tokens_in,
-                            tokens_out: quote_usage.tokens_out,
-                            vod_id: Some(&clip.vod_id),
-                            clip_id: Some(&clip_id),
-                            context: None,
-                        });
+        let money_quote: Option<String> =
+            match transcript.as_deref().filter(|t| !t.trim().is_empty()) {
+                Some(ft) => match post_captions::extract_money_quote_llm(
+                    resolved.provider,
+                    &resolved.api_key,
+                    &resolved.model,
+                    &event_summary,
+                    ft,
+                    &tags,
+                    Some(&mut quote_usage),
+                )
+                .await
+                {
+                    Ok(q) => {
+                        if let Ok(conn) = db.lock() {
+                            crate::ai_usage::log_usage(
+                                &conn,
+                                crate::ai_usage::UsageEntry {
+                                    feature: "money_quote_title",
+                                    provider: resolved.provider,
+                                    model: &resolved.model,
+                                    tokens_in: quote_usage.tokens_in,
+                                    tokens_out: quote_usage.tokens_out,
+                                    vod_id: Some(&clip.vod_id),
+                                    clip_id: Some(&clip_id),
+                                    context: None,
+                                },
+                            );
+                        }
+                        q
                     }
-                    q
-                }
-                Err(e) => { log::debug!("Money-quote extraction skipped: {}", e); None }
-            },
-            None => None,
-        };
+                    Err(e) => {
+                        log::debug!("Money-quote extraction skipped: {}", e);
+                        None
+                    }
+                },
+                None => None,
+            };
 
         // Regenerate anti-repeat: build a history of all titles the model has
         // already produced for this clip in this session (REGEN_TITLE_HISTORY),
@@ -1088,13 +1218,20 @@ pub async fn generate_ai_title(
 
         let mut title_usage = post_captions::TokenUsage::default();
         match post_captions::generate_llm_titles(
-            &resolved.api_key, &resolved.model, &event_summary,
-            money_quote.as_deref(), transcript.as_deref(),
-            &tags, game_name,
+            resolved.provider,
+            &resolved.api_key,
+            &resolved.model,
+            &event_summary,
+            money_quote.as_deref(),
+            transcript.as_deref(),
+            &tags,
+            game_name,
             history_slice,
             None, // target_platform — defaults to TikTok
             Some(&mut title_usage),
-        ).await {
+        )
+        .await
+        {
             Ok(candidates) => {
                 if let Some(top) = candidates.first() {
                     log::info!(
@@ -1103,16 +1240,19 @@ pub async fn generate_ai_title(
                     );
                     // Phase 6.0: log title regen call.
                     if let Ok(conn) = db.lock() {
-                        crate::ai_usage::log_usage(&conn, crate::ai_usage::UsageEntry {
-                            feature: "title_regen",
-                            provider: resolved.provider,
-                            model: &resolved.model,
-                            tokens_in: title_usage.tokens_in,
-                            tokens_out: title_usage.tokens_out,
-                            vod_id: Some(&clip.vod_id),
-                            clip_id: Some(&clip_id),
-                            context: None,
-                        });
+                        crate::ai_usage::log_usage(
+                            &conn,
+                            crate::ai_usage::UsageEntry {
+                                feature: "title_regen",
+                                provider: resolved.provider,
+                                model: &resolved.model,
+                                tokens_in: title_usage.tokens_in,
+                                tokens_out: title_usage.tokens_out,
+                                vod_id: Some(&clip.vod_id),
+                                clip_id: Some(&clip_id),
+                                context: None,
+                            },
+                        );
                     }
                     // Record this regen so subsequent calls on the same clip see
                     // the full session history, not just the current UI title.

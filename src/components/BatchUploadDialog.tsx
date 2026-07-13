@@ -1,18 +1,21 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { X, Upload, CheckCircle2, AlertCircle, Loader2, ChevronDown, ChevronUp, RotateCcw, ExternalLink, Clock } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { usePlatformStore, PLATFORM_INFO, type UploadResult } from '../stores/platformStore'
 import { useScheduleStore } from '../stores/scheduleStore'
-import TikTokComplianceFields, { EMPTY_TIKTOK_COMPLIANCE } from './TikTokComplianceFields'
-import type { TikTokComplianceValue } from './TikTokComplianceFields'
+import TikTokComplianceFields from './TikTokComplianceFields'
+import { EMPTY_TIKTOK_COMPLIANCE } from '../lib/tiktokCompliance'
+import type { TikTokComplianceValue } from '../lib/tiktokCompliance'
 import type { Clip } from '../types'
+import { errorMessage } from '../lib/errors'
+import { localDateTimeAfter } from '../lib/dateTime'
 
 // ── Types ──
 
 interface ClipUploadStatus {
   clipId: string
-  status: 'pending' | 'exporting' | 'uploading' | 'done' | 'error' | 'skipped'
+  status: 'pending' | 'exporting' | 'uploading' | 'processing' | 'done' | 'error' | 'skipped'
   exportProgress?: number
   error?: string
   videoUrl?: string
@@ -104,7 +107,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
   const { schedule: scheduleUpload } = useScheduleStore()
 
   // Platform selection
-  const availablePlatforms = Object.entries(PLATFORM_INFO).filter(([_, info]) => info.available)
+  const availablePlatforms = Object.entries(PLATFORM_INFO).filter(([, info]) => info.available)
   const [selectedPlatforms, setSelectedPlatforms] = useState<Record<string, boolean>>(() => {
     const init: Record<string, boolean> = {}
     for (const [key, info] of availablePlatforms) {
@@ -125,6 +128,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
   // Schedule state
   const [scheduleMode, setScheduleMode] = useState(false)
   const [scheduleTime, setScheduleTime] = useState('')
+  const [minimumScheduleTime, setMinimumScheduleTime] = useState('')
   const [scheduleComplete, setScheduleComplete] = useState(false)
 
   // Upload state
@@ -137,23 +141,46 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
   const [tiktokComplianceValid, setTiktokComplianceValid] = useState(false)
   const cancelRef = useRef(false)
   // Keep a mutable ref to the latest version of each clip (updated after export)
-  const clipMapRef = useRef<Record<string, Clip>>({})
-  // Initialize clip map
-  if (Object.keys(clipMapRef.current).length === 0) {
-    for (const c of clips) clipMapRef.current[c.id] = c
-  }
+  const clipMapRef = useRef<Record<string, Clip>>(
+    Object.fromEntries(clips.map((clip) => [clip.id, clip])),
+  )
 
-  const activePlatforms = Object.entries(selectedPlatforms).filter(([_, v]) => v).map(([k]) => k)
+  const activePlatforms = Object.entries(selectedPlatforms).filter(([, selected]) => selected).map(([key]) => key)
   const missingTitleClips = clips.filter(c => !c.title?.trim())
 
   // ALL clips participate (not just exported ones)
   const totalJobs = clips.length * activePlatforms.length
   const doneJobs = Object.values(clipStatuses).reduce((acc, platformMap) => {
-    return acc + Object.values(platformMap).filter(s => s.status === 'done' || s.status === 'error' || s.status === 'skipped').length
+    return acc + Object.values(platformMap).filter(s => s.status === 'done' || s.status === 'processing' || s.status === 'error' || s.status === 'skipped').length
   }, 0)
   const failedJobs = Object.values(clipStatuses).reduce((acc, platformMap) => {
     return acc + Object.values(platformMap).filter(s => s.status === 'error').length
   }, 0)
+
+  useEffect(() => {
+    const uploadSucceeded = completed
+      && !scheduleComplete
+      && !uploading
+      && totalJobs > 0
+      && doneJobs === totalJobs
+      && failedJobs === 0
+    if (!uploadSucceeded) return
+
+    const timer = window.setTimeout(() => {
+      onComplete()
+      onClose()
+    }, 900)
+    return () => window.clearTimeout(timer)
+  }, [
+    completed,
+    doneJobs,
+    failedJobs,
+    onClose,
+    onComplete,
+    scheduleComplete,
+    totalJobs,
+    uploading,
+  ])
 
   const togglePlatform = (platform: string) => {
     setSelectedPlatforms(prev => ({ ...prev, [platform]: !prev[platform] }))
@@ -200,11 +227,11 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
       if (!isConnected(platform)) {
         try {
           await connect(platform)
-        } catch (e: any) {
+        } catch (error: unknown) {
           for (const clip of clips) {
             updateClipStatus(platform, clip.id, {
               status: 'error',
-              error: `Failed to connect to ${PLATFORM_INFO[platform]?.name || platform}: ${e?.message || e}`,
+              error: `Failed to connect to ${PLATFORM_INFO[platform]?.name || platform}: ${errorMessage(error, 'Connection failed')}`,
             })
           }
           continue
@@ -227,12 +254,12 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
       let exportedClip: Clip
       try {
         exportedClip = await ensureExported(clip, activePlatforms[0])
-      } catch (e: any) {
+      } catch (error: unknown) {
         // Export failed — mark all platforms as error for this clip
         for (const platform of activePlatforms) {
           updateClipStatus(platform, clip.id, {
             status: 'error',
-            error: `Export failed: ${typeof e === 'string' ? e : e?.message || 'Unknown error'}`,
+            error: `Export failed: ${errorMessage(error, 'Unknown error')}`,
           })
         }
         continue
@@ -254,16 +281,18 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
           const result = await invoke<UploadResult>('upload_to_platform', { platform, meta })
 
           if (result.status.status === 'complete') {
-            updateClipStatus(platform, clip.id, { status: 'done', videoUrl: result.status.video_url })
+            updateClipStatus(platform, clip.id, { status: 'done', videoUrl: result.status.video_url ?? undefined })
           } else if (result.status.status === 'duplicate') {
-            updateClipStatus(platform, clip.id, { status: 'done', duplicateUrl: result.status.existing_url })
+            updateClipStatus(platform, clip.id, { status: 'done', duplicateUrl: result.status.existing_url ?? undefined })
           } else if (result.status.status === 'failed') {
             updateClipStatus(platform, clip.id, { status: 'error', error: result.status.error })
+          } else if (result.status.status === 'processing') {
+            updateClipStatus(platform, clip.id, { status: 'processing' })
           } else {
-            updateClipStatus(platform, clip.id, { status: 'done' })
+            updateClipStatus(platform, clip.id, { status: 'uploading' })
           }
-        } catch (e: any) {
-          updateClipStatus(platform, clip.id, { status: 'error', error: typeof e === 'string' ? e : e?.message || 'Upload failed' })
+        } catch (error: unknown) {
+          updateClipStatus(platform, clip.id, { status: 'error', error: errorMessage(error, 'Upload failed') })
         }
       }
     }
@@ -302,11 +331,11 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
       let exportedClip: Clip
       try {
         exportedClip = await ensureExported(clip, activePlatforms[0])
-      } catch (e: any) {
+      } catch (error: unknown) {
         for (const platform of activePlatforms) {
           updateClipStatus(platform, clip.id, {
             status: 'error',
-            error: `Export failed: ${typeof e === 'string' ? e : e?.message || 'Unknown error'}`,
+            error: `Export failed: ${errorMessage(error, 'Unknown error')}`,
           })
         }
         continue
@@ -319,8 +348,8 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
           const meta = buildMetaForClip(exportedClip, platform, visibility[platform] || getDefaultVisibility(platform), useSavedCaptions, false, tiktokCompliance)
           await scheduleUpload(clip.id, platform, isoTime, JSON.stringify(meta))
           updateClipStatus(platform, clip.id, { status: 'done' })
-        } catch (e: any) {
-          updateClipStatus(platform, clip.id, { status: 'error', error: typeof e === 'string' ? e : e?.message || 'Schedule failed' })
+        } catch (error: unknown) {
+          updateClipStatus(platform, clip.id, { status: 'error', error: errorMessage(error, 'Schedule failed') })
         }
       }
     }
@@ -454,7 +483,8 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
                     type="datetime-local"
                     value={scheduleTime}
                     onChange={(e) => setScheduleTime(e.target.value)}
-                    min={new Date(Date.now() + 60000).toISOString().slice(0, 16)}
+                    onFocus={() => setMinimumScheduleTime(localDateTimeAfter(60_000))}
+                    min={minimumScheduleTime}
                     className="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:border-violet-500 focus:outline-none"
                   />
                   <p className="text-xs text-slate-500">
@@ -514,6 +544,12 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
                                 <>
                                   <Loader2 className="w-3 h-3 animate-spin text-violet-400" />
                                   <span className="text-violet-400">Uploading</span>
+                                </>
+                              )}
+                              {status === 'processing' && (
+                                <>
+                                  <Loader2 className="w-3 h-3 animate-spin text-cyan-400" />
+                                  <span className="text-cyan-400">Processing on platform</span>
                                 </>
                               )}
                               {status === 'done' && (

@@ -10,6 +10,7 @@
 
 use crate::pipeline::CandidateClip;
 use crate::error::AppError;
+use crate::ai_provider::Provider;
 use crate::detection::Platform;
 use once_cell::sync::Lazy;
 
@@ -52,6 +53,132 @@ pub struct CaptionVariant {
 pub struct TokenUsage {
     pub tokens_in: u64,
     pub tokens_out: u64,
+}
+
+async fn call_generation_provider(
+    provider: Provider,
+    api_key: &str,
+    model: &str,
+    system: &str,
+    prompt: &str,
+    max_tokens: u64,
+) -> Result<(String, TokenUsage), AppError> {
+    let client = reqwest::Client::new();
+    let estimated_input = ((system.len() + prompt.len()) / 4) as u64;
+
+    let (response, provider_name) = match provider {
+        Provider::Claude => {
+            let body = serde_json::json!({
+                "model": model,
+                "max_tokens": max_tokens,
+                "system": system,
+                "messages": [{"role": "user", "content": prompt}],
+            });
+            (
+                client
+                    .post("https://api.anthropic.com/v1/messages")
+                    .header("x-api-key", api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| AppError::Api(format!("Claude request failed: {e}")))?,
+                "Claude",
+            )
+        }
+        Provider::OpenAI => {
+            let body = serde_json::json!({
+                "model": model,
+                "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt}
+                ],
+            });
+            (
+                client
+                    .post("https://api.openai.com/v1/chat/completions")
+                    .bearer_auth(api_key)
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| AppError::Api(format!("OpenAI request failed: {e}")))?,
+                "OpenAI",
+            )
+        }
+        Provider::Gemini => {
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+                urlencoding::encode(model),
+            );
+            let body = serde_json::json!({
+                "system_instruction": {"parts": [{"text": system}]},
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "maxOutputTokens": max_tokens,
+                    "responseMimeType": "application/json",
+                    "temperature": 0.4
+                },
+            });
+            (
+                client
+                    .post(url)
+                    .header("x-goog-api-key", api_key)
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| AppError::Api(format!("Gemini request failed: {e}")))?,
+                "Gemini",
+            )
+        }
+        Provider::Free => {
+            return Err(AppError::Api(
+                "AI generation requires a configured BYOK provider".into(),
+            ));
+        }
+    };
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let preview: String = body.chars().take(500).collect();
+        return Err(AppError::Api(format!(
+            "{provider_name} API {status}: {preview}",
+        )));
+    }
+
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| AppError::Api(format!("{provider_name} response parse failed: {e}")))?;
+    let (text, tokens_in, tokens_out) = match provider {
+        Provider::Claude => (
+            json["content"][0]["text"].as_str(),
+            json["usage"]["input_tokens"].as_u64(),
+            json["usage"]["output_tokens"].as_u64(),
+        ),
+        Provider::OpenAI => (
+            json["choices"][0]["message"]["content"].as_str(),
+            json["usage"]["prompt_tokens"].as_u64(),
+            json["usage"]["completion_tokens"].as_u64(),
+        ),
+        Provider::Gemini => (
+            json["candidates"][0]["content"]["parts"][0]["text"].as_str(),
+            json["usageMetadata"]["promptTokenCount"].as_u64(),
+            json["usageMetadata"]["candidatesTokenCount"].as_u64(),
+        ),
+        Provider::Free => unreachable!(),
+    };
+    let text = text
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| AppError::Api(format!("No text in {provider_name} response")))?
+        .to_string();
+    let usage = TokenUsage {
+        tokens_in: tokens_in.unwrap_or(estimated_input),
+        tokens_out: tokens_out.unwrap_or((text.len() / 4) as u64),
+    };
+    Ok((text, usage))
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -337,7 +464,6 @@ pub fn generate(clip: &CandidateClip) -> PostCaptions {
 
 /// Generate captions with an explicit seed (different seed = different output).
 pub fn generate_with_seed(clip: &CandidateClip, seed: u32) -> PostCaptions {
-    let event = primary_event(&clip.tags);
     let tone = classify_tone(
         &clip.tags,
         clip.transcript_excerpt.as_deref(),
@@ -349,7 +475,9 @@ pub fn generate_with_seed(clip: &CandidateClip, seed: u32) -> PostCaptions {
 
     // Use the clip's pre-computed event summary if available,
     // otherwise generate one inline.
-    let event_summary = clip.event_summary.clone()
+    let event_summary = clip
+        .event_summary
+        .clone()
         .unwrap_or_else(|| generate_event_summary(clip));
 
     let ctx = CaptionCtx {
@@ -2022,6 +2150,7 @@ pub fn extract_money_quote_free(
 /// Callers that know the publish target (Shorts / Reels) should pass it
 /// explicitly so length scoring is accurate.
 pub async fn generate_llm_titles(
+    provider: Provider,
     api_key: &str,
     model: &str,
     event_summary: &str,
@@ -2051,7 +2180,10 @@ pub async fn generate_llm_titles(
     };
 
     let money_quote_line = match money_quote {
-        Some(q) if !q.trim().is_empty() => format!("MONEY QUOTE (available — use in AT MOST 1 of 5): \"{}\"\n", q),
+        Some(q) if !q.trim().is_empty() => format!(
+            "MONEY QUOTE (available — use in AT MOST 1 of 5): \"{}\"\n",
+            q
+        ),
         _ => String::new(),
     };
 
@@ -2182,67 +2314,32 @@ OUTPUT — JSON only, no prose, no markdown fence:
 
     // ── Send request ──────────────────────────────────────────
 
-    let client = reqwest::Client::new();
-    let body = serde_json::json!({
-        "model": model,
-        "max_tokens": 400,
-        "system": LLM_SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": prompt}],
-    });
-
-    log::debug!("generate_llm_titles request - model: {}, history: {}",
+    log::debug!(
+        "generate_llm_titles request - model: {}, history: {}",
         model,
         streamer_history.map(|h| h.len()).unwrap_or(0),
     );
-
-    let resp = client
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| AppError::Api(format!("Claude titles request failed: {e}")))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(AppError::Api(format!(
-            "Claude API {}: {}",
-            status,
-            &body[..body.len().min(200)]
-        )));
-    }
-
-    let resp_json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| AppError::Api(format!("Failed to parse Claude titles response: {e}")))?;
-
-    // Phase 6.0: extract token counts for usage logging.
+    let (text, usage) =
+        call_generation_provider(provider, api_key, model, LLM_SYSTEM_PROMPT, &prompt, 400).await?;
     if let Some(sink) = usage_sink {
-        sink.tokens_in = resp_json["usage"]["input_tokens"].as_u64().unwrap_or(0);
-        sink.tokens_out = resp_json["usage"]["output_tokens"].as_u64().unwrap_or(0);
+        *sink = usage;
     }
-
-    let text = resp_json["content"][0]["text"]
-        .as_str()
-        .ok_or_else(|| AppError::Api("No text in Claude titles response".into()))?;
 
     // ── Parse JSON (try raw, then markdown-fence fallback) ────
 
     let parsed: TitlesResponse = match serde_json::from_str(text.trim()) {
         Ok(p) => p,
         Err(_) => {
-            let json_str = extract_json_from_markdown(text)?;
+            let json_str = extract_json_from_markdown(&text)?;
             serde_json::from_str(&json_str)
                 .map_err(|e| AppError::Api(format!("Malformed titles JSON: {e}")))?
         }
     };
 
     if parsed.candidates.is_empty() {
-        return Err(AppError::Api("Claude returned zero title candidates".into()));
+        return Err(AppError::Api(
+            "AI provider returned zero title candidates".into(),
+        ));
     }
 
     // ── Score via the ranker and sort ─────────────────────────
@@ -2269,9 +2366,13 @@ OUTPUT — JSON only, no prose, no markdown fence:
             let len = c.text.chars().count();
             let length_bonus = match c.pattern {
                 TitlePattern::QuietFlex => {
-                    if len <= 25 { 0.15 }
-                    else if len <= 35 { 0.05 }
-                    else { -0.10 }
+                    if len <= 25 {
+                        0.15
+                    } else if len <= 35 {
+                        0.05
+                    } else {
+                        -0.10
+                    }
                 }
                 _ => 0.0,
             };
@@ -2284,7 +2385,11 @@ OUTPUT — JSON only, no prose, no markdown fence:
         .collect();
 
     // Descending by score so candidates[0] is the winner.
-    scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     log::debug!(
         "generate_llm_titles result - top score: {:.2}, pattern spread: {}",
@@ -2327,6 +2432,41 @@ struct RawTitleCandidate {
 //
 //  See section 12a of docs/PHASE12_PROMPT_DIFF.md.
 
+fn transcript_evidence(text: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+    if max_chars < 20 {
+        return chars.into_iter().take(max_chars).collect();
+    }
+
+    // Keep both the setup and the payoff. Taking only the beginning made long
+    // clips look generic because the decisive final beat never reached the model.
+    let separator = " [...] ";
+    let available = max_chars.saturating_sub(separator.chars().count());
+    let head_len = available * 3 / 5;
+    let tail_len = available.saturating_sub(head_len);
+    let head: String = chars.iter().take(head_len).collect();
+    let tail: String = chars
+        .iter()
+        .skip(chars.len().saturating_sub(tail_len))
+        .collect();
+    format!("{}{}{}", head.trim_end(), separator, tail.trim_start())
+}
+
+fn caption_reroll_direction(seed: u32) -> &'static str {
+    const DIRECTIONS: [&str; 6] = [
+        "ACTION/PAYOFF: center the exact action and its immediate result. Do not make the reaction the main idea.",
+        "DIALOGUE/REACTION: center a distinctive exact line or reaction from the transcript. Do not paraphrase an action-led prior caption.",
+        "SETUP/TURN: contrast what was happening before with the specific moment it changed. Use two separate factual beats.",
+        "CAUSE/MISTAKE: center the decision, mistake, misunderstanding, or trigger that caused the moment. Do not merely restate the outcome.",
+        "ODD DETAIL/IRONY: center one unusual concrete detail or contradiction that has not been the subject of a prior caption.",
+        "STAKES/CONSEQUENCE: center why the moment mattered or what it caused next, but only when that consequence is explicit in the evidence.",
+    ];
+    DIRECTIONS[seed.saturating_sub(1) as usize % DIRECTIONS.len()]
+}
+
 /// Generate 3 caption candidates for a clip, ranker-scored and sorted.
 ///
 /// Arguments mirror the old `generate_llm()` signature with three
@@ -2341,6 +2481,7 @@ struct RawTitleCandidate {
 /// `score = 0.0` means banlist hit on the hook — caller may choose to
 /// drop those before presenting.
 pub async fn generate_llm_caption(
+    provider: Provider,
     api_key: &str,
     model: &str,
     selected_mode: &str,
@@ -2354,10 +2495,11 @@ pub async fn generate_llm_caption(
     clip_title: &str,
     game_name: Option<&str>,
     streamer_niche_tags: &[String],
-    avoid_caption: Option<&str>,
+    avoid_captions: &[String],
+    generation_seed: u32,
     usage_sink: Option<&mut TokenUsage>,
 ) -> Result<Vec<CaptionCandidate>, AppError> {
-    const TRANSCRIPT_CHAR_LIMIT: usize = 800;
+    const TRANSCRIPT_CHAR_LIMIT: usize = 4_000;
 
     // ── Assemble prompt sections ──────────────────────────────
 
@@ -2377,8 +2519,8 @@ pub async fn generate_llm_caption(
 
     let transcript_section = match full_transcript.filter(|t| !t.trim().is_empty()) {
         Some(ft) => {
-            let truncated: String = ft.chars().take(TRANSCRIPT_CHAR_LIMIT).collect();
-            format!("TRANSCRIPT:\n\"{}\"\n\n", truncated)
+            let truncated = transcript_evidence(ft, TRANSCRIPT_CHAR_LIMIT);
+            format!("FULL CLIP TRANSCRIPT (primary evidence):\n\"{}\"\n\n", truncated)
         }
         None => match transcript_quote {
             Some(q) if !q.trim().is_empty() => format!("The person said: \"{}\"\n\n", q),
@@ -2406,23 +2548,36 @@ pub async fn generate_llm_caption(
         format!("STREAMER NICHE: {}\n", streamer_niche_tags.join(", "))
     };
 
-    let avoid_line = match avoid_caption {
-        Some(prev) if !prev.trim().is_empty() => format!(
-            "AVOID REPEATING (this is the current caption — your output must not be a close variant):\n\"{}\"\n\n",
-            prev.trim()
-        ),
-        _ => String::new(),
+    let avoid_line = if avoid_captions.is_empty() {
+        String::new()
+    } else {
+        let previous = avoid_captions
+            .iter()
+            .enumerate()
+            .map(|(index, caption)| format!("{}. \"{}\"", index + 1, caption.trim()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "PRIOR CAPTIONS (do not reuse their main subject, factual anchor, joke, or sentence shape):\n{}\n\n",
+            previous
+        )
     };
 
     let tone_block = tone_instruction(selected_mode);
+    let reroll_direction = caption_reroll_direction(generation_seed);
 
     let prompt = format!(
         r#"Write 3 caption candidates for my gaming clip. Return JSON only.
 
 {platform}{game}GENRE: {tone}
-{title}WHAT HAPPENED: {event}
+{title}DETECTOR SUMMARY (coarse hint; the transcript is more authoritative): {event}
 {money_quote}{transcript}{tags}{niche}{avoid}
 MODE: {tone_block}
+REROLL FOCUS (mandatory): {reroll_direction}
+
+Before writing, silently identify the clip's setup, turn, payoff, reaction, and
+most distinctive spoken line from the supplied evidence. Then choose the beat
+required by REROLL FOCUS. Do not output this analysis.
 
 STRUCTURE - each candidate has two parts:
 - hook_line: first ~50 characters. Active voice. Emotional driver.
@@ -2430,13 +2585,18 @@ STRUCTURE - each candidate has two parts:
 - body: remainder (<230 chars). Specifics. Context. Reaction.
 
 DIVERSITY (strict — your output will be rejected if violated):
-- The 3 hooks MUST open with 3 DIFFERENT angles AND 3 DIFFERENT opening words.
-- Angle menu: money-quote (AT MOST 1 of 3), observation about the moment,
-  specific stake or detail, reaction framing, self-deprecation, meme/juxtaposition.
-- The 3 bodies must differ in their core beat — not three variations of the same sentence.
+- All 3 candidates must follow REROLL FOCUS, but approach that focus through
+  3 different concrete details and 3 different opening words.
+- Candidate 1 should state the moment directly. Candidate 2 should frame the
+  streamer's personal experience. Candidate 3 should use contrast, irony, or payoff.
+- The 3 bodies must use different factual anchors — not three phrasings of one idea.
 - Never fabricate quotes. Only use the provided quote or transcript fragments.
-- If "AVOID REPEATING" is shown above, none of the 3 candidates may open with the same
-  word, use the same core image, or follow the same sentence shape as that caption.
+- Every candidate must contain at least one concrete detail traceable to the detector
+  summary or transcript. A game name or generic reaction word does not count.
+- Do not invent kills, weapons, enemies, wins, losses, or other gameplay mechanics that are not stated in the supplied context.
+- When context is sparse, describe the actual reaction or dialogue instead of guessing what occurred.
+- If PRIOR CAPTIONS are shown, changing adjectives or verbs is not enough. Switch to
+  a different event beat and factual anchor. Never return a semantic paraphrase of one.
 
 AVOID (reads as AI filler):
 - Stacking adjectives ("pure silence", "dead silence", "full silence" — pick one)
@@ -2444,6 +2604,8 @@ AVOID (reads as AI filler):
 - Over-explaining emotion ("deeply regretting", "knowing exactly what we signed up for")
 - Recapping what the signal tags already say
 - Starting every candidate with the same sentence shape
+- Generic creator filler such as "what a moment", "gaming at its finest", "the timing",
+  "no context needed", "this game hates me", or "things got wild"
 
 HARD LIMITS:
 - hook_line: <=50 characters (will be client-side truncated if longer)
@@ -2473,17 +2635,10 @@ OUTPUT - JSON only, no prose, no markdown fence:
         niche = niche_line,
         avoid = avoid_line,
         tone_block = tone_block,
+        reroll_direction = reroll_direction,
     );
 
     // ── Send request ──────────────────────────────────────────
-
-    let client = reqwest::Client::new();
-    let body = serde_json::json!({
-        "model": model,
-        "max_tokens": 600,
-        "system": LLM_SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": prompt}],
-    });
 
     log::debug!(
         "generate_llm_caption request - model: {}, mode: {}, platform: {:?}, money_quote: {}",
@@ -2493,54 +2648,27 @@ OUTPUT - JSON only, no prose, no markdown fence:
         money_quote.is_some(),
     );
 
-    let resp = client
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| AppError::Api(format!("Claude caption request failed: {e}")))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(AppError::Api(format!(
-            "Claude API {}: {}",
-            status,
-            &body[..body.len().min(200)]
-        )));
-    }
-
-    let resp_json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| AppError::Api(format!("Failed to parse Claude caption response: {e}")))?;
-
-    // Phase 6.0: extract token counts for usage logging.
+    let (text, usage) =
+        call_generation_provider(provider, api_key, model, LLM_SYSTEM_PROMPT, &prompt, 600).await?;
     if let Some(sink) = usage_sink {
-        sink.tokens_in = resp_json["usage"]["input_tokens"].as_u64().unwrap_or(0);
-        sink.tokens_out = resp_json["usage"]["output_tokens"].as_u64().unwrap_or(0);
+        *sink = usage;
     }
-
-    let text = resp_json["content"][0]["text"]
-        .as_str()
-        .ok_or_else(|| AppError::Api("No text in Claude caption response".into()))?;
 
     // ── Parse JSON (raw first, markdown-fence fallback) ───────
 
     let parsed: CaptionsResponse = match serde_json::from_str(text.trim()) {
         Ok(p) => p,
         Err(_) => {
-            let json_str = extract_json_from_markdown(text)?;
+            let json_str = extract_json_from_markdown(&text)?;
             serde_json::from_str(&json_str)
                 .map_err(|e| AppError::Api(format!("Malformed captions JSON: {e}")))?
         }
     };
 
     if parsed.candidates.is_empty() {
-        return Err(AppError::Api("Claude returned zero caption candidates".into()));
+        return Err(AppError::Api(
+            "AI provider returned zero caption candidates".into(),
+        ));
     }
 
     // ── Score via the ranker + body heuristic, sort descending ─
@@ -2551,6 +2679,13 @@ OUTPUT - JSON only, no prose, no markdown fence:
         target_platform: platform_resolved,
         has_money_quote: money_quote.is_some(),
     };
+    let grounding_evidence = format!(
+        "{} {} {} {}",
+        event_summary,
+        full_transcript.unwrap_or_default(),
+        transcript_quote.unwrap_or_default(),
+        tags.join(" "),
+    );
 
     let mut scored: Vec<CaptionCandidate> = parsed
         .candidates
@@ -2559,6 +2694,15 @@ OUTPUT - JSON only, no prose, no markdown fence:
             let hook_truncated = truncate_hook(&c.hook_line, 50);
             let hook_score = crate::detection::ranker::score_title(&hook_truncated, &ctx);
             let body_score = score_caption_body(&c.body);
+            let combined_text = format!("{} {}", hook_truncated, c.body);
+            let grounding_adjustment = caption_grounding_adjustment(
+                &combined_text,
+                &grounding_evidence,
+            );
+            let novelty_adjustment = caption_novelty_adjustment(
+                &combined_text,
+                avoid_captions,
+            );
             // Wave 3 fix: de-prefer money-quote-led candidates. Quote hooks nail the
             // ranker's brevity/specificity criteria so they would auto-win every regen
             // unless we put a thumb on the scale. 0.10 is enough to let a non-quote
@@ -2573,7 +2717,11 @@ OUTPUT - JSON only, no prose, no markdown fence:
                 hook_line: hook_truncated,
                 body: c.body,
                 uses_money_quote: c.uses_money_quote,
-                score: hook_score + body_score - money_quote_penalty,
+                score: hook_score
+                    + body_score
+                    + grounding_adjustment
+                    + novelty_adjustment
+                    - money_quote_penalty,
             }
         })
         .collect();
@@ -2626,6 +2774,58 @@ fn truncate_hook(hook: &str, max_chars: usize) -> String {
 
 /// Lightweight secondary score for the body. Kept small so the hook
 /// score (which can reach 1.0 via the ranker) dominates sort order.
+fn caption_content_tokens(text: &str) -> std::collections::HashSet<String> {
+    const STOP_WORDS: &[&str] = &[
+        "and", "are", "but", "clip", "for", "from", "game", "gaming", "had",
+        "has", "have", "into", "its", "just", "moment", "not", "that", "the",
+        "their", "then", "this", "stream", "streamer", "was", "were", "what",
+        "when", "with", "you", "your",
+    ];
+
+    text.split(|character: char| !character.is_alphanumeric() && character != '\'')
+        .map(str::to_lowercase)
+        .filter(|word| word.len() > 2 && !STOP_WORDS.contains(&word.as_str()))
+        .collect()
+}
+
+fn caption_grounding_adjustment(caption: &str, evidence: &str) -> f32 {
+    if evidence.trim().is_empty() {
+        return 0.0;
+    }
+    let caption_tokens = caption_content_tokens(caption);
+    let evidence_tokens = caption_content_tokens(evidence);
+    let shared = caption_tokens.intersection(&evidence_tokens).count();
+    if shared == 0 {
+        -0.30
+    } else {
+        (shared.min(5) as f32) * 0.05
+    }
+}
+
+fn caption_novelty_adjustment(caption: &str, previous_captions: &[String]) -> f32 {
+    if previous_captions.is_empty() {
+        return 0.0;
+    }
+    let caption_tokens = caption_content_tokens(caption);
+    if caption_tokens.is_empty() {
+        return -0.10;
+    }
+
+    let max_overlap = previous_captions
+        .iter()
+        .map(|previous| {
+            let previous_tokens = caption_content_tokens(previous);
+            if previous_tokens.is_empty() {
+                return 0.0;
+            }
+            let shared = caption_tokens.intersection(&previous_tokens).count() as f32;
+            shared / caption_tokens.len().min(previous_tokens.len()) as f32
+        })
+        .fold(0.0_f32, f32::max);
+
+    0.20 - (0.45 * max_overlap)
+}
+
 fn score_caption_body(body: &str) -> f32 {
     let len = body.chars().count();
     if len == 0 || len > 230 {
@@ -2657,6 +2857,7 @@ fn score_caption_body(body: &str) -> f32 {
 ///   OR returned phrase failed the 2–6 word check.
 /// - `Ok(Some(phrase))` — usable money-quote.
 pub async fn extract_money_quote_llm(
+    provider: Provider,
     api_key: &str,
     model: &str,
     event_summary: &str,
@@ -2665,7 +2866,7 @@ pub async fn extract_money_quote_llm(
     usage_sink: Option<&mut TokenUsage>,
 ) -> Result<Option<String>, AppError> {
     const CONFIDENCE_THRESHOLD: f32 = 0.6;
-    const TRANSCRIPT_CHAR_LIMIT: usize = 800;
+    const TRANSCRIPT_CHAR_LIMIT: usize = 2_400;
 
     let tag_line = if tags.is_empty() {
         String::new()
@@ -2673,7 +2874,7 @@ pub async fn extract_money_quote_llm(
         format!("SIGNALS: {}\n", tags.join(", "))
     };
 
-    let truncated: String = full_transcript.chars().take(TRANSCRIPT_CHAR_LIMIT).collect();
+    let truncated = transcript_evidence(full_transcript, TRANSCRIPT_CHAR_LIMIT);
 
     let prompt = format!(
         r#"Extract the single best "money quote" from this gaming clip transcript.
@@ -2699,54 +2900,16 @@ or
         tags = tag_line,
     );
 
-    let client = reqwest::Client::new();
-    let body = serde_json::json!({
-        "model": model,
-        "max_tokens": 80,
-        "system": LLM_SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": prompt}],
-    });
-
     log::debug!("money-quote LLM request — model: {}", model);
-
-    let resp = client
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| AppError::Api(format!("Money-quote request failed: {e}")))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(AppError::Api(format!(
-            "Claude API {}: {}",
-            status,
-            &body[..body.len().min(200)]
-        )));
-    }
-
-    let resp_json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| AppError::Api(format!("Failed to parse Claude money-quote response: {e}")))?;
-
-    // Phase 6.0: extract token counts for usage logging.
+    let (text, usage) =
+        call_generation_provider(provider, api_key, model, LLM_SYSTEM_PROMPT, &prompt, 80).await?;
     if let Some(sink) = usage_sink {
-        sink.tokens_in = resp_json["usage"]["input_tokens"].as_u64().unwrap_or(0);
-        sink.tokens_out = resp_json["usage"]["output_tokens"].as_u64().unwrap_or(0);
+        *sink = usage;
     }
-
-    let text = resp_json["content"][0]["text"]
-        .as_str()
-        .ok_or_else(|| AppError::Api("No text in Claude money-quote response".into()))?;
 
     let json_str = match serde_json::from_str::<MoneyQuoteResponse>(text.trim()) {
         Ok(r) => return Ok(validate_money_quote(r, CONFIDENCE_THRESHOLD)),
-        Err(_) => extract_json_from_markdown(text)?,
+        Err(_) => extract_json_from_markdown(&text)?,
     };
 
     let parsed: MoneyQuoteResponse = serde_json::from_str(&json_str)
@@ -2886,6 +3049,38 @@ pub fn strong_quote_pub(transcript: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caption_rerolls_rotate_through_distinct_grounded_directions() {
+        assert_ne!(caption_reroll_direction(1), caption_reroll_direction(2));
+        assert_ne!(caption_reroll_direction(2), caption_reroll_direction(3));
+        assert_eq!(caption_reroll_direction(1), caption_reroll_direction(7));
+    }
+
+    #[test]
+    fn caption_transcript_evidence_keeps_setup_and_payoff() {
+        let transcript = format!("setup begins {} payoff lands", "filler ".repeat(30));
+        let evidence = transcript_evidence(&transcript, 80);
+        assert!(evidence.starts_with("setup begins"));
+        assert!(evidence.ends_with("payoff lands"));
+        assert!(evidence.contains("[...]"));
+        assert!(evidence.chars().count() <= 80);
+    }
+
+    #[test]
+    fn caption_scoring_prefers_grounded_and_novel_copy() {
+        let evidence = "vaulted the window and escaped the killer";
+        assert!(
+            caption_grounding_adjustment("vaulted the window and escaped", evidence)
+                > caption_grounding_adjustment("what a wild moment", evidence)
+        );
+
+        let previous = vec!["vaulted the window and escaped the killer".to_string()];
+        assert!(
+            caption_novelty_adjustment("the scream at the end says everything", &previous)
+                > caption_novelty_adjustment("escaped the killer through the window", &previous)
+        );
+    }
     use crate::pipeline::{ClipScoreBreakdown, SignalType};
 
     fn make_clip(tags: &[&str], audio: f64, speech: f64, scene: f64) -> CandidateClip {

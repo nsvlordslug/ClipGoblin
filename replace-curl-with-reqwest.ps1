@@ -1,4 +1,5 @@
-# Replace curl process spawns with reqwest HTTP calls
+# Legacy one-off migration: replace curl process spawns with reqwest HTTP calls.
+# The OAuth proxy no longer accepts a desktop-supplied shared key.
 # Fixes CMD window flicker on Windows (accessibility issue)
 
 $ErrorActionPreference = "Stop"
@@ -41,7 +42,6 @@ if ($startIdx -ge 0) {
         $replacement = @(
             '        let resp = self.client'
             '            .post(&url)'
-            '            .header("X-Proxy-Key", &self.api_key)'
             '            .header("Content-Type", "application/json")'
             '            .body(body_str)'
             '            .send()'

@@ -22,6 +22,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncReadExt;
 
 // ═══════════════════════════════════════════════════════════════════
 //  Constants
@@ -39,11 +40,13 @@ const TIKTOK_PUBLISH_STATUS_URL: &str =
 const CALLBACK_PORT: u16 = 17387;
 const REDIRECT_URI: &str = "https://nsvlordslug.github.io/ClipGoblin/callback/";
 
-// Scopes for Login Kit + Content Posting.
-// NOTE: `video.list` (Display API — for view-count refresh) is NOT included
-// because it requires a separate TikTok app-review submission. Analytics'
-// Refresh stats button will return no TikTok view counts until that's approved.
+// Match the scopes approved for the production TikTok app. `video.list` is
+// intentionally omitted until TikTok approves it in a future app revision.
 const SCOPES: &str = "user.info.basic,video.publish,video.upload";
+
+pub(crate) fn video_stats_enabled() -> bool {
+    SCOPES.split(',').any(|scope| scope == "video.list")
+}
 
 const AUTH_TIMEOUT_SECS: u64 = 120;
 
@@ -83,6 +86,7 @@ static OAUTH_STATE: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new())
 
 /// PKCE code_verifier — stored between start_auth and exchange_code.
 static PKCE_VERIFIER: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
+static TIKTOK_REFRESH_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // ═══════════════════════════════════════════════════════════════════
 //  Internal response types
@@ -319,7 +323,8 @@ impl PlatformAdapter for TikTokAdapter {
 
         log::info!(
             "TikTok PKCE: verifier_len={}, challenge_len={}",
-            code_verifier.len(), code_challenge.len()
+            code_verifier.len(),
+            code_challenge.len()
         );
 
         // TikTok Login Kit OAuth URL with PKCE
@@ -340,27 +345,29 @@ impl PlatformAdapter for TikTokAdapter {
 
     async fn handle_callback(
         &self,
-        db: &Connection,
+        db: &crate::DbConn,
         code: &str,
     ) -> Result<ConnectedAccount, AppError> {
         let code_owned = code.to_string();
         let (tokens, user_info) = do_handle_callback_net(&code_owned).await?;
 
         let expiry = chrono::Utc::now().timestamp() + tokens.expires_in as i64;
-        let refresh_expiry =
-            chrono::Utc::now().timestamp() + tokens.refresh_expires_in as i64;
+        let refresh_expiry = chrono::Utc::now().timestamp() + tokens.refresh_expires_in as i64;
 
-        db::save_setting(db, "tiktok_access_token", &tokens.access_token)
+        let conn = db
+            .lock()
+            .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+        db::save_setting(&conn, "tiktok_access_token", &tokens.access_token)
             .map_err(|e| AppError::Database(e.to_string()))?;
-        db::save_setting(db, "tiktok_refresh_token", &tokens.refresh_token)
+        db::save_setting(&conn, "tiktok_refresh_token", &tokens.refresh_token)
             .map_err(|e| AppError::Database(e.to_string()))?;
-        db::save_setting(db, "tiktok_token_expiry", &expiry.to_string())
+        db::save_setting(&conn, "tiktok_token_expiry", &expiry.to_string())
             .map_err(|e| AppError::Database(e.to_string()))?;
-        db::save_setting(db, "tiktok_refresh_expiry", &refresh_expiry.to_string())
+        db::save_setting(&conn, "tiktok_refresh_expiry", &refresh_expiry.to_string())
             .map_err(|e| AppError::Database(e.to_string()))?;
-        db::save_setting(db, "tiktok_open_id", &user_info.open_id)
+        db::save_setting(&conn, "tiktok_open_id", &user_info.open_id)
             .map_err(|e| AppError::Database(e.to_string()))?;
-        db::save_setting(db, "tiktok_display_name", &user_info.display_name)
+        db::save_setting(&conn, "tiktok_display_name", &user_info.display_name)
             .map_err(|e| AppError::Database(e.to_string()))?;
         // Save the TikTok @handle. Priority:
         // 1. API-returned username (if user.info.profile scope is available)
@@ -368,14 +375,14 @@ impl PlatformAdapter for TikTokAdapter {
         // 3. display_name as a last resort
         if let Some(ref handle) = user_info.username {
             // Got the real handle from the API — always use it
-            db::save_setting(db, "tiktok_handle", handle)
+            db::save_setting(&conn, "tiktok_handle", handle)
                 .map_err(|e| AppError::Database(e.to_string()))?;
-        } else if db::get_setting(db, "tiktok_handle")
+        } else if db::get_setting(&conn, "tiktok_handle")
             .map_err(|e| AppError::Database(e.to_string()))?
             .is_none()
         {
             // No API handle and nothing saved — default to display_name
-            db::save_setting(db, "tiktok_handle", &user_info.display_name)
+            db::save_setting(&conn, "tiktok_handle", &user_info.display_name)
                 .map_err(|e| AppError::Database(e.to_string()))?;
         }
 
@@ -388,28 +395,8 @@ impl PlatformAdapter for TikTokAdapter {
         })
     }
 
-    async fn refresh_token(&self, db: &Connection) -> Result<(), AppError> {
-        let refresh_tok = db::get_setting(db, "tiktok_refresh_token")
-            .map_err(|e| AppError::Database(e.to_string()))?
-            .ok_or_else(|| {
-                AppError::Api("No TikTok refresh token found — please reconnect.".into())
-            })?;
-
-        let tokens = do_refresh_token_net(&refresh_tok).await?;
-
-        let expiry = chrono::Utc::now().timestamp() + tokens.expires_in as i64;
-        let refresh_expiry =
-            chrono::Utc::now().timestamp() + tokens.refresh_expires_in as i64;
-
-        db::save_setting(db, "tiktok_access_token", &tokens.access_token)
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        db::save_setting(db, "tiktok_refresh_token", &tokens.refresh_token)
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        db::save_setting(db, "tiktok_token_expiry", &expiry.to_string())
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        db::save_setting(db, "tiktok_refresh_expiry", &refresh_expiry.to_string())
-            .map_err(|e| AppError::Database(e.to_string()))?;
-
+    async fn refresh_token(&self, db: &crate::DbConn) -> Result<(), AppError> {
+        refresh_access_token(db, true).await?;
         Ok(())
     }
 
@@ -419,129 +406,124 @@ impl PlatformAdapter for TikTokAdapter {
         file_path: &str,
         meta: &UploadMeta,
     ) -> Result<UploadResult, AppError> {
-        log::info!("TikTok upload_video called: file={}, clip_id={}", file_path, meta.clip_id);
-
-        // 1. Validate the export file
+        log::info!(
+            "TikTok upload_video called: file={}, clip_id={}",
+            file_path,
+            meta.clip_id
+        );
         validate_export_file(Some(file_path))?;
-        log::info!("TikTok upload: file validated OK");
 
-        // Phase 1 — hold the DB lock ONLY for the dup check and to read the token
-        // state, then release it so neither the network refresh below nor the long
-        // upload runs under the lock. `refresh_tok` is Some only when due.
-        let refresh_tok = {
-            let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
-
-            // 2. Duplicate check — skip if the stored URL is a stale fallback
-            if !meta.force {
-                if let Some(existing) = db::get_upload_for_clip(&conn, &meta.clip_id, "tiktok")
-                    .map_err(|e| AppError::Database(e.to_string()))?
-                {
-                    let url = existing.video_url.unwrap_or_default();
-                    let has_real_url = url.contains("/video/") || url.contains("publish_id=");
-                    if has_real_url {
-                        return Ok(UploadResult {
-                            status: UploadResultStatus::Duplicate { existing_url: url },
-                            job_id: String::new(),
-                        });
-                    }
-                    log::info!("TikTok: existing upload has stale URL '{}' — allowing re-upload", url);
-                }
-            }
-
-            // 3a. Is the access token stale? If so, read the refresh token now.
-            let expiry_str = db::get_setting(&conn, "tiktok_token_expiry")
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            let needs_refresh = match expiry_str {
-                Some(s) => {
-                    let expiry: i64 = s.parse().unwrap_or(0);
-                    chrono::Utc::now().timestamp() >= expiry - 60
-                }
-                None => true,
-            };
-            if needs_refresh {
-                Some(
-                    db::get_setting(&conn, "tiktok_refresh_token")
-                        .map_err(|e| AppError::Database(e.to_string()))?
-                        .ok_or_else(|| AppError::Api("No TikTok refresh token found — please reconnect.".into()))?,
-                )
-            } else {
-                None
-            }
-        };
-
-        // 3b. Refresh over the network WITHOUT the DB lock, then persist under a
-        // brief re-lock.
-        if let Some(refresh_tok) = refresh_tok {
-            let new_tokens = do_refresh_token_net(&refresh_tok).await?;
-            let new_expiry = chrono::Utc::now().timestamp() + new_tokens.expires_in as i64;
-            let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
-            db::save_setting(&conn, "tiktok_access_token", &new_tokens.access_token)
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            db::save_setting(&conn, "tiktok_token_expiry", &new_expiry.to_string())
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            db::save_setting(&conn, "tiktok_refresh_token", &new_tokens.refresh_token)
-                .map_err(|e| AppError::Database(e.to_string()))?;
-        }
-
-        // 3c. Read the (now fresh) access token under a brief lock.
-        let access_token = {
-            let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
-            db::get_setting(&conn, "tiktok_access_token")
+        let claim = {
+            let conn = db
+                .lock()
+                .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+            db::begin_upload(&conn, &meta.clip_id, "tiktok", meta.force)
                 .map_err(|e| AppError::Database(e.to_string()))?
-                .ok_or_else(|| AppError::Api("No TikTok access token — please reconnect.".into()))?
         };
-
-        log::info!("TikTok upload: access token present (len={})", access_token.len());
-
-        // Read file bytes (sync)
-        let file_bytes = std::fs::read(file_path)
-            .map_err(|e| AppError::Unknown(format!("Failed to read export file: {}", e)))?;
-
-        log::info!("TikTok upload: read {} bytes from {}", file_bytes.len(), file_path);
+        match claim {
+            db::UploadClaim::Completed { video_url } => {
+                return Ok(UploadResult {
+                    status: UploadResultStatus::Duplicate {
+                        existing_url: video_url,
+                    },
+                    job_id: String::new(),
+                });
+            }
+            db::UploadClaim::InProgress { job_id } => {
+                return Ok(UploadResult {
+                    status: UploadResultStatus::Processing,
+                    job_id: job_id.unwrap_or_default(),
+                });
+            }
+            db::UploadClaim::Acquired => {}
+        }
 
         let title = meta.title.clone();
         let description = meta.description.clone();
         let visibility = meta.visibility.clone();
-        // Prefer the explicit handle setting; fall back to display_name (short lock)
-        let tiktok_handle = {
-            let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
-            db::get_setting(&conn, "tiktok_handle")
-                .map_err(|e| AppError::Database(e.to_string()))?
-                .or_else(|| db::get_setting(&conn, "tiktok_display_name").ok().flatten())
-                .unwrap_or_default()
-        };
+        let clip_id = meta.clip_id.clone();
 
-        // 4. Upload via Content Posting API
-        log::info!("TikTok upload: calling do_upload_net (title='{}', visibility='{}', handle='{}')", title, visibility, tiktok_handle);
-        let (publish_id, status) = do_upload_net(
-            &access_token,
-            &title,
-            &description,
-            &visibility,
-            file_bytes,
-            &tiktok_handle,
-            meta.disable_comment,
-            meta.disable_duet,
-            meta.disable_stitch,
-            meta.brand_organic,
-            meta.branded_content,
-            &meta.clip_id,
-        )
-        .await?;
-
-        // 5. Record upload history ONLY on a confirmed publish. A Failed/unconfirmed
-        //    result must not be logged as a completed upload — that was the bug:
-        //    failed/pending posts were recorded as success with a profile URL.
-        if let UploadResultStatus::Complete { video_url } = &status {
-            let conn = db.lock().map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
-            db::upsert_upload(&conn, &meta.clip_id, "tiktok", video_url)
-                .map_err(|e| AppError::Database(e.to_string()))?;
+        let upload_result = async {
+            let access_token = ensure_fresh_access_token(db).await?;
+            do_upload_net(
+                &access_token,
+                &title,
+                &description,
+                &visibility,
+                file_path,
+                meta.disable_comment,
+                meta.disable_duet,
+                meta.disable_stitch,
+                meta.brand_organic,
+                meta.branded_content,
+                &clip_id,
+                |publish_id| {
+                    let conn = db
+                        .lock()
+                        .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+                    db::mark_upload_processing(&conn, &clip_id, "tiktok", publish_id)
+                        .map_err(|e| AppError::Database(e.to_string()))
+                },
+            )
+            .await
         }
+        .await;
 
-        Ok(UploadResult {
-            status,
-            job_id: publish_id,
-        })
+        match upload_result {
+            Ok((
+                publish_id,
+                UploadResultStatus::Complete {
+                    video_url,
+                    platform_video_id,
+                },
+            )) => {
+                let conn = db
+                    .lock()
+                    .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+                db::mark_upload_complete(
+                    &conn,
+                    &meta.clip_id,
+                    "tiktok",
+                    video_url.as_deref(),
+                    Some(&publish_id),
+                    platform_video_id.as_deref(),
+                )
+                .map_err(|e| AppError::Database(e.to_string()))?;
+                Ok(UploadResult {
+                    status: UploadResultStatus::Complete {
+                        video_url,
+                        platform_video_id,
+                    },
+                    job_id: publish_id,
+                })
+            }
+            Ok((publish_id, UploadResultStatus::Processing)) => Ok(UploadResult {
+                status: UploadResultStatus::Processing,
+                job_id: publish_id,
+            }),
+            Ok((publish_id, UploadResultStatus::Failed { error })) => {
+                let conn = db
+                    .lock()
+                    .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+                db::mark_upload_failed(&conn, &meta.clip_id, "tiktok", &error)
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                Ok(UploadResult {
+                    status: UploadResultStatus::Failed { error },
+                    job_id: publish_id,
+                })
+            }
+            Ok((publish_id, status)) => Ok(UploadResult {
+                status,
+                job_id: publish_id,
+            }),
+            Err(error) => {
+                if let Ok(conn) = db.lock() {
+                    let _ =
+                        db::mark_upload_failed(&conn, &meta.clip_id, "tiktok", &error.to_string());
+                }
+                Err(error)
+            }
+        }
     }
 
     fn disconnect(&self, db: &Connection) -> Result<(), AppError> {
@@ -553,8 +535,8 @@ impl PlatformAdapter for TikTokAdapter {
     fn get_account(&self, db: &Connection) -> Result<Option<ConnectedAccount>, AppError> {
         let display_name = db::get_setting(db, "tiktok_display_name")
             .map_err(|e| AppError::Database(e.to_string()))?;
-        let open_id = db::get_setting(db, "tiktok_open_id")
-            .map_err(|e| AppError::Database(e.to_string()))?;
+        let open_id =
+            db::get_setting(db, "tiktok_open_id").map_err(|e| AppError::Database(e.to_string()))?;
 
         match (display_name, open_id) {
             (Some(name), Some(id)) => Ok(Some(ConnectedAccount {
@@ -583,23 +565,35 @@ async fn do_handle_callback_net(
 async fn do_refresh_token_net(refresh_tok: &str) -> Result<TokenResponse, AppError> {
     log::info!("TikTok token refresh via auth proxy");
 
-    let proxy = AuthProxy::new()
-        .map_err(|e| AppError::Api(format!("Auth proxy init failed: {}", e)))?;
-    let proxy_resp = proxy.tiktok_refresh(refresh_tok).await
+    let proxy =
+        AuthProxy::new().map_err(|e| AppError::Api(format!("Auth proxy init failed: {}", e)))?;
+    let proxy_resp = proxy
+        .tiktok_refresh(refresh_tok)
+        .await
         .map_err(|e| AppError::Api(e))?;
 
     // Check for error in proxy response
     if let Some(err) = proxy_resp.error {
         let desc = proxy_resp.error_description.unwrap_or_default();
+        if matches!(
+            err.as_str(),
+            "invalid_grant" | "access_token_invalid" | "refresh_token_invalid"
+        ) {
+            return Err(AppError::AuthExpired(
+                "Your TikTok session has expired. Please reconnect your TikTok account in Settings.".into(),
+            ));
+        }
         return Err(AppError::Api(format!(
-            "TikTok token refresh error: {} — {}",
+            "TikTok token refresh error: {}; {}",
             err, desc
         )));
     }
 
-    let access_token = proxy_resp.access_token
+    let access_token = proxy_resp
+        .access_token
         .ok_or_else(|| AppError::Api("Proxy response missing access_token".into()))?;
-    let refresh_token = proxy_resp.refresh_token
+    let refresh_token = proxy_resp
+        .refresh_token
         .ok_or_else(|| AppError::Api("Proxy response missing refresh_token".into()))?;
 
     log::info!("TikTok token refresh succeeded via proxy");
@@ -837,22 +831,37 @@ fn friendly_tiktok_error_from_body(body: &str, status: impl std::fmt::Display) -
     format!("TikTok request failed ({}): {}", status, body)
 }
 
-async fn do_upload_net(
+async fn do_upload_net<F>(
     access_token: &str,
     title: &str,
     description: &str,
     visibility: &str,
-    file_bytes: Vec<u8>,
-    tiktok_handle: &str,
+    file_path: &str,
     disable_comment: bool,
     disable_duet: bool,
     disable_stitch: bool,
     brand_organic: bool,
     branded_content: bool,
     clip_id: &str,
-) -> Result<(String, UploadResultStatus), AppError> {
+    on_initialized: F,
+) -> Result<(String, UploadResultStatus), AppError>
+where
+    F: FnOnce(&str) -> Result<(), AppError>,
+{
     let client = reqwest::Client::new();
-    let total_size = file_bytes.len();
+    let mut file = tokio::fs::File::open(file_path)
+        .await
+        .map_err(|e| AppError::Unknown(format!("Failed to open export file: {}", e)))?;
+    let total_size = file
+        .metadata()
+        .await
+        .map_err(|e| AppError::Unknown(format!("Failed to inspect export file: {}", e)))?
+        .len();
+    if total_size == 0 {
+        return Err(AppError::NotFound(
+            "Export file is empty; re-export the clip".into(),
+        ));
+    }
 
     // 0. Query creator info (recommended by TikTok before Direct Post — non-fatal)
     let privacy_options = query_creator_info(access_token).await;
@@ -872,7 +881,8 @@ async fn do_upload_net(
     } else if let Some(first) = privacy_options.first() {
         log::warn!(
             "TikTok: requested privacy '{}' not available, using first available: {}",
-            requested, first
+            requested,
+            first
         );
         first.as_str()
     } else {
@@ -881,25 +891,32 @@ async fn do_upload_net(
 
     log::info!(
         "TikTok upload: file_size={}, privacy_level={}, available_options={:?}",
-        total_size, privacy_level, privacy_options
+        total_size,
+        privacy_level,
+        privacy_options
     );
 
     // 1. Determine chunk sizing
     //    TikTok Content Posting API rules:
     //    - Files ≤ 64 MB: upload as single chunk (chunk_size = video_size, count = 1)
     //    - Files > 64 MB: split into 10 MB chunks (each 5–64 MB allowed, final up to 128 MB)
-    let (actual_chunk_size, chunk_count) = if total_size <= SINGLE_CHUNK_LIMIT {
-        (total_size, 1usize)
+    let (actual_chunk_size, chunk_count) = if total_size <= SINGLE_CHUNK_LIMIT as u64 {
+        (total_size, 1_u64)
     } else {
-        let count = (total_size + UPLOAD_CHUNK_SIZE - 1) / UPLOAD_CHUNK_SIZE;
-        (UPLOAD_CHUNK_SIZE, count)
+        let chunk_size = UPLOAD_CHUNK_SIZE as u64;
+        let count = (total_size + chunk_size - 1) / chunk_size;
+        (chunk_size, count)
     };
 
     // 2. Init upload — tells TikTok we want to upload a video
     // TikTok's "title" field is the full video caption (description + hashtags).
     // Use description if available (already has hashtags appended by frontend),
     // fall back to title if description is empty.
-    let caption = if description.trim().is_empty() { title } else { description };
+    let caption = if description.trim().is_empty() {
+        title
+    } else {
+        description
+    };
 
     let init_body = serde_json::json!({
         "post_info": {
@@ -936,18 +953,25 @@ async fn do_upload_net(
     log::debug!("TikTok upload init response body: {}", init_body_text);
 
     if !init_status.is_success() {
-        return Err(AppError::Api(friendly_tiktok_error_from_body(&init_body_text, init_status)));
+        return Err(AppError::Api(friendly_tiktok_error_from_body(
+            &init_body_text,
+            init_status,
+        )));
     }
 
-    let init_result: PublishInitResponse = serde_json::from_str(&init_body_text)
-        .map_err(|e| AppError::Api(format!(
+    let init_result: PublishInitResponse = serde_json::from_str(&init_body_text).map_err(|e| {
+        AppError::Api(format!(
             "Failed to parse TikTok init response: {} — body: {}",
             e, init_body_text
-        )))?;
+        ))
+    })?;
 
     if let Some(ref err) = init_result.error {
         if err.code != "ok" {
-            return Err(AppError::Api(friendly_tiktok_error(&err.code, &err.message)));
+            return Err(AppError::Api(friendly_tiktok_error(
+                &err.code,
+                &err.message,
+            )));
         }
     }
 
@@ -960,30 +984,37 @@ async fn do_upload_net(
 
     let upload_url = init_data.upload_url;
     let publish_id = init_data.publish_id;
+    on_initialized(&publish_id)?;
 
     log::info!("TikTok upload URL obtained, publish_id={}", publish_id);
 
     // 3. Upload file in chunks via PUT
-    let mut offset: usize = 0;
-    let mut chunk_idx: usize = 0;
+    let mut offset: u64 = 0;
+    let mut chunk_idx: u64 = 0;
 
     while offset < total_size {
         let end = std::cmp::min(offset + actual_chunk_size, total_size);
-        let chunk = &file_bytes[offset..end];
+        let chunk_len = (end - offset) as usize;
+        let mut chunk = vec![0_u8; chunk_len];
+        file.read_exact(&mut chunk)
+            .await
+            .map_err(|e| AppError::Unknown(format!("Failed to read export file: {}", e)))?;
 
         let content_range = format!("bytes {}-{}/{}", offset, end - 1, total_size);
 
         log::info!(
             "TikTok uploading chunk {}/{}: Content-Range: {}",
-            chunk_idx + 1, chunk_count, content_range
+            chunk_idx + 1,
+            chunk_count,
+            content_range
         );
 
         let chunk_resp = client
             .put(&upload_url)
             .header("Content-Range", &content_range)
-            .header("Content-Length", chunk.len().to_string())
+            .header("Content-Length", chunk_len.to_string())
             .header("Content-Type", "video/mp4")
-            .body(chunk.to_vec())
+            .body(chunk)
             .send()
             .await?;
 
@@ -995,7 +1026,9 @@ async fn do_upload_net(
             chunk_idx += 1;
             log::info!(
                 "TikTok upload chunk {}/{} complete (HTTP {})",
-                chunk_idx, chunk_count, status
+                chunk_idx,
+                chunk_count,
+                status
             );
             let pct = ((chunk_idx * 100) / chunk_count.max(1)).min(100) as u8;
             crate::social::emit_upload_status("tiktok", clip_id, "uploading", Some(pct));
@@ -1003,139 +1036,171 @@ async fn do_upload_net(
         }
 
         let body = chunk_resp.text().await.unwrap_or_default();
-        log::error!(
-            "TikTok chunk upload failed (HTTP {}): {}",
-            status, body
-        );
-        return Err(AppError::Api(friendly_tiktok_error_from_body(&body, status)));
+        log::error!("TikTok chunk upload failed (HTTP {}): {}", status, body);
+        return Err(AppError::Api(friendly_tiktok_error_from_body(
+            &body, status,
+        )));
     }
 
-    log::info!("TikTok upload complete — all {} chunks sent. Polling for video URL...", chunk_count);
+    log::info!(
+        "TikTok upload complete — all {} chunks sent. Polling for video URL...",
+        chunk_count
+    );
 
     // Poll the publish status endpoint to resolve the real outcome.
     // TikTok needs time to process the upload before returning a post ID.
     crate::social::emit_upload_status("tiktok", clip_id, "processing", None);
-    let status = poll_publish_status(&client, access_token, &publish_id, tiktok_handle).await;
+    let status = poll_publish_status(&client, access_token, &publish_id).await;
 
     Ok((publish_id, status))
 }
 
-/// Poll TikTok's publish status endpoint until the post is confirmed or the
-/// window elapses. Returns `Complete` ONLY when TikTok reports a real published
-/// video id; `Failed` if TikTok rejects it, or if it can't be confirmed within
-/// the window (it may still be processing). Never reports success without a
-/// genuine video URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PublishPollResult {
+    Processing,
+    Complete {
+        video_url: Option<String>,
+        platform_video_id: Option<String>,
+    },
+    Failed {
+        error: String,
+    },
+}
+
+fn post_id_from_status_data(data: &serde_json::Value) -> Option<String> {
+    let value = data
+        .get("publicaly_available_post_id")
+        .or_else(|| data.get("publicly_available_post_id"))?;
+    value
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| value.as_u64().map(|number| number.to_string()))
+        .or_else(|| value.as_i64().map(|number| number.to_string()))
+        .or_else(|| {
+            value
+                .as_array()
+                .and_then(|items| items.first())
+                .and_then(|item| {
+                    item.as_str()
+                        .map(str::to_string)
+                        .or_else(|| item.as_u64().map(|number| number.to_string()))
+                })
+        })
+        .filter(|id| !id.is_empty() && id != "0")
+}
+
+fn publish_poll_result_from_json(json: &serde_json::Value) -> Result<PublishPollResult, AppError> {
+    let code = json["error"]["code"].as_str().unwrap_or("ok");
+    if code != "ok" {
+        let message = json["error"]["message"].as_str().unwrap_or("");
+        return Err(AppError::Api(friendly_tiktok_error(code, message)));
+    }
+
+    let data = &json["data"];
+    match data["status"].as_str().unwrap_or("") {
+        "PUBLISH_COMPLETE" => {
+            let platform_video_id = post_id_from_status_data(data);
+            let video_url = platform_video_id
+                .as_ref()
+                .map(|id| format!("https://www.tiktok.com/video/{}", id));
+            Ok(PublishPollResult::Complete {
+                video_url,
+                platform_video_id,
+            })
+        }
+        "FAILED" => {
+            let reason = data["fail_reason"].as_str().unwrap_or("unknown");
+            Ok(PublishPollResult::Failed {
+                error: format!("TikTok rejected the post: {}", reason),
+            })
+        }
+        _ => Ok(PublishPollResult::Processing),
+    }
+}
+
+async fn fetch_publish_status_with_client(
+    client: &reqwest::Client,
+    access_token: &str,
+    publish_id: &str,
+) -> Result<PublishPollResult, AppError> {
+    let resp = client
+        .post(TIKTOK_PUBLISH_STATUS_URL)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({ "publish_id": publish_id }))
+        .send()
+        .await
+        .map_err(|e| AppError::Api(format!("TikTok publish status network error: {}", e)))?;
+
+    let http_status = resp.status();
+    let body_text = resp.text().await.unwrap_or_default();
+    if !http_status.is_success() {
+        return Err(AppError::Api(friendly_tiktok_error_from_body(
+            &body_text,
+            http_status,
+        )));
+    }
+
+    let json: serde_json::Value = serde_json::from_str(&body_text)
+        .map_err(|e| AppError::Api(format!("TikTok publish status parse error: {}", e)))?;
+    publish_poll_result_from_json(&json)
+}
+
+pub(crate) async fn fetch_publish_status(
+    access_token: &str,
+    publish_id: &str,
+) -> Result<PublishPollResult, AppError> {
+    fetch_publish_status_with_client(&reqwest::Client::new(), access_token, publish_id).await
+}
+
+/// Poll briefly for immediate feedback. A timeout remains `Processing`; the
+/// scheduler reconciles the persisted publish ID in the background.
 async fn poll_publish_status(
     client: &reqwest::Client,
     access_token: &str,
     publish_id: &str,
-    tiktok_handle: &str,
 ) -> UploadResultStatus {
-    // Poll every 5s for up to 30 seconds. If the status endpoint doesn't
-    // work (common in sandbox), we fall back quickly to the profile URL.
     const MAX_ATTEMPTS: u32 = 6;
     const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-    log::info!("TikTok: starting publish status poll (handle='{}')", tiktok_handle);
-
     for attempt in 1..=MAX_ATTEMPTS {
         tokio::time::sleep(POLL_INTERVAL).await;
-
-        log::info!(
-            "TikTok publish status poll {}/{} for publish_id={}",
-            attempt, MAX_ATTEMPTS, publish_id
-        );
-
-        let resp = client
-            .post(TIKTOK_PUBLISH_STATUS_URL)
-            .header("Authorization", format!("Bearer {}", access_token))
-            .header("Content-Type", "application/json")
-            .json(&serde_json::json!({ "publish_id": publish_id }))
-            .send()
-            .await;
-
-        let resp = match resp {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!("TikTok status poll request failed: {}", e);
-                continue;
-            }
-        };
-
-        let body_text = resp.text().await.unwrap_or_default();
-        log::debug!("TikTok status poll response: {}", body_text);
-
-        // Parse as raw JSON first so we can inspect whatever TikTok returns
-        let json: serde_json::Value = match serde_json::from_str(&body_text) {
-            Ok(v) => v,
-            Err(e) => {
-                log::warn!("TikTok status poll parse error: {} — body_len={}", e, body_text.len());
-                continue;
-            }
-        };
-
-        // Check for API-level errors (e.g. scope issues, rate limits)
-        // TikTok includes error.code = "ok" on success, so only log/break on real errors.
-        if let Some(err) = json.get("error") {
-            let code = err.get("code").and_then(|v| v.as_str()).unwrap_or("unknown");
-            if code != "ok" {
-                let msg = err.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                log::warn!("TikTok status poll API error: {} — {}", code, msg);
-                // Real error — stop polling
-                break;
-            }
-        }
-
-        let data = &json["data"];
-        let status = data["status"].as_str().unwrap_or("");
-
-        match status {
-            "PUBLISH_COMPLETE" => {
-                // Extract post ID — could be string, number, array, or nested
-                let post_id_val = &data["publicaly_available_post_id"];
-                let post_id = post_id_val.as_str().map(|s| s.to_string())
-                    .or_else(|| post_id_val.as_u64().map(|n| n.to_string()))
-                    .or_else(|| post_id_val.as_i64().map(|n| n.to_string()))
-                    .or_else(|| {
-                        // Might be an array
-                        post_id_val.as_array().and_then(|arr| arr.first()).and_then(|v| {
-                            v.as_str().map(|s| s.to_string())
-                                .or_else(|| v.as_u64().map(|n| n.to_string()))
-                        })
-                    });
-
-                if let Some(pid) = post_id.filter(|s| !s.is_empty() && s != "0") {
-                    let url = format!("https://www.tiktok.com/video/{}", pid);
-                    log::info!("TikTok video URL resolved: {}", url);
-                    return UploadResultStatus::Complete { video_url: url };
-                }
-                log::info!("TikTok PUBLISH_COMPLETE but no post ID yet (moderation pending)");
-            }
-            "FAILED" => {
-                let reason = data["fail_reason"].as_str().unwrap_or("unknown");
-                log::error!("TikTok publish failed: {}", reason);
-                return UploadResultStatus::Failed {
-                    error: format!("TikTok rejected the post: {}", reason),
+        match fetch_publish_status_with_client(client, access_token, publish_id).await {
+            Ok(PublishPollResult::Complete {
+                video_url,
+                platform_video_id,
+            }) => {
+                return UploadResultStatus::Complete {
+                    video_url,
+                    platform_video_id,
                 };
             }
-            "" => {
-                log::info!("TikTok status poll: no status field in response");
+            Ok(PublishPollResult::Failed { error }) => {
+                return UploadResultStatus::Failed { error };
             }
-            other => {
-                log::info!("TikTok publish status: {} — still processing", other);
+            Ok(PublishPollResult::Processing) => {
+                log::info!(
+                    "TikTok publish status poll {}/{} is still processing",
+                    attempt,
+                    MAX_ATTEMPTS
+                );
+            }
+            Err(error) => {
+                log::warn!(
+                    "TikTok publish status poll {}/{} failed: {}",
+                    attempt,
+                    MAX_ATTEMPTS,
+                    error
+                );
             }
         }
     }
 
-    // Polling window elapsed without a confirmed video id. Do NOT report success:
-    // the post may still be processing on TikTok's side, or it may have failed.
-    // Returning Failed keeps it from being recorded as a completed upload (the
-    // scheduler treats it as a failure; a direct upload surfaces the message).
-    let _ = tiktok_handle;
-    log::warn!("TikTok status poll ended without a confirmed video URL for publish_id={}", publish_id);
-    UploadResultStatus::Failed {
-        error: "TikTok didn't confirm the post within 30s — it may still be processing. Check your TikTok before re-uploading.".to_string(),
-    }
+    log::info!(
+        "TikTok publish {} remains processing after the foreground poll",
+        publish_id
+    );
+    UploadResultStatus::Processing
 }
 
 #[cfg(test)]
@@ -1143,11 +1208,21 @@ mod error_message_tests {
     use super::*;
 
     #[test]
+    fn oauth_scopes_match_the_approved_live_app() {
+        assert_eq!(SCOPES, "user.info.basic,video.publish,video.upload");
+        assert!(!video_stats_enabled());
+    }
+
+    #[test]
     fn maps_audit_code_to_private_account_guidance() {
-        let msg = friendly_tiktok_error("unaudited_client_can_only_post_to_private_accounts", "raw");
+        let msg =
+            friendly_tiktok_error("unaudited_client_can_only_post_to_private_accounts", "raw");
         assert!(msg.contains("audited"), "got: {msg}");
         assert!(msg.contains("Private"), "got: {msg}");
-        assert!(!msg.contains("unaudited_client"), "should not leak raw code: {msg}");
+        assert!(
+            !msg.contains("unaudited_client"),
+            "should not leak raw code: {msg}"
+        );
     }
 
     #[test]
@@ -1166,7 +1241,10 @@ mod error_message_tests {
 
     #[test]
     fn unknown_code_empty_message_shows_code() {
-        assert_eq!(friendly_tiktok_error("some_new_code", ""), "TikTok error: some_new_code");
+        assert_eq!(
+            friendly_tiktok_error("some_new_code", ""),
+            "TikTok error: some_new_code"
+        );
     }
 
     #[test]
@@ -1181,6 +1259,55 @@ mod error_message_tests {
         let msg = friendly_tiktok_error_from_body("not json", 500);
         assert!(msg.contains("500"), "got: {msg}");
         assert!(msg.contains("not json"), "got: {msg}");
+    }
+
+    #[test]
+    fn completed_private_post_does_not_require_a_public_video_id() {
+        let json = serde_json::json!({
+            "data": { "status": "PUBLISH_COMPLETE" },
+            "error": { "code": "ok", "message": "" }
+        });
+
+        assert_eq!(
+            publish_poll_result_from_json(&json).unwrap(),
+            PublishPollResult::Complete {
+                video_url: None,
+                platform_video_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn completed_post_accepts_tiktok_post_id_spellings_and_shapes() {
+        let corrected = serde_json::json!({
+            "data": {
+                "status": "PUBLISH_COMPLETE",
+                "publicly_available_post_id": "12345"
+            },
+            "error": { "code": "ok" }
+        });
+        let legacy = serde_json::json!({
+            "data": {
+                "status": "PUBLISH_COMPLETE",
+                "publicaly_available_post_id": [67890]
+            },
+            "error": { "code": "ok" }
+        });
+
+        assert_eq!(
+            publish_poll_result_from_json(&corrected).unwrap(),
+            PublishPollResult::Complete {
+                video_url: Some("https://www.tiktok.com/video/12345".to_string()),
+                platform_video_id: Some("12345".to_string()),
+            }
+        );
+        assert_eq!(
+            publish_poll_result_from_json(&legacy).unwrap(),
+            PublishPollResult::Complete {
+                video_url: Some("https://www.tiktok.com/video/67890".to_string()),
+                platform_video_id: Some("67890".to_string()),
+            }
+        );
     }
 }
 
@@ -1379,6 +1506,7 @@ fn html_escape(s: &str) -> String {
 pub struct VideoStats {
     pub view_count: Option<i64>,
     pub like_count: Option<i64>,
+    pub share_url: Option<String>,
 }
 
 /// Extract a TikTok video ID from the final `video_url` we stored.
@@ -1399,41 +1527,82 @@ pub fn extract_video_id(url: &str) -> Option<String> {
     None
 }
 
-/// Ensure we have a valid TikTok access token, refreshing if needed.
-pub async fn ensure_fresh_access_token(conn: &Connection) -> Result<String, AppError> {
-    let expiry_str = db::get_setting(conn, "tiktok_token_expiry")
-        .map_err(|e| AppError::Database(e.to_string()))?;
-    let needs_refresh = match expiry_str {
-        Some(s) => {
-            let expiry: i64 = s.parse().unwrap_or(0);
-            let now = chrono::Utc::now().timestamp();
-            now >= expiry - 60
-        }
-        None => true,
-    };
-    if needs_refresh {
-        let refresh_tok = db::get_setting(conn, "tiktok_refresh_token")
-            .map_err(|e| AppError::Database(e.to_string()))?
-            .ok_or_else(|| AppError::Api("No TikTok refresh token — please reconnect.".into()))?;
-        let new_tokens = do_refresh_token_net(&refresh_tok).await?;
-        let new_expiry = chrono::Utc::now().timestamp() + new_tokens.expires_in as i64;
-        db::save_setting(conn, "tiktok_access_token", &new_tokens.access_token)
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        db::save_setting(conn, "tiktok_token_expiry", &new_expiry.to_string())
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        db::save_setting(conn, "tiktok_refresh_token", &new_tokens.refresh_token)
-            .map_err(|e| AppError::Database(e.to_string()))?;
-    }
-    db::get_setting(conn, "tiktok_access_token")
+fn valid_access_token(conn: &Connection) -> Result<Option<String>, AppError> {
+    let expiry = db::get_setting(conn, "tiktok_token_expiry")
         .map_err(|e| AppError::Database(e.to_string()))?
-        .ok_or_else(|| AppError::Api("No TikTok access token — please reconnect.".into()))
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    if chrono::Utc::now().timestamp() >= expiry - 60 {
+        return Ok(None);
+    }
+    db::get_setting(conn, "tiktok_access_token").map_err(|e| AppError::Database(e.to_string()))
 }
 
-/// Fetch view + like counts for a single TikTok video via the Display API's
-/// `/v2/video/list/` endpoint. Requires the `video.list` scope — users will
-/// need to disconnect + reconnect TikTok once to grant it.
+async fn refresh_access_token(db_conn: &crate::DbConn, force: bool) -> Result<String, AppError> {
+    if !force {
+        let conn = db_conn
+            .lock()
+            .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+        if let Some(token) = valid_access_token(&conn)? {
+            return Ok(token);
+        }
+    }
+
+    let _refresh_guard = TIKTOK_REFRESH_MUTEX.lock().await;
+    let refresh_tok = {
+        let conn = db_conn
+            .lock()
+            .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+        if !force {
+            if let Some(token) = valid_access_token(&conn)? {
+                return Ok(token);
+            }
+        }
+        db::get_setting(&conn, "tiktok_refresh_token")
+            .map_err(|e| AppError::Database(e.to_string()))?
+            .ok_or_else(|| AppError::Api("No TikTok refresh token; please reconnect.".into()))?
+    };
+
+    let new_tokens = match do_refresh_token_net(&refresh_tok).await {
+        Err(AppError::AuthExpired(message)) => {
+            if let Ok(conn) = db_conn.lock() {
+                let _ = db::delete_settings_for_platform(&conn, "tiktok");
+            }
+            return Err(AppError::AuthExpired(message));
+        }
+        other => other?,
+    };
+    let new_expiry = chrono::Utc::now().timestamp() + new_tokens.expires_in as i64;
+    let new_refresh_expiry = chrono::Utc::now().timestamp() + new_tokens.refresh_expires_in as i64;
+    let conn = db_conn
+        .lock()
+        .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+    db::save_setting(&conn, "tiktok_access_token", &new_tokens.access_token)
+        .map_err(|e| AppError::Database(e.to_string()))?;
+    db::save_setting(&conn, "tiktok_token_expiry", &new_expiry.to_string())
+        .map_err(|e| AppError::Database(e.to_string()))?;
+    db::save_setting(&conn, "tiktok_refresh_token", &new_tokens.refresh_token)
+        .map_err(|e| AppError::Database(e.to_string()))?;
+    if new_tokens.refresh_expires_in > 0 {
+        db::save_setting(
+            &conn,
+            "tiktok_refresh_expiry",
+            &new_refresh_expiry.to_string(),
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+    }
+    Ok(new_tokens.access_token)
+}
+
+/// Return a valid TikTok bearer token, serializing refreshes per platform.
+pub async fn ensure_fresh_access_token(db_conn: &crate::DbConn) -> Result<String, AppError> {
+    refresh_access_token(db_conn, false).await
+}
+
+/// Fetch a specific TikTok video via the Display API query endpoint.
 pub async fn fetch_video_stats(access_token: &str, video_id: &str) -> Result<VideoStats, AppError> {
-    let url = "https://open.tiktokapis.com/v2/video/list/?fields=view_count,like_count";
+    let url =
+        "https://open.tiktokapis.com/v2/video/query/?fields=id,view_count,like_count,share_url";
     let body = serde_json::json!({
         "filters": { "video_ids": [video_id] }
     });
@@ -1454,13 +1623,24 @@ pub async fn fetch_video_stats(access_token: &str, video_id: &str) -> Result<Vid
         .json()
         .await
         .map_err(|e| AppError::Api(format!("TikTok stats parse: {}", e)))?;
-    let videos = json["data"]["videos"].as_array();
-    let video = videos.and_then(|arr| arr.first());
+    let video = json["data"]["videos"].as_array().and_then(|videos| {
+        videos
+            .iter()
+            .find(|video| video["id"].as_str() == Some(video_id))
+    });
     match video {
-        None => Ok(VideoStats { view_count: None, like_count: None }),
+        None => Ok(VideoStats {
+            view_count: None,
+            like_count: None,
+            share_url: None,
+        }),
         Some(v) => Ok(VideoStats {
             view_count: v.get("view_count").and_then(|x| x.as_i64()),
             like_count: v.get("like_count").and_then(|x| x.as_i64()),
+            share_url: v
+                .get("share_url")
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
         }),
     }
 }

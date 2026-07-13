@@ -456,7 +456,7 @@ Total: ~6–8 calendar weeks focused pace, 10–12 at part-time.
 
 - **Project root:** `C:\Users\cereb\Desktop\Claude projects\clipviral`
 - **GitHub:** https://github.com/nsvlordslug/ClipGoblin
-- **Required env for signed builds:** `PROXY_API_KEY`, `TAURI_SIGNING_PRIVATE_KEY`
+- **Required env for signed builds:** `TAURI_SIGNING_PRIVATE_KEY` (OAuth provider secrets are Cloudflare Worker secrets, not desktop build inputs)
 - **Signing key:** `.tauri\clipgoblin-v2.key` (no password)
 - **Transcript cache:** `%APPDATA%/clipviral/transcripts/{vod_id}.json`
 - **Export output:** `%APPDATA%/clipviral/exports/{clip_id}.mp4`

@@ -174,7 +174,6 @@ pub fn run() {
                 .rotation_strategy(RotationStrategy::KeepAll)
                 .build()
         })
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init());
@@ -280,6 +279,10 @@ pub fn run() {
         .setup(|app| {
             let _ = APP_HANDLE.set(app.handle().clone());
 
+            let db_state: State<'_, DbConn> = app.state();
+            commands::settings::allow_configured_asset_directories(app.handle(), &*db_state)
+                .map_err(std::io::Error::other)?;
+
             // Wire job queue events into Tauri's frontend event system.
             let queue: State<'_, JobQueue> = app.state();
             let handle = app.handle().clone();
@@ -289,10 +292,7 @@ pub fn run() {
             });
 
             // Start background upload scheduler
-            let scheduler_handle = app.handle().clone();
-            std::thread::spawn(move || {
-                start_upload_scheduler(scheduler_handle);
-            });
+            start_upload_scheduler(app.handle().clone());
 
             // Background: keep the bundled yt-dlp fresh so Twitch-extractor
             // breakage self-heals. Non-blocking; gated on a bundled binary

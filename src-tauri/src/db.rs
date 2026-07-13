@@ -103,48 +103,93 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
             render_status TEXT DEFAULT 'pending',
             output_path TEXT,
             created_at TEXT
-        );"
+        );",
     )?;
 
     // Migrations: add columns that may not exist yet
-    conn.execute("ALTER TABLE vods ADD COLUMN download_progress INTEGER DEFAULT 0", []).ok();
-    conn.execute("ALTER TABLE clips ADD COLUMN captions_text TEXT", []).ok();
-    conn.execute("ALTER TABLE clips ADD COLUMN captions_position TEXT DEFAULT 'bottom'", []).ok();
-    conn.execute("ALTER TABLE clips ADD COLUMN facecam_layout TEXT DEFAULT 'none'", []).ok();
-    conn.execute("ALTER TABLE clips ADD COLUMN thumbnail_path TEXT", []).ok();
-    conn.execute("ALTER TABLE vods ADD COLUMN analysis_progress INTEGER DEFAULT 0", []).ok();
+    conn.execute(
+        "ALTER TABLE vods ADD COLUMN download_progress INTEGER DEFAULT 0",
+        [],
+    )
+    .ok();
+    conn.execute("ALTER TABLE clips ADD COLUMN captions_text TEXT", [])
+        .ok();
+    conn.execute(
+        "ALTER TABLE clips ADD COLUMN captions_position TEXT DEFAULT 'bottom'",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "ALTER TABLE clips ADD COLUMN facecam_layout TEXT DEFAULT 'none'",
+        [],
+    )
+    .ok();
+    conn.execute("ALTER TABLE clips ADD COLUMN thumbnail_path TEXT", [])
+        .ok();
+    conn.execute(
+        "ALTER TABLE vods ADD COLUMN analysis_progress INTEGER DEFAULT 0",
+        [],
+    )
+    .ok();
 
     // Session 4+: Transcript and performance tracking
-    conn.execute("ALTER TABLE vods ADD COLUMN transcript_path TEXT", []).ok();
-    conn.execute("ALTER TABLE clips ADD COLUMN auto_captions_path TEXT", []).ok();
-    conn.execute("ALTER TABLE clips ADD COLUMN keyword_boost REAL DEFAULT 0.0", []).ok();
+    conn.execute("ALTER TABLE vods ADD COLUMN transcript_path TEXT", [])
+        .ok();
+    conn.execute("ALTER TABLE clips ADD COLUMN auto_captions_path TEXT", [])
+        .ok();
+    conn.execute(
+        "ALTER TABLE clips ADD COLUMN keyword_boost REAL DEFAULT 0.0",
+        [],
+    )
+    .ok();
 
     // Grounded scoring: replace legacy virality_score display with calibrated confidence
-    conn.execute("ALTER TABLE highlights ADD COLUMN confidence_score REAL", []).ok();
-    conn.execute("ALTER TABLE highlights ADD COLUMN explanation TEXT", []).ok();
+    conn.execute(
+        "ALTER TABLE highlights ADD COLUMN confidence_score REAL",
+        [],
+    )
+    .ok();
+    conn.execute("ALTER TABLE highlights ADD COLUMN explanation TEXT", [])
+        .ok();
 
     // Event summary: one-sentence description of what happened
-    conn.execute("ALTER TABLE highlights ADD COLUMN event_summary TEXT", []).ok();
+    conn.execute("ALTER TABLE highlights ADD COLUMN event_summary TEXT", [])
+        .ok();
 
     // Clip scoring investigation (v1.3.12): per-clip diagnostic data populated
     // at scoring time, plus user-supplied review fields gated behind the
     // "Show clip review tools" Settings toggle. See
     // docs/superpowers/specs/2026-05-07-clip-scoring-investigation-design.md
-    conn.execute("ALTER TABLE highlights ADD COLUMN scoring_dimensions TEXT", []).ok();
-    conn.execute("ALTER TABLE highlights ADD COLUMN signal_sources TEXT", []).ok();
-    conn.execute("ALTER TABLE highlights ADD COLUMN review_rating TEXT", []).ok();
-    conn.execute("ALTER TABLE highlights ADD COLUMN review_note TEXT", []).ok();
+    conn.execute(
+        "ALTER TABLE highlights ADD COLUMN scoring_dimensions TEXT",
+        [],
+    )
+    .ok();
+    conn.execute("ALTER TABLE highlights ADD COLUMN signal_sources TEXT", [])
+        .ok();
+    conn.execute("ALTER TABLE highlights ADD COLUMN review_rating TEXT", [])
+        .ok();
+    conn.execute("ALTER TABLE highlights ADD COLUMN review_note TEXT", [])
+        .ok();
 
     // Caption style: which visual style is selected for subtitle rendering
-    conn.execute("ALTER TABLE clips ADD COLUMN caption_style TEXT DEFAULT 'clean'", []).ok();
+    conn.execute(
+        "ALTER TABLE clips ADD COLUMN caption_style TEXT DEFAULT 'clean'",
+        [],
+    )
+    .ok();
 
     // Game metadata: captured from Twitch API or set manually
-    conn.execute("ALTER TABLE vods ADD COLUMN game_name TEXT", []).ok();
-    conn.execute("ALTER TABLE clips ADD COLUMN game TEXT", []).ok();
+    conn.execute("ALTER TABLE vods ADD COLUMN game_name TEXT", [])
+        .ok();
+    conn.execute("ALTER TABLE clips ADD COLUMN game TEXT", [])
+        .ok();
 
     // Publish metadata: caption description and hashtags persisted per clip
-    conn.execute("ALTER TABLE clips ADD COLUMN publish_description TEXT", []).ok();
-    conn.execute("ALTER TABLE clips ADD COLUMN publish_hashtags TEXT", []).ok();
+    conn.execute("ALTER TABLE clips ADD COLUMN publish_description TEXT", [])
+        .ok();
+    conn.execute("ALTER TABLE clips ADD COLUMN publish_hashtags TEXT", [])
+        .ok();
 
     // Performance tracking for feedback loop
     conn.execute_batch(
@@ -174,8 +219,9 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
             total_clips_tracked INTEGER DEFAULT 0,
             top_performing_tags TEXT,
             updated_at TEXT
-        );"
-    ).ok();
+        );",
+    )
+    .ok();
 
     // Social publishing: upload history for duplicate detection
     conn.execute_batch(
@@ -185,16 +231,53 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
             platform TEXT NOT NULL,
             video_url TEXT,
             uploaded_at TEXT,
+            status TEXT NOT NULL DEFAULT 'completed',
+            job_id TEXT,
+            platform_video_id TEXT,
+            last_error TEXT,
+            updated_at TEXT,
             UNIQUE(clip_id, platform)
-        )"
+        )",
     )?;
+
+    // Upload lifecycle state. Existing rows predate the state machine and are
+    // completed uploads by definition.
+    conn.execute(
+        "ALTER TABLE upload_history ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'",
+        [],
+    )
+    .ok();
+    conn.execute("ALTER TABLE upload_history ADD COLUMN job_id TEXT", [])
+        .ok();
+    conn.execute(
+        "ALTER TABLE upload_history ADD COLUMN platform_video_id TEXT",
+        [],
+    )
+    .ok();
+    conn.execute("ALTER TABLE upload_history ADD COLUMN last_error TEXT", [])
+        .ok();
+    conn.execute("ALTER TABLE upload_history ADD COLUMN updated_at TEXT", [])
+        .ok();
+    conn.execute(
+        "UPDATE upload_history SET status = 'completed' WHERE status IS NULL OR status = ''",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "UPDATE upload_history
+         SET status = 'failed', last_error = 'Upload interrupted before completion',
+             updated_at = datetime('now')
+         WHERE status = 'uploading' OR (status = 'processing' AND job_id IS NULL)",
+        [],
+    )
+    .ok();
 
     // Track explicitly deleted VODs so Twitch API re-fetch doesn't re-insert them
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS deleted_vods (
             twitch_video_id TEXT PRIMARY KEY,
             deleted_at TEXT NOT NULL
-        )"
+        )",
     )?;
 
     // Scheduled uploads: queue clips for future upload to social platforms
@@ -208,18 +291,43 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
             retry_count INTEGER DEFAULT 0,
             error_message TEXT,
             video_url TEXT,
+            job_id TEXT,
+            platform_video_id TEXT,
             upload_meta_json TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY (clip_id) REFERENCES clips(id) ON DELETE CASCADE
-        )"
+        )",
     )?;
 
     // Platform analytics on published uploads (populated by refresh_upload_stats).
     // Nullable — null means "not yet fetched"; 0 means "fetched but zero views".
-    conn.execute("ALTER TABLE scheduled_uploads ADD COLUMN view_count INTEGER", []).ok();
-    conn.execute("ALTER TABLE scheduled_uploads ADD COLUMN like_count INTEGER", []).ok();
-    conn.execute("ALTER TABLE scheduled_uploads ADD COLUMN ctr_percent REAL", []).ok();
-    conn.execute("ALTER TABLE scheduled_uploads ADD COLUMN stats_updated_at TEXT", []).ok();
+    conn.execute(
+        "ALTER TABLE scheduled_uploads ADD COLUMN view_count INTEGER",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "ALTER TABLE scheduled_uploads ADD COLUMN like_count INTEGER",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "ALTER TABLE scheduled_uploads ADD COLUMN ctr_percent REAL",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "ALTER TABLE scheduled_uploads ADD COLUMN stats_updated_at TEXT",
+        [],
+    )
+    .ok();
+    conn.execute("ALTER TABLE scheduled_uploads ADD COLUMN job_id TEXT", [])
+        .ok();
+    conn.execute(
+        "ALTER TABLE scheduled_uploads ADD COLUMN platform_video_id TEXT",
+        [],
+    )
+    .ok();
 
     // Backfill: direct uploads historically only landed in `upload_history`, which the
     // analytics pipeline doesn't read. Copy any upload_history rows without a matching
@@ -227,12 +335,14 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
     // up in Analytics. Idempotent — the NOT EXISTS guard skips already-migrated rows.
     conn.execute(
         "INSERT INTO scheduled_uploads
-            (id, clip_id, platform, scheduled_time, status, retry_count, video_url, upload_meta_json, created_at)
+            (id, clip_id, platform, scheduled_time, status, retry_count, video_url,
+             job_id, platform_video_id, upload_meta_json, created_at)
          SELECT lower(hex(randomblob(16))), h.clip_id, h.platform,
-                COALESCE(h.uploaded_at, datetime('now')), 'completed', 0, h.video_url, '{}',
-                COALESCE(h.uploaded_at, datetime('now'))
+                COALESCE(h.uploaded_at, datetime('now')), 'completed', 0, h.video_url,
+                h.job_id, h.platform_video_id, '{}', COALESCE(h.uploaded_at, datetime('now'))
          FROM upload_history h
-         WHERE h.video_url IS NOT NULL
+         WHERE h.status = 'completed'
+           AND (h.video_url IS NOT NULL OR h.platform_video_id IS NOT NULL)
            AND EXISTS (SELECT 1 FROM clips c WHERE c.id = h.clip_id)
            AND NOT EXISTS (
                SELECT 1 FROM scheduled_uploads s WHERE s.clip_id = h.clip_id AND s.platform = h.platform
@@ -258,24 +368,21 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
             context TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_ai_usage_log_ts ON ai_usage_log(timestamp);
-        CREATE INDEX IF NOT EXISTS idx_ai_usage_log_vod ON ai_usage_log(vod_id);"
+        CREATE INDEX IF NOT EXISTS idx_ai_usage_log_vod ON ai_usage_log(vod_id);",
     )?;
 
     // ─── v1.4.0 Cam region (crop-from-source) ──────────────────────
     // Per-VOD source-frame region; per-clip optional override; per-clip fit mode.
     // All NULL by default = pre-feature dup-source behavior preserved.
-    conn.execute(
-        "ALTER TABLE vods ADD COLUMN cam_region_norm TEXT",
-        [],
-    ).ok();
+    conn.execute("ALTER TABLE vods ADD COLUMN cam_region_norm TEXT", [])
+        .ok();
     conn.execute(
         "ALTER TABLE clips ADD COLUMN cam_region_norm_override TEXT",
         [],
-    ).ok();
-    conn.execute(
-        "ALTER TABLE clips ADD COLUMN cam_fit_mode TEXT",
-        [],
-    ).ok();
+    )
+    .ok();
+    conn.execute("ALTER TABLE clips ADD COLUMN cam_fit_mode TEXT", [])
+        .ok();
     // Settings k/v default (existing settings table). Idempotent.
     conn.execute(
         "INSERT OR IGNORE INTO settings(key, value) VALUES('allow_per_clip_cam_region_override', 'false')",
@@ -292,11 +399,13 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
     conn.execute(
         "ALTER TABLE highlights ADD COLUMN community_clip_mp4_path TEXT",
         [],
-    ).ok();
+    )
+    .ok();
     conn.execute(
         "ALTER TABLE clips ADD COLUMN community_clip_mp4_path TEXT",
         [],
-    ).ok();
+    )
+    .ok();
 
     Ok(())
 }
@@ -422,6 +531,27 @@ pub struct UploadHistoryRow {
     pub platform: String,
     pub video_url: Option<String>,
     pub uploaded_at: Option<String>,
+    #[serde(default = "default_upload_status")]
+    pub status: String,
+    #[serde(default)]
+    pub job_id: Option<String>,
+    #[serde(default)]
+    pub platform_video_id: Option<String>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+fn default_upload_status() -> String {
+    "completed".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UploadClaim {
+    Acquired,
+    Completed { video_url: Option<String> },
+    InProgress { job_id: Option<String> },
 }
 
 // ── Sensitive field encryption ──
@@ -1316,51 +1446,171 @@ pub fn get_all_highlights(conn: &Connection) -> SqliteResult<Vec<HighlightRow>> 
 
 // ── Upload history helpers ──
 
-pub fn get_upload_for_clip(conn: &Connection, clip_id: &str, platform: &str) -> SqliteResult<Option<UploadHistoryRow>> {
+fn upload_history_from_row(row: &rusqlite::Row<'_>) -> SqliteResult<UploadHistoryRow> {
+    Ok(UploadHistoryRow {
+        id: row.get(0)?,
+        clip_id: row.get(1)?,
+        platform: row.get(2)?,
+        video_url: row.get(3)?,
+        uploaded_at: row.get(4)?,
+        status: row.get(5)?,
+        job_id: row.get(6)?,
+        platform_video_id: row.get(7)?,
+        last_error: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
+pub fn get_upload_for_clip(
+    conn: &Connection,
+    clip_id: &str,
+    platform: &str,
+) -> SqliteResult<Option<UploadHistoryRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, clip_id, platform, video_url, uploaded_at FROM upload_history WHERE clip_id = ?1 AND platform = ?2"
+        "SELECT id, clip_id, platform, video_url, uploaded_at, status, job_id,
+                platform_video_id, last_error, updated_at
+         FROM upload_history WHERE clip_id = ?1 AND platform = ?2",
     )?;
-    let mut rows = stmt.query_map(params![clip_id, platform], |row| {
-        Ok(UploadHistoryRow {
-            id: row.get(0)?,
-            clip_id: row.get(1)?,
-            platform: row.get(2)?,
-            video_url: row.get(3)?,
-            uploaded_at: row.get(4)?,
-        })
-    })?;
+    let mut rows = stmt.query_map(params![clip_id, platform], upload_history_from_row)?;
     match rows.next() {
         Some(row) => Ok(Some(row?)),
         None => Ok(None),
     }
 }
 
-pub fn get_uploads_for_clip(conn: &Connection, clip_id: &str) -> SqliteResult<Vec<UploadHistoryRow>> {
+pub fn get_uploads_for_clip(
+    conn: &Connection,
+    clip_id: &str,
+) -> SqliteResult<Vec<UploadHistoryRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, clip_id, platform, video_url, uploaded_at FROM upload_history WHERE clip_id = ?1"
+        "SELECT id, clip_id, platform, video_url, uploaded_at, status, job_id,
+                platform_video_id, last_error, updated_at
+         FROM upload_history WHERE clip_id = ?1",
     )?;
-    let rows = stmt.query_map(params![clip_id], |row| {
-        Ok(UploadHistoryRow {
-            id: row.get(0)?,
-            clip_id: row.get(1)?,
-            platform: row.get(2)?,
-            video_url: row.get(3)?,
-            uploaded_at: row.get(4)?,
-        })
-    })?;
+    let rows = stmt.query_map(params![clip_id], upload_history_from_row)?;
     rows.collect()
 }
 
-pub fn upsert_upload(conn: &Connection, clip_id: &str, platform: &str, video_url: &str) -> SqliteResult<()> {
+/// Atomically claim a clip/platform pair before any external side effect.
+/// The caller holds the app's DB mutex while this runs, so the read + upsert is
+/// serialized with every other upload claim.
+pub fn begin_upload(
+    conn: &Connection,
+    clip_id: &str,
+    platform: &str,
+    force: bool,
+) -> SqliteResult<UploadClaim> {
+    if let Some(existing) = get_upload_for_clip(conn, clip_id, platform)? {
+        match existing.status.as_str() {
+            "uploading" | "processing" => {
+                return Ok(UploadClaim::InProgress {
+                    job_id: existing.job_id,
+                });
+            }
+            "completed" if !force => {
+                return Ok(UploadClaim::Completed {
+                    video_url: existing.video_url,
+                });
+            }
+            _ => {}
+        }
+    }
+
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO upload_history (id, clip_id, platform, video_url, uploaded_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(clip_id, platform) DO UPDATE SET video_url = excluded.video_url, uploaded_at = excluded.uploaded_at",
-        params![id, clip_id, platform, video_url, now],
+        "INSERT INTO upload_history
+            (id, clip_id, platform, status, updated_at)
+         VALUES (?1, ?2, ?3, 'uploading', ?4)
+         ON CONFLICT(clip_id, platform) DO UPDATE SET
+            status = 'uploading', video_url = NULL, uploaded_at = NULL,
+            job_id = NULL, platform_video_id = NULL, last_error = NULL,
+            updated_at = excluded.updated_at",
+        params![id, clip_id, platform, now],
+    )?;
+    Ok(UploadClaim::Acquired)
+}
+
+pub fn mark_upload_processing(
+    conn: &Connection,
+    clip_id: &str,
+    platform: &str,
+    job_id: &str,
+) -> SqliteResult<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE upload_history SET status = 'processing', job_id = ?3,
+                last_error = NULL, updated_at = ?4
+         WHERE clip_id = ?1 AND platform = ?2",
+        params![clip_id, platform, job_id, now],
     )?;
     Ok(())
+}
+
+pub fn mark_upload_complete(
+    conn: &Connection,
+    clip_id: &str,
+    platform: &str,
+    video_url: Option<&str>,
+    job_id: Option<&str>,
+    platform_video_id: Option<&str>,
+) -> SqliteResult<()> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO upload_history
+            (id, clip_id, platform, video_url, uploaded_at, status, job_id,
+             platform_video_id, last_error, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'completed', ?6, ?7, NULL, ?5)
+         ON CONFLICT(clip_id, platform) DO UPDATE SET
+            video_url = excluded.video_url,
+            uploaded_at = excluded.uploaded_at,
+            status = 'completed',
+            job_id = COALESCE(excluded.job_id, upload_history.job_id),
+            platform_video_id = COALESCE(excluded.platform_video_id, upload_history.platform_video_id),
+            last_error = NULL,
+            updated_at = excluded.updated_at",
+        params![id, clip_id, platform, video_url, now, job_id, platform_video_id],
+    )?;
+    Ok(())
+}
+
+pub fn mark_upload_failed(
+    conn: &Connection,
+    clip_id: &str,
+    platform: &str,
+    error: &str,
+) -> SqliteResult<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE upload_history SET status = 'failed', last_error = ?3,
+                updated_at = ?4
+         WHERE clip_id = ?1 AND platform = ?2",
+        params![clip_id, platform, error, now],
+    )?;
+    Ok(())
+}
+
+pub fn get_processing_uploads(
+    conn: &Connection,
+    platform: &str,
+) -> SqliteResult<Vec<UploadHistoryRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, clip_id, platform, video_url, uploaded_at, status, job_id,
+                platform_video_id, last_error, updated_at
+         FROM upload_history WHERE platform = ?1 AND status = 'processing'",
+    )?;
+    let rows = stmt.query_map(params![platform], upload_history_from_row)?;
+    rows.collect()
+}
+
+pub fn upsert_upload(
+    conn: &Connection,
+    clip_id: &str,
+    platform: &str,
+    video_url: &str,
+) -> SqliteResult<()> {
+    mark_upload_complete(conn, clip_id, platform, Some(video_url), None, None)
 }
 
 /// Record a direct ("Upload now") upload in the `scheduled_uploads` ledger as a
@@ -1371,28 +1621,77 @@ pub fn upsert_upload(conn: &Connection, clip_id: &str, platform: &str, video_url
 ///
 /// Only called from the direct `upload_to_platform` command — the scheduler creates
 /// its own `scheduled_uploads` row, so this never double-records scheduled uploads.
+pub fn record_direct_upload_state_for_analytics(
+    conn: &Connection,
+    clip_id: &str,
+    platform: &str,
+    status: &str,
+    video_url: Option<&str>,
+    job_id: Option<&str>,
+    platform_video_id: Option<&str>,
+    error_message: Option<&str>,
+) -> SqliteResult<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let updated = conn.execute(
+        "UPDATE scheduled_uploads SET status = ?3, video_url = COALESCE(?4, video_url),
+                job_id = COALESCE(?5, job_id),
+                platform_video_id = COALESCE(?6, platform_video_id),
+                error_message = ?7, stats_updated_at = NULL
+         WHERE id = (
+             SELECT id FROM scheduled_uploads
+             WHERE clip_id = ?1 AND platform = ?2
+               AND status NOT IN ('pending', 'cancelled')
+             ORDER BY created_at DESC LIMIT 1
+         )",
+        params![
+            clip_id,
+            platform,
+            status,
+            video_url,
+            job_id,
+            platform_video_id,
+            error_message
+        ],
+    )?;
+    if updated == 0 {
+        let id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO scheduled_uploads
+                (id, clip_id, platform, scheduled_time, status, retry_count,
+                 error_message, video_url, job_id, platform_video_id, upload_meta_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, ?9, '{}', ?4)",
+            params![
+                id,
+                clip_id,
+                platform,
+                now,
+                status,
+                error_message,
+                video_url,
+                job_id,
+                platform_video_id
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 pub fn record_direct_upload_for_analytics(
     conn: &Connection,
     clip_id: &str,
     platform: &str,
     video_url: &str,
 ) -> SqliteResult<()> {
-    let now = chrono::Utc::now().to_rfc3339();
-    let updated = conn.execute(
-        "UPDATE scheduled_uploads SET video_url = ?3, stats_updated_at = NULL
-         WHERE clip_id = ?1 AND platform = ?2 AND status = 'completed'",
-        params![clip_id, platform, video_url],
-    )?;
-    if updated == 0 {
-        let id = uuid::Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO scheduled_uploads
-                (id, clip_id, platform, scheduled_time, status, retry_count, video_url, upload_meta_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, 'completed', 0, ?5, '{}', ?4)",
-            params![id, clip_id, platform, now, video_url],
-        )?;
-    }
-    Ok(())
+    record_direct_upload_state_for_analytics(
+        conn,
+        clip_id,
+        platform,
+        "completed",
+        Some(video_url),
+        None,
+        None,
+        None,
+    )
 }
 
 pub fn delete_settings_for_platform(conn: &Connection, platform: &str) -> SqliteResult<()> {
@@ -1419,6 +1718,10 @@ pub struct ScheduledUploadRow {
     pub retry_count: i64,
     pub error_message: Option<String>,
     pub video_url: Option<String>,
+    #[serde(default)]
+    pub job_id: Option<String>,
+    #[serde(default)]
+    pub platform_video_id: Option<String>,
     pub upload_meta_json: Option<String>,
     pub created_at: String,
     /// Views as reported by the platform API. None = never fetched.
@@ -1437,90 +1740,87 @@ pub struct ScheduledUploadRow {
 
 // ── Scheduled upload helpers ──
 
+fn scheduled_upload_from_row(row: &rusqlite::Row<'_>) -> SqliteResult<ScheduledUploadRow> {
+    Ok(ScheduledUploadRow {
+        id: row.get(0)?,
+        clip_id: row.get(1)?,
+        platform: row.get(2)?,
+        scheduled_time: row.get(3)?,
+        status: row.get(4)?,
+        retry_count: row.get(5)?,
+        error_message: row.get(6)?,
+        video_url: row.get(7)?,
+        job_id: row.get(8)?,
+        platform_video_id: row.get(9)?,
+        upload_meta_json: row.get(10)?,
+        created_at: row.get(11)?,
+        view_count: row.get(12)?,
+        like_count: row.get(13)?,
+        ctr_percent: row.get(14)?,
+        stats_updated_at: row.get(15)?,
+    })
+}
+
 pub fn insert_scheduled_upload(conn: &Connection, row: &ScheduledUploadRow) -> SqliteResult<()> {
     conn.execute(
-        "INSERT INTO scheduled_uploads (id, clip_id, platform, scheduled_time, status, retry_count, error_message, video_url, upload_meta_json, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![row.id, row.clip_id, row.platform, row.scheduled_time, row.status, row.retry_count, row.error_message, row.video_url, row.upload_meta_json, row.created_at],
+        "INSERT INTO scheduled_uploads (id, clip_id, platform, scheduled_time, status,
+                 retry_count, error_message, video_url, job_id, platform_video_id,
+                 upload_meta_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            row.id,
+            row.clip_id,
+            row.platform,
+            row.scheduled_time,
+            row.status,
+            row.retry_count,
+            row.error_message,
+            row.video_url,
+            row.job_id,
+            row.platform_video_id,
+            row.upload_meta_json,
+            row.created_at
+        ],
     )?;
     Ok(())
 }
 
 pub fn get_all_scheduled_uploads(conn: &Connection) -> SqliteResult<Vec<ScheduledUploadRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, clip_id, platform, scheduled_time, status, retry_count, error_message, video_url, upload_meta_json, created_at, view_count, like_count, ctr_percent, stats_updated_at
-         FROM scheduled_uploads ORDER BY scheduled_time ASC"
+        "SELECT id, clip_id, platform, scheduled_time, status, retry_count, error_message,
+                video_url, job_id, platform_video_id, upload_meta_json, created_at,
+                view_count, like_count, ctr_percent, stats_updated_at
+         FROM scheduled_uploads ORDER BY scheduled_time ASC",
     )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(ScheduledUploadRow {
-            id: row.get(0)?,
-            clip_id: row.get(1)?,
-            platform: row.get(2)?,
-            scheduled_time: row.get(3)?,
-            status: row.get(4)?,
-            retry_count: row.get(5)?,
-            error_message: row.get(6)?,
-            video_url: row.get(7)?,
-            upload_meta_json: row.get(8)?,
-            created_at: row.get(9)?,
-            view_count: row.get(10).ok(),
-            like_count: row.get(11).ok(),
-            ctr_percent: row.get(12).ok(),
-            stats_updated_at: row.get(13).ok(),
-        })
-    })?;
+    let rows = stmt.query_map([], scheduled_upload_from_row)?;
     rows.collect()
 }
 
-pub fn get_scheduled_uploads_for_clip(conn: &Connection, clip_id: &str) -> SqliteResult<Vec<ScheduledUploadRow>> {
+pub fn get_scheduled_uploads_for_clip(
+    conn: &Connection,
+    clip_id: &str,
+) -> SqliteResult<Vec<ScheduledUploadRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, clip_id, platform, scheduled_time, status, retry_count, error_message, video_url, upload_meta_json, created_at, view_count, like_count, ctr_percent, stats_updated_at
-         FROM scheduled_uploads WHERE clip_id = ?1 ORDER BY scheduled_time ASC"
+        "SELECT id, clip_id, platform, scheduled_time, status, retry_count, error_message,
+                video_url, job_id, platform_video_id, upload_meta_json, created_at,
+                view_count, like_count, ctr_percent, stats_updated_at
+         FROM scheduled_uploads WHERE clip_id = ?1 ORDER BY scheduled_time ASC",
     )?;
-    let rows = stmt.query_map(params![clip_id], |row| {
-        Ok(ScheduledUploadRow {
-            id: row.get(0)?,
-            clip_id: row.get(1)?,
-            platform: row.get(2)?,
-            scheduled_time: row.get(3)?,
-            status: row.get(4)?,
-            retry_count: row.get(5)?,
-            error_message: row.get(6)?,
-            video_url: row.get(7)?,
-            upload_meta_json: row.get(8)?,
-            created_at: row.get(9)?,
-            view_count: row.get(10).ok(),
-            like_count: row.get(11).ok(),
-            ctr_percent: row.get(12).ok(),
-            stats_updated_at: row.get(13).ok(),
-        })
-    })?;
+    let rows = stmt.query_map(params![clip_id], scheduled_upload_from_row)?;
     rows.collect()
 }
 
-pub fn get_due_scheduled_uploads(conn: &Connection, now: &str) -> SqliteResult<Vec<ScheduledUploadRow>> {
+pub fn get_due_scheduled_uploads(
+    conn: &Connection,
+    now: &str,
+) -> SqliteResult<Vec<ScheduledUploadRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, clip_id, platform, scheduled_time, status, retry_count, error_message, video_url, upload_meta_json, created_at, view_count, like_count, ctr_percent, stats_updated_at
+        "SELECT id, clip_id, platform, scheduled_time, status, retry_count, error_message,
+                video_url, job_id, platform_video_id, upload_meta_json, created_at,
+                view_count, like_count, ctr_percent, stats_updated_at
          FROM scheduled_uploads WHERE status = 'pending' AND scheduled_time <= ?1 ORDER BY scheduled_time ASC"
     )?;
-    let rows = stmt.query_map(params![now], |row| {
-        Ok(ScheduledUploadRow {
-            id: row.get(0)?,
-            clip_id: row.get(1)?,
-            platform: row.get(2)?,
-            scheduled_time: row.get(3)?,
-            status: row.get(4)?,
-            retry_count: row.get(5)?,
-            error_message: row.get(6)?,
-            video_url: row.get(7)?,
-            upload_meta_json: row.get(8)?,
-            created_at: row.get(9)?,
-            view_count: row.get(10).ok(),
-            like_count: row.get(11).ok(),
-            ctr_percent: row.get(12).ok(),
-            stats_updated_at: row.get(13).ok(),
-        })
-    })?;
+    let rows = stmt.query_map(params![now], scheduled_upload_from_row)?;
     rows.collect()
 }
 
@@ -1533,8 +1833,42 @@ pub fn update_scheduled_upload_status(
     retry_count: Option<i64>,
 ) -> SqliteResult<()> {
     conn.execute(
-        "UPDATE scheduled_uploads SET status = ?1, error_message = ?2, video_url = ?3, retry_count = COALESCE(?4, retry_count) WHERE id = ?5",
+        "UPDATE scheduled_uploads SET status = ?1, error_message = ?2,
+                video_url = CASE WHEN ?1 = 'pending' THEN NULL ELSE COALESCE(?3, video_url) END,
+                job_id = CASE WHEN ?1 = 'pending' THEN NULL ELSE job_id END,
+                platform_video_id = CASE WHEN ?1 = 'pending' THEN NULL ELSE platform_video_id END,
+                retry_count = COALESCE(?4, retry_count) WHERE id = ?5",
         params![status, error_message, video_url, retry_count, id],
+    )?;
+    Ok(())
+}
+
+pub fn update_scheduled_upload_processing(
+    conn: &Connection,
+    id: &str,
+    job_id: &str,
+) -> SqliteResult<()> {
+    conn.execute(
+        "UPDATE scheduled_uploads SET status = 'processing', error_message = NULL,
+                job_id = ?2 WHERE id = ?1",
+        params![id, job_id],
+    )?;
+    Ok(())
+}
+
+pub fn update_scheduled_upload_complete(
+    conn: &Connection,
+    id: &str,
+    video_url: Option<&str>,
+    job_id: Option<&str>,
+    platform_video_id: Option<&str>,
+) -> SqliteResult<()> {
+    conn.execute(
+        "UPDATE scheduled_uploads SET status = 'completed', error_message = NULL,
+                video_url = COALESCE(?2, video_url), job_id = COALESCE(?3, job_id),
+                platform_video_id = COALESCE(?4, platform_video_id), stats_updated_at = NULL
+         WHERE id = ?1",
+        params![id, video_url, job_id, platform_video_id],
     )?;
     Ok(())
 }
@@ -1570,36 +1904,40 @@ pub fn update_upload_stats(
     Ok(())
 }
 
-/// Return all completed uploads with a video_url — the refresher iterates this.
+/// Return completed uploads that have a public URL or stable platform video ID.
 pub fn get_completed_uploads_with_url(conn: &Connection) -> SqliteResult<Vec<ScheduledUploadRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, clip_id, platform, scheduled_time, status, retry_count, error_message, video_url, upload_meta_json, created_at, view_count, like_count, ctr_percent, stats_updated_at
-         FROM scheduled_uploads WHERE status = 'completed' AND video_url IS NOT NULL ORDER BY scheduled_time DESC"
+        "SELECT id, clip_id, platform, scheduled_time, status, retry_count, error_message,
+                video_url, job_id, platform_video_id, upload_meta_json, created_at,
+                view_count, like_count, ctr_percent, stats_updated_at
+         FROM scheduled_uploads
+         WHERE status = 'completed'
+           AND ((video_url IS NOT NULL AND video_url <> '') OR platform_video_id IS NOT NULL)
+         ORDER BY scheduled_time DESC",
     )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(ScheduledUploadRow {
-            id: row.get(0)?,
-            clip_id: row.get(1)?,
-            platform: row.get(2)?,
-            scheduled_time: row.get(3)?,
-            status: row.get(4)?,
-            retry_count: row.get(5)?,
-            error_message: row.get(6)?,
-            video_url: row.get(7)?,
-            upload_meta_json: row.get(8)?,
-            created_at: row.get(9)?,
-            view_count: row.get(10).ok(),
-            like_count: row.get(11).ok(),
-            ctr_percent: row.get(12).ok(),
-            stats_updated_at: row.get(13).ok(),
-        })
-    })?;
+    let rows = stmt.query_map([], scheduled_upload_from_row)?;
     rows.collect()
+}
+
+pub fn update_upload_video_identity(
+    conn: &Connection,
+    id: &str,
+    video_url: Option<&str>,
+    platform_video_id: Option<&str>,
+) -> SqliteResult<()> {
+    conn.execute(
+        "UPDATE scheduled_uploads SET video_url = COALESCE(?2, video_url),
+                platform_video_id = COALESCE(?3, platform_video_id) WHERE id = ?1",
+        params![id, video_url, platform_video_id],
+    )?;
+    Ok(())
 }
 
 pub fn reschedule_upload(conn: &Connection, id: &str, new_time: &str) -> SqliteResult<bool> {
     let changed = conn.execute(
-        "UPDATE scheduled_uploads SET scheduled_time = ?1, status = 'pending', error_message = NULL WHERE id = ?2",
+        "UPDATE scheduled_uploads SET scheduled_time = ?1, status = 'pending',
+                error_message = NULL, video_url = NULL, job_id = NULL,
+                platform_video_id = NULL WHERE id = ?2",
         params![new_time, id],
     )?;
     Ok(changed > 0)
@@ -1651,19 +1989,92 @@ mod tests {
         // clip being uploaded always exists).
         conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
         // A direct upload with no prior scheduled_uploads row.
-        record_direct_upload_for_analytics(&conn, "clip1", "youtube", "https://youtu.be/abc").unwrap();
+        record_direct_upload_for_analytics(&conn, "clip1", "youtube", "https://youtu.be/abc")
+            .unwrap();
         let rows = get_completed_uploads_with_url(&conn).unwrap();
-        assert_eq!(rows.len(), 1, "direct upload should appear in the completed ledger");
+        assert_eq!(
+            rows.len(),
+            1,
+            "direct upload should appear in the completed ledger"
+        );
         assert_eq!(rows[0].clip_id, "clip1");
         assert_eq!(rows[0].platform, "youtube");
         assert_eq!(rows[0].status, "completed");
         assert_eq!(rows[0].video_url.as_deref(), Some("https://youtu.be/abc"));
 
         // Re-uploading the same clip+platform updates the row instead of duplicating.
-        record_direct_upload_for_analytics(&conn, "clip1", "youtube", "https://youtu.be/xyz").unwrap();
+        record_direct_upload_for_analytics(&conn, "clip1", "youtube", "https://youtu.be/xyz")
+            .unwrap();
         let rows = get_completed_uploads_with_url(&conn).unwrap();
         assert_eq!(rows.len(), 1, "re-upload must update, not duplicate");
         assert_eq!(rows[0].video_url.as_deref(), Some("https://youtu.be/xyz"));
+    }
+
+    #[test]
+    fn upload_claim_blocks_concurrent_and_forced_attempts() {
+        let conn = fresh_db();
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+
+        assert_eq!(
+            begin_upload(&conn, "clip1", "tiktok", false).unwrap(),
+            UploadClaim::Acquired
+        );
+        assert_eq!(
+            begin_upload(&conn, "clip1", "tiktok", false).unwrap(),
+            UploadClaim::InProgress { job_id: None }
+        );
+
+        mark_upload_processing(&conn, "clip1", "tiktok", "publish-123").unwrap();
+        assert_eq!(
+            begin_upload(&conn, "clip1", "tiktok", true).unwrap(),
+            UploadClaim::InProgress {
+                job_id: Some("publish-123".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn completed_private_upload_is_deduplicated_without_a_public_url() {
+        let conn = fresh_db();
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+
+        mark_upload_complete(&conn, "clip1", "tiktok", None, Some("publish-123"), None).unwrap();
+
+        assert_eq!(
+            begin_upload(&conn, "clip1", "tiktok", false).unwrap(),
+            UploadClaim::Completed { video_url: None }
+        );
+        let row = get_upload_for_clip(&conn, "clip1", "tiktok")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, "completed");
+        assert_eq!(row.job_id.as_deref(), Some("publish-123"));
+        assert_eq!(row.video_url, None);
+    }
+
+    #[test]
+    fn private_direct_upload_with_platform_id_is_in_analytics_ledger() {
+        let conn = fresh_db();
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+
+        record_direct_upload_state_for_analytics(
+            &conn,
+            "clip1",
+            "tiktok",
+            "completed",
+            None,
+            Some("publish-123"),
+            Some("video-456"),
+            None,
+        )
+        .unwrap();
+
+        let rows = get_completed_uploads_with_url(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "completed");
+        assert_eq!(rows[0].video_url, None);
+        assert_eq!(rows[0].job_id.as_deref(), Some("publish-123"));
+        assert_eq!(rows[0].platform_video_id.as_deref(), Some("video-456"));
     }
 
     #[test]
@@ -1701,10 +2112,17 @@ mod tests {
             start_seconds: 100.0,
             end_seconds: 130.0,
             virality_score: 0.72,
-            audio_score: 0.6, visual_score: 0.6, chat_score: 0.6,
-            transcript_snippet: None, description: None, tags: None,
-            thumbnail_path: None, created_at: "2026-05-07T00:00:00Z".to_string(),
-            confidence_score: None, explanation: None, event_summary: None,
+            audio_score: 0.6,
+            visual_score: 0.6,
+            chat_score: 0.6,
+            transcript_snippet: None,
+            description: None,
+            tags: None,
+            thumbnail_path: None,
+            created_at: "2026-05-07T00:00:00Z".to_string(),
+            confidence_score: None,
+            explanation: None,
+            event_summary: None,
             scoring_dimensions: Some(r#"{"hook":0.8,"emotion":0.75}"#.to_string()),
             signal_sources: Some(r#"["audio","transcript"]"#.to_string()),
             review_rating: None,
@@ -1715,7 +2133,13 @@ mod tests {
 
         let fetched = get_highlights_by_vod(&conn, "v1").unwrap();
         assert_eq!(fetched.len(), 1);
-        assert_eq!(fetched[0].scoring_dimensions.as_deref(), Some(r#"{"hook":0.8,"emotion":0.75}"#));
-        assert_eq!(fetched[0].signal_sources.as_deref(), Some(r#"["audio","transcript"]"#));
+        assert_eq!(
+            fetched[0].scoring_dimensions.as_deref(),
+            Some(r#"{"hook":0.8,"emotion":0.75}"#)
+        );
+        assert_eq!(
+            fetched[0].signal_sources.as_deref(),
+            Some(r#"["audio","transcript"]"#)
+        );
     }
 }

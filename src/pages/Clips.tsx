@@ -175,7 +175,7 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
 
   const displayTitle = useMemo(
     () => clipDisplayTitle(clip, highlight),
-    [clip.title, highlight]
+    [clip, highlight]
   )
 
   const ensureSrc = useCallback(async () => {
@@ -192,7 +192,7 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
     } catch {
       console.warn(`[Clips] Failed to load VOD source for clip ${clip.id}`)
     }
-  }, [videoSrc, clip.vod_id, clip.community_clip_mp4_path])
+  }, [videoSrc, clip.id, clip.vod_id, clip.community_clip_mp4_path])
 
   const handleClick = () => {
     if (selectMode) onToggleSelect()
@@ -252,7 +252,7 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
 
       <div className="v4-lib-body flex flex-col gap-2">
         <div className="flex items-start justify-between gap-2">
-          <h3 className="v4-lib-title flex-1" style={{whiteSpace:'normal',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical' as any}}>
+          <h3 className="v4-lib-title flex-1" style={{whiteSpace:'normal',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical'}}>
             {displayTitle}
           </h3>
           {!selectMode && (

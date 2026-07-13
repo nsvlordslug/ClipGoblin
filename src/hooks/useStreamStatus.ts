@@ -25,23 +25,23 @@ const POLL_INTERVAL_MS = 60_000
  * status. Errors are swallowed so one bad fetch doesn't break the UI.
  */
 export function useStreamStatus(channelId: string | null | undefined): StreamStatus {
-  const [status, setStatus] = useState<StreamStatus>(OFFLINE)
+  const [latest, setLatest] = useState<{
+    channelId: string
+    status: StreamStatus
+  } | null>(null)
 
   useEffect(() => {
-    if (!channelId) {
-      setStatus(OFFLINE)
-      return
-    }
+    if (!channelId) return
 
     let cancelled = false
 
     const fetchOnce = async () => {
       try {
         const s = await invoke<StreamStatus>('get_stream_status', { channelId })
-        if (!cancelled) setStatus(s)
+        if (!cancelled) setLatest({ channelId, status: s })
       } catch {
         // Swallow errors — channel may be offline, token expired, or running in browser.
-        if (!cancelled) setStatus(OFFLINE)
+        if (!cancelled) setLatest({ channelId, status: OFFLINE })
       }
     }
 
@@ -53,7 +53,7 @@ export function useStreamStatus(channelId: string | null | undefined): StreamSta
     }
   }, [channelId])
 
-  return status
+  return channelId && latest?.channelId === channelId ? latest.status : OFFLINE
 }
 
 /** "1.2k" / "12.4k" / "1.3M" compact viewer-count formatter. */

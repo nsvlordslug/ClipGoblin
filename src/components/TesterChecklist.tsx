@@ -4,16 +4,10 @@ import { Check, Circle, X } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
 import { usePlatformStore } from '../stores/platformStore'
 import { useScheduleStore } from '../stores/scheduleStore'
-
-const DISMISS_KEY = 'tester_checklist_dismissed_v1'
-
-function isDismissed(): boolean {
-  try { return localStorage.getItem(DISMISS_KEY) === 'true' } catch { return false }
-}
-
-function markDismissed() {
-  try { localStorage.setItem(DISMISS_KEY, 'true') } catch { /* ignore */ }
-}
+import {
+  dismissTesterChecklist,
+  isTesterChecklistDismissed,
+} from '../lib/testerChecklist'
 
 /**
  * Checklist shown on the Dashboard for testers, tracking the core onboarding
@@ -25,7 +19,7 @@ function markDismissed() {
  */
 export default function TesterChecklist() {
   const navigate = useNavigate()
-  const [dismissedLocal, setDismissedLocal] = useState(() => isDismissed())
+  const [dismissedLocal, setDismissedLocal] = useState(() => isTesterChecklistDismissed())
 
   const { loggedInUser, vods, highlights, clips } = useAppStore()
   const { accounts } = usePlatformStore()
@@ -91,7 +85,7 @@ export default function TesterChecklist() {
   if (dismissedLocal || allDone) return null
 
   const dismiss = () => {
-    markDismissed()
+    dismissTesterChecklist()
     setDismissedLocal(true)
   }
 
@@ -148,12 +142,4 @@ export default function TesterChecklist() {
       </div>
     </section>
   )
-}
-
-/**
- * Public helper so Help → "Show onboarding checklist" can reset the
- * dismissed flag and bring the panel back.
- */
-export function resetTesterChecklistDismissal() {
-  try { localStorage.removeItem(DISMISS_KEY) } catch { /* ignore */ }
 }

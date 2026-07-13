@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ChevronDown, ChevronRight } from 'lucide-react'
-import { resetTesterChecklistDismissal } from '../components/TesterChecklist'
+import { resetTesterChecklistDismissal } from '../lib/testerChecklist'
 import { version as appVersion } from '../../package.json'
 
 /** Collapsible deep-dive section */
@@ -125,7 +125,7 @@ export default function HelpGuide() {
             </p>
             <ul className="text-[11px] text-slate-500 space-y-1 ml-4 list-disc">
               <li>Instagram publishing not implemented (Meta app not started yet).</li>
-              <li>TikTok view counts need a reconnect — disconnect + reconnect in Settings once.</li>
+              <li>TikTok view counts are unavailable until the optional video.list scope is approved.</li>
               <li>Waveform thumbnails on clip rows are decorative placeholders (not real audio shape yet).</li>
               <li>AI Insights on Dashboard are generic counts — pattern detection needs more data first.</li>
               <li>Not code-signed yet — Windows SmartScreen will show "Unknown publisher". Click <b>More info → Run anyway</b> once.</li>
@@ -159,10 +159,10 @@ export default function HelpGuide() {
             Lower ship rates usually mean sensitivity is too high.
           </FaqItem>
           <FaqItem q="How do I get real view counts on the Analytics page?">
-            Open Analytics and click <b>Refresh stats</b>. The app polls YouTube Data API
-            (uses your existing scope — no re-auth) and TikTok Display API (needs the
-            <code className="text-violet-300"> video.list</code> scope — disconnect
-            and reconnect TikTok once in Settings to grant it). Instagram isn't wired up yet.
+            Open Analytics and click <b>Refresh stats</b>. The app currently polls the
+            YouTube Data API using your existing scope. TikTok view counts will become
+            available after the optional <code className="text-violet-300">video.list</code>
+            scope is approved. Instagram isn't wired up yet.
           </FaqItem>
           <FaqItem q='What is "Auto-ship high-confidence"?'>
             When enabled in Settings → Detection, any clip scoring 90%+ confidence

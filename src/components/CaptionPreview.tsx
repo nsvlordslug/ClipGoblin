@@ -73,7 +73,7 @@ function groupByEmphasis(
 
 export default function CaptionPreview({
   segments, emphasisTokens = [], captionStyle: cs, currentTime,
-  trimStart, trimEnd, position, yPercent, emphasisEnabled, outputWidth: _ow,
+  trimStart, trimEnd, position, yPercent, emphasisEnabled,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [frameWidth, setFrameWidth] = useState(270)
@@ -117,10 +117,6 @@ export default function CaptionPreview({
   // Safe margins: left/right padding inside the frame
   const safeMarginPx = Math.round(frameWidth * 0.05) // 5% each side
   const maxTextWidth = frameWidth - safeMarginPx * 2
-  // Account for background padding in available text width
-  const bgPad = cs.bgPadding > 0 ? cs.bgPadding * scale * 2 : 0
-  const textAreaWidth = Math.max(50, maxTextWidth - bgPad)
-
   // Bottom safe zone: at least 6% from bottom edge
   const bottomSafe = Math.max(Math.round(frameHeight * 0.06), 10)
 
