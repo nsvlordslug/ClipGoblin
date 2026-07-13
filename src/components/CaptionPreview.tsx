@@ -2,12 +2,15 @@ import React, { useCallback, useMemo, useRef, useState, useEffect } from 'react'
 import type { CaptionToken } from '../lib/captionEmphasis'
 import { EMPHASIS_STYLES } from '../lib/captionEmphasis'
 import type { CaptionStyle } from '../lib/editTypes'
+import { clampCaptionFontScale, fitCaptionFontSize } from '../lib/captionSizing'
+import { findActiveSegment } from '../lib/subtitleUtils'
 import type { SubtitleSegment } from '../lib/subtitleUtils'
 
 interface Props {
   segments: SubtitleSegment[]
   emphasisTokens?: CaptionToken[]
   captionStyle: CaptionStyle
+  fontScale?: number
   currentTime: number
   trimStart?: number
   trimEnd?: number
@@ -73,7 +76,7 @@ function groupByEmphasis(
 
 export default function CaptionPreview({
   segments, emphasisTokens = [], captionStyle: cs, currentTime,
-  trimStart, trimEnd, position, yPercent, emphasisEnabled,
+  trimStart, trimEnd, position, yPercent, emphasisEnabled, fontScale = 1,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [frameWidth, setFrameWidth] = useState(270)
@@ -89,30 +92,48 @@ export default function CaptionPreview({
     return () => ro.disconnect()
   }, [])
 
-  const activeSegment = useMemo(() => {
-    for (const s of segments) {
-      if (trimStart != null && trimEnd != null) {
-        if (s.endTime <= trimStart || s.startTime >= trimEnd) continue
-      }
-      if (currentTime >= s.startTime - 0.05 && currentTime <= s.endTime + 0.05) return s
-    }
-    return null
-  }, [segments, currentTime, trimStart, trimEnd])
+  const visibleSegments = useMemo(
+    () => trimStart != null && trimEnd != null
+      ? segments.filter(s => s.endTime > trimStart && s.startTime < trimEnd)
+      : segments,
+    [segments, trimStart, trimEnd],
+  )
+  const activeSegment = useMemo(
+    () => findActiveSegment(visibleSegments, currentTime),
+    [visibleSegments, currentTime],
+  )
 
   // ── Layout computation ──
   const ar = frameWidth / Math.max(frameHeight, 1)
   const isVertical = ar < 0.7
   const isLandscape = ar > 1.5
+  const isCardboard = cs.presentation === 'cardboard'
+  const activeSegmentIndex = activeSegment ? visibleSegments.indexOf(activeSegment) : -1
+  const previousSegmentText = activeSegmentIndex > 0
+    ? visibleSegments[activeSegmentIndex - 1].text.trim()
+    : ''
+  const cardboardLeadWord = isCardboard && (
+    activeSegmentIndex === 0 || /[.!?]["')\]]?$/.test(previousSegmentText)
+  )
+  const baseFontColor = cardboardLeadWord ? '#15100C' : cs.fontColor
 
   // Scale: frame width relative to 1080 design, with format boost
   const baseScale = frameWidth / DESIGN_WIDTH
   const boost = isVertical ? 1.15 : isLandscape ? 0.85 : 1.0
   const scale = Math.max(0.15, Math.min(0.55, baseScale * boost))
 
-  // Font size: cap to prevent overflow on narrow frames
-  const maxFontPx = frameWidth * (isVertical ? 0.085 : 0.065) // max ~8.5% of frame width for vertical
-  const rawFontSize = cs.fontSize * scale
-  const baseFontSize = Math.min(rawFontSize, maxFontPx)
+  // Font size: respect the user's bounded scale, then shrink only when a word
+  // would escape the platform-safe horizontal area.
+  const safeFontScale = clampCaptionFontScale(fontScale)
+  const rawFontSize = cs.fontSize * scale * safeFontScale
+  const baseFontSize = fitCaptionFontSize({
+    requestedPx: rawFontSize,
+    frameWidth,
+    isVertical,
+    text: activeSegment?.text || '',
+    characterWidthFactor: cs.characterWidthFactor,
+    safeWidthRatio: cs.safeWidthRatio,
+  })
 
   // Safe margins: left/right padding inside the frame
   const safeMarginPx = Math.round(frameWidth * 0.05) // 5% each side
@@ -146,7 +167,7 @@ export default function CaptionPreview({
 
   // Shadow scaling
   const scaledShadow = cs.shadow === 'none' ? 'none'
-    : cs.shadow.replace(/(\d+)px/g, (_, n) => `${Math.max(1, Math.round(parseInt(n) * Math.min(scale, 0.4)))}px`)
+    : cs.shadow.replace(/(\d+)px/g, (_, n) => `${Math.max(1, Math.round(parseInt(n) * Math.min(scale * safeFontScale, 0.5)))}px`)
 
   const emphasisStyle = EMPHASIS_STYLES[cs.id] || EMPHASIS_STYLES.clean
 
@@ -183,25 +204,48 @@ export default function CaptionPreview({
 
   if (!activeSegment) return null
 
+  const captionFrameStyle: React.CSSProperties = isCardboard ? {
+    width: `${Math.round(maxTextWidth * 0.9)}px`,
+    maxWidth: `${maxTextWidth}px`,
+    maxHeight: `${Math.round(frameHeight * 0.35)}px`,
+    minHeight: `${Math.max(30, Math.round(baseFontSize * 1.8))}px`,
+    overflow: 'hidden',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    textAlign: 'center',
+    backgroundColor: cs.bgColor,
+    backgroundImage: [
+      'repeating-linear-gradient(0deg, rgba(82,45,20,0.11) 0 1px, transparent 1px 4px)',
+      'repeating-linear-gradient(90deg, rgba(255,255,255,0.045) 0 7px, rgba(83,45,20,0.045) 7px 8px)',
+      'linear-gradient(90deg, rgba(74,38,15,0.14), transparent 13%, transparent 87%, rgba(74,38,15,0.14))',
+    ].join(', '),
+    padding: `${Math.max(5, Math.round(cs.bgPadding * scale * 0.55))}px ${Math.max(10, Math.round(cs.bgPadding * scale))}px`,
+    clipPath: 'polygon(2% 4%, 8% 1%, 15% 3%, 24% 0%, 34% 2%, 44% 1%, 55% 3%, 66% 0%, 77% 2%, 87% 1%, 98% 4%, 100% 17%, 98% 32%, 100% 50%, 98% 69%, 100% 84%, 97% 97%, 87% 99%, 77% 97%, 66% 100%, 55% 98%, 44% 100%, 34% 97%, 23% 99%, 13% 97%, 2% 100%, 0% 83%, 2% 68%, 0% 50%, 2% 31%, 0% 16%)',
+    boxShadow: 'inset 0 0 0 1px rgba(75,39,17,0.28), inset 0 0 18px rgba(80,43,20,0.22)',
+    filter: 'drop-shadow(0 3px 3px rgba(0,0,0,0.55))',
+    boxSizing: 'border-box',
+  } : {
+    maxWidth: `${maxTextWidth}px`,
+    maxHeight: `${Math.round(frameHeight * 0.35)}px`,
+    width: `${maxTextWidth}px`,
+    overflow: 'hidden',
+    textAlign: 'center',
+    background: cs.bgColor || undefined,
+    padding: cs.bgPadding > 0
+      ? `${Math.round(cs.bgPadding * scale * 0.5)}px ${Math.round(cs.bgPadding * scale * 0.8)}px`
+      : `0 ${safeMarginPx * 0.3}px`,
+    borderRadius: cs.bgRadius > 0 ? `${Math.round(cs.bgRadius * scale)}px` : undefined,
+    boxSizing: 'border-box',
+  }
+
   return (
     <div ref={containerRef}
       className="absolute left-0 right-0 flex justify-center pointer-events-none z-10"
       style={{ top: posTop, bottom: posBottom, transform }}>
 
       {/* Bounded subtitle container — all text stays inside this box */}
-      <div style={{
-        maxWidth: `${maxTextWidth}px`,
-        maxHeight: `${Math.round(frameHeight * 0.35)}px`, // subtitle block can't exceed 35% of frame height
-        width: `${maxTextWidth}px`,
-        overflow: 'hidden',
-        textAlign: 'center',
-        background: cs.bgColor || undefined,
-        padding: cs.bgPadding > 0
-          ? `${Math.round(cs.bgPadding * scale * 0.5)}px ${Math.round(cs.bgPadding * scale * 0.8)}px`
-          : `0 ${safeMarginPx * 0.3}px`,
-        borderRadius: cs.bgRadius > 0 ? `${Math.round(cs.bgRadius * scale)}px` : undefined,
-        boxSizing: 'border-box',
-      }}>
+      <div style={captionFrameStyle}>
         {/* Text block with wrapping */}
         <div style={{
           width: '100%',
@@ -216,17 +260,28 @@ export default function CaptionPreview({
           lineHeight: cs.lineHeight,
           textShadow: scaledShadow,
           textTransform: cs.uppercase ? 'uppercase' : 'none',
-          color: cs.fontColor,
-          wordBreak: 'keep-all',
-          overflowWrap: 'normal',
+          color: baseFontColor,
+          wordBreak: 'break-word',
+          overflowWrap: 'anywhere',
           whiteSpace: 'normal',
+          WebkitTextStroke: cs.strokeWidth > 0 && cs.strokeColor
+            ? `${Math.max(0.5, cs.strokeWidth * scale * safeFontScale)}px ${cs.strokeColor}`
+            : undefined,
+          paintOrder: 'stroke fill',
           WebkitFontSmoothing: 'antialiased',
         } as React.CSSProperties}>
           {/* ── Layer 3: render — one code path, style config is data only ── */}
           {groups.map((group, gi) => {
             const isEmph = group.emphasized
             const fontSize = isEmph
-              ? Math.min(baseFontSize * emphasisStyle.scale, maxFontPx * 1.2)
+              ? fitCaptionFontSize({
+                  requestedPx: rawFontSize * emphasisStyle.scale,
+                  frameWidth,
+                  isVertical,
+                  text: group.tokens.join(' '),
+                  characterWidthFactor: cs.characterWidthFactor,
+                  safeWidthRatio: cs.safeWidthRatio,
+                })
               : baseFontSize
             return (
               <React.Fragment key={gi}>
@@ -240,8 +295,8 @@ export default function CaptionPreview({
                       <React.Fragment key={ti}>
                         <span style={{
                           fontSize: `${fontSize}px`,
-                          fontWeight: isEmph ? 900 : cs.fontWeight,
-                          color: isEmph ? emphasisStyle.color : cs.fontColor,
+                          fontWeight: isEmph && emphasisStyle.bold && cs.fontWeight >= 700 ? 900 : cs.fontWeight,
+                          color: isEmph ? emphasisStyle.color : baseFontColor,
                           textTransform: (isEmph && emphasisStyle.uppercase) || cs.uppercase ? 'uppercase' : 'none',
                           transition: 'font-size 0.12s ease, color 0.12s ease',
                           display: 'inline',

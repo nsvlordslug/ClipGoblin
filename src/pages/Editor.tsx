@@ -16,6 +16,7 @@ import CaptionPreview from '../components/CaptionPreview'
 import type { TimelineMarker } from '../components/TrimTimeline'
 import { analyzeEmphasis, getEmphasisSummary } from '../lib/captionEmphasis'
 import type { CaptionToken } from '../lib/captionEmphasis'
+import { clampCaptionFontScale, fitCaptionFontSize } from '../lib/captionSizing'
 import ThumbnailSelector from '../components/ThumbnailSelector'
 import LayoutPicker from '../components/LayoutPicker'
 import CamRegionRow from '../components/CamRegionRow'
@@ -26,7 +27,7 @@ import FacecamEditor, { DraggablePipOverlay, DraggableSplitDivider } from '../co
 import { DEFAULT_FACECAM, computeSubtitleCollision } from '../lib/facecam'
 import type { FacecamSettings } from '../lib/facecam'
 import SubtitleEditor from '../components/SubtitleEditor'
-import { parseSrt, serializeSrt, findActiveSegment } from '../lib/subtitleUtils'
+import { parseSrt, serializeSrt, findActiveSegment, splitSubtitleSegmentsByWord } from '../lib/subtitleUtils'
 import type { SubtitleSegment } from '../lib/subtitleUtils'
 import { usePlaybackStore } from '../stores/playbackStore'
 import { usePlatformStore, PLATFORM_INFO } from '../stores/platformStore'
@@ -729,6 +730,7 @@ export default function Editor() {
   const [captionsPosition, setCaptionsPosition] = useState('bottom')
   const [captionYOffset, setCaptionYOffset] = useState(0) // % offset from preset position (-20 to +20)
   const [captionStyleId, setCaptionStyleId] = useState('clean')
+  const [captionFontScale, setCaptionFontScale] = useState(1)
   const [aiEmphasisEnabled, setAiEmphasisEnabled] = useState(true)
   const [generatingCaptions, setGeneratingCaptions] = useState(false)
   const [captionError, setCaptionError] = useState('')
@@ -773,6 +775,7 @@ export default function Editor() {
   const handleLoadTemplate = useCallback((tmpl: ClipTemplate) => {
     setCaptionStyleId(tmpl.captionStyleId)
     setCaptionsPosition(tmpl.captionPosition)
+    setCaptionFontScale(clampCaptionFontScale(tmpl.captionFontScale ?? 1))
     setExportPresetId(tmpl.exportPresetId)
     setPublishMeta(prev => ({
       ...prev,
@@ -787,6 +790,7 @@ export default function Editor() {
     templateStore.create(name, {
       captionStyleId,
       captionPosition: captionsPosition as 'top' | 'center' | 'bottom',
+      captionFontScale,
       captionTone: 'punchy', // default — user can change later
       hashtags: publishMeta.hashtags,
       exportPresetId,
@@ -795,7 +799,7 @@ export default function Editor() {
     setTemplateSaveOpen(false)
     setTemplateSaved(true)
     setTimeout(() => setTemplateSaved(false), 2000)
-  }, [templateSaveName, captionStyleId, captionsPosition, publishMeta.hashtags, exportPresetId, templateStore])
+  }, [templateSaveName, captionStyleId, captionsPosition, captionFontScale, publishMeta.hashtags, exportPresetId, templateStore])
 
   // ── Undo / Redo history ──
   const history = useEditorHistory()
@@ -804,11 +808,11 @@ export default function Editor() {
 
   const takeSnapshot = useCallback((): EditorSnapshot => ({
     title, startSeconds, endSeconds, captionsText,
-    captionsPosition, captionStyleId, captionYOffset,
+    captionsPosition, captionStyleId, captionFontScale, captionYOffset,
     publishTitle: publishMeta.title,
     publishDescription: publishMeta.description,
     publishHashtags: publishMeta.hashtags,
-  }), [title, startSeconds, endSeconds, captionsText, captionsPosition, captionStyleId, captionYOffset, publishMeta])
+  }), [title, startSeconds, endSeconds, captionsText, captionsPosition, captionStyleId, captionFontScale, captionYOffset, publishMeta])
 
   const applySnapshot = useCallback((snap: EditorSnapshot) => {
     historyRestoringRef.current = true
@@ -818,6 +822,7 @@ export default function Editor() {
     setCaptionsText(snap.captionsText)
     setCaptionsPosition(snap.captionsPosition)
     setCaptionStyleId(snap.captionStyleId)
+    setCaptionFontScale(clampCaptionFontScale(snap.captionFontScale))
     setCaptionYOffset(snap.captionYOffset)
     setPublishMeta(prev => ({
       ...prev,
@@ -849,7 +854,7 @@ export default function Editor() {
       }
     }, 400)
     return () => clearTimeout(timer)
-  }, [title, startSeconds, endSeconds, captionsText, captionsPosition, captionStyleId, captionYOffset, publishMeta, history, takeSnapshot])
+  }, [title, startSeconds, endSeconds, captionsText, captionsPosition, captionStyleId, captionFontScale, captionYOffset, publishMeta, history, takeSnapshot])
 
   // Keyboard shortcuts: Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z
   useEffect(() => {
@@ -902,7 +907,7 @@ export default function Editor() {
   useEffect(() => {
     if (captionsText !== captionsTextRef.current) {
       captionsTextRef.current = captionsText
-      setSubtitleSegments(parseSrt(captionsText))
+      setSubtitleSegments(splitSubtitleSegmentsByWord(parseSrt(captionsText)))
     }
   }, [captionsText])
 
@@ -1053,6 +1058,7 @@ export default function Editor() {
         setCaptionsText(c.captions_text || '')
         setCaptionsPosition(c.captions_position || 'bottom')
         setCaptionStyleId(c.caption_style || 'clean')
+        setCaptionFontScale(clampCaptionFontScale(c.caption_font_scale ?? 1))
         const savedLayout = LAYOUT_OPTIONS.some((layout) => layout.id === c.facecam_layout)
           ? c.facecam_layout as LayoutMode
           : 'none'
@@ -1089,6 +1095,7 @@ export default function Editor() {
           captionsText: c.captions_text || '',
           captionsPosition: c.captions_position || 'bottom',
           captionStyleId: c.caption_style || 'clean',
+          captionFontScale: clampCaptionFontScale(c.caption_font_scale ?? 1),
           captionYOffset: 0,
           publishTitle: c.title,
           publishDescription: '',
@@ -1149,6 +1156,7 @@ export default function Editor() {
         captionsText: captionsText || null,
         captionsPosition,
         captionStyle: captionStyleId,
+        captionFontScale,
         facecamLayout,
         game: game || null,
       })
@@ -1179,7 +1187,7 @@ export default function Editor() {
       aspectRatio: targetAspectRatio,
       captionsEnabled: captionsEnabled ? 1 : 0,
       captionsText: captionsText || null,
-      captionsPosition, captionStyle: captionStyleId, facecamLayout,
+      captionsPosition, captionStyle: captionStyleId, captionFontScale, facecamLayout,
       game: game || null,
     })
 
@@ -1296,19 +1304,46 @@ export default function Editor() {
   const effectiveFrameW = frameWidth > 0 ? frameWidth : 442 // 442 is typical landscape width in the panel
   const formatMultiplier = aspectRatio === '9:16' ? 1.15 : aspectRatio === '16:9' ? 0.85 : 1.0
   const plainS = (effectiveFrameW / 1080) * formatMultiplier
+  const plainFontSize = fitCaptionFontSize({
+    requestedPx: captionStyle.fontSize * plainS * captionFontScale,
+    frameWidth: effectiveFrameW,
+    isVertical: aspectRatio === '9:16',
+    text: captionsText,
+    characterWidthFactor: captionStyle.characterWidthFactor,
+    safeWidthRatio: Math.min(captionStyle.safeWidthRatio ?? 0.84, 0.78),
+  })
+  const plainShadowScale = plainS * captionFontScale
   const captionPreviewStyle: React.CSSProperties = {
     fontFamily: captionStyle.fontFamily,
-    fontSize: `${captionStyle.fontSize * plainS}px`,
+    fontSize: `${plainFontSize}px`,
     fontWeight: captionStyle.fontWeight,
     color: captionStyle.fontColor,
     textTransform: captionStyle.uppercase ? 'uppercase' : 'none',
     letterSpacing: `${captionStyle.letterSpacing}em`,
     lineHeight: captionStyle.lineHeight,
     textShadow: captionStyle.shadow === 'none' ? 'none'
-      : captionStyle.shadow.replace(/(\d+)px/g, (_, n) => `${Math.max(1, Math.round(parseInt(n) * plainS))}px`),
-    backgroundColor: captionStyle.bgColor || undefined,
-    padding: captionStyle.bgPadding > 0 ? `${captionStyle.bgPadding * plainS * 0.6}px ${captionStyle.bgPadding * plainS}px` : undefined,
-    borderRadius: captionStyle.bgRadius > 0 ? `${captionStyle.bgRadius * plainS}px` : undefined,
+      : captionStyle.shadow.replace(/(\d+)px/g, (_, n) => `${Math.max(1, Math.round(parseInt(n) * plainShadowScale))}px`),
+    WebkitTextStroke: captionStyle.strokeWidth > 0 && captionStyle.strokeColor
+      ? `${Math.max(0.5, captionStyle.strokeWidth * plainShadowScale)}px ${captionStyle.strokeColor}`
+      : undefined,
+    paintOrder: 'stroke fill',
+    ...(captionStyle.presentation === 'cardboard' ? {
+      width: '76%',
+      minHeight: `${Math.max(30, plainFontSize * 1.8)}px`,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: captionStyle.bgColor,
+      backgroundImage: 'repeating-linear-gradient(0deg, rgba(82,45,20,0.11) 0 1px, transparent 1px 4px), repeating-linear-gradient(90deg, rgba(255,255,255,0.045) 0 7px, rgba(83,45,20,0.045) 7px 8px), linear-gradient(90deg, rgba(74,38,15,0.14), transparent 13%, transparent 87%, rgba(74,38,15,0.14))',
+      padding: `${Math.max(5, captionStyle.bgPadding * plainS * 0.55)}px ${Math.max(10, captionStyle.bgPadding * plainS)}px`,
+      clipPath: 'polygon(2% 4%, 8% 1%, 15% 3%, 24% 0%, 34% 2%, 44% 1%, 55% 3%, 66% 0%, 77% 2%, 87% 1%, 98% 4%, 100% 17%, 98% 32%, 100% 50%, 98% 69%, 100% 84%, 97% 97%, 87% 99%, 77% 97%, 66% 100%, 55% 98%, 44% 100%, 34% 97%, 23% 99%, 13% 97%, 2% 100%, 0% 83%, 2% 68%, 0% 50%, 2% 31%, 0% 16%)',
+      boxShadow: 'inset 0 0 0 1px rgba(75,39,17,0.28), inset 0 0 18px rgba(80,43,20,0.22)',
+      filter: 'drop-shadow(0 3px 3px rgba(0,0,0,0.55))',
+    } : {
+      backgroundColor: captionStyle.bgColor || undefined,
+      padding: captionStyle.bgPadding > 0 ? `${captionStyle.bgPadding * plainS * 0.6}px ${captionStyle.bgPadding * plainS}px` : undefined,
+      borderRadius: captionStyle.bgRadius > 0 ? `${captionStyle.bgRadius * plainS}px` : undefined,
+    }),
   }
 
   if (!clip) {
@@ -1486,6 +1521,7 @@ export default function Editor() {
                           segments={subtitleSegments}
                           emphasisTokens={captionTokens}
                           captionStyle={captionStyle}
+                          fontScale={captionFontScale}
                           currentTime={srtTime}
                           trimStart={srtTrimStart}
                           trimEnd={srtTrimEnd}
@@ -1499,8 +1535,8 @@ export default function Editor() {
                           style={captionPositionStyle}>
                           <span className="text-center max-w-[80%]" style={{
                             ...captionPreviewStyle,
-                            wordBreak: 'normal',
-                            overflowWrap: 'break-word',
+                            wordBreak: 'break-word',
+                            overflowWrap: 'anywhere',
                             whiteSpace: 'normal',
                             display: 'inline-block',
                           }}>
@@ -2076,11 +2112,12 @@ export default function Editor() {
                       // Per-style button backgrounds and border accents
                       const styleHints: Record<string, { bg: string; border: string; textShadow: string }> = {
                         clean:       { bg: 'bg-surface-900', border: 'border-slate-500/50', textShadow: '0 1px 4px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,0.8)' },
-                        'bold-white': { bg: 'bg-surface-900', border: 'border-slate-400/60', textShadow: '2px 2px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000' },
-                        boxed:       { bg: 'bg-surface-900', border: 'border-slate-500/40', textShadow: 'none' },
+                        'bold-white': { bg: 'bg-surface-900', border: 'border-amber-700/50', textShadow: 'none' },
+                        boxed:       { bg: 'bg-surface-900', border: 'border-pink-400/50', textShadow: '1px 1px 0 #f05bd8, 2px 2px 0 #6d28d9' },
                         neon:        { bg: 'bg-surface-900', border: 'border-emerald-500/40', textShadow: '0 0 6px #00ff8880, 0 0 2px #000' },
-                        minimal:     { bg: 'bg-surface-900', border: 'border-slate-600/40', textShadow: '0 1px 3px rgba(0,0,0,0.6)' },
-                        fire:        { bg: 'bg-surface-900', border: 'border-orange-500/40', textShadow: '0 0 6px #FF450088, 0 0 2px #000, 1px 1px 0 #000' },
+                        minimal:     { bg: 'bg-surface-900', border: 'border-red-500/50', textShadow: '0 1px 0 #7a0000, 0 2px 3px #000' },
+                        fire:        { bg: 'bg-surface-900', border: 'border-yellow-400/40', textShadow: '1px 0 0 #000, -1px 0 0 #000, 0 1px 0 #000, 0 -1px 0 #000' },
+                        'comic-pop': { bg: 'bg-surface-900', border: 'border-cyan-400/50', textShadow: '1px 1px 0 #f05bd8, 2px 2px 0 #55206f' },
                       }
                       const hint = styleHints[s.id] || styleHints.clean
                       return (
@@ -2091,21 +2128,21 @@ export default function Editor() {
                                 ? 'ring-1 ring-violet-500/60 border-violet-500/50 bg-violet-950/40'
                                 : `${hint.bg} ${hint.border} hover:bg-surface-800`
                             }`}
-                            style={s.id === 'boxed' ? {
-                              background: isActive ? undefined : 'linear-gradient(135deg, rgba(30,30,50,0.9) 0%, rgba(15,15,30,0.95) 100%)',
+                            style={s.presentation === 'cardboard' ? {
+                              backgroundColor: isActive ? undefined : '#B97E43',
+                              backgroundImage: isActive ? undefined : 'repeating-linear-gradient(0deg, rgba(82,45,20,0.12) 0 1px, transparent 1px 4px), repeating-linear-gradient(90deg, rgba(255,255,255,0.05) 0 7px, rgba(83,45,20,0.05) 7px 8px)',
                             } : undefined}>
-                            {/* Boxed style: show mini box behind text */}
-                            {s.id === 'boxed' ? (
+                            {s.presentation === 'cardboard' ? (
                               <span style={{
                                 fontFamily: s.fontFamily,
                                 fontWeight: s.fontWeight,
-                                color: s.fontColor,
-                                fontSize: '11px',
-                                background: 'rgba(10,10,20,0.8)',
-                                padding: '2px 6px',
-                                borderRadius: '4px',
-                                textShadow: hint.textShadow,
-                              }}>{s.name}</span>
+                                fontSize: '10px',
+                                textTransform: 'uppercase',
+                                letterSpacing: '0.01em',
+                              }}>
+                                <span style={{ color: '#15100C' }}>Card</span>
+                                <span style={{ color: s.fontColor }}>board</span>
+                              </span>
                             ) : (
                               <span style={{
                                 fontFamily: s.fontFamily,
@@ -2121,6 +2158,22 @@ export default function Editor() {
                         </Tooltip>
                       )
                     })}
+                  </div>
+                  <div className="mt-3 flex items-center gap-2">
+                    <span className="text-[9px] text-slate-500 w-12 shrink-0">Size</span>
+                    <input
+                      type="range"
+                      min={75}
+                      max={125}
+                      step={5}
+                      value={Math.round(captionFontScale * 100)}
+                      onChange={event => setCaptionFontScale(clampCaptionFontScale(Number(event.target.value) / 100))}
+                      aria-label="Subtitle font size"
+                      className="flex-1 h-1 accent-violet-500 cursor-pointer"
+                    />
+                    <span className="text-[9px] font-mono text-slate-500 w-9 text-right">
+                      {Math.round(captionFontScale * 100)}%
+                    </span>
                   </div>
                 </div>
                 {/* AI Emphasis */}

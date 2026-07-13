@@ -3,6 +3,8 @@ import { Hash, X, Sparkles, RefreshCw } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { PLATFORM_INFO } from '../stores/platformStore'
 import { useAiStore } from '../stores/aiStore'
+import { getCaptionFallbackNotice } from '../lib/aiFallbackNotice'
+import type { CaptionFallbackReason } from '../lib/aiFallbackNotice'
 import { generateHashtagSuggestions, generateStandaloneTitle, generateStandaloneCaption, TONE_LABELS } from '../lib/publishCopyGenerator'
 import type { ClipContext, GeneratedCopy, CopyTone } from '../lib/publishCopyGenerator'
 import Tooltip from './Tooltip'
@@ -81,7 +83,7 @@ export default function PublishComposer({ platform, metadata, onChange, clipCont
   const [lastApplied, setLastApplied] = useState('')
   const [generating, setGenerating] = useState(false)
   const [genCount, setGenCount] = useState(0)
-  const [usedFallback, setUsedFallback] = useState(false)
+  const [fallbackNotice, setFallbackNotice] = useState<string | null>(null)
   const [loadingTone, setLoadingTone] = useState<string | null>(null)
   const captionHistoryRef = useRef<{ clipId?: string; captions: string[] }>({
     clipId,
@@ -90,6 +92,16 @@ export default function PublishComposer({ platform, metadata, onChange, clipCont
   const aiStore = useAiStore()
   const fields = PLATFORM_FIELDS[platform] || PLATFORM_FIELDS.tiktok
   const info = PLATFORM_INFO[platform] || { name: platform, color: '#888' }
+
+  const showFallbackNotice = (reason: CaptionFallbackReason) => {
+    const { provider, useForCaptions } = aiStore.settings
+    setFallbackNotice(getCaptionFallbackNotice({
+      provider,
+      useForCaptions,
+      hasActiveKey: Boolean(aiStore.activeKey()),
+      reason,
+    }))
+  }
 
   // Defensive: hashtags may be undefined if backend omits the field after AI generation
   const hashtags = metadata.hashtags ?? []
@@ -209,7 +221,7 @@ export default function PublishComposer({ platform, metadata, onChange, clipCont
                   // When BYOK is configured, skip free templates entirely — only use AI.
                   // Free templates are ONLY shown when no API key is set.
                   let allVariants: GeneratedCopy[] = []
-                  setUsedFallback(false)
+                  setFallbackNotice(null)
 
                   if (clipId) {
                     try {
@@ -242,7 +254,7 @@ export default function PublishComposer({ platform, metadata, onChange, clipCont
                           'direct_quote', 'blame', 'internal_thought', 'observation',
                         ]
                         if (backendVariants.length === 0) {
-                          setUsedFallback(true)
+                          showFallbackNotice('no-new-caption')
                           allVariants = allTones.map(tone => ({
                             title: freshTitle,
                             description: generateStandaloneCaption(freshCtx, tone, nextCount, metadata.description, previousDescriptions),
@@ -260,7 +272,7 @@ export default function PublishComposer({ platform, metadata, onChange, clipCont
                         }
                       } else if (isByok && bc.source === 'free') {
                         // BYOK configured but AI failed/unavailable — fall back to templates
-                        setUsedFallback(true)
+                        showFallbackNotice('provider-returned-free')
                         allVariants = backendVariants
                       } else {
                         // Free mode: combine frontend templates + backend free captions
@@ -278,7 +290,7 @@ export default function PublishComposer({ platform, metadata, onChange, clipCont
                       }
                     } catch {
                       // Backend call failed entirely — fall back to frontend templates
-                      if (isByok) setUsedFallback(true)
+                      if (isByok) showFallbackNotice('request-failed')
                       const frontendTones: CopyTone[] = [
                         'punchy', 'clean', 'funny', 'hype', 'search', 'minimal',
                         'direct_quote', 'blame', 'internal_thought', 'observation',
@@ -384,7 +396,13 @@ export default function PublishComposer({ platform, metadata, onChange, clipCont
                                 metadata.description,
                                 previousDescriptions,
                               )
-                              if (!generated) setUsedFallback(true)
+                              if (bc.source === 'free') {
+                                showFallbackNotice('provider-returned-free')
+                              } else if (!generated) {
+                                showFallbackNotice('no-new-caption')
+                              } else {
+                                setFallbackNotice(null)
+                              }
                               // Update this variant in-place
                               setVariants(prev => prev && prev.map(pv =>
                                 pv.tone === v.tone ? { ...pv, description: aiText } : pv
@@ -421,9 +439,9 @@ export default function PublishComposer({ platform, metadata, onChange, clipCont
           )}
 
           {/* Fallback notice */}
-          {usedFallback && (
+          {fallbackNotice && (
             <p className="text-[10px] text-amber-400/80 mt-1">
-              Provider unavailable, used Free mode instead.
+              {fallbackNotice}
             </p>
           )}
         </div>

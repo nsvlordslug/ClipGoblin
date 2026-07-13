@@ -11,6 +11,8 @@ export interface ClipTemplate {
   builtIn?: boolean
   captionStyleId: string
   captionPosition: 'top' | 'center' | 'bottom'
+  /** Optional for backward compatibility with templates saved before v1.5.10. */
+  captionFontScale?: number
   /** Preferred caption tone for generation */
   captionTone: CopyTone
   /** Default hashtags applied when template is loaded */
@@ -58,12 +60,12 @@ const BUILTIN_TEMPLATES: ClipTemplate[] = [
   },
   {
     id: '__builtin_shorts_fire',
-    name: 'Shorts Fire',
+    name: 'Shorts Highlight',
     builtIn: true,
     captionStyleId: 'fire',
     captionPosition: 'bottom',
     captionTone: 'punchy',
-    hashtags: ['shorts', 'gaming', 'viral', 'fire'],
+    hashtags: ['shorts', 'gaming', 'viral', 'clips'],
     exportPresetId: 'shorts',
     createdAt: '2025-01-01T00:00:00Z',
   },

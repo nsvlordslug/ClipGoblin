@@ -188,18 +188,80 @@ export default function ClipPlayer({
   useEffect(() => {
     const video = videoRef.current
     if (!video) return
-    const onTime = () => {
-      setCurrentTime(video.currentTime)
-      onTimeUpdateRef.current?.(video.currentTime)
-      if (video.currentTime >= effClipEnd) {
+    let videoFrameId: number | null = null
+    let animationFrameId: number | null = null
+    let disposed = false
+    let lastReportedTime = Number.NEGATIVE_INFINITY
+
+    const reportTime = (time: number, force = false) => {
+      if (!force && Math.abs(time - lastReportedTime) < 1 / 30) return
+      lastReportedTime = time
+      setCurrentTime(time)
+      onTimeUpdateRef.current?.(time)
+    }
+
+    const syncPlaybackTime = (force = false) => {
+      const time = video.currentTime
+      if (time >= effClipEnd) {
         video.pause()
         video.currentTime = effClipStart
-        setCurrentTime(effClipStart)
+        reportTime(effClipStart, true)
         setPlayingState(false)
+        return
+      }
+      reportTime(time, force)
+    }
+
+    const cancelScheduledFrame = () => {
+      if (videoFrameId != null && typeof video.cancelVideoFrameCallback === 'function') {
+        video.cancelVideoFrameCallback(videoFrameId)
+      }
+      if (animationFrameId != null) cancelAnimationFrame(animationFrameId)
+      videoFrameId = null
+      animationFrameId = null
+    }
+
+    const scheduleFrame = () => {
+      if (disposed || video.paused || video.ended || videoFrameId != null || animationFrameId != null) return
+      if (typeof video.requestVideoFrameCallback === 'function') {
+        videoFrameId = video.requestVideoFrameCallback(() => {
+          videoFrameId = null
+          syncPlaybackTime()
+          scheduleFrame()
+        })
+      } else {
+        animationFrameId = requestAnimationFrame(() => {
+          animationFrameId = null
+          syncPlaybackTime()
+          scheduleFrame()
+        })
       }
     }
+
+    const onPlay = () => scheduleFrame()
+    const onPause = () => {
+      cancelScheduledFrame()
+      syncPlaybackTime(true)
+    }
+    const onTime = () => syncPlaybackTime()
+    const onSeek = () => syncPlaybackTime(true)
+
+    video.addEventListener('play', onPlay)
+    video.addEventListener('pause', onPause)
     video.addEventListener('timeupdate', onTime)
-    return () => video.removeEventListener('timeupdate', onTime)
+    video.addEventListener('seeking', onSeek)
+    video.addEventListener('seeked', onSeek)
+    if (!video.paused) scheduleFrame()
+
+    return () => {
+      disposed = true
+      cancelScheduledFrame()
+      video.removeEventListener('play', onPlay)
+      video.removeEventListener('pause', onPause)
+      video.removeEventListener('timeupdate', onTime)
+      video.removeEventListener('seeking', onSeek)
+      video.removeEventListener('seeked', onSeek)
+    }
   }, [effClipStart, effClipEnd, setPlayingState])
 
   // ── Expose seek function to parent via ref ──

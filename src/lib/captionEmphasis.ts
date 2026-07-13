@@ -25,11 +25,12 @@ export interface EmphasisStyle {
 
 export const EMPHASIS_STYLES: Record<string, EmphasisStyle> = {
   clean:       { color: '#FFD700', scale: 1.25, bold: true, uppercase: false },
-  'bold-white': { color: '#FF4444', scale: 1.3,  bold: true, uppercase: true },
-  boxed:       { color: '#00FF88', scale: 1.2,  bold: true, uppercase: false },
+  'bold-white': { color: '#15100C', scale: 1.12, bold: true, uppercase: true },
+  boxed:       { color: '#FF8FD8', scale: 1.12, bold: true, uppercase: true, shadow: '0 2px 0 #FFFFFF, 2px 4px 0 #A855F7, -2px 4px 0 #6D28D9' },
   neon:        { color: '#FFFFFF', scale: 1.3,  bold: true, uppercase: true },
-  minimal:     { color: '#8B5CF6', scale: 1.15, bold: true, uppercase: false },
-  fire:        { color: '#000000', scale: 1.0, bold: true, uppercase: true, shadow: '2px 2px 0 #FF6B2B, -2px -2px 0 #FF6B2B, 2px -2px 0 #FF6B2B, -2px 2px 0 #FF6B2B, 0 2px 0 #FF6B2B, 0 -2px 0 #FF6B2B, 2px 0 0 #FF6B2B, -2px 0 0 #FF6B2B' },
+  minimal:     { color: '#FFE45E', scale: 1.08, bold: true, uppercase: true, shadow: '0 2px 0 #7A0000, 0 4px 7px rgba(0,0,0,0.9)' },
+  fire:        { color: '#FFFFFF', scale: 1.12, bold: true, uppercase: true, shadow: '2px 0 0 #000, -2px 0 0 #000, 0 2px 0 #000, 0 -2px 0 #000' },
+  'comic-pop': { color: '#FF76D6', scale: 1.14, bold: true, uppercase: true, shadow: '2px 2px 0 #67E8E6, 4px 4px 0 #55206F' },
 }
 
 // ── Detection dictionaries ──

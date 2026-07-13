@@ -67,6 +67,7 @@ export interface Clip {
   captions_text: string | null;
   captions_position: string;
   caption_style: string;
+  caption_font_scale: number;
   facecam_layout: string;
   render_status: 'pending' | 'rendering' | 'completed' | 'failed';
   output_path: string | null;

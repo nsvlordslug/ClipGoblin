@@ -6,6 +6,8 @@
 export interface CaptionStyle {
   id: string
   name: string
+  /** Optional renderer treatment beyond the base typography fields. */
+  presentation?: 'cardboard'
   fontFamily: string
   fontSize: number       // px at 1080p export resolution
   fontWeight: number     // 400–900
@@ -20,6 +22,10 @@ export interface CaptionStyle {
   lineHeight: number     // multiplier (1.2 = tight, 1.5 = comfortable)
   /** Multi-layer text shadow for crisp outlines */
   shadow: string
+  /** Approximate glyph width used to keep long words inside the video safe area. */
+  characterWidthFactor?: number
+  /** Fraction of the frame width available to caption text. */
+  safeWidthRatio?: number
 }
 
 export const CAPTION_STYLES: CaptionStyle[] = [
@@ -37,27 +43,31 @@ export const CAPTION_STYLES: CaptionStyle[] = [
   },
   {
     id: 'bold-white',
-    name: 'Bold White',
-    fontFamily: "'Impact', 'Arial Black', sans-serif",
-    fontSize: 60, fontWeight: 900,
-    fontColor: '#FFFFFF',
-    strokeColor: '#000000', strokeWidth: 0,
-    bgColor: '', bgPadding: 0, bgRadius: 0,
+    name: 'Cardboard',
+    presentation: 'cardboard',
+    fontFamily: "'Arial Black', Arial, sans-serif",
+    fontSize: 52, fontWeight: 900,
+    fontColor: '#7A2118',
+    strokeColor: '', strokeWidth: 0,
+    bgColor: '#C99358', bgPadding: 32, bgRadius: 0,
     uppercase: true,
-    letterSpacing: 0.05, lineHeight: 1.15,
-    shadow: '2px 2px 0 #000, -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 0 2px 0 #000, 2px 0 0 #000, 0 -2px 0 #000, -2px 0 0 #000',
+    letterSpacing: 0.01, lineHeight: 1.05,
+    shadow: '0 1px 0 rgba(255,255,255,0.14), 0 2px 2px rgba(63,35,16,0.25)',
+    characterWidthFactor: 0.72,
+    safeWidthRatio: 0.68,
   },
   {
     id: 'boxed',
-    name: 'Boxed',
-    fontFamily: "'Segoe UI', Arial, sans-serif",
-    fontSize: 48, fontWeight: 700,
-    fontColor: '#F8F8FF',
-    strokeColor: '', strokeWidth: 0,
-    bgColor: 'rgba(10,10,20,0.82)', bgPadding: 16, bgRadius: 10,
-    uppercase: false,
-    letterSpacing: 0.02, lineHeight: 1.35,
-    shadow: '0 1px 3px rgba(0,0,0,0.4)',
+    name: 'Frosted',
+    fontFamily: "'Coiny', 'Arial Black', Arial, sans-serif",
+    fontSize: 58, fontWeight: 400,
+    fontColor: '#FFFFFF',
+    strokeColor: '#FFFFFF', strokeWidth: 3,
+    bgColor: '', bgPadding: 0, bgRadius: 0,
+    uppercase: true,
+    letterSpacing: 0.01, lineHeight: 1.1,
+    shadow: '2px 3px 0 #F05BD8, 4px 5px 0 #6D28D9',
+    characterWidthFactor: 0.72,
   },
   {
     id: 'neon',
@@ -73,27 +83,42 @@ export const CAPTION_STYLES: CaptionStyle[] = [
   },
   {
     id: 'minimal',
-    name: 'Minimal',
-    fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif",
-    fontSize: 42, fontWeight: 300,
-    fontColor: 'rgba(255,255,255,0.95)',
-    strokeColor: '', strokeWidth: 0,
+    name: 'Drip',
+    fontFamily: "'Nosifer', 'Arial Black', Arial, sans-serif",
+    fontSize: 50, fontWeight: 400,
+    fontColor: '#FF351F',
+    strokeColor: '#3B0000', strokeWidth: 2,
     bgColor: '', bgPadding: 0, bgRadius: 0,
-    uppercase: false,
-    letterSpacing: 0.06, lineHeight: 1.5,
-    shadow: '0 1px 6px rgba(0,0,0,0.8), 0 0 3px rgba(0,0,0,0.6), 0 2px 10px rgba(0,0,0,0.4)',
+    uppercase: true,
+    letterSpacing: 0.01, lineHeight: 1.15,
+    shadow: '0 2px 0 #7A0000, 0 4px 7px rgba(0,0,0,0.9)',
+    characterWidthFactor: 0.8,
   },
   {
     id: 'fire',
-    name: 'Fire',
-    fontFamily: "'Impact', 'Arial Black', sans-serif",
-    fontSize: 58, fontWeight: 900,
-    fontColor: '#FF6B2B',
-    strokeColor: '', strokeWidth: 0,
+    name: 'Highlight',
+    fontFamily: "'Rubik Dirt', 'Arial Black', Arial, sans-serif",
+    fontSize: 60, fontWeight: 400,
+    fontColor: '#FFE45E',
+    strokeColor: '#000000', strokeWidth: 3,
     bgColor: '', bgPadding: 0, bgRadius: 0,
     uppercase: true,
-    letterSpacing: 0.03, lineHeight: 1.2,
-    shadow: '0 0 6px #FF4500, 2px 2px 0 #000, -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 0 2px 0 #000, 0 -2px 0 #000, 2px 0 0 #000, -2px 0 0 #000',
+    letterSpacing: 0.01, lineHeight: 1.1,
+    shadow: '2px 0 0 #000, -2px 0 0 #000, 0 2px 0 #000, 0 -2px 0 #000, 0 4px 9px rgba(0,0,0,0.85)',
+    characterWidthFactor: 0.72,
+  },
+  {
+    id: 'comic-pop',
+    name: 'Comic Pop',
+    fontFamily: "'Bangers', 'Arial Black', Arial, sans-serif",
+    fontSize: 64, fontWeight: 400,
+    fontColor: '#67E8E6',
+    strokeColor: '#55206F', strokeWidth: 3,
+    bgColor: '', bgPadding: 0, bgRadius: 0,
+    uppercase: true,
+    letterSpacing: 0.02, lineHeight: 1.05,
+    shadow: '2px 2px 0 #F05BD8, 4px 4px 0 #55206F, 0 7px 10px rgba(0,0,0,0.75)',
+    characterWidthFactor: 0.68,
   },
 ]
 

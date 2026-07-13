@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperSegment};
 
 // ── Model definitions ──
 
@@ -53,10 +53,18 @@ impl WhisperModel {
 // ── Transcript types ──
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TranscriptWord {
+    pub word: String,
+    pub start: f64,
+    pub end: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TranscriptSegment {
     pub start: f64,
     pub end: f64,
     pub text: String,
+    pub words: Vec<TranscriptWord>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -64,6 +72,94 @@ pub struct TranscriptResult {
     pub segments: Vec<TranscriptSegment>,
     pub language: String,
     pub duration: f64,
+}
+
+#[derive(Debug)]
+struct TimedTokenPiece {
+    text: String,
+    start: f64,
+    end: f64,
+}
+
+fn merge_token_pieces(pieces: Vec<TimedTokenPiece>) -> Vec<TranscriptWord> {
+    let mut words = Vec::new();
+    let mut current_text = String::new();
+    let mut current_start = 0.0;
+    let mut current_end = 0.0;
+
+    let flush = |words: &mut Vec<TranscriptWord>, text: &mut String, start: f64, end: f64| {
+        if !text.is_empty() && end > start {
+            words.push(TranscriptWord {
+                word: std::mem::take(text),
+                start,
+                end,
+            });
+        } else {
+            text.clear();
+        }
+    };
+
+    for piece in pieces {
+        let starts_new_word = piece
+            .text
+            .chars()
+            .next()
+            .map(char::is_whitespace)
+            .unwrap_or(false);
+        let text = piece.text.trim();
+        if text.is_empty() || text.starts_with("<|") {
+            continue;
+        }
+
+        if starts_new_word && !current_text.is_empty() {
+            flush(&mut words, &mut current_text, current_start, current_end);
+        }
+        if current_text.is_empty() {
+            current_start = piece.start;
+            current_end = piece.end;
+        } else {
+            current_end = current_end.max(piece.end);
+        }
+        current_text.push_str(text);
+    }
+
+    flush(&mut words, &mut current_text, current_start, current_end);
+    words
+}
+
+fn convert_segment(segment: &WhisperSegment<'_>, time_offset: f64) -> Option<TranscriptSegment> {
+    let text = segment.to_str().unwrap_or("").trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+
+    let start = time_offset + segment.start_timestamp() as f64 / 100.0;
+    let end = time_offset + segment.end_timestamp() as f64 / 100.0;
+    let mut pieces = Vec::new();
+    for token_index in 0..segment.n_tokens() {
+        let Some(token) = segment.get_token(token_index) else {
+            continue;
+        };
+        let data = token.token_data();
+        if data.t0 < 0 || data.t1 <= data.t0 {
+            continue;
+        }
+        let Ok(token_text) = token.to_str_lossy() else {
+            continue;
+        };
+        pieces.push(TimedTokenPiece {
+            text: token_text.into_owned(),
+            start: time_offset + data.t0 as f64 / 100.0,
+            end: time_offset + data.t1 as f64 / 100.0,
+        });
+    }
+
+    Some(TranscriptSegment {
+        start,
+        end,
+        text,
+        words: merge_token_pieces(pieces),
+    })
 }
 
 // ── Path helpers ──
@@ -251,12 +347,8 @@ where
             Some(s) => s,
             None => continue,
         };
-        // whisper timestamps are in centiseconds (10ms units)
-        let start = segment.start_timestamp() as f64 / 100.0;
-        let end = segment.end_timestamp() as f64 / 100.0;
-        let text = segment.to_str().unwrap_or("").trim().to_string();
-        if !text.is_empty() {
-            segments.push(TranscriptSegment { start, end, text });
+        if let Some(converted) = convert_segment(&segment, 0.0) {
+            segments.push(converted);
         }
     }
 
@@ -273,6 +365,82 @@ where
         language: "en".to_string(),
         duration,
     })
+}
+
+/// Transcribe only one clip range. The temporary audio slice keeps subtitle
+/// regeneration fast even when the source VOD is several hours long.
+pub fn transcribe_range<F>(
+    audio_path: &str,
+    start_seconds: f64,
+    end_seconds: f64,
+    model: WhisperModel,
+    use_gpu: bool,
+    on_progress: F,
+) -> Result<TranscriptResult, String>
+where
+    F: Fn(u32) + Send + Sync + 'static,
+{
+    let duration = end_seconds - start_seconds;
+    if !start_seconds.is_finite() || !end_seconds.is_finite() || start_seconds < 0.0 || duration <= 0.0 {
+        return Err("Invalid clip range for transcription".to_string());
+    }
+
+    let ffmpeg = find_ffmpeg()?;
+    let temp_path = std::env::temp_dir().join(format!(
+        "clipviral-caption-{}.wav",
+        uuid::Uuid::new_v4()
+    ));
+    let mut command = Command::new(&ffmpeg);
+    command
+        .arg("-y")
+        .arg("-ss")
+        .arg(format!("{start_seconds:.3}"))
+        .arg("-i")
+        .arg(audio_path)
+        .arg("-t")
+        .arg(format!("{duration:.3}"))
+        .arg("-map")
+        .arg("0:a:0")
+        .arg("-vn")
+        .arg("-ar")
+        .arg("16000")
+        .arg("-ac")
+        .arg("1")
+        .arg("-c:a")
+        .arg("pcm_s16le")
+        .arg(&temp_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+
+    let output = command
+        .output()
+        .map_err(|e| format!("Failed to extract clip audio: {e}"))?;
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&temp_path);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let tail = stderr
+            .chars()
+            .rev()
+            .take(800)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        return Err(format!("Failed to extract clip audio: {}", tail.trim()));
+    }
+
+    let result = match temp_path.to_str() {
+        Some(path) => transcribe(path, model, use_gpu, on_progress),
+        None => Err("Temporary caption path has invalid encoding".to_string()),
+    };
+    let _ = std::fs::remove_file(&temp_path);
+    result
 }
 
 /// Two-pass transcription: only transcribe specific time windows, not the
@@ -442,16 +610,8 @@ where
         let num_segments = state.full_n_segments();
         for j in 0..num_segments {
             if let Some(segment) = state.get_segment(j) {
-                // whisper-rs reports timestamps in centiseconds (10ms units)
-                let local_start = segment.start_timestamp() as f64 / 100.0;
-                let local_end = segment.end_timestamp() as f64 / 100.0;
-                let text = segment.to_str().unwrap_or("").trim().to_string();
-                if !text.is_empty() {
-                    all_segments.push(TranscriptSegment {
-                        start: window_start_secs + local_start,
-                        end: window_start_secs + local_end,
-                        text,
-                    });
+                if let Some(converted) = convert_segment(&segment, window_start_secs) {
+                    all_segments.push(converted);
                 }
             }
         }
@@ -482,4 +642,28 @@ fn optimal_thread_count() -> i32 {
     let threads = if cpus > 2 { cpus - 1 } else { 1 };
     log::debug!("[Whisper] Using {} threads ({} physical cores)", threads, cpus);
     threads as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merges_whisper_subword_tokens_into_timed_words() {
+        let words = merge_token_pieces(vec![
+            TimedTokenPiece { text: " Not".into(), start: 1.0, end: 1.2 },
+            TimedTokenPiece { text: " Sta".into(), start: 1.2, end: 1.4 },
+            TimedTokenPiece { text: "cie".into(), start: 1.4, end: 1.6 },
+            TimedTokenPiece { text: " stabbing".into(), start: 1.6, end: 2.0 },
+            TimedTokenPiece { text: ".".into(), start: 2.0, end: 2.1 },
+        ]);
+
+        assert_eq!(words.len(), 3);
+        assert_eq!(words[0].word, "Not");
+        assert_eq!(words[1].word, "Stacie");
+        assert_eq!(words[1].start, 1.2);
+        assert_eq!(words[1].end, 1.6);
+        assert_eq!(words[2].word, "stabbing.");
+    }
+
 }

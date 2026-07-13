@@ -16,6 +16,7 @@ pub fn update_clip_settings(
     captions_text: Option<String>,
     captions_position: String,
     caption_style: String,
+    caption_font_scale: f64,
     facecam_layout: String,
     game: Option<String>,
     db: State<'_, DbConn>,
@@ -24,7 +25,7 @@ pub fn update_clip_settings(
     db::update_clip_settings(
         &conn, &clip_id, &title, start_seconds, end_seconds,
         &aspect_ratio, captions_enabled, captions_text.as_deref(),
-        &captions_position, &caption_style, &facecam_layout,
+        &captions_position, &caption_style, caption_font_scale, &facecam_layout,
         game.as_deref(),
     ).map_err(|e| format!("DB error: {}", e))
 }

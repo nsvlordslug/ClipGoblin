@@ -178,6 +178,11 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
         [],
     )
     .ok();
+    conn.execute(
+        "ALTER TABLE clips ADD COLUMN caption_font_scale REAL DEFAULT 1.0",
+        [],
+    )
+    .ok();
 
     // Game metadata: captured from Twitch API or set manually
     conn.execute("ALTER TABLE vods ADD COLUMN game_name TEXT", [])
@@ -483,6 +488,21 @@ pub struct HighlightRow {
     pub community_clip_mp4_path: Option<String>,
 }
 
+pub(crate) const MIN_CAPTION_FONT_SCALE: f64 = 0.75;
+pub(crate) const MAX_CAPTION_FONT_SCALE: f64 = 1.25;
+
+pub(crate) fn normalize_caption_font_scale(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(MIN_CAPTION_FONT_SCALE, MAX_CAPTION_FONT_SCALE)
+    } else {
+        1.0
+    }
+}
+
+fn default_caption_font_scale() -> f64 {
+    1.0
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClipRow {
     pub id: String,
@@ -500,6 +520,8 @@ pub struct ClipRow {
     pub captions_text: Option<String>,
     pub captions_position: String,
     pub caption_style: String,
+    #[serde(default = "default_caption_font_scale")]
+    pub caption_font_scale: f64,
     pub facecam_layout: String,
     pub render_status: String,
     pub output_path: Option<String>,
@@ -944,8 +966,8 @@ pub fn set_clip_review(
 
 pub fn insert_clip(conn: &Connection, c: &ClipRow) -> SqliteResult<()> {
     conn.execute(
-        "INSERT INTO clips (id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, render_status, output_path, thumbnail_path, created_at, game, community_clip_mp4_path)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+        "INSERT INTO clips (id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, render_status, output_path, thumbnail_path, created_at, game, community_clip_mp4_path, caption_font_scale)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
          ON CONFLICT(id) DO UPDATE SET
            highlight_id = excluded.highlight_id,
            vod_id = excluded.vod_id,
@@ -966,8 +988,9 @@ pub fn insert_clip(conn: &Connection, c: &ClipRow) -> SqliteResult<()> {
            output_path = excluded.output_path,
            thumbnail_path = excluded.thumbnail_path,
            game = excluded.game,
-           community_clip_mp4_path = excluded.community_clip_mp4_path",
-        params![c.id, c.highlight_id, c.vod_id, c.title, c.start_seconds, c.end_seconds, c.aspect_ratio, c.crop_x, c.crop_y, c.crop_width, c.crop_height, c.captions_enabled, c.captions_text, c.captions_position, c.caption_style, c.facecam_layout, c.render_status, c.output_path, c.thumbnail_path, c.created_at, c.game, c.community_clip_mp4_path],
+           community_clip_mp4_path = excluded.community_clip_mp4_path,
+           caption_font_scale = excluded.caption_font_scale",
+        params![c.id, c.highlight_id, c.vod_id, c.title, c.start_seconds, c.end_seconds, c.aspect_ratio, c.crop_x, c.crop_y, c.crop_width, c.crop_height, c.captions_enabled, c.captions_text, c.captions_position, c.caption_style, c.facecam_layout, c.render_status, c.output_path, c.thumbnail_path, c.created_at, c.game, c.community_clip_mp4_path, normalize_caption_font_scale(c.caption_font_scale)],
     )?;
     Ok(())
 }
@@ -1015,6 +1038,9 @@ fn read_clip_row(row: &rusqlite::Row) -> rusqlite::Result<ClipRow> {
         cam_region_norm_override: row.get(23)?,
         cam_fit_mode: row.get(24)?,
         community_clip_mp4_path: row.get(25)?,
+        caption_font_scale: normalize_caption_font_scale(
+            row.get::<_, Option<f64>>(26)?.unwrap_or(1.0),
+        ),
     })
 }
 
@@ -1024,7 +1050,7 @@ fn read_clip_row(row: &rusqlite::Row) -> rusqlite::Result<ClipRow> {
 /// `VodRow` so positional `row.get(idx)?` calls stay in sync.
 const VOD_SELECT: &str = "SELECT id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress, game_name, cam_region_norm FROM vods";
 
-const CLIP_SELECT: &str = "SELECT id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, render_status, output_path, thumbnail_path, created_at, game, publish_description, publish_hashtags, cam_region_norm_override, cam_fit_mode, community_clip_mp4_path FROM clips";
+const CLIP_SELECT: &str = "SELECT id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, render_status, output_path, thumbnail_path, created_at, game, publish_description, publish_hashtags, cam_region_norm_override, cam_fit_mode, community_clip_mp4_path, caption_font_scale FROM clips";
 
 pub fn get_all_clips(conn: &Connection) -> SqliteResult<Vec<ClipRow>> {
     let mut stmt = conn.prepare(&format!("{} ORDER BY created_at DESC, start_seconds ASC", CLIP_SELECT))?;
@@ -1052,12 +1078,13 @@ pub fn update_clip_settings(
     captions_text: Option<&str>,
     captions_position: &str,
     caption_style: &str,
+    caption_font_scale: f64,
     facecam_layout: &str,
     game: Option<&str>,
 ) -> SqliteResult<()> {
     conn.execute(
-        "UPDATE clips SET title = ?1, start_seconds = ?2, end_seconds = ?3, aspect_ratio = ?4, captions_enabled = ?5, captions_text = ?6, captions_position = ?7, caption_style = ?8, facecam_layout = ?9, game = ?10, render_status = 'pending' WHERE id = ?11",
-        params![title, start_seconds, end_seconds, aspect_ratio, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, game, clip_id],
+        "UPDATE clips SET title = ?1, start_seconds = ?2, end_seconds = ?3, aspect_ratio = ?4, captions_enabled = ?5, captions_text = ?6, captions_position = ?7, caption_style = ?8, facecam_layout = ?9, game = ?10, caption_font_scale = ?11, render_status = 'pending' WHERE id = ?12",
+        params![title, start_seconds, end_seconds, aspect_ratio, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, game, normalize_caption_font_scale(caption_font_scale), clip_id],
     )?;
     Ok(())
 }
@@ -2140,6 +2167,73 @@ mod tests {
         assert_eq!(
             fetched[0].signal_sources.as_deref(),
             Some(r#"["audio","transcript"]"#)
+        );
+    }
+
+    #[test]
+    fn caption_font_scale_round_trips_and_clamps_at_the_database_boundary() {
+        let conn = fresh_db();
+        let clip = ClipRow {
+            id: "clip-scale".to_string(),
+            highlight_id: "highlight-scale".to_string(),
+            vod_id: "vod-scale".to_string(),
+            title: "Scale test".to_string(),
+            start_seconds: 10.0,
+            end_seconds: 20.0,
+            aspect_ratio: "9:16".to_string(),
+            crop_x: None,
+            crop_y: None,
+            crop_width: None,
+            crop_height: None,
+            captions_enabled: 1,
+            captions_text: Some("clutch".to_string()),
+            captions_position: "bottom".to_string(),
+            caption_style: "comic-pop".to_string(),
+            caption_font_scale: 99.0,
+            facecam_layout: "none".to_string(),
+            render_status: "pending".to_string(),
+            output_path: None,
+            thumbnail_path: None,
+            created_at: "2026-07-13T00:00:00Z".to_string(),
+            game: None,
+            publish_description: None,
+            publish_hashtags: None,
+            cam_region_norm_override: None,
+            cam_fit_mode: None,
+            community_clip_mp4_path: None,
+        };
+
+        insert_clip(&conn, &clip).unwrap();
+        assert_eq!(
+            get_clip_by_id(&conn, &clip.id)
+                .unwrap()
+                .unwrap()
+                .caption_font_scale,
+            MAX_CAPTION_FONT_SCALE
+        );
+
+        update_clip_settings(
+            &conn,
+            &clip.id,
+            &clip.title,
+            clip.start_seconds,
+            clip.end_seconds,
+            &clip.aspect_ratio,
+            clip.captions_enabled,
+            clip.captions_text.as_deref(),
+            &clip.captions_position,
+            &clip.caption_style,
+            0.1,
+            &clip.facecam_layout,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            get_clip_by_id(&conn, &clip.id)
+                .unwrap()
+                .unwrap()
+                .caption_font_scale,
+            MIN_CAPTION_FONT_SCALE
         );
     }
 }

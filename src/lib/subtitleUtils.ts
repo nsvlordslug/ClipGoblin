@@ -57,18 +57,66 @@ export function findActiveSegment(
   segments: SubtitleSegment[],
   time: number,
 ): SubtitleSegment | null {
-  // Exact match
   for (const s of segments) {
-    if (time >= s.startTime - 0.05 && time <= s.endTime + 0.05) return s
+    if (time >= s.startTime && time < s.endTime) return s
   }
-  // Nearest within 1s
-  let best: SubtitleSegment | null = null
-  let bestDist = 1.0
-  for (const s of segments) {
-    const dist = Math.min(Math.abs(s.startTime - time), Math.abs(s.endTime - time))
-    if (dist < bestDist) { bestDist = dist; best = s }
+  return null
+}
+
+function visibleWordDuration(word: string): number {
+  const characterCount = Math.max(1, word.replace(/[^\p{L}\p{N}]/gu, '').length)
+  return Math.min(1.2, Math.max(0.475, 0.4 + characterCount * 0.075))
+}
+
+/**
+ * Keep one visible word per cue. New transcriptions already contain exact
+ * word-level SRT timing; the proportional path keeps older grouped SRT files
+ * usable until the user regenerates them with current Whisper timing.
+ */
+export function splitSubtitleSegmentsByWord(segments: SubtitleSegment[]): SubtitleSegment[] {
+  const split: SubtitleSegment[] = []
+
+  for (const segment of segments) {
+    const words = segment.text.trim().split(/\s+/).filter(Boolean)
+    const duration = segment.endTime - segment.startTime
+    if (words.length === 0 || duration <= 0) continue
+    if (words.length === 1) {
+      split.push({
+        ...segment,
+        endTime: Math.min(segment.endTime, segment.startTime + visibleWordDuration(words[0])),
+      })
+      continue
+    }
+
+    const weights = words.map(word => Math.max(2, word.replace(/[^\p{L}\p{N}]/gu, '').length))
+    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0)
+    let elapsedWeight = 0
+
+    for (let i = 0; i < words.length; i += 1) {
+      const wordStart = segment.startTime + duration * (elapsedWeight / totalWeight)
+      elapsedWeight += weights[i]
+      const weightedEnd = segment.startTime + duration * (elapsedWeight / totalWeight)
+      const wordEnd = Math.min(weightedEnd, wordStart + visibleWordDuration(words[i]))
+      if (wordEnd <= wordStart) continue
+
+      split.push({
+        ...segment,
+        id: `${segment.id}-word-${i}`,
+        text: words[i],
+        startTime: wordStart,
+        endTime: wordEnd,
+      })
+    }
   }
-  return best
+
+  const ordered = [...split].sort((a, b) => a.startTime - b.startTime)
+  const normalized = ordered.flatMap((segment, index) => {
+    const nextStart = ordered[index + 1]?.startTime ?? Number.POSITIVE_INFINITY
+    const endTime = Math.min(segment.endTime, nextStart)
+    return endTime > segment.startTime ? [{ ...segment, endTime }] : []
+  })
+
+  return normalized.map((segment, index) => ({ ...segment, index: index + 1 }))
 }
 
 /** Filter segments to only those within the trim window. */

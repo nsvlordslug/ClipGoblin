@@ -865,7 +865,11 @@ fn convert_whisper_result(wr: &whisper::TranscriptResult) -> TranscriptResult {
         start: s.start,
         end: s.end,
         text: s.text.clone(),
-        words: Vec::new(), // whisper-rs doesn't provide word-level timestamps
+        words: s.words.iter().map(|word| TranscriptWord {
+            word: word.word.clone(),
+            start: word.start,
+            end: word.end,
+        }).collect(),
     }).collect();
 
     let full_text = segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
@@ -899,6 +903,29 @@ fn convert_whisper_result(wr: &whisper::TranscriptResult) -> TranscriptResult {
     }
 }
 
+fn resolve_whisper_runtime_settings() -> (whisper::WhisperModel, bool) {
+    let conn = db::db_path()
+        .ok()
+        .and_then(|path| rusqlite::Connection::open(path).ok());
+    let model_name = conn
+        .as_ref()
+        .and_then(|connection| db::get_setting(connection, "whisper_model").ok().flatten())
+        .unwrap_or_else(|| "base".to_string());
+    let model = match model_name.as_str() {
+        "medium" => whisper::WhisperModel::Medium,
+        _ => whisper::WhisperModel::Base,
+    };
+    let ui_json = conn
+        .as_ref()
+        .and_then(|connection| db::get_setting(connection, "ui_settings").ok().flatten())
+        .unwrap_or_default();
+    let use_gpu = serde_json::from_str::<serde_json::Value>(&ui_json)
+        .ok()
+        .and_then(|value| value.get("useGpu").and_then(|enabled| enabled.as_bool()))
+        .unwrap_or(true);
+    (model, use_gpu)
+}
+
 /// Run native whisper-rs transcription on a video file.
 /// Returns transcript and saves JSON to disk for caching.
 pub(crate) fn run_transcription_native(
@@ -909,24 +936,7 @@ pub(crate) fn run_transcription_native(
     // Resolve model + GPU preference from DB (both read from the same conn).
     // useGpu default is true (honor hardware CUDA support); users can flip it
     // off via Settings → Detection → "Use GPU (CUDA)".
-    let (model, use_gpu) = {
-        let conn = db::db_path().ok().and_then(|p| rusqlite::Connection::open(&p).ok());
-        let model_name = conn.as_ref()
-            .and_then(|c| db::get_setting(c, "whisper_model").ok().flatten())
-            .unwrap_or_else(|| "base".to_string());
-        let model = match model_name.as_str() {
-            "medium" => whisper::WhisperModel::Medium,
-            _ => whisper::WhisperModel::Base,
-        };
-        let ui_json = conn.as_ref()
-            .and_then(|c| db::get_setting(c, "ui_settings").ok().flatten())
-            .unwrap_or_default();
-        let use_gpu = serde_json::from_str::<serde_json::Value>(&ui_json)
-            .ok()
-            .and_then(|v| v.get("useGpu").and_then(|b| b.as_bool()))
-            .unwrap_or(true);
-        (model, use_gpu)
-    };
+    let (model, use_gpu) = resolve_whisper_runtime_settings();
 
     // Check model is downloaded
     if !whisper::is_model_downloaded(model) {
@@ -984,24 +994,7 @@ pub(crate) fn run_windowed_transcription_native(
     vod_id: Option<&str>,
 ) -> Result<TranscriptResult, AppError> {
     // Resolve model + GPU preference identically to the full-VOD path.
-    let (model, use_gpu) = {
-        let conn = db::db_path().ok().and_then(|p| rusqlite::Connection::open(&p).ok());
-        let model_name = conn.as_ref()
-            .and_then(|c| db::get_setting(c, "whisper_model").ok().flatten())
-            .unwrap_or_else(|| "base".to_string());
-        let model = match model_name.as_str() {
-            "medium" => whisper::WhisperModel::Medium,
-            _ => whisper::WhisperModel::Base,
-        };
-        let ui_json = conn.as_ref()
-            .and_then(|c| db::get_setting(c, "ui_settings").ok().flatten())
-            .unwrap_or_default();
-        let use_gpu = serde_json::from_str::<serde_json::Value>(&ui_json)
-            .ok()
-            .and_then(|v| v.get("useGpu").and_then(|b| b.as_bool()))
-            .unwrap_or(true);
-        (model, use_gpu)
-    };
+    let (model, use_gpu) = resolve_whisper_runtime_settings();
 
     if !whisper::is_model_downloaded(model) {
         return Err(AppError::Transcription(format!(
@@ -1045,6 +1038,40 @@ pub(crate) fn run_windowed_transcription_native(
     );
 
     Ok(transcript)
+}
+
+/// Transcribe only one clip range for subtitle generation. Returned timestamps
+/// are relative to the beginning of the clip, not the source VOD.
+pub(crate) fn run_clip_transcription_native(
+    vod_path: &str,
+    clip_start: f64,
+    clip_end: f64,
+) -> Result<TranscriptResult, AppError> {
+    let (model, use_gpu) = resolve_whisper_runtime_settings();
+    if !whisper::is_model_downloaded(model) {
+        return Err(AppError::Transcription(format!(
+            "Whisper model '{}' is not downloaded. Go to Settings -> Transcription Model to download it.",
+            model.label()
+        )));
+    }
+
+    log::info!(
+        "[Captions] Transcribing clip range {:.3}-{:.3}s with {} (GPU={})",
+        clip_start,
+        clip_end,
+        model.label(),
+        use_gpu,
+    );
+    let result = whisper::transcribe_range(
+        vod_path,
+        clip_start,
+        clip_end,
+        model,
+        use_gpu,
+        |_| {},
+    )
+    .map_err(AppError::Transcription)?;
+    Ok(convert_whisper_result(&result))
 }
 
 // â”€â”€ Legacy Python transcription (replaced by whisper-rs native) â”€â”€
@@ -1337,63 +1364,119 @@ pub(crate) fn generate_srt_for_clip(
 
     for seg in &transcript.segments {
         // Only include segments that overlap with clip range
-        if seg.end < clip_start || seg.start > clip_end {
+        if seg.end <= clip_start || seg.start >= clip_end {
             continue;
         }
 
-        // Use word-level timestamps if available for better timing
-        if !seg.words.is_empty() {
-            // Group words into subtitle chunks (max ~8 words per subtitle)
-            let mut chunk_words: Vec<&TranscriptWord> = Vec::new();
-            for word in &seg.words {
-                if word.end < clip_start || word.start > clip_end {
-                    continue;
-                }
-                chunk_words.push(word);
-
-                if chunk_words.len() >= 6 {
-                    // Emit subtitle
-                    let start_time = (chunk_words[0].start - clip_start).max(0.0);
-                    let end_time = (chunk_words.last().unwrap().end - clip_start).max(0.0);
-                    let text: Vec<&str> = chunk_words.iter().map(|w| w.word.as_str()).collect();
-
-                    srt.push_str(&format!("{}\n", index));
-                    srt.push_str(&format!("{} --> {}\n", format_srt_time(start_time), format_srt_time(end_time)));
-                    srt.push_str(&format!("{}\n\n", text.join(" ")));
-                    index += 1;
-                    chunk_words.clear();
-                }
-            }
-            // Emit remaining words
-            if !chunk_words.is_empty() {
-                let start_time = (chunk_words[0].start - clip_start).max(0.0);
-                let end_time = (chunk_words.last().unwrap().end - clip_start).max(0.0);
-                let text: Vec<&str> = chunk_words.iter().map(|w| w.word.as_str()).collect();
-
-                srt.push_str(&format!("{}\n", index));
-                srt.push_str(&format!("{} --> {}\n", format_srt_time(start_time), format_srt_time(end_time)));
-                srt.push_str(&format!("{}\n\n", text.join(" ")));
-            }
+        let estimated_words;
+        let words: Vec<&TranscriptWord> = if seg.words.is_empty() {
+            estimated_words = estimate_segment_words(seg);
+            estimated_words.iter().collect()
         } else {
-            // Fall back to segment-level timing
-            let start_time = (seg.start - clip_start).max(0.0);
-            let end_time = (seg.end - clip_start).max(0.0);
+            seg.words.iter().collect()
+        };
 
-            srt.push_str(&format!("{}\n", index));
-            srt.push_str(&format!("{} --> {}\n", format_srt_time(start_time), format_srt_time(end_time)));
-            srt.push_str(&format!("{}\n\n", seg.text));
-            index += 1;
+        for (word_index, word) in words.iter().enumerate() {
+            if word.end <= clip_start || word.start >= clip_end {
+                continue;
+            }
+            let next_word_start = words.get(word_index + 1).map(|next| next.start);
+            append_srt_word(
+                &mut srt,
+                &mut index,
+                word,
+                next_word_start,
+                clip_start,
+                clip_end,
+            );
         }
     }
 
     std::fs::write(output_path, srt).map_err(|e| format!("Failed to write SRT: {}", e))
 }
 
+fn estimate_segment_words(segment: &TranscriptSegment) -> Vec<TranscriptWord> {
+    let words: Vec<&str> = segment.text.split_whitespace().collect();
+    if words.is_empty() || segment.end <= segment.start {
+        return Vec::new();
+    }
+
+    let weights: Vec<usize> = words
+        .iter()
+        .map(|word| word.chars().filter(|character| character.is_alphanumeric()).count().max(2))
+        .collect();
+    let total_weight: usize = weights.iter().sum();
+    let duration = segment.end - segment.start;
+    let mut elapsed_weight = 0usize;
+
+    words
+        .into_iter()
+        .zip(weights)
+        .map(|(word, weight)| {
+            let start = segment.start + duration * elapsed_weight as f64 / total_weight as f64;
+            elapsed_weight += weight;
+            let end = segment.start + duration * elapsed_weight as f64 / total_weight as f64;
+            TranscriptWord {
+                word: word.to_string(),
+                start,
+                end,
+            }
+        })
+        .collect()
+}
+
+fn word_visible_duration(word: &str) -> f64 {
+    let character_count = word
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .count()
+        .max(1) as f64;
+    (0.4 + character_count * 0.075).clamp(0.475, 1.2)
+}
+
+fn append_srt_word(
+    srt: &mut String,
+    index: &mut usize,
+    word: &TranscriptWord,
+    next_word_start: Option<f64>,
+    clip_start: f64,
+    clip_end: f64,
+) {
+    let text = word.word.trim();
+    if text.is_empty() {
+        return;
+    }
+
+    let absolute_start = word.start.max(clip_start);
+    // Whisper can assign a word's end to the next token after a long pause.
+    // Cap that hold so silence is rendered as silence instead of sticky text.
+    let absolute_end = word
+        .end
+        .min(word.start + word_visible_duration(text))
+        .min(next_word_start.unwrap_or(f64::INFINITY))
+        .min(clip_end);
+    let start_time = (absolute_start - clip_start).max(0.0);
+    let end_time = (absolute_end - clip_start).max(0.0);
+    if end_time <= start_time {
+        return;
+    }
+
+    srt.push_str(&format!("{}\n", *index));
+    srt.push_str(&format!(
+        "{} --> {}\n",
+        format_srt_time(start_time),
+        format_srt_time(end_time)
+    ));
+    srt.push_str(&format!("{}\n\n", text));
+    *index += 1;
+}
+
 fn format_srt_time(seconds: f64) -> String {
-    let h = (seconds / 3600.0) as u32;
-    let m = ((seconds % 3600.0) / 60.0) as u32;
-    let s = (seconds % 60.0) as u32;
-    let ms = ((seconds % 1.0) * 1000.0) as u32;
+    let total_ms = (seconds.max(0.0) * 1000.0).round() as u64;
+    let h = total_ms / 3_600_000;
+    let m = (total_ms % 3_600_000) / 60_000;
+    let s = (total_ms % 60_000) / 1_000;
+    let ms = total_ms % 1_000;
     format!("{:02}:{:02}:{:02},{:03}", h, m, s, ms)
 }
 
@@ -1633,6 +1716,7 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
                             captions_text: auto_captions,
                             captions_position: "bottom".to_string(),
                             caption_style: "clean".to_string(),
+                            caption_font_scale: 1.0,
                             facecam_layout: "none".to_string(),
                             render_status: "pending".to_string(),
                             output_path: None,
@@ -3904,12 +3988,12 @@ mod tests {
             language: "en".to_string(),
             duration: 6.0,
             segments: vec![
-                whisper::TranscriptSegment { start: 0.0, end: 1.0, text: "oh my god dance sound".to_string() },
-                whisper::TranscriptSegment { start: 1.0, end: 2.0, text: "oh my god dance sound".to_string() },
-                whisper::TranscriptSegment { start: 2.0, end: 3.0, text: "oh my god dance sound".to_string() },
-                whisper::TranscriptSegment { start: 3.0, end: 4.0, text: "oh my god dance sound".to_string() },
-                whisper::TranscriptSegment { start: 4.0, end: 5.0, text: "oh my god dance sound".to_string() },
-                whisper::TranscriptSegment { start: 5.0, end: 6.0, text: "no way that worked".to_string() },
+                whisper::TranscriptSegment { start: 0.0, end: 1.0, text: "oh my god dance sound".to_string(), words: Vec::new() },
+                whisper::TranscriptSegment { start: 1.0, end: 2.0, text: "oh my god dance sound".to_string(), words: Vec::new() },
+                whisper::TranscriptSegment { start: 2.0, end: 3.0, text: "oh my god dance sound".to_string(), words: Vec::new() },
+                whisper::TranscriptSegment { start: 3.0, end: 4.0, text: "oh my god dance sound".to_string(), words: Vec::new() },
+                whisper::TranscriptSegment { start: 4.0, end: 5.0, text: "oh my god dance sound".to_string(), words: Vec::new() },
+                whisper::TranscriptSegment { start: 5.0, end: 6.0, text: "no way that worked".to_string(), words: Vec::new() },
             ],
         };
 
@@ -3972,5 +4056,101 @@ mod tests {
         assert!(!should_block_position_fallback("downloaded"));
         assert!(!should_block_position_fallback("downloading"));
         assert!(!should_block_position_fallback(""));
+    }
+
+    #[test]
+    fn srt_generation_uses_one_cue_per_timed_word() {
+        let words = (0..8)
+            .map(|index| TranscriptWord {
+                word: format!("word{index}"),
+                start: 10.0 + index as f64 * 0.4,
+                end: 10.0 + (index + 1) as f64 * 0.4,
+            })
+            .collect();
+        let transcript = TranscriptResult {
+            segments: vec![TranscriptSegment {
+                start: 10.0,
+                end: 13.2,
+                text: "word0 word1 word2 word3 word4 word5 word6 word7".to_string(),
+                words,
+            }],
+            full_text: String::new(),
+            language: "en".to_string(),
+            keywords_found: Vec::new(),
+        };
+        let path = std::env::temp_dir().join(format!("clipviral-srt-test-{}.srt", uuid::Uuid::new_v4()));
+
+        generate_srt_for_clip(&transcript, 10.0, 14.0, &path).unwrap();
+        let srt = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(path);
+        let blocks: Vec<&str> = srt.split("\n\n").filter(|block| !block.trim().is_empty()).collect();
+
+        assert_eq!(blocks.len(), 8);
+        assert!(blocks[0].contains("00:00:00,000 --> 00:00:00,400"));
+        assert!(blocks.iter().all(|block| {
+            block.lines().last().unwrap_or_default().split_whitespace().count() == 1
+        }));
+    }
+
+    #[test]
+    fn srt_generation_leaves_long_pauses_blank() {
+        let transcript = TranscriptResult {
+            segments: vec![TranscriptSegment {
+                start: 10.0,
+                end: 12.4,
+                text: "wait now".to_string(),
+                words: vec![
+                    TranscriptWord {
+                        word: "wait".to_string(),
+                        start: 10.0,
+                        end: 12.0,
+                    },
+                    TranscriptWord {
+                        word: "now".to_string(),
+                        start: 12.0,
+                        end: 12.4,
+                    },
+                ],
+            }],
+            full_text: String::new(),
+            language: "en".to_string(),
+            keywords_found: Vec::new(),
+        };
+        let path = std::env::temp_dir().join(format!(
+            "clipviral-srt-pause-test-{}.srt",
+            uuid::Uuid::new_v4()
+        ));
+
+        generate_srt_for_clip(&transcript, 10.0, 13.0, &path).unwrap();
+        let srt = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(path);
+
+        assert!(srt.contains("00:00:00,000 --> 00:00:00,700\nwait"));
+        assert!(srt.contains("00:00:02,000 --> 00:00:02,400\nnow"));
+    }
+
+    #[test]
+    fn srt_generation_splits_legacy_segments_without_word_timing() {
+        let transcript = TranscriptResult {
+            segments: vec![seg(
+                0.0,
+                12.0,
+                "this old caption should no longer appear as one enormous block",
+            )],
+            full_text: String::new(),
+            language: "en".to_string(),
+            keywords_found: Vec::new(),
+        };
+        let path = std::env::temp_dir().join(format!("clipviral-srt-test-{}.srt", uuid::Uuid::new_v4()));
+
+        generate_srt_for_clip(&transcript, 0.0, 12.0, &path).unwrap();
+        let srt = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(path);
+        let blocks: Vec<&str> = srt.split("\n\n").filter(|block| !block.trim().is_empty()).collect();
+
+        assert_eq!(blocks.len(), 11);
+        assert!(blocks.iter().all(|block| {
+            block.lines().last().unwrap_or_default().split_whitespace().count() == 1
+        }));
     }
 }
