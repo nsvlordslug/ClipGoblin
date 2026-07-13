@@ -1504,7 +1504,7 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
             // ── Twitch community clips (optional detection signal) ──
             // Fetched here in async context so the sync `run_analysis_signals`
             // worker can consume them without needing tokio itself.
-            let community_clips = fetch_community_clips_for_vod(&db, &vod_clone).await;
+            let community_clips = fetch_community_clips_for_vod(&db, &vod_clone, &app).await;
             if !community_clips.is_empty() {
                 log::info!("[community-clips] {} clips feeding into selector", community_clips.len());
             }
@@ -1960,6 +1960,7 @@ fn run_auto_ship_for_vod(
 async fn fetch_community_clips_for_vod(
     db: &State<'_, DbConn>,
     vod: &db::VodRow,
+    app: &AppHandle,
 ) -> Vec<clip_selector::CommunityClip> {
     // Read setting + token + broadcaster_id under one lock, drop before network IO.
     let (use_community, token, broadcaster_id) = {
@@ -1997,7 +1998,37 @@ async fn fetch_community_clips_for_vod(
         .map(|dt| (dt + chrono::Duration::hours(48)).to_rfc3339())
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
-    match crate::twitch::fetch_community_clips(&token, &broadcaster_id, &started_at, &ended_at).await {
+    let fetch_result = crate::twitch::fetch_community_clips(
+        &token,
+        &broadcaster_id,
+        &started_at,
+        &ended_at,
+    ).await;
+
+    let fetch_result = match fetch_result {
+        Err(error) if error.contains("401") => {
+            log::warn!("[community-clips] access token rejected; refreshing and retrying once");
+            match try_refresh_twitch_token(db.inner(), &token).await {
+                Ok(refreshed_token) => crate::twitch::fetch_community_clips(
+                    &refreshed_token,
+                    &broadcaster_id,
+                    &started_at,
+                    &ended_at,
+                ).await,
+                Err(refresh_error) => {
+                    log::warn!(
+                        "[community-clips] token refresh failed (non-fatal): {}",
+                        refresh_error,
+                    );
+                    emit_twitch_reconnect_warning(app, &vod.id);
+                    return Vec::new();
+                }
+            }
+        }
+        result => result,
+    };
+
+    match fetch_result {
         Ok(clips) => {
             let this_vod = vod.twitch_video_id.clone();
             let raw = clips.len();
@@ -2037,10 +2068,26 @@ async fn fetch_community_clips_for_vod(
             }).collect()
         }
         Err(e) => {
+            if e.contains("401") {
+                emit_twitch_reconnect_warning(app, &vod.id);
+            }
             log::warn!("[community-clips] fetch failed (non-fatal): {}", e);
             Vec::new()
         }
     }
+}
+
+fn emit_twitch_reconnect_warning(app: &AppHandle, vod_id: &str) {
+    use tauri::Emitter;
+
+    let _ = app.emit(
+        "vod-analysis-warning",
+        serde_json::json!({
+            "vodId": vod_id,
+            "code": "twitch_reconnect_required",
+            "message": "ClipGoblin continued with local and AI detection, but Twitch clips were skipped because your Twitch session expired. Reconnect Twitch, then reanalyze this VOD to include streamer and viewer clips."
+        }),
+    );
 }
 
 /// Serialize a ClipCandidate's six scoring dimensions to a compact JSON string
@@ -2938,7 +2985,7 @@ pub async fn get_vods(
         }
         Err(e) if e.contains("401") => {
             log::warn!("[get_vods] Got 401, refreshing token and retrying");
-            access_token = try_refresh_twitch_token(&db).await?;
+            access_token = try_refresh_twitch_token(&db, &access_token).await?;
             twitch::get_vods(&access_token, &twitch_user_id).await?
         }
         Err(e) => {
@@ -3104,7 +3151,7 @@ pub async fn refresh_vod_metadata(
     // Check for 401 in the response body (curl doesn't give us HTTP status codes directly)
     if body.contains("\"status\":401") || body.contains("\"status\": 401") {
         // Token expired â€” try refreshing
-        access_token = try_refresh_twitch_token(&db).await?;
+        access_token = try_refresh_twitch_token(&db, &access_token).await?;
         body = twitch::curl_twitch_get(&url, &access_token).await
             .map_err(|e| format!("Twitch API error: {}", e))?;
     }
@@ -3604,7 +3651,7 @@ pub async fn import_vod_by_url(
     let mut body = twitch::curl_twitch_get(&api_url, &access_token).await
         .map_err(|e| format!("Twitch API error: {}", e))?;
     if body.contains("\"status\":401") || body.contains("\"status\": 401") {
-        access_token = try_refresh_twitch_token(&db).await?;
+        access_token = try_refresh_twitch_token(&db, &access_token).await?;
         body = twitch::curl_twitch_get(&api_url, &access_token).await
             .map_err(|e| format!("Twitch API error: {}", e))?;
     }
@@ -3732,7 +3779,7 @@ pub async fn get_stream_status(
     let mut body = twitch::curl_twitch_get(&url, &access_token).await
         .map_err(|e| format!("Twitch API error: {}", e))?;
     if body.contains("\"status\":401") || body.contains("\"status\": 401") {
-        access_token = try_refresh_twitch_token(&db).await?;
+        access_token = try_refresh_twitch_token(&db, &access_token).await?;
         body = twitch::curl_twitch_get(&url, &access_token).await
             .map_err(|e| format!("Twitch API error: {}", e))?;
     }

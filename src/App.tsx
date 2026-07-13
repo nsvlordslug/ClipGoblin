@@ -1,10 +1,11 @@
-import { useEffect, Component, type ReactNode } from 'react'
-import { Routes, Route, NavLink } from 'react-router-dom'
+import { useEffect, useState, Component, type ReactNode } from 'react'
+import { Routes, Route, NavLink, Navigate } from 'react-router-dom'
+import { listen } from '@tauri-apps/api/event'
 import { usePlatformStore } from './stores/platformStore'
 import { useAiStore } from './stores/aiStore'
 import { useUiStore } from './stores/uiStore'
 import { useTemplateStore } from './stores/templateStore'
-import { Sun, Moon } from 'lucide-react'
+import { AlertTriangle, Sun, Moon, X } from 'lucide-react'
 import Tooltip from './components/Tooltip'
 import FirstRunSetup from './components/FirstRunSetup'
 import BinariesSetup from './components/BinariesSetup'
@@ -19,7 +20,6 @@ import SettingsPage from './pages/Settings'
 import Player from './pages/Player'
 import Editor from './pages/Editor'
 import MontageBuilder from './pages/MontageBuilder'
-import Results from './pages/Results'
 import ScheduledUploads from './pages/ScheduledUploads'
 import HelpGuide from './pages/HelpGuide'
 import BugReport from './pages/BugReport'
@@ -41,6 +41,12 @@ const accountNavItems = [
   { to: '/bug-report', label: 'Report Bug', icon: '🐛', badgeKind: 'none' as const },
   { to: '/help', label: 'Help', icon: '?', badgeKind: 'none' as const },
 ]
+
+interface VodAnalysisWarning {
+  vodId: string
+  code: 'twitch_reconnect_required'
+  message: string
+}
 
 // ── Error Boundary ──
 interface EBProps { children: ReactNode }
@@ -98,6 +104,7 @@ class ErrorBoundary extends Component<EBProps, EBState> {
 }
 
 export default function App() {
+  const [analysisWarning, setAnalysisWarning] = useState<VodAnalysisWarning | null>(null)
   const loadPlatforms = usePlatformStore(s => s.load)
   const loadAi = useAiStore(s => s.load)
   const loadUi = useUiStore(s => s.load)
@@ -125,6 +132,23 @@ export default function App() {
     const unlisten = startScheduleListening()
     return unlisten
   }, [loadPlatforms, loadAi, loadUi, loadTemplates, loadSchedules, startScheduleListening])
+
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    listen<VodAnalysisWarning>('vod-analysis-warning', (event) => {
+      setAnalysisWarning(event.payload)
+    }).then((cleanup) => {
+      if (disposed) cleanup()
+      else unlisten = cleanup
+    }).catch((error) => {
+      console.error('Failed to listen for analysis warnings:', error)
+    })
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [])
 
   const toggleTheme = () => updateUi({ theme: theme === 'dark' ? 'light' : 'dark' })
 
@@ -258,7 +282,7 @@ export default function App() {
               <Route path="/scheduled" element={<ScheduledUploads />} />
               <Route path="/montage" element={<MontageBuilder />} />
               <Route path="/analytics" element={<Analytics />} />
-              <Route path="/results/:vodId" element={<Results />} />
+              <Route path="/results/:vodId" element={<Navigate to="/clips" replace />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/bug-report" element={<BugReport />} />
               <Route path="/help" element={<HelpGuide />} />
@@ -266,6 +290,35 @@ export default function App() {
           </div>
         </ErrorBoundary>
       </main>
+      {analysisWarning && (
+        <div
+          role="alert"
+          className="fixed right-4 top-16 z-[60] w-[min(360px,calc(100vw-2rem))] rounded-lg border border-amber-500/35 bg-surface-900 p-3.5 shadow-xl"
+        >
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold text-white">Twitch reconnect required</p>
+              <p className="mt-1 text-xs leading-relaxed text-slate-400">{analysisWarning.message}</p>
+              <NavLink
+                to="/settings"
+                onClick={() => setAnalysisWarning(null)}
+                className="mt-2 inline-flex text-xs font-semibold text-violet-300 hover:text-violet-200"
+              >
+                Open Settings
+              </NavLink>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAnalysisWarning(null)}
+              className="rounded p-1 text-slate-500 hover:bg-surface-800 hover:text-white"
+              aria-label="Dismiss Twitch warning"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
       <UpdateChecker />
     </div>
     </FirstRunSetup>

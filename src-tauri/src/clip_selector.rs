@@ -1618,6 +1618,10 @@ fn pin_community_clips(
         }
         if moment.consensus_count() > 1 {
             event_tags.push("community-consensus".to_string());
+            event_tags.push(format!(
+                "community-consensus:{}",
+                moment.consensus_count()
+            ));
         }
         let mut pin = ClipCandidate {
             start_time: start,
@@ -2135,6 +2139,9 @@ mod tests {
         assert_eq!(pinned.start_time, 102.0, "streamer's exact span should win");
         assert_eq!(pinned.community_url.as_deref(), Some("streamer"));
         assert!(pinned.event_tags.contains(&"community-consensus".to_string()));
+        assert!(pinned
+            .event_tags
+            .contains(&"community-consensus:3".to_string()));
         assert!(pinned.event_tags.contains(&"streamer-created".to_string()));
         assert!(pinned.event_tags.contains(&"viewer-created".to_string()));
         assert!(pinned.event_tags.contains(&"reaction".to_string()));

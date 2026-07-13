@@ -7,6 +7,12 @@ use crate::db;
 use crate::twitch;
 use crate::DbConn;
 
+static TWITCH_REFRESH_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn has_newer_access_token(current: &str, rejected: &str) -> bool {
+    !current.is_empty() && current != rejected
+}
+
 #[tauri::command]
 pub async fn twitch_login(app: AppHandle, db: State<'_, DbConn>) -> Result<db::ChannelRow, String> {
     log::info!("[twitch_login] === Starting Twitch login flow ===");
@@ -137,15 +143,30 @@ pub fn get_channels(db: State<'_, DbConn>) -> Result<Vec<db::ChannelRow>, String
     db::get_all_channels(&conn).map_err(|e| format!("DB error: {}", e))
 }
 
-/// Try to refresh the Twitch user access token using the stored refresh token.
-/// On success, saves the new tokens to the DB and returns the new access token.
-pub(crate) async fn try_refresh_twitch_token(db: &std::sync::Mutex<rusqlite::Connection>) -> Result<String, String> {
-    let refresh_token = {
+/// Refresh after a 401, while preventing concurrent requests from racing a
+/// rotating Twitch refresh token. If another request already replaced the
+/// rejected access token, reuse that newer token instead of refreshing again.
+pub(crate) async fn try_refresh_twitch_token(
+    db: &std::sync::Mutex<rusqlite::Connection>,
+    rejected_access_token: &str,
+) -> Result<String, String> {
+    let _refresh_guard = TWITCH_REFRESH_MUTEX.lock().await;
+
+    let (current_access_token, refresh_token) = {
         let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-        db::get_setting(&conn, "twitch_refresh_token")
+        let access = db::get_setting(&conn, "twitch_user_access_token")
             .map_err(|e| format!("DB error: {}", e))?
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let refresh = db::get_setting(&conn, "twitch_refresh_token")
+            .map_err(|e| format!("DB error: {}", e))?
+            .unwrap_or_default();
+        (access, refresh)
     };
+
+    if has_newer_access_token(&current_access_token, rejected_access_token) {
+        log::info!("[Twitch Refresh] Reusing access token refreshed by another request");
+        return Ok(current_access_token);
+    }
 
     if refresh_token.is_empty() {
         return Err("No refresh token available. Please log out and log in again.".into());
@@ -165,4 +186,16 @@ pub(crate) async fn try_refresh_twitch_token(db: &std::sync::Mutex<rusqlite::Con
     }
 
     Ok(token_resp.access_token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_newer_access_token;
+
+    #[test]
+    fn only_reuses_a_nonempty_token_that_differs_from_the_rejected_one() {
+        assert!(has_newer_access_token("new-token", "old-token"));
+        assert!(!has_newer_access_token("same-token", "same-token"));
+        assert!(!has_newer_access_token("", "old-token"));
+    }
 }

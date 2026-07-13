@@ -7,6 +7,7 @@ import { useScheduleStore } from '../stores/scheduleStore'
 import { PLATFORM_INFO } from '../stores/platformStore'
 import ImportVodDialog from '../components/ImportVodDialog'
 import TesterChecklist from '../components/TesterChecklist'
+import TwitchProvenanceBadges from '../components/TwitchProvenanceBadges'
 import { formatViewerCount } from '../hooks/useStreamStatus'
 import heroGoblinImg from '../assets/hero-goblin-v2.png'
 
@@ -111,7 +112,10 @@ export default function Dashboard() {
   const completedScheduled = scheduledUploads.filter(u => u.status === 'completed')
 
   const clipMap = useMemo(() => Object.fromEntries(clips.map(c => [c.id, c])), [clips])
-  const vodMap = useMemo(() => Object.fromEntries(vods.map(v => [v.id, v])), [vods])
+  const clipByHighlight = useMemo(
+    () => Object.fromEntries(clips.map(c => [c.highlight_id, c])),
+    [clips],
+  )
 
   // Categorize highlights / clips for the 5 workbench tabs
   const reviewHighlights = [...highlights]
@@ -429,12 +433,13 @@ export default function Dashboard() {
                 <div className="p-10 text-center text-sm text-slate-500">No highlights need review.</div>
               ) : reviewHighlights.map((h, i) => {
                 const score = h.confidence_score ?? legacyToConfidence(h.virality_score)
-                const vod = vodMap[h.vod_id]
+                const clip = clipByHighlight[h.id]
+                const openEditor = () => navigate(clip ? `/editor/${clip.id}` : '/clips')
                 return (
                   <div
                     key={h.id}
                     className="v4-clip-row"
-                    onClick={() => vod && navigate(`/results/${vod.id}`)}
+                    onClick={openEditor}
                   >
                     <div className={`v4-clip-thumb ${THUMB_STYLES[i % THUMB_STYLES.length]}`}>
                       <span className="v4-clip-dur">{fmtTime(h.end_seconds - h.start_seconds)}</span>
@@ -453,6 +458,11 @@ export default function Dashboard() {
                         {parseTags(h.tags).slice(0,2).map(tg => (
                           <span key={tg} className={`v4-tone-chip ${tg === 'hype' ? 'hype' : ''}`}>{tg}</span>
                         ))}
+                        <TwitchProvenanceBadges
+                          tags={h.tags}
+                          signalSources={h.signal_sources}
+                          compact
+                        />
                       </div>
                     </div>
                     <div className="v4-confidence">
@@ -473,7 +483,7 @@ export default function Dashboard() {
                       <div className="v4-plat yt">▶</div>
                       <div className="v4-plat tt">𝄩</div>
                     </div>
-                    <button className="v4-clip-action" onClick={(e) => { e.stopPropagation(); if (vod) navigate(`/results/${vod.id}`) }}>
+                    <button className="v4-clip-action" onClick={(e) => { e.stopPropagation(); openEditor() }}>
                       Review
                     </button>
                   </div>

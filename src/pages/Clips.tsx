@@ -15,6 +15,7 @@ import { useScheduleStore } from '../stores/scheduleStore'
 import type { Clip, Vod } from '../types'
 import type { ClipReviewRating } from '../types/clipReview'
 import { REVIEW_RATING_LABELS, REVIEW_RATING_COLORS } from '../types/clipReview'
+import TwitchProvenanceBadges from '../components/TwitchProvenanceBadges'
 
 // ─── Helpers ───────────────────────────────────────────────────────
 
@@ -151,6 +152,7 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
     id?: string
     description?: string
     tags?: string | string[]
+    signal_sources?: string | null
     transcript_snippet?: string
     review_rating?: 'good' | 'meh' | 'boring' | null
     review_note?: string | null
@@ -276,7 +278,12 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
             </div>
           )}
         </div>
-        <div className="v4-lib-meta flex-wrap">
+        <div className="v4-lib-meta !justify-start flex-wrap gap-1.5">
+          <TwitchProvenanceBadges
+            tags={highlight?.tags}
+            signalSources={highlight?.signal_sources}
+            compact
+          />
           {isViral && <span className="v4-viral-badge">🔥 VIRAL PICK</span>}
           {scheduledPlatforms && scheduledPlatforms.length > 0 && (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/20 text-amber-300 border border-amber-500/30">
@@ -1120,7 +1127,7 @@ export default function Clips() {
                       <ClipCard
                         key={clip.id}
                         clip={clip}
-                        highlight={hl ? { id: hl.id, description: hl.description, tags: hl.tags, transcript_snippet: hl.transcript_snippet, review_rating: hl.review_rating, review_note: hl.review_note } : undefined}
+                        highlight={hl ? { id: hl.id, description: hl.description, tags: hl.tags, signal_sources: hl.signal_sources, transcript_snippet: hl.transcript_snippet, review_rating: hl.review_rating, review_note: hl.review_note } : undefined}
                         confidence={getConfidence(clip.highlight_id)}
                         posterSrc={getPosterSrc(clip)}
                         onDelete={() => requestDelete([clip.id])}

@@ -27,7 +27,7 @@ export interface AiSettings {
   /** Claude model used for the clip-detection judge (separate from `claudeModel`,
    *  which drives titles/captions). Default: cheap Haiku. */
   claudeJudgeModel: string
-  /** Run a final Sonnet pass to make the last clip picks. Default: true. */
+  /** Run a final Sonnet pass to make the last clip picks. Paid, opt-in. */
   useSonnetFinalPass: boolean
 
   /** Fall back to Free mode if BYOK call fails. Default: true. */
@@ -45,7 +45,7 @@ export const AI_DEFAULTS: AiSettings = {
   useForTitles: true,
   useForCaptions: true,
   claudeJudgeModel: 'claude-sonnet-4-6',
-  useSonnetFinalPass: true,
+  useSonnetFinalPass: false,
   fallbackToFree: true,
 }
 

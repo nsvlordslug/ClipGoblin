@@ -50,6 +50,8 @@ import { generateStandaloneTitle } from '../lib/publishCopyGenerator'
 import type { ClipContext } from '../lib/publishCopyGenerator'
 import { errorMessage } from '../lib/errors'
 import { localDateTimeAfter } from '../lib/dateTime'
+import { parseStoredTags } from '../lib/tags'
+import TwitchProvenanceBadges from '../components/TwitchProvenanceBadges'
 
 function formatTime(seconds: number) {
   const m = Math.floor(seconds / 60)
@@ -1097,8 +1099,11 @@ export default function Editor() {
         // Fetch linked highlight for marker data
         let loadedHighlight: Highlight | undefined
         try {
-          const highlights = await invoke<Highlight[]>('get_all_highlights')
-          loadedHighlight = highlights.find(h => h.id === c.highlight_id)
+          const highlights = await invoke<Array<Omit<Highlight, 'tags'> & { tags: unknown }>>('get_all_highlights')
+          const rawHighlight = highlights.find(h => h.id === c.highlight_id)
+          loadedHighlight = rawHighlight
+            ? { ...rawHighlight, tags: parseStoredTags(rawHighlight.tags) }
+            : undefined
           if (loadedHighlight) setHighlight(loadedHighlight)
         } catch { /* non-critical */ }
 
@@ -1347,7 +1352,14 @@ export default function Editor() {
         <button onClick={() => navigate('/clips')} className="p-2 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-400 hover:text-white transition-colors cursor-pointer">
           <ArrowLeft className="w-5 h-5" />
         </button>
-        <h1 className="text-2xl font-bold text-white truncate flex-1">Edit Clip</h1>
+        <div className="min-w-0 flex-1">
+          <h1 className="text-2xl font-bold text-white truncate">Edit Clip</h1>
+          <TwitchProvenanceBadges
+            tags={highlight?.tags}
+            signalSources={highlight?.signal_sources}
+            className="mt-1.5"
+          />
+        </div>
         <div className="flex items-center gap-1.5">
           <Tooltip text={history.canUndo() ? `Undo (${history.undoCount()} step${history.undoCount() === 1 ? '' : 's'})` : 'Nothing to undo'} position="bottom">
             <button onClick={handleUndo} disabled={!history.canUndo()}

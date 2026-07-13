@@ -125,8 +125,8 @@ struct AiSettings {
     #[serde(default)]
     claude_judge_model: Option<String>,
     /// Run a single Sonnet final-pass over the top Haiku-ranked moments to
-    /// pick/re-order the final clip set (Claude judge only). Default on.
-    #[serde(default = "default_true")]
+    /// pick/re-order the final clip set (Claude judge only). Paid and opt-in.
+    #[serde(default)]
     use_sonnet_final_pass: bool,
 
     #[serde(default)]
@@ -169,7 +169,7 @@ impl Default for AiSettings {
             claude_api_key: String::new(),
             claude_model: default_claude_model(),
             claude_judge_model: None,
-            use_sonnet_final_pass: true,
+            use_sonnet_final_pass: false,
             gemini_api_key: String::new(),
             gemini_model: default_gemini_model(),
             use_for_analysis: true,
@@ -385,7 +385,7 @@ mod tests {
             .filter(|m| !m.trim().is_empty())
             .unwrap_or_else(default_claude_judge_model);
         assert_eq!(judge, "claude-sonnet-4-6");
-        assert!(s.use_sonnet_final_pass); // default on
+        assert!(!s.use_sonnet_final_pass); // paid final pass is opt-in
     }
 
     #[test]

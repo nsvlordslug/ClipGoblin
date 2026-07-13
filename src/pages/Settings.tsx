@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from 'react'
-import { Save, FolderOpen, Info, Brain, Check, Loader2, X, Zap, Sun, Moon, Bookmark, Pencil, Trash2, HardDrive, ExternalLink, Gauge, Tv, LogOut, Download, Mic, Cpu } from 'lucide-react'
+import { Save, FolderOpen, Info, Brain, Check, Loader2, X, Zap, Sun, Moon, Bookmark, Pencil, Trash2, HardDrive, ExternalLink, Gauge, Tv, LogOut, Download, Mic, Cpu, AlertTriangle } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import ConnectedAccounts from '../components/ConnectedAccounts'
@@ -9,9 +9,11 @@ import { useAppStore } from '../stores/appStore'
 import { useUiStore, tryAdvanceTapCounter, type TapCounterState } from '../stores/uiStore'
 import { useTemplateStore } from '../stores/templateStore'
 import { CAPTION_STYLES, EXPORT_PRESETS } from '../lib/editTypes'
+import { requiresHighDetectionCostConsent, type DetectionSensitivity } from '../lib/detectionCostConsent'
 import { version as appVersion } from '../../package.json'
 
 const PROVIDERS: AiProvider[] = ['free', 'openai', 'claude', 'gemini']
+type CostConsentRequest = 'high-detection' | 'sonnet-final-pass'
 
 /** Manage custom clip templates — rename and delete */
 function TemplateManager() {
@@ -155,8 +157,9 @@ export default function SettingsPage() {
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null)
   const [storagePaths, setStoragePaths] = useState<{ exportsDir: string; downloadsDir: string; dataDir: string } | null>(null)
   const [openingFolder, setOpeningFolder] = useState<string | null>(null)
-  const [sensitivity, setSensitivity] = useState<'low' | 'medium' | 'high'>('medium')
+  const [sensitivity, setSensitivity] = useState<DetectionSensitivity>('medium')
   const [sensitivitySaved, setSensitivitySaved] = useState(false)
+  const [costConsentRequest, setCostConsentRequest] = useState<CostConsentRequest | null>(null)
   const [useCommunityClips, setUseCommunityClips] = useState(true)
   const [aiClipDetection, setAiClipDetection] = useState(false)
   const [allowPerClipCamOverride, setAllowPerClipCamOverride] = useState(false)
@@ -197,6 +200,9 @@ export default function SettingsPage() {
   // Active provider's key + model field names
   const keyField = `${s.provider}ApiKey` as keyof typeof s
   const modelField = `${s.provider}Model` as keyof typeof s
+  const detectionModel = s.provider === 'claude'
+    ? s.claudeJudgeModel
+    : ((s[modelField] as string) || 'Default model')
 
   useEffect(() => {
     const load = async () => {
@@ -297,6 +303,41 @@ export default function SettingsPage() {
       setAiSaved(true)
       setTimeout(() => setAiSaved(false), 2000)
     } catch (err) { console.error('Failed to save AI settings:', err) }
+  }
+
+  const applySensitivity = async (next: DetectionSensitivity) => {
+    const previous = sensitivity
+    setSensitivity(next)
+    try {
+      await invoke('save_setting', { key: 'detection_sensitivity', value: next })
+      setSensitivitySaved(true)
+      setTimeout(() => setSensitivitySaved(false), 1500)
+    } catch (error) {
+      setSensitivity(previous)
+      console.error('Failed to save detection sensitivity:', error)
+    }
+  }
+
+  const handleSensitivitySelect = (next: DetectionSensitivity) => {
+    if (requiresHighDetectionCostConsent({
+      currentSensitivity: sensitivity,
+      nextSensitivity: next,
+      byokProviderSelected: isByok,
+    })) {
+      setCostConsentRequest('high-detection')
+      return
+    }
+    void applySensitivity(next)
+  }
+
+  const handleCostConsentAccept = () => {
+    const request = costConsentRequest
+    setCostConsentRequest(null)
+    if (request === 'high-detection') {
+      void applySensitivity('high')
+    } else if (request === 'sonnet-final-pass') {
+      ai.update({ useSonnetFinalPass: true })
+    }
   }
 
   const handleBrowseFolder = async () => {
@@ -481,11 +522,17 @@ export default function SettingsPage() {
 
                 <label className="flex items-center gap-3 cursor-pointer">
                   <input type="checkbox" checked={s.useSonnetFinalPass}
-                    onChange={e => ai.update({ useSonnetFinalPass: e.target.checked })}
+                    onChange={e => {
+                      if (e.target.checked) {
+                        setCostConsentRequest('sonnet-final-pass')
+                      } else {
+                        ai.update({ useSonnetFinalPass: false })
+                      }
+                    }}
                     className="w-4 h-4 rounded border-surface-600 bg-surface-900 text-violet-500 focus:ring-violet-500" />
                   <div>
                     <span className="text-sm text-slate-300">Sonnet final pass</span>
-                    <p className="text-[10px] text-slate-500">let Sonnet make the final clip picks — small extra cost, sharper taste</p>
+                    <p className="text-[10px] text-slate-500">Optional paid final review. Enabling it requires cost consent.</p>
                   </div>
                 </label>
               </>
@@ -629,14 +676,7 @@ export default function SettingsPage() {
           ] as const).map(opt => (
             <button
               key={opt.id}
-              onClick={async () => {
-                setSensitivity(opt.id)
-                try {
-                  await invoke('save_setting', { key: 'detection_sensitivity', value: opt.id })
-                  setSensitivitySaved(true)
-                  setTimeout(() => setSensitivitySaved(false), 1500)
-                } catch { /* best effort */ }
-              }}
+              onClick={() => handleSensitivitySelect(opt.id)}
               className={`px-3 py-3 rounded-lg text-center border transition-colors cursor-pointer ${
                 sensitivity === opt.id
                   ? 'bg-violet-600/20 border-violet-500/50 text-white'
@@ -645,6 +685,9 @@ export default function SettingsPage() {
             >
               <div className="text-sm font-medium">{opt.label}</div>
               <div className="text-[10px] mt-0.5 opacity-60">{opt.desc}</div>
+              {opt.id === 'high' && isByok && (
+                <div className="text-[10px] mt-1.5 text-amber-300">Higher BYOK usage</div>
+              )}
             </button>
           ))}
         </div>
@@ -1092,6 +1135,98 @@ export default function SettingsPage() {
           </div>
         </div>
       </section>
+
+      {costConsentRequest && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="byok-cost-consent-title"
+            aria-describedby="byok-cost-consent-description"
+            className="w-full max-w-lg rounded-lg border border-amber-400/30 bg-surface-900 shadow-2xl"
+          >
+            <div className="flex items-start gap-3 border-b border-surface-700 px-5 py-4">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-400/10">
+                <AlertTriangle className="h-5 w-5 text-amber-300" />
+              </div>
+              <div>
+                <h2 id="byok-cost-consent-title" className="text-base font-semibold text-white">
+                  {costConsentRequest === 'high-detection'
+                    ? 'High detection may increase BYOK cost'
+                    : 'Sonnet final pass adds paid AI usage'}
+                </h2>
+                <p id="byok-cost-consent-description" className="mt-1 text-xs leading-5 text-slate-400">
+                  Review the cost impact before changing this setting. Nothing changes unless you accept.
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-4 px-5 py-4 text-sm text-slate-300">
+              {costConsentRequest === 'high-detection' ? (
+                <>
+                  <p className="leading-6">
+                    High lowers the quality threshold and allows roughly 75% more output clips than Medium. More clips can mean more paid title-generation calls when BYOK titles are enabled.
+                  </p>
+                  <div className="rounded-lg border border-surface-700 bg-surface-950 px-4 py-3">
+                    <div className="flex justify-between gap-4 text-xs">
+                      <span className="text-slate-500">AI provider</span>
+                      <span className="text-right text-slate-200">{meta.name}</span>
+                    </div>
+                    <div className="mt-2 flex justify-between gap-4 text-xs">
+                      <span className="text-slate-500">Detection model</span>
+                      <span className="max-w-[65%] text-right text-slate-200">{detectionModel}</span>
+                    </div>
+                    <div className="mt-2 flex justify-between gap-4 text-xs">
+                      <span className="text-slate-500">AI titles</span>
+                      <span className="text-right text-slate-200">{s.useForTitles ? 'Enabled' : 'Disabled'}</span>
+                    </div>
+                  </div>
+                  <p className="text-xs leading-5 text-slate-400">
+                    High does not silently replace your selected model. The transcript judge still runs once; the main increase comes from allowing more clips and any per-clip AI work they trigger.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="leading-6">
+                    This option can add one Claude Sonnet final-review request after the first clip judge. It reviews the strongest candidate snippets to sharpen the final choices.
+                  </p>
+                  <p className="text-xs leading-5 text-slate-400">
+                    It only runs when AI clip detection is enabled, the first judge uses a cheaper Claude model, and at least two moments are found. Provider pricing and token usage determine the charge.
+                  </p>
+                </>
+              )}
+
+              {costSummary && costSummary.vodCount > 0 && (
+                <div className="rounded-lg border border-amber-400/20 bg-amber-400/5 px-4 py-3 text-xs leading-5 text-amber-100">
+                  Your measured BYOK average is ${costSummary.avgPerAnalyzeUsd.toFixed(3)} per analyzed VOD across the last {costSummary.vodCount}. This is historical usage, not a guaranteed price for the next VOD.
+                </div>
+              )}
+
+              <p className="text-xs leading-5 text-slate-500">
+                ClipGoblin does not charge for this setting. Any usage is billed directly by {meta.name} through your API key, and actual cost varies with VOD length, model, and clip count.
+              </p>
+            </div>
+
+            <div className="flex justify-end gap-2 border-t border-surface-700 px-5 py-4">
+              <button
+                type="button"
+                autoFocus
+                onClick={() => setCostConsentRequest(null)}
+                className="rounded-lg border border-surface-600 bg-surface-800 px-4 py-2 text-sm font-medium text-slate-200 transition-colors hover:bg-surface-700"
+              >
+                Deny
+              </button>
+              <button
+                type="button"
+                onClick={handleCostConsentAccept}
+                className="rounded-lg bg-amber-400 px-4 py-2 text-sm font-semibold text-slate-950 transition-colors hover:bg-amber-300"
+              >
+                Accept
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
