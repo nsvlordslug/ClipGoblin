@@ -120,18 +120,21 @@ pub fn update_clip_settings(
     let before = db::get_clip_by_id(&conn, &clip_id)
         .map_err(|e| format!("DB error: {}", e))?
         .ok_or_else(|| "Clip not found".to_string())?;
-    let requested_branding = context_background_mode == "branding";
+    let requested_context_background_mode = match context_background_mode.as_str() {
+        "black" => "black",
+        "branding" => "branding",
+        _ => "blur",
+    };
+    let requested_branding = requested_context_background_mode == "branding";
     let context_background_path = match validate_staged_branding_path(context_background_path) {
         Ok(path) => path,
         Err(_) if !requested_branding => None,
         Err(error) => return Err(error),
     };
-    let context_background_mode = if requested_branding
-        && context_background_path.is_some()
-    {
-        "branding"
-    } else {
-        "blur"
+    let context_background_mode = match requested_context_background_mode {
+        "branding" if context_background_path.is_some() => "branding",
+        "black" => "black",
+        _ => "blur",
     };
     let facecam_settings = match facecam_settings.filter(|value| !value.trim().is_empty()) {
         Some(value) => {

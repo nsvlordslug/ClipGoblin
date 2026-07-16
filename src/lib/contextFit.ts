@@ -1,6 +1,12 @@
 export const DEFAULT_CONTEXT_BLUR_STRENGTH = 0.25
 export const DEFAULT_CONTEXT_VIDEO_Y = 0.5
 
+export type ContextBackgroundMode = 'blur' | 'black' | 'branding'
+
+export function normalizeContextBackgroundMode(value: unknown): ContextBackgroundMode {
+  return value === 'black' || value === 'branding' ? value : 'blur'
+}
+
 export function clampContextUnit(value: number, fallback: number): number {
   return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : fallback
 }

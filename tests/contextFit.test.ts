@@ -6,11 +6,15 @@ import {
   brandingAssetName,
   contextBlurPixels,
   contextVideoPositionLabel,
+  normalizeContextBackgroundMode,
   normalizeContextBlurStrength,
   normalizeContextVideoY,
 } from '../src/lib/contextFit.ts'
 
 test('Context Fit values clamp malformed and out-of-range persisted data', () => {
+  assert.equal(normalizeContextBackgroundMode('black'), 'black')
+  assert.equal(normalizeContextBackgroundMode('branding'), 'branding')
+  assert.equal(normalizeContextBackgroundMode('unsupported'), 'blur')
   assert.equal(normalizeContextBlurStrength(undefined), DEFAULT_CONTEXT_BLUR_STRENGTH)
   assert.equal(normalizeContextBlurStrength(-4), 0)
   assert.equal(normalizeContextBlurStrength(9), 1)

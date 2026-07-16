@@ -11,5 +11,6 @@ test('Context Fit is available as a distinct context-preserving layout', () => {
   assert.ok(fullFrame)
   assert.notDeepEqual(contextFit.regions, fullFrame.regions)
   assert.match(contextFit.description, /entire video visible/i)
+  assert.match(contextFit.description, /black-bar/i)
   assert.equal(contextFit.tag, 'Best for imports')
 })

@@ -569,6 +569,15 @@ fn clip_to_export_request(
             clip.id
         );
     }
+    let context_background_mode = if matches!(&layout, vertical_crop::LayoutMode::ContextFit)
+        && clip.context_background_mode == "black"
+    {
+        vertical_crop::ContextBackgroundMode::Black
+    } else if context_background_path.is_some() {
+        vertical_crop::ContextBackgroundMode::Branding
+    } else {
+        vertical_crop::ContextBackgroundMode::Blur
+    };
 
     // Resolve the effective cam region using override precedence + settings toggle.
     let effective_region = crate::cam_region::resolve_effective_region(
@@ -631,6 +640,7 @@ fn clip_to_export_request(
         caption_filter,
         effective_region,
         fit_mode,
+        context_background_mode,
         context_background_path,
         context_blur_strength: clip.context_blur_strength,
         context_video_y: clip.context_video_y,

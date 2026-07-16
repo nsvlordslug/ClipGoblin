@@ -1,3 +1,5 @@
+import type { ContextBackgroundMode } from './lib/contextFit'
+
 export interface TwitchChannel {
   id: string;
   twitch_user_id: string;
@@ -76,7 +78,7 @@ export interface Clip {
   facecam_layout: string;
   facecam_settings?: string | null;
   context_background_path?: string | null;
-  context_background_mode?: 'blur' | 'branding';
+  context_background_mode?: ContextBackgroundMode;
   context_blur_strength?: number;
   context_video_y?: number;
   render_status: 'pending' | 'rendering' | 'completed' | 'failed';

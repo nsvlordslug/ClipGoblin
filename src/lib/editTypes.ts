@@ -219,7 +219,7 @@ export const LAYOUT_OPTIONS: LayoutOption[] = [
     ],
   },
   {
-    id: 'context_fit', name: 'Context Fit', description: 'Keeps the entire video visible over a softly blurred vertical fill',
+    id: 'context_fit', name: 'Context Fit', description: 'Keeps the entire video visible with a blurred, black-bar, or branded background',
     tag: 'Best for imports', accent: '#06b6d4',
     regions: [
       { label: 'BLUR', x: 0, y: 0, w: 100, h: 100, fill: '#164e63' },

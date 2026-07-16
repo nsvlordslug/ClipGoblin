@@ -166,7 +166,7 @@ pub enum LayoutMode {
     #[serde(alias = "none")]
     GameplayFocus,
 
-    /// Keep the complete source frame visible over a blurred full-canvas copy.
+    /// Keep the complete source frame visible over a selectable vertical background.
     /// Best for: landscape recordings where UI and action context span the frame.
     ContextFit,
 
@@ -192,6 +192,13 @@ pub enum LayoutMode {
         #[serde(default = "default_pip_size")]
         size: f64,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextBackgroundMode {
+    Blur,
+    Black,
+    Branding,
 }
 
 fn default_split_ratio() -> f64 { 0.6 }
@@ -448,7 +455,13 @@ pub fn layout_filter(
             (filter, false)
         }
 
-        LayoutMode::ContextFit => context_fit_filter(target, caption_filter, false, 0.25, 0.5),
+        LayoutMode::ContextFit => context_fit_filter(
+            target,
+            caption_filter,
+            ContextBackgroundMode::Blur,
+            0.25,
+            0.5,
+        ),
 
         LayoutMode::Split { ratio } => {
             let r = ratio.clamp(0.3, 0.8);
@@ -503,7 +516,7 @@ pub fn layout_filter(
 fn context_fit_filter(
     target: OutputSize,
     caption_filter: Option<&str>,
-    branding_input: bool,
+    background_mode: ContextBackgroundMode,
     blur_strength: f64,
     video_y: f64,
 ) -> (String, bool) {
@@ -521,21 +534,24 @@ fn context_fit_filter(
     };
     let blur_radius = 1 + (blur_strength * 9.0).round() as u32;
 
-    let mut filter = if branding_input {
-        format!(
+    let mut filter = match background_mode {
+        ContextBackgroundMode::Branding => format!(
             "[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase:flags=lanczos,\
              crop={tw}:{th},setsar=1,fps=30,setpts=PTS-STARTPTS[background];\
              [0:v]scale={tw}:{th}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,setsar=1,setpts=PTS-STARTPTS[full];\
              [background][full]overlay=(W-w)/2:(H-h)*{video_y:.3}:shortest=1:eof_action=endall:repeatlast=0"
-        )
-    } else {
-        format!(
+        ),
+        ContextBackgroundMode::Black => format!(
+            "[0:v]scale={tw}:{th}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,\
+             setsar=1,pad={tw}:{th}:(ow-iw)/2:(oh-ih)*{video_y:.3}:color=black,setpts=PTS-STARTPTS"
+        ),
+        ContextBackgroundMode::Blur => format!(
             "[0:v]split=2[blur_src][full_src];\
              [blur_src]scale={tw}:{th}:force_original_aspect_ratio=increase:flags=lanczos,\
              crop={tw}:{th},setsar=1,boxblur={blur_radius}:1,eq=contrast=0.92:brightness=0.01:saturation=0.90,setpts=PTS-STARTPTS[background];\
              [full_src]scale={tw}:{th}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,setsar=1,setpts=PTS-STARTPTS[full];\
              [background][full]overlay=(W-w)/2:(H-h)*{video_y:.3}:shortest=1:eof_action=endall:repeatlast=0"
-        )
+        ),
     };
     if let Some(caption_filter) = caption_filter {
         filter.push_str(&format!("[composed];[composed]{caption_filter}[out]"));
@@ -736,6 +752,8 @@ pub struct ExportRequest {
     pub effective_region: Option<crate::cam_region::CamRegion>,
     /// Fit mode for the region within the cam slot. Defaults to Fit.
     pub fit_mode: crate::cam_region::CamFitMode,
+    /// Background treatment used by Context Fit and branded secondary layouts.
+    pub context_background_mode: ContextBackgroundMode,
     /// Optional second input used by Context Fit, Split, or PiP branding.
     pub context_background_path: Option<PathBuf>,
     /// Normalized 0..1 softness for the live-video Context Fit background.
@@ -745,16 +763,25 @@ pub struct ExportRequest {
 }
 
 fn export_layout_filter(request: &ExportRequest) -> (String, bool) {
+    let has_branding_input = request.context_background_mode == ContextBackgroundMode::Branding
+        && request.context_background_path.is_some();
     if matches!(request.layout, LayoutMode::ContextFit) {
+        let background_mode = if request.context_background_mode == ContextBackgroundMode::Branding
+            && !has_branding_input
+        {
+            ContextBackgroundMode::Blur
+        } else {
+            request.context_background_mode
+        };
         return context_fit_filter(
             request.target,
             request.caption_filter.as_deref(),
-            request.context_background_path.is_some(),
+            background_mode,
             request.context_blur_strength,
             request.context_video_y,
         );
     }
-    if request.context_background_path.is_some() {
+    if has_branding_input {
         match &request.layout {
             LayoutMode::Split { .. } => {
                 return branded_split_filter(
@@ -790,6 +817,9 @@ fn append_export_inputs(cmd: &mut Command, request: &ExportRequest) {
         .arg("-i")
         .arg(&request.source_path);
 
+    if request.context_background_mode != ContextBackgroundMode::Branding {
+        return;
+    }
     let Some(background) = request.context_background_path.as_deref() else {
         return;
     };
@@ -1224,7 +1254,7 @@ mod tests {
         let (f, complex) = context_fit_filter(
             OutputSize::VERTICAL_1080,
             None,
-            true,
+            ContextBackgroundMode::Branding,
             0.25,
             2.0,
         );
@@ -1232,6 +1262,21 @@ mod tests {
         assert!(f.contains("[1:v]scale=1080:1920"), "branding input missing: {f}");
         assert!(!f.contains("boxblur="), "branding should remain unblurred: {f}");
         assert!(f.contains("(H-h)*1.000:shortest=1"), "position should clamp: {f}");
+    }
+
+    #[test]
+    fn context_fit_black_bars_use_solid_padding_without_blur() {
+        let (f, complex) = context_fit_filter(
+            OutputSize::VERTICAL_1080,
+            None,
+            ContextBackgroundMode::Black,
+            0.25,
+            0.2,
+        );
+        assert!(complex);
+        assert!(f.contains("pad=1080:1920:(ow-iw)/2:(oh-ih)*0.200:color=black"), "filter: {f}");
+        assert!(!f.contains("boxblur="), "black bars must not sample or blur the source: {f}");
+        assert!(!f.contains("[1:v]"), "black bars must not require a second input: {f}");
     }
 
     #[test]
@@ -1380,6 +1425,7 @@ mod tests {
             caption_filter: None,
             effective_region: None,
             fit_mode: crate::cam_region::CamFitMode::Fit,
+            context_background_mode: ContextBackgroundMode::Blur,
             context_background_path: None,
             context_blur_strength: 0.25,
             context_video_y: 0.5,
@@ -1418,6 +1464,7 @@ mod tests {
     fn context_fit_gif_command_loops_second_input() {
         let mut req = sample_request();
         req.layout = LayoutMode::ContextFit;
+        req.context_background_mode = ContextBackgroundMode::Branding;
         req.context_background_path = Some(PathBuf::from("/tmp/brand.gif"));
         let cmd = build_export_command(Path::new("ffmpeg"), &req);
         let args = cmd_args(&cmd);
@@ -1430,11 +1477,23 @@ mod tests {
     fn context_fit_static_branding_command_loops_image() {
         let mut req = sample_request();
         req.layout = LayoutMode::ContextFit;
+        req.context_background_mode = ContextBackgroundMode::Branding;
         req.context_background_path = Some(PathBuf::from("/tmp/brand.png"));
         let args = cmd_args(&build_export_command(Path::new("ffmpeg"), &req));
         assert!(args.windows(2).any(|pair| pair == ["-loop", "1"]));
         assert!(args.windows(2).any(|pair| pair == ["-framerate", "30"]));
         assert!(args.windows(2).any(|pair| pair == ["-t", "29.500"]));
+    }
+
+    #[test]
+    fn context_fit_black_bars_command_uses_one_input_and_solid_padding() {
+        let mut req = sample_request();
+        req.layout = LayoutMode::ContextFit;
+        req.context_background_mode = ContextBackgroundMode::Black;
+        let args = cmd_args(&build_export_command(Path::new("ffmpeg"), &req));
+        assert_eq!(args.iter().filter(|arg| arg.as_str() == "-i").count(), 1);
+        assert!(args.iter().any(|arg| arg.contains("pad=1080:1920")));
+        assert!(!args.iter().any(|arg| arg.contains("boxblur=")));
     }
 
     #[test]

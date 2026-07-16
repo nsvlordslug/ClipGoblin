@@ -45,7 +45,7 @@ const FEATURED_TOPICS: Array<{
     icon: '🎨',
     title: 'Editor, captions, and branding',
     desc: 'Use Context Fit, Split, PiP, timed subtitles, branding media, and safe positioning.',
-    searchTerms: 'edit captions subtitles context fit blur branding split picture in picture pip layout size',
+    searchTerms: 'edit captions subtitles context fit blur black bars letterbox branding split picture in picture pip layout size',
   },
   {
     id: 'ai-provider',
@@ -182,7 +182,7 @@ export default function HelpGuide() {
             <li><b className="text-white">Smoke-test the whole pipeline:</b> connect Twitch or import a local clip → review → edit → export → ship to YouTube / TikTok.</li>
             <li><b className="text-white">Try edge cases:</b> very short VODs (&lt; 30 min), very long VODs (3h+), VODs with little chat, VODs while you're offline.</li>
             <li><b className="text-white">Teach detection:</b> rate varied clips Good, Meh, and Boring, then mark timing issues such as Starts too late or Cuts off early.</li>
-            <li><b className="text-white">Exercise imported media:</b> scan nested Medal game folders, save an OBS/Meld replay, generate subtitles, and try Context Fit with blur or branding.</li>
+            <li><b className="text-white">Exercise imported media:</b> scan nested Medal game folders, save an OBS/Meld replay, generate subtitles, and try Context Fit with blur, black bars, or branding.</li>
             <li><b className="text-white">When something breaks,</b> click <a onClick={() => navigate('/bug-report')} className="text-violet-300 underline cursor-pointer">Report a Bug</a> — the form attaches logs + system info automatically.</li>
           </ul>
           <div className="flex flex-wrap gap-2">
@@ -320,7 +320,7 @@ export default function HelpGuide() {
             )}
             {deepDiveOpen === 'editor' && (
               <HelpSection key="editor" icon="🎨" title="Editor, captions, and branding" defaultOpen>
-                <p><span className="text-white font-medium">Edit tab</span> — Adjust trim, aspect ratio, export preset, and layout. Full Frame center-crops. Context Fit keeps the entire scene visible over a soft video background, and its Video placement slider moves the main frame up or down. Split and PiP keep gameplay and a second panel visible together.</p>
+                <p><span className="text-white font-medium">Edit tab</span> — Adjust trim, aspect ratio, export preset, and layout. Full Frame center-crops. Context Fit keeps the entire scene visible and lets you choose a soft video blur, clean black bars, or branding behind it. Its Video placement slider moves the main frame up or down. Split and PiP keep gameplay and a second panel visible together.</p>
                 <p><span className="text-white font-medium">Branding media</span> — Context Fit, Split, and PiP can replace the blur or facecam panel with your PNG, JPG, WebP, or animated GIF. Use Change → choose a supported layout → Branding, then choose the asset. Split ratio and PiP position/size controls also apply to branding.</p>
                 <p><span className="text-white font-medium">Captions tab</span> — Turn Subtitles on and click Generate Subtitles (Speech-to-Text). It uses the bundled local Whisper model, including for imported clips. Existing subtitles can be regenerated with the refresh icon or edited one segment at a time.</p>
                 <p><span className="text-white font-medium">Timing and placement</span> — Timed captions show words as they are spoken and leave real pauses blank. Drag captions on the preview or use Position and Offset. Safe-zone and facecam warnings appear before text is likely to be clipped or covered.</p>

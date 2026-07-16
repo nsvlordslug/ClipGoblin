@@ -45,6 +45,8 @@ interface Props {
   objectFit?: 'cover' | 'contain'
   /** Show a softened poster behind contained video to preview a context-preserving vertical export. */
   blurBackground?: boolean
+  /** Use a true black canvas behind contained video instead of a live blur. */
+  blackBackground?: boolean
   /** Optional app-managed image/GIF shown behind Context Fit video instead of the live blur. */
   backgroundMedia?: string | null
   /** Normalized 0..1 softness for the live-video background. */
@@ -60,7 +62,7 @@ interface Props {
 export default function ClipPlayer({
   src, poster, clipStart, clipEnd, mode = 'compact', className = '', overlay,
   controlsOverlay = false, onPlayChange, onTimeUpdate, seekRef: externalSeekRef,
-  objectFit = 'cover', blurBackground = false, backgroundMedia = null,
+  objectFit = 'cover', blurBackground = false, blackBackground = false, backgroundMedia = null,
   backgroundBlurStrength = 0.25, objectPositionY = 0.5, videoElementRef, fullFile = false,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -444,7 +446,7 @@ export default function ClipPlayer({
   return (
     <div className={`flex flex-col ${className}`}>
       {/* ── Video area ── */}
-      <div className={`relative bg-surface-900 cursor-pointer group flex-1 min-h-0`} onClick={togglePlay}>
+      <div className={`relative cursor-pointer group flex-1 min-h-0 ${blackBackground ? 'bg-black' : 'bg-surface-900'}`} onClick={togglePlay}>
         {backgroundMedia && (
           <img
             src={backgroundMedia}

@@ -805,7 +805,11 @@ fn default_context_background_mode() -> String {
 }
 
 fn normalize_context_background_mode(value: &str) -> &str {
-    if value == "branding" { "branding" } else { "blur" }
+    match value {
+        "black" => "black",
+        "branding" => "branding",
+        _ => "blur",
+    }
 }
 
 fn default_context_video_y() -> f64 {
@@ -865,7 +869,7 @@ pub struct ClipRow {
     /// Optional app-managed PNG/JPG/WebP/GIF used behind Context Fit video.
     #[serde(default)]
     pub context_background_path: Option<String>,
-    /// `blur` or `branding`; kept separate so toggling modes preserves the asset.
+    /// `blur`, `black`, or `branding`; kept separate so toggling modes preserves the asset.
     #[serde(default = "default_context_background_mode")]
     pub context_background_mode: String,
     /// Normalized 0..1 softness for the live-video background fallback.
@@ -3328,6 +3332,19 @@ mod tests {
             .facecam_settings
             .as_deref()
             .is_some_and(|value| value.contains("splitRatio")));
+    }
+
+    #[test]
+    fn context_fit_black_background_mode_round_trips() {
+        let conn = fresh_db();
+        let mut clip = test_clip("clip-context-black", "highlight-context-black", "vod-context-black");
+        clip.facecam_layout = "context_fit".to_string();
+        clip.context_background_mode = "black".to_string();
+
+        insert_clip(&conn, &clip).unwrap();
+
+        let inserted = get_clip_by_id(&conn, &clip.id).unwrap().unwrap();
+        assert_eq!(inserted.context_background_mode, "black");
     }
 
     #[test]

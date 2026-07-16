@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import type { CopyTone } from '../lib/publishCopyGenerator'
+import type { ContextBackgroundMode } from '../lib/contextFit'
 
 // ── Types ──
 
@@ -23,7 +24,7 @@ export interface ClipTemplate {
   exportPresetId: string
   /** Optional Context Fit background saved with custom templates. */
   contextBackgroundPath?: string | null
-  contextBackgroundMode?: 'blur' | 'branding'
+  contextBackgroundMode?: ContextBackgroundMode
   contextBlurStrength?: number
   contextVideoY?: number
   createdAt: string

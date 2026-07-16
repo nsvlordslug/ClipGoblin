@@ -61,9 +61,11 @@ import {
   contextVideoPositionLabel,
   DEFAULT_CONTEXT_BLUR_STRENGTH,
   DEFAULT_CONTEXT_VIDEO_Y,
+  normalizeContextBackgroundMode,
   normalizeContextBlurStrength,
   normalizeContextVideoY,
 } from '../lib/contextFit'
+import type { ContextBackgroundMode } from '../lib/contextFit'
 
 function formatTime(seconds: number) {
   const m = Math.floor(seconds / 60)
@@ -789,7 +791,7 @@ export default function Editor() {
   const [facecamLayout, setFacecamLayout] = useState<LayoutMode>('none')
   const [facecamSettings, setFacecamSettings] = useState<FacecamSettings>(DEFAULT_FACECAM)
   const [contextBackgroundPath, setContextBackgroundPath] = useState<string | null>(null)
-  const [contextBackgroundMode, setContextBackgroundMode] = useState<'blur' | 'branding'>('blur')
+  const [contextBackgroundMode, setContextBackgroundMode] = useState<ContextBackgroundMode>('blur')
   const [contextBlurStrength, setContextBlurStrength] = useState(DEFAULT_CONTEXT_BLUR_STRENGTH)
   const [contextVideoY, setContextVideoY] = useState(DEFAULT_CONTEXT_VIDEO_Y)
   const [pickingBranding, setPickingBranding] = useState(false)
@@ -874,7 +876,7 @@ export default function Editor() {
       setContextBackgroundPath(tmpl.contextBackgroundPath || null)
     }
     if (tmpl.contextBackgroundMode) {
-      setContextBackgroundMode(tmpl.contextBackgroundMode)
+      setContextBackgroundMode(normalizeContextBackgroundMode(tmpl.contextBackgroundMode))
     }
     if (tmpl.contextBlurStrength != null) {
       setContextBlurStrength(normalizeContextBlurStrength(tmpl.contextBlurStrength))
@@ -1185,7 +1187,7 @@ export default function Editor() {
         setFacecamLayout(savedLayout)
         setFacecamSettings(parseFacecamSettings(c.facecam_settings))
         setContextBackgroundPath(c.context_background_path || null)
-        setContextBackgroundMode(c.context_background_mode === 'branding' ? 'branding' : 'blur')
+        setContextBackgroundMode(normalizeContextBackgroundMode(c.context_background_mode))
         setContextBlurStrength(normalizeContextBlurStrength(c.context_blur_strength))
         setContextVideoY(normalizeContextVideoY(c.context_video_y))
         setBrandingError('')
@@ -1635,7 +1637,10 @@ export default function Editor() {
                   seekRef={playerSeekRef}
                   videoElementRef={mainVideoElementRef}
                   objectFit={facecamLayout === 'context_fit' ? 'contain' : 'cover'}
-                  blurBackground={facecamLayout === 'context_fit'}
+                  blurBackground={facecamLayout === 'context_fit'
+                    && contextBackgroundMode !== 'black'
+                    && !brandingActive}
+                  blackBackground={facecamLayout === 'context_fit' && contextBackgroundMode === 'black'}
                   backgroundMedia={facecamLayout === 'context_fit' ? brandingMediaSrc : null}
                   backgroundBlurStrength={contextBlurStrength}
                   objectPositionY={contextVideoY}
@@ -2199,22 +2204,44 @@ export default function Editor() {
                     <span className="text-[10px] text-slate-500">
                       {contextBackgroundMode === 'branding'
                         ? 'Branding'
-                        : facecamLayout === 'context_fit' ? 'Video blur' : 'Facecam'}
+                        : facecamLayout === 'context_fit'
+                          ? contextBackgroundMode === 'black' ? 'Black bars' : 'Video blur'
+                          : 'Facecam'}
                     </span>
                   </div>
-                  <div className="grid grid-cols-2 gap-1 rounded-md bg-surface-900 p-1 border border-surface-600">
+                  <div className={`grid gap-1 rounded-md bg-surface-900 p-1 border border-surface-600 ${
+                    facecamLayout === 'context_fit' ? 'grid-cols-3' : 'grid-cols-2'
+                  }`}>
                     <button
                       type="button"
-                      aria-pressed={contextBackgroundMode === 'blur'}
+                      aria-pressed={facecamLayout === 'context_fit'
+                        ? contextBackgroundMode === 'blur'
+                        : contextBackgroundMode !== 'branding'}
                       onClick={() => setContextBackgroundMode('blur')}
                       className={`h-8 rounded text-xs font-medium transition-colors cursor-pointer ${
-                        contextBackgroundMode === 'blur'
+                        (facecamLayout === 'context_fit'
+                          ? contextBackgroundMode === 'blur'
+                          : contextBackgroundMode !== 'branding')
                           ? 'bg-cyan-500/15 text-cyan-300'
                           : 'text-slate-500 hover:text-slate-300'
                       }`}
                     >
                       {facecamLayout === 'context_fit' ? 'Video blur' : 'Facecam'}
                     </button>
+                    {facecamLayout === 'context_fit' && (
+                      <button
+                        type="button"
+                        aria-pressed={contextBackgroundMode === 'black'}
+                        onClick={() => setContextBackgroundMode('black')}
+                        className={`h-8 rounded text-xs font-medium transition-colors cursor-pointer ${
+                          contextBackgroundMode === 'black'
+                            ? 'bg-cyan-500/15 text-cyan-300'
+                            : 'text-slate-500 hover:text-slate-300'
+                        }`}
+                      >
+                        Black bars
+                      </button>
+                    )}
                     <button
                       type="button"
                       aria-pressed={contextBackgroundMode === 'branding'}
