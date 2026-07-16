@@ -21,6 +21,7 @@ interface ClipUploadStatus {
   videoUrl?: string
   duplicateUrl?: string
   acceptedWithoutLink?: boolean
+  draftHandoff?: boolean
 }
 
 interface BatchUploadDialogProps {
@@ -67,6 +68,7 @@ function buildMetaForClip(clip: Clip, platform: string, visibility: string, useS
       disable_stitch: tiktok.disableStitch,
       brand_organic: tiktok.yourBrand,
       branded_content: tiktok.brandedContent,
+      tiktok_publish_mode: tiktok.publishMode,
     } : {}),
   }
 }
@@ -159,7 +161,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
   }, 0)
   const attentionJobs = Object.values(clipStatuses).reduce((acc, platformMap) => {
     return acc + Object.values(platformMap).filter(s =>
-      s.status === 'duplicate' || s.acceptedWithoutLink === true
+      s.status === 'duplicate' || s.acceptedWithoutLink === true || s.draftHandoff === true
     ).length
   }, 0)
 
@@ -302,7 +304,10 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
           } else if (result.status.status === 'failed') {
             updateClipStatus(platform, clip.id, { status: 'error', error: result.status.error })
           } else if (result.status.status === 'processing') {
-            updateClipStatus(platform, clip.id, { status: 'processing' })
+            updateClipStatus(platform, clip.id,
+              platform === 'tiktok' && tiktokCompliance.publishMode === 'draft'
+                ? { status: 'done', draftHandoff: true }
+                : { status: 'processing' })
           } else {
             updateClipStatus(platform, clip.id, { status: 'uploading' })
           }
@@ -571,7 +576,9 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
                               {status === 'done' && (
                                 <>
                                   <CheckCircle2 className="w-3 h-3 text-green-400" />
-                                  {st?.videoUrl ? (
+                                  {st?.draftHandoff ? (
+                                    <span className="text-cyan-400">Draft sent - finish in TikTok Inbox</span>
+                                  ) : st?.videoUrl ? (
                                     <a href={st.videoUrl} target="_blank" rel="noopener noreferrer" className="text-green-400 hover:underline flex items-center gap-0.5">
                                       Done <ExternalLink className="w-3 h-3" />
                                     </a>
@@ -643,7 +650,11 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
                   className="px-4 py-2 rounded-lg text-sm font-medium bg-violet-600 hover:bg-violet-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer flex items-center gap-2"
                 >
                   <Upload className="w-4 h-4" />
-                  Upload {clips.length} Clip{clips.length !== 1 ? 's' : ''}
+                  {activePlatforms.length === 1
+                    && activePlatforms[0] === 'tiktok'
+                    && tiktokCompliance.publishMode === 'draft'
+                    ? `Send ${clips.length} Draft${clips.length !== 1 ? 's' : ''}`
+                    : `Upload ${clips.length} Clip${clips.length !== 1 ? 's' : ''}`}
                 </button>
               )}
             </>

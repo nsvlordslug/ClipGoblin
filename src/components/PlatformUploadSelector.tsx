@@ -1,4 +1,4 @@
-import { Check, Link2, Loader2, AlertCircle } from 'lucide-react'
+import { Check, Link2, Loader2, AlertCircle, Smartphone } from 'lucide-react'
 import { PLATFORM_INFO, usePlatformStore } from '../stores/platformStore'
 import { getPresetForPlatform, PLATFORM_VISIBILITY } from '../lib/platformUpload'
 import type { PlatformUploadState, YouTubeSubFormat } from '../lib/platformUpload'
@@ -79,6 +79,11 @@ function StatusIndicator({ state, platformName, onViewUrl }: {
     </span>
   )
   const viewUrl = state.videoUrl || state.duplicateUrl
+  if (state.status === 'done' && state.draftHandoff) return (
+    <span className="text-[9px] text-cyan-400 flex items-center gap-0.5" title="Open TikTok's inbox notification to finish and publish this draft">
+      <Smartphone className="w-3 h-3" /> Draft ready
+    </span>
+  )
   if (state.status === 'done' && viewUrl) return (
     <Tooltip text={`Open your video on ${platformName}`} position="left">
       <button onClick={() => onViewUrl?.(viewUrl)}

@@ -94,4 +94,5 @@ export interface PlatformUploadState {
   videoUrl?: string
   duplicateUrl?: string
   acceptedWithoutLink?: boolean
+  draftHandoff?: boolean
 }

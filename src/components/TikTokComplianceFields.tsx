@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { LockKeyhole, UserRound } from 'lucide-react'
+import { LockKeyhole, Send, Smartphone, UserRound } from 'lucide-react'
 import type { TikTokComplianceValue } from '../lib/tiktokCompliance'
 
 // Mirrors the Rust `TikTokCreatorInfo` struct (src-tauri/src/social/tiktok.rs).
@@ -100,18 +100,22 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
   // Validity: must pick a privacy level; if disclosing, pick ≥1 brand type;
   // branded content is incompatible with an "Only me" audience; the clip must
   // not exceed the account's max post duration.
+  const isDraft = value.publishMode === 'draft'
   const brandedOnPrivate = value.brandedContent && value.privacyLevel === 'SELF_ONLY'
   const discloseMissing = value.discloseContent && !value.yourBrand && !value.brandedContent
   const maxDurationSec = info?.max_video_post_duration_sec ?? 0
-  const durationExceeded = clipDurationSec != null && maxDurationSec > 0 && clipDurationSec > maxDurationSec
+  const directDurationExceeded = clipDurationSec != null && maxDurationSec > 0 && clipDurationSec > maxDurationSec
+  const draftDurationExceeded = clipDurationSec != null && clipDurationSec > 600
   const privacyOptions = info && DIRECT_POST_AUDIT_PENDING
     ? info.privacy_level_options.includes('SELF_ONLY')
       ? ['SELF_ONLY']
       : info.privacy_level_options
     : info?.privacy_level_options ?? []
-  const valid = !!info && !error && value.privacyLevel != null
-    && privacyOptions.includes(value.privacyLevel)
-    && !discloseMissing && !brandedOnPrivate && !durationExceeded
+  const valid = !!info && !error && (isDraft
+    ? !draftDurationExceeded
+    : value.privacyLevel != null
+      && privacyOptions.includes(value.privacyLevel)
+      && !discloseMissing && !brandedOnPrivate && !directDurationExceeded)
   useEffect(() => {
     onValidityChange?.(valid)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -160,11 +164,60 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
         </span>
       </div>
 
+      <div>
+        <label className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold block mb-1">
+          Send to TikTok as
+        </label>
+        <div className="grid grid-cols-2 rounded-md border border-surface-600 bg-surface-900 p-0.5" role="group" aria-label="TikTok publishing mode">
+          <button
+            type="button"
+            onClick={() => set({ publishMode: 'direct' })}
+            className={`flex min-w-0 items-center justify-center gap-1.5 rounded px-2 py-1.5 text-xs transition-colors ${
+              !isDraft ? 'bg-violet-600 text-white' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <Send className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            Post directly
+          </button>
+          <button
+            type="button"
+            onClick={() => set({ publishMode: 'draft' })}
+            className={`flex min-w-0 items-center justify-center gap-1.5 rounded px-2 py-1.5 text-xs transition-colors ${
+              isDraft ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <Smartphone className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            Send to drafts
+          </button>
+        </div>
+      </div>
+
+      {isDraft && (
+        <div className="space-y-1.5 rounded border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-[11px] leading-relaxed text-cyan-100">
+          <p className="font-semibold">Finish this draft in the TikTok app</p>
+          <p>
+            ClipGoblin sends the rendered video to your TikTok inbox without publishing it.
+            Open TikTok's inbox notification to edit the video, add its caption, choose an
+            audience, and publish.
+          </p>
+          <p className="text-cyan-200/80">
+            TikTok's draft API transfers the video only, so the caption and hashtags shown
+            above must be added inside TikTok.
+          </p>
+          {draftDurationExceeded && (
+            <p className="font-medium text-red-300">TikTok drafts must be 10 minutes or shorter.</p>
+          )}
+        </div>
+      )}
+
+      {!isDraft && (
+        <>
+
       {/* Max length hint + duration gate — TikTok requires checking
           max_video_post_duration_sec before posting. */}
       {maxDurationSec > 0 && (
-        <p className={`text-[10px] ${durationExceeded ? 'text-red-400' : 'text-slate-500'}`}>
-          {durationExceeded
+        <p className={`text-[10px] ${directDurationExceeded ? 'text-red-400' : 'text-slate-500'}`}>
+          {directDurationExceeded
             ? `This clip is ${fmtDuration(clipDurationSec!)} — your TikTok account allows videos up to ${fmtDuration(maxDurationSec)}. Trim it shorter to post.`
             : `Max video length for your TikTok account: ${fmtDuration(maxDurationSec)}.`}
         </p>
@@ -279,6 +332,8 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
       <p className="text-[10px] text-slate-500 leading-relaxed">
         After you post, it may take a few minutes for your video to process and be visible on TikTok.
       </p>
+        </>
+      )}
     </div>
   )
 }

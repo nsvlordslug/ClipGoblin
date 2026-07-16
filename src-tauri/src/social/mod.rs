@@ -23,6 +23,16 @@ pub struct ConnectedAccount {
     pub connected_at: String,
 }
 
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TikTokPublishMode {
+    #[default]
+    Direct,
+    Draft,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UploadMeta {
     pub title: String,
@@ -47,6 +57,10 @@ pub struct UploadMeta {
     /// "Branded content" disclosure → TikTok `brand_content_toggle`.
     #[serde(default)]
     pub branded_content: bool,
+    /// Direct Post publishes from ClipGoblin; Draft hands the video to the
+    /// creator's TikTok inbox so they can finish editing and publish there.
+    #[serde(default)]
+    pub tiktok_publish_mode: TikTokPublishMode,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -186,4 +200,34 @@ pub fn get_all_accounts(db: &Connection) -> Result<Vec<ConnectedAccount>, AppErr
         }
     }
     Ok(accounts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_upload_metadata_defaults_tiktok_to_direct_post() {
+        let meta: UploadMeta = serde_json::from_value(serde_json::json!({
+            "title": "title",
+            "description": "description",
+            "tags": [],
+            "visibility": "private",
+            "clip_id": "clip-1",
+            "force": false
+        }))
+        .unwrap();
+
+        assert_eq!(meta.tiktok_publish_mode, TikTokPublishMode::Direct);
+    }
+
+    #[test]
+    fn tiktok_draft_mode_round_trips_as_snake_case() {
+        let json = serde_json::to_value(TikTokPublishMode::Draft).unwrap();
+        assert_eq!(json, serde_json::json!("draft"));
+        assert_eq!(
+            serde_json::from_value::<TikTokPublishMode>(json).unwrap(),
+            TikTokPublishMode::Draft
+        );
+    }
 }

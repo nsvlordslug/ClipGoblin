@@ -2059,6 +2059,7 @@ fn run_auto_ship_for_vod(
                 disable_stitch: false,
                 brand_organic: false,
                 branded_content: false,
+                tiktok_publish_mode: crate::social::TikTokPublishMode::Direct,
             };
             let meta_json = match serde_json::to_string(&meta) {
                 Ok(s) => s,

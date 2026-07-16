@@ -12,8 +12,8 @@ use crate::auth_proxy::AuthProxy;
 use crate::db;
 use crate::error::AppError;
 use crate::social::{
-    validate_export_file, ConnectedAccount, PlatformAdapter, UploadMeta, UploadResult,
-    UploadResultStatus,
+    validate_export_file, ConnectedAccount, PlatformAdapter, TikTokPublishMode, UploadMeta,
+    UploadResult, UploadResultStatus,
 };
 use once_cell::sync::Lazy;
 use rusqlite::Connection;
@@ -32,6 +32,8 @@ const TIKTOK_AUTH_URL: &str = "https://www.tiktok.com/v2/auth/authorize/";
 const TIKTOK_USERINFO_URL: &str = "https://open.tiktokapis.com/v2/user/info/";
 const TIKTOK_PUBLISH_INIT_URL: &str =
     "https://open.tiktokapis.com/v2/post/publish/video/init/";
+const TIKTOK_UPLOAD_INIT_URL: &str =
+    "https://open.tiktokapis.com/v2/post/publish/inbox/video/init/";
 const TIKTOK_CREATOR_INFO_URL: &str =
     "https://open.tiktokapis.com/v2/post/publish/creator_info/query/";
 const TIKTOK_PUBLISH_STATUS_URL: &str =
@@ -450,6 +452,7 @@ impl PlatformAdapter for TikTokAdapter {
                 &title,
                 &description,
                 &visibility,
+                meta.tiktok_publish_mode,
                 file_path,
                 meta.disable_comment,
                 meta.disable_duet,
@@ -836,6 +839,7 @@ async fn do_upload_net<F>(
     title: &str,
     description: &str,
     visibility: &str,
+    publish_mode: TikTokPublishMode,
     file_path: &str,
     disable_comment: bool,
     disable_duet: bool,
@@ -863,39 +867,6 @@ where
         ));
     }
 
-    // 0. Query creator info (recommended by TikTok before Direct Post — non-fatal)
-    let privacy_options = query_creator_info(access_token).await;
-
-    // Map frontend visibility to TikTok API privacy level
-    let requested = map_visibility_to_privacy(visibility);
-
-    // Use the requested level if available, otherwise fall back safely
-    let privacy_level = if privacy_options.contains(&requested.to_string()) {
-        requested
-    } else if privacy_options.contains(&"SELF_ONLY".to_string()) {
-        log::warn!(
-            "TikTok: requested privacy '{}' not available, falling back to SELF_ONLY. Available: {:?}",
-            requested, privacy_options
-        );
-        "SELF_ONLY"
-    } else if let Some(first) = privacy_options.first() {
-        log::warn!(
-            "TikTok: requested privacy '{}' not available, using first available: {}",
-            requested,
-            first
-        );
-        first.as_str()
-    } else {
-        "SELF_ONLY" // absolute fallback
-    };
-
-    log::info!(
-        "TikTok upload: file_size={}, privacy_level={}, available_options={:?}",
-        total_size,
-        privacy_level,
-        privacy_options
-    );
-
     // 1. Determine chunk sizing
     //    TikTok Content Posting API rules:
     //    - Files ≤ 64 MB: upload as single chunk (chunk_size = video_size, count = 1)
@@ -908,38 +879,79 @@ where
         (chunk_size, count)
     };
 
-    // 2. Init upload — tells TikTok we want to upload a video
-    // TikTok's "title" field is the full video caption (description + hashtags).
-    // Use description if available (already has hashtags appended by frontend),
-    // fall back to title if description is empty.
-    let caption = if description.trim().is_empty() {
-        title
-    } else {
-        description
-    };
-
-    let init_body = serde_json::json!({
-        "post_info": {
-            "title": caption,
-            "privacy_level": privacy_level,
-            "disable_duet": disable_duet,
-            "disable_comment": disable_comment,
-            "disable_stitch": disable_stitch,
-            "brand_content_toggle": branded_content,
-            "brand_organic_toggle": brand_organic,
-        },
-        "source_info": {
-            "source": "FILE_UPLOAD",
-            "video_size": total_size,
-            "chunk_size": actual_chunk_size,
-            "total_chunk_count": chunk_count,
-        }
+    // 2. Initialize either a Direct Post or an inbox draft. TikTok's draft
+    // endpoint accepts media only; caption, privacy, interactions, and
+    // disclosures are completed by the creator inside TikTok.
+    let source_info = serde_json::json!({
+        "source": "FILE_UPLOAD",
+        "video_size": total_size,
+        "chunk_size": actual_chunk_size,
+        "total_chunk_count": chunk_count,
     });
+    let (init_url, init_body) = match publish_mode {
+        TikTokPublishMode::Direct => {
+            // TikTok requires creator_info to drive the Direct Post controls.
+            let privacy_options = query_creator_info(access_token).await;
+            let requested = map_visibility_to_privacy(visibility);
+            let privacy_level = if privacy_options.contains(&requested.to_string()) {
+                requested
+            } else if privacy_options.contains(&"SELF_ONLY".to_string()) {
+                log::warn!(
+                    "TikTok: requested privacy '{}' not available, falling back to SELF_ONLY. Available: {:?}",
+                    requested, privacy_options
+                );
+                "SELF_ONLY"
+            } else if let Some(first) = privacy_options.first() {
+                log::warn!(
+                    "TikTok: requested privacy '{}' not available, using first available: {}",
+                    requested,
+                    first
+                );
+                first.as_str()
+            } else {
+                "SELF_ONLY"
+            };
+            let caption = if description.trim().is_empty() {
+                title
+            } else {
+                description
+            };
+
+            log::info!(
+                "TikTok direct post: file_size={}, privacy_level={}, available_options={:?}",
+                total_size,
+                privacy_level,
+                privacy_options
+            );
+            (
+                TIKTOK_PUBLISH_INIT_URL,
+                serde_json::json!({
+                    "post_info": {
+                        "title": caption,
+                        "privacy_level": privacy_level,
+                        "disable_duet": disable_duet,
+                        "disable_comment": disable_comment,
+                        "disable_stitch": disable_stitch,
+                        "brand_content_toggle": branded_content,
+                        "brand_organic_toggle": brand_organic,
+                    },
+                    "source_info": source_info,
+                }),
+            )
+        }
+        TikTokPublishMode::Draft => {
+            log::info!("TikTok inbox draft: file_size={}", total_size);
+            (
+                TIKTOK_UPLOAD_INIT_URL,
+                serde_json::json!({ "source_info": source_info }),
+            )
+        }
+    };
 
     log::debug!("TikTok upload init body: {}", init_body);
 
     let init_resp = client
-        .post(TIKTOK_PUBLISH_INIT_URL)
+        .post(init_url)
         .header("Authorization", format!("Bearer {}", access_token))
         .header("Content-Type", "application/json; charset=UTF-8")
         .json(&init_body)
@@ -1058,6 +1070,7 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PublishPollResult {
     Processing,
+    InboxDelivered,
     Complete {
         video_url: Option<String>,
         platform_video_id: Option<String>,
@@ -1098,6 +1111,7 @@ fn publish_poll_result_from_json(json: &serde_json::Value) -> Result<PublishPoll
 
     let data = &json["data"];
     match data["status"].as_str().unwrap_or("") {
+        "SEND_TO_USER_INBOX" => Ok(PublishPollResult::InboxDelivered),
         "PUBLISH_COMPLETE" => {
             let platform_video_id = post_id_from_status_data(data);
             let video_url = platform_video_id
@@ -1184,6 +1198,13 @@ async fn poll_publish_status(
                     attempt,
                     MAX_ATTEMPTS
                 );
+            }
+            Ok(PublishPollResult::InboxDelivered) => {
+                log::info!(
+                    "TikTok delivered draft {} to the creator inbox",
+                    publish_id
+                );
+                return UploadResultStatus::Processing;
             }
             Err(error) => {
                 log::warn!(
@@ -1274,6 +1295,19 @@ mod error_message_tests {
                 video_url: None,
                 platform_video_id: None,
             }
+        );
+    }
+
+    #[test]
+    fn draft_inbox_delivery_is_a_distinct_handoff_state() {
+        let json = serde_json::json!({
+            "data": { "status": "SEND_TO_USER_INBOX" },
+            "error": { "code": "ok", "message": "" }
+        });
+
+        assert_eq!(
+            publish_poll_result_from_json(&json).unwrap(),
+            PublishPollResult::InboxDelivered
         );
     }
 

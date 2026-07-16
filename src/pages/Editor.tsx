@@ -220,6 +220,8 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
   const hasForcedReuploadOption = forcedReuploadPlatforms.length > 0
   const tiktokAcceptedWithoutLink = platformStates.tiktok?.status === 'done'
     && platformStates.tiktok.acceptedWithoutLink === true
+  const tiktokDraftHandoff = platformStates.tiktok?.status === 'done'
+    && platformStates.tiktok.draftHandoff === true
   const tiktokPreviouslyAccepted = platformStates.tiktok?.status === 'duplicate'
 
   // Build upload metadata — includes title from main field, caption, and hashtags
@@ -250,6 +252,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
         disable_stitch: tiktokCompliance.disableStitch,
         brand_organic: tiktokCompliance.yourBrand,
         branded_content: tiktokCompliance.brandedContent,
+        tiktok_publish_mode: tiktokCompliance.publishMode,
       } : {}),
     }
   }
@@ -282,7 +285,9 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
       } else if (result.status.status === 'failed') {
         return { status: 'error', progress: 0, error: result.status.error }
       } else if (result.status.status === 'processing') {
-        return { status: 'processing', progress: 100 }
+        return adapterPlatform === 'tiktok' && tiktokCompliance.publishMode === 'draft'
+          ? { status: 'done', progress: 100, draftHandoff: true }
+          : { status: 'processing', progress: 100 }
       } else if (result.status.status === 'uploading') {
         return { status: 'uploading', progress: result.status.progress_pct }
       }
@@ -572,6 +577,14 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
           />
         )}
 
+        {tiktokDraftHandoff && (
+          <div role="status" className="border-l-2 border-cyan-400 bg-cyan-500/5 px-3 py-2 text-[11px] leading-relaxed text-cyan-100">
+            TikTok received the draft. Open the notification in TikTok's Inbox to edit it,
+            add the caption and audience, then publish. ClipGoblin will keep checking for the
+            final post in the background.
+          </div>
+        )}
+
         {(tiktokAcceptedWithoutLink || tiktokPreviouslyAccepted) && (
           <div role="status" className="border-l-2 border-amber-400 bg-amber-500/5 px-3 py-2 text-[11px] leading-relaxed text-amber-200">
             {tiktokAcceptedWithoutLink
@@ -649,15 +662,21 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
                   <><Check className="w-3.5 h-3.5" />
                     {hasProcessingUpload
                       ? 'Upload submitted - processing'
+                      : tiktokDraftHandoff && selectedPlatforms.length === 1
+                        ? 'Draft sent to TikTok inbox'
                       : tiktokAcceptedWithoutLink && selectedPlatforms.length === 1
                         ? 'TikTok accepted private post'
                         : 'All uploads complete'}
                   </>
                 ) : (
                   <><Upload className="w-3.5 h-3.5" />
-                    Export & Upload to {selectedPlatforms.length === 1
-                      ? (selectedPlatforms[0] === 'youtube_shorts' ? 'YouTube Shorts' : PLATFORM_INFO[selectedPlatforms[0]]?.name || selectedPlatforms[0])
-                      : `${selectedPlatforms.length} platforms`}
+                    {selectedPlatforms.length === 1
+                      && selectedPlatforms[0] === 'tiktok'
+                      && tiktokCompliance.publishMode === 'draft'
+                      ? 'Export & Send to TikTok drafts'
+                      : `Export & Upload to ${selectedPlatforms.length === 1
+                        ? (selectedPlatforms[0] === 'youtube_shorts' ? 'YouTube Shorts' : PLATFORM_INFO[selectedPlatforms[0]]?.name || selectedPlatforms[0])
+                        : `${selectedPlatforms.length} platforms`}`}
                   </>
                 )}
               </button>

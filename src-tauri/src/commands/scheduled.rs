@@ -360,7 +360,10 @@ async fn reconcile_processing_uploads(handle: &tauri::AppHandle) -> Result<(), S
             continue;
         };
         match social::tiktok::fetch_publish_status(&access_token, publish_id).await {
-            Ok(social::tiktok::PublishPollResult::Processing) => {
+            Ok(
+                social::tiktok::PublishPollResult::Processing
+                | social::tiktok::PublishPollResult::InboxDelivered,
+            ) => {
                 let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
                 db::record_direct_upload_state_for_analytics(
                     &conn,

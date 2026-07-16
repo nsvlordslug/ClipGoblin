@@ -1,4 +1,7 @@
+export type TikTokPublishMode = 'direct' | 'draft'
+
 export interface TikTokComplianceValue {
+  publishMode: TikTokPublishMode
   privacyLevel: string | null
   disableComment: boolean
   disableDuet: boolean
@@ -9,6 +12,7 @@ export interface TikTokComplianceValue {
 }
 
 export const EMPTY_TIKTOK_COMPLIANCE: TikTokComplianceValue = {
+  publishMode: 'direct',
   privacyLevel: null,
   disableComment: false,
   disableDuet: false,
