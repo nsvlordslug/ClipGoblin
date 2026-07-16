@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Save, Download, Check, Loader2, MessageSquare, Upload, Film, Link2, Undo2, Redo2, RefreshCw, Bookmark, ChevronDown, X, Plus, Clock, CalendarClock } from 'lucide-react'
+import { useParams, useNavigate, useLocation } from 'react-router-dom'
+import { ArrowLeft, Save, Download, Check, Loader2, MessageSquare, Upload, Film, Link2, Undo2, Redo2, RefreshCw, Bookmark, ChevronDown, X, Plus, Clock, CalendarClock, ImagePlus } from 'lucide-react'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 // Use our own Tauri command to open URLs in the system default browser
@@ -24,7 +24,7 @@ import CamRegionModal from '../components/CamRegionModal'
 import CamRegionPreview from '../components/CamRegionPreview'
 import type { RegionNorm } from '../components/CamRegionSetter'
 import FacecamEditor, { DraggablePipOverlay, DraggableSplitDivider } from '../components/FacecamEditor'
-import { DEFAULT_FACECAM, computeSubtitleCollision } from '../lib/facecam'
+import { DEFAULT_FACECAM, computeSubtitleCollision, parseFacecamSettings } from '../lib/facecam'
 import type { FacecamSettings } from '../lib/facecam'
 import SubtitleEditor from '../components/SubtitleEditor'
 import { parseSrt, serializeSrt, findActiveSegment, splitSubtitleSegmentsByWord } from '../lib/subtitleUtils'
@@ -40,7 +40,7 @@ import { EMPTY_TIKTOK_COMPLIANCE } from '../lib/tiktokCompliance'
 import type { TikTokComplianceValue } from '../lib/tiktokCompliance'
 import { useScheduleStore } from '../stores/scheduleStore'
 import PlatformUploadSelector from '../components/PlatformUploadSelector'
-import { expandYouTubeSubFormat, getDefaultVisibility, getDefaultYouTubeSubFormat, getPresetForPlatform, isSuccessfulUploadHandoff } from '../lib/platformUpload'
+import { expandYouTubeSubFormat, getDefaultVisibility, getDefaultYouTubeSubFormat, getPresetForPlatform, isSuccessfulUploadHandoff, shouldOfferForcedReupload } from '../lib/platformUpload'
 import type { PlatformUploadState, YouTubeSubFormat } from '../lib/platformUpload'
 import { useEditorHistory } from '../hooks/useEditorHistory'
 import type { EditorSnapshot } from '../hooks/useEditorHistory'
@@ -53,6 +53,17 @@ import { errorMessage } from '../lib/errors'
 import { localDateTimeAfter } from '../lib/dateTime'
 import { parseStoredTags } from '../lib/tags'
 import TwitchProvenanceBadges from '../components/TwitchProvenanceBadges'
+import { getNextEditorWorkspace, isEditorWorkspaceId } from '../lib/editorWorkspace'
+import type { EditorWorkspaceId, EditorWorkspaceNavigationKey } from '../lib/editorWorkspace'
+import { canGenerateTimedCaptions, getCaptionTimelineStart, hasUsableSourceMedia } from '../lib/editorCaptions'
+import {
+  brandingAssetName,
+  contextVideoPositionLabel,
+  DEFAULT_CONTEXT_BLUR_STRENGTH,
+  DEFAULT_CONTEXT_VIDEO_Y,
+  normalizeContextBlurStrength,
+  normalizeContextVideoY,
+} from '../lib/contextFit'
 
 function formatTime(seconds: number) {
   const m = Math.floor(seconds / 60)
@@ -100,10 +111,10 @@ function PillGroup<T extends string>({ value, options, onChange }: {
 }
 
 /** Action buttons — extracted so platform hooks are called at component level */
-function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, exportDone, exportError, vodPath, exportPreset, onSave, onExportForFormat, publishMeta, clipTitle, uploadHistory, onUploadHistoryChange }: {
+function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, exportDone, exportError, mediaAvailable, exportPreset, onSave, onExportForFormat, publishMeta, clipTitle, uploadHistory, onUploadHistoryChange }: {
   clipId: string; clip: Clip | null; saving: boolean; saved: boolean
   exporting: boolean; exportProgress: number; exportDone: boolean; exportError: string | null
-  vodPath: boolean
+  mediaAvailable: boolean
   exportPreset: { id: string; aspectRatio: string; name: string }
   onSave: () => void
   /** Export with a specific aspect ratio override (for multi-platform re-export) */
@@ -201,6 +212,13 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
     selectedPlatforms.every(platform =>
       isSuccessfulUploadHandoff(platformStates[platform]?.status)
     )
+  const forcedReuploadPlatforms = selectedPlatforms.filter(platform =>
+    shouldOfferForcedReupload(platformStates[platform])
+  )
+  const hasForcedReuploadOption = forcedReuploadPlatforms.length > 0
+  const tiktokAcceptedWithoutLink = platformStates.tiktok?.status === 'done'
+    && platformStates.tiktok.acceptedWithoutLink === true
+  const tiktokPreviouslyAccepted = platformStates.tiktok?.status === 'duplicate'
 
   // Build upload metadata — includes title from main field, caption, and hashtags
   const buildUploadMeta = (platform: string, force = false) => {
@@ -248,9 +266,17 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
       if (result.status.status === 'complete') {
         const url = result.status.video_url
         if (url) onUploadHistoryChange(platform, url)
-        return { status: 'done', progress: 100, videoUrl: url ?? undefined }
+        return {
+          status: 'done',
+          progress: 100,
+          videoUrl: url ?? undefined,
+          acceptedWithoutLink: adapterPlatform === 'tiktok' && !url,
+        }
       } else if (result.status.status === 'duplicate') {
-        return { status: 'done', progress: 100, duplicateUrl: result.status.existing_url ?? undefined }
+        const duplicateUrl = result.status.existing_url ?? undefined
+        return duplicateUrl
+          ? { status: 'done', progress: 100, duplicateUrl }
+          : { status: 'duplicate', progress: 100 }
       } else if (result.status.status === 'failed') {
         return { status: 'error', progress: 0, error: result.status.error }
       } else if (result.status.status === 'processing') {
@@ -290,16 +316,20 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
   }, [clipId])
 
   // Multi-platform upload orchestrator — always saves + exports first, then uploads
-  const handleMultiUpload = async () => {
+  const handleMultiUpload = async (forcePlatforms: Set<string> = new Set()) => {
     if (!clipId || selectedPlatforms.length === 0) return
     setMultiUploading(true)
+
+    const platformsForRun = forcePlatforms.size > 0
+      ? selectedPlatforms.filter(platform => forcePlatforms.has(platform))
+      : selectedPlatforms
 
     // Save first
     onSave()
 
     // Group platforms by required aspect ratio
     const groups: Record<string, string[]> = {}
-    for (const platform of selectedPlatforms) {
+    for (const platform of platformsForRun) {
       const preset = getPresetForPlatform(platform)
       const ar = preset.aspectRatio
       if (!groups[ar]) groups[ar] = []
@@ -307,7 +337,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
     }
 
     const initStates: Record<string, PlatformUploadState> = {}
-    for (const p of selectedPlatforms) initStates[p] = { status: 'waiting', progress: 0 }
+    for (const p of platformsForRun) initStates[p] = { status: 'waiting', progress: 0 }
     setPlatformStates(prev => ({ ...prev, ...initStates }))
 
     for (const [aspectRatio, platforms] of Object.entries(groups)) {
@@ -333,7 +363,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
           ...prev,
           [platform]: { status: 'uploading', progress: 0 },
         }))
-        const result = await uploadToPlatform(platform)
+        const result = await uploadToPlatform(platform, forcePlatforms.has(platform))
         setPlatformStates(prev => ({ ...prev, [platform]: result }))
       }
     }
@@ -417,7 +447,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
   }
 
   return (
-    <div className="sticky bottom-0 bg-surface-900/80 backdrop-blur-sm p-2 -mx-1 rounded-lg space-y-2">
+    <div className="v4-editor-publish-controls sticky bottom-0 bg-surface-900/80 backdrop-blur-sm p-2 -mx-1 rounded-lg space-y-2">
       {/* Save button */}
       <div className="flex gap-2">
         {/* Save button */}
@@ -432,7 +462,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
         {/* Download button */}
         <Tooltip text="Export clip and save video file to your download folder" position="top">
           <button
-            disabled={downloading || exporting || !vodPath}
+            disabled={downloading || exporting || !mediaAvailable}
             onClick={async () => {
               if (!clipId) return
               setDownloading(true)
@@ -540,6 +570,14 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
           />
         )}
 
+        {(tiktokAcceptedWithoutLink || tiktokPreviouslyAccepted) && (
+          <div role="status" className="border-l-2 border-amber-400 bg-amber-500/5 px-3 py-2 text-[11px] leading-relaxed text-amber-200">
+            {tiktokAcceptedWithoutLink
+              ? 'TikTok reported that the private post was accepted. Private posts do not return a link, so check Profile > Private (the lock tab) in the TikTok mobile app. It can take several minutes and occasionally longer to appear. Do not upload another copy while waiting.'
+              : 'TikTok previously reported this clip as accepted, so ClipGoblin did not send another copy. Check Profile > Private (the lock tab). Use the button below only if the post is missing.'}
+          </div>
+        )}
+
         {/* Schedule toggle + Upload/Schedule buttons */}
         {selectedPlatforms.length > 0 && (
           <div className="space-y-1.5">
@@ -572,7 +610,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
             {scheduleMode ? (
               <button
                 onClick={handleScheduleUpload}
-                disabled={scheduling || !scheduleTime || !vodPath || (selectedPlatforms.includes('tiktok') && !tiktokComplianceValid)}
+                disabled={scheduling || !scheduleTime || !mediaAvailable || (selectedPlatforms.includes('tiktok') && !tiktokComplianceValid)}
                 className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors cursor-pointer border bg-amber-600/80 text-white border-amber-500 hover:bg-amber-500 disabled:opacity-60"
               >
                 {scheduling ? (
@@ -585,10 +623,10 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
               </button>
             ) : (
               <button
-                onClick={handleMultiUpload}
-                disabled={anyUploading || !vodPath || allSubmitted || (selectedPlatforms.includes('tiktok') && !tiktokComplianceValid)}
+                onClick={() => void handleMultiUpload(new Set(forcedReuploadPlatforms))}
+                disabled={anyUploading || !mediaAvailable || (allSubmitted && !hasForcedReuploadOption) || (selectedPlatforms.includes('tiktok') && !tiktokComplianceValid)}
                 className={`w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors cursor-pointer border ${
-                  allSubmitted
+                  allSubmitted && !hasForcedReuploadOption
                     ? 'bg-green-600/20 text-green-400 border-green-500/30'
                     : anyUploading
                     ? 'bg-violet-600/20 text-violet-400 border-violet-500/30'
@@ -599,9 +637,19 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
                   <><Loader2 className="w-3.5 h-3.5 animate-spin" />
                     {exporting ? 'Exporting...' : 'Uploading...'}
                   </>
+                ) : hasForcedReuploadOption ? (
+                  <><RefreshCw className="w-3.5 h-3.5" />
+                    Upload another copy to {forcedReuploadPlatforms.length === 1
+                      ? (PLATFORM_INFO[forcedReuploadPlatforms[0]]?.name || forcedReuploadPlatforms[0])
+                      : `${forcedReuploadPlatforms.length} platforms`}
+                  </>
                 ) : allSubmitted ? (
                   <><Check className="w-3.5 h-3.5" />
-                    {hasProcessingUpload ? 'Upload submitted — processing' : 'All uploads complete'}
+                    {hasProcessingUpload
+                      ? 'Upload submitted - processing'
+                      : tiktokAcceptedWithoutLink && selectedPlatforms.length === 1
+                        ? 'TikTok accepted private post'
+                        : 'All uploads complete'}
                   </>
                 ) : (
                   <><Upload className="w-3.5 h-3.5" />
@@ -660,6 +708,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
 export default function Editor() {
   const { clipId } = useParams()
   const navigate = useNavigate()
+  const location = useLocation()
   const stopAll = usePlaybackStore(s => s.stopAll)
 
   // Stop all other playback when editor opens
@@ -708,6 +757,8 @@ export default function Editor() {
     }
   }
   const [videoSrc, setVideoSrc] = useState<string | null>(null)
+  const [editorLoadError, setEditorLoadError] = useState<string | null>(null)
+  const [editorLoadAttempt, setEditorLoadAttempt] = useState(0)
   const [saving, setSaving] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [exportProgress, setExportProgress] = useState(0)
@@ -718,6 +769,7 @@ export default function Editor() {
   const [uploadHistory, setUploadHistory] = useState<Record<string, string>>({})
   const [originalStart, setOriginalStart] = useState(0)
   const [originalEnd, setOriginalEnd] = useState(0)
+  const [captionTimelineStart, setCaptionTimelineStart] = useState(0)
   const [thumbnailPath, setThumbnailPath] = useState<string | null>(null)
 
   // ── Editor state ──
@@ -736,6 +788,12 @@ export default function Editor() {
   const [captionError, setCaptionError] = useState('')
   const [facecamLayout, setFacecamLayout] = useState<LayoutMode>('none')
   const [facecamSettings, setFacecamSettings] = useState<FacecamSettings>(DEFAULT_FACECAM)
+  const [contextBackgroundPath, setContextBackgroundPath] = useState<string | null>(null)
+  const [contextBackgroundMode, setContextBackgroundMode] = useState<'blur' | 'branding'>('blur')
+  const [contextBlurStrength, setContextBlurStrength] = useState(DEFAULT_CONTEXT_BLUR_STRENGTH)
+  const [contextVideoY, setContextVideoY] = useState(DEFAULT_CONTEXT_VIDEO_Y)
+  const [pickingBranding, setPickingBranding] = useState(false)
+  const [brandingError, setBrandingError] = useState('')
   const [layoutPickerOpen, setLayoutPickerOpen] = useState(false)
   const [exportPresetId, setExportPresetId] = useState('tiktok')
   const [textOverlays] = useState<TextOverlay[]>([])
@@ -743,6 +801,40 @@ export default function Editor() {
   const [publishMeta, setPublishMeta] = useState<PublishMetadata>({
     title: '', description: '', hashtags: [], visibility: 'public',
   })
+  const [editorWorkspace, setEditorWorkspace] = useState<EditorWorkspaceId>(() => {
+    const workspace = (location.state as { workspace?: unknown } | null)?.workspace
+    return isEditorWorkspaceId(workspace) ? workspace : 'edit'
+  })
+  const editorWorkspaceTabRefs = useRef<Partial<Record<EditorWorkspaceId, HTMLButtonElement | null>>>({})
+
+  const handlePickContextBranding = async () => {
+    setPickingBranding(true)
+    setBrandingError('')
+    try {
+      const path = await invoke<string | null>('pick_context_branding_asset')
+      if (path) {
+        setContextBackgroundPath(path)
+        setContextBackgroundMode('branding')
+      }
+    } catch (error) {
+      setBrandingError(errorMessage(error, 'Could not add this branding asset'))
+    } finally {
+      setPickingBranding(false)
+    }
+  }
+
+  const handleEditorWorkspaceKeyDown = (
+    event: React.KeyboardEvent<HTMLButtonElement>,
+    workspace: EditorWorkspaceId,
+  ) => {
+    const key = event.key as EditorWorkspaceNavigationKey
+    if (!['ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'End', 'Home'].includes(key)) return
+
+    event.preventDefault()
+    const nextWorkspace = getNextEditorWorkspace(workspace, key)
+    setEditorWorkspace(nextWorkspace)
+    requestAnimationFrame(() => editorWorkspaceTabRefs.current[nextWorkspace]?.focus())
+  }
 
   const clipDuration = Math.max(0, endSeconds - startSeconds)
   // When the clip is backed by a standalone community-clip MP4, the preview
@@ -776,7 +868,20 @@ export default function Editor() {
     setCaptionStyleId(tmpl.captionStyleId)
     setCaptionsPosition(tmpl.captionPosition)
     setCaptionFontScale(clampCaptionFontScale(tmpl.captionFontScale ?? 1))
+    setCaptionYOffset(Math.max(-20, Math.min(20, tmpl.captionYOffset ?? 0)))
     setExportPresetId(tmpl.exportPresetId)
+    if ('contextBackgroundPath' in tmpl) {
+      setContextBackgroundPath(tmpl.contextBackgroundPath || null)
+    }
+    if (tmpl.contextBackgroundMode) {
+      setContextBackgroundMode(tmpl.contextBackgroundMode)
+    }
+    if (tmpl.contextBlurStrength != null) {
+      setContextBlurStrength(normalizeContextBlurStrength(tmpl.contextBlurStrength))
+    }
+    if (tmpl.contextVideoY != null) {
+      setContextVideoY(normalizeContextVideoY(tmpl.contextVideoY))
+    }
     setPublishMeta(prev => ({
       ...prev,
       hashtags: [...tmpl.hashtags],
@@ -791,15 +896,20 @@ export default function Editor() {
       captionStyleId,
       captionPosition: captionsPosition as 'top' | 'center' | 'bottom',
       captionFontScale,
+      captionYOffset,
       captionTone: 'punchy', // default — user can change later
       hashtags: publishMeta.hashtags,
       exportPresetId,
+      contextBackgroundPath,
+      contextBackgroundMode,
+      contextBlurStrength,
+      contextVideoY,
     })
     setTemplateSaveName('')
     setTemplateSaveOpen(false)
     setTemplateSaved(true)
     setTimeout(() => setTemplateSaved(false), 2000)
-  }, [templateSaveName, captionStyleId, captionsPosition, captionFontScale, publishMeta.hashtags, exportPresetId, templateStore])
+  }, [templateSaveName, captionStyleId, captionsPosition, captionFontScale, captionYOffset, publishMeta.hashtags, exportPresetId, contextBackgroundPath, contextBackgroundMode, contextBlurStrength, contextVideoY, templateStore])
 
   // ── Undo / Redo history ──
   const history = useEditorHistory()
@@ -902,6 +1012,7 @@ export default function Editor() {
   const [subtitleSegments, setSubtitleSegments] = useState<SubtitleSegment[]>([])
   const captionsTextRef = useRef(captionsText)
   const hasSrtCaptions = subtitleSegments.length > 0
+  const canGenerateSubtitles = canGenerateTimedCaptions(clip, vod)
 
   // Sync: external captionsText changes → parse into segments
   useEffect(() => {
@@ -921,11 +1032,12 @@ export default function Editor() {
     return () => clearTimeout(timeout)
   }, [subtitleSegments])
 
-  // SRT-relative playback time (0 = originalStart)
-  const srtTime = Math.max(0, playbackTime - originalStart)
+  // SRT timestamps remain tied to the source position where captions were
+  // generated, even if the clip is trimmed again later.
+  const srtTime = playbackTime - captionTimelineStart
   // SRT-relative trim bounds
-  const srtTrimStart = startSeconds - originalStart
-  const srtTrimEnd = endSeconds - originalStart
+  const srtTrimStart = startSeconds - captionTimelineStart
+  const srtTrimEnd = endSeconds - captionTimelineStart
   const trimmedTranscriptText = useMemo(() => {
     const visibleSegments = subtitleSegments.filter(segment =>
       segment.endTime >= srtTrimStart && segment.startTime <= srtTrimEnd
@@ -961,8 +1073,8 @@ export default function Editor() {
     setSubtitleSegments(prev => prev.filter(s => s.id !== id))
   }, [])
   const handleSubtitleSeek = useCallback((srtTimeTarget: number) => {
-    playerSeekRef.current?.(originalStart + srtTimeTarget)
-  }, [originalStart])
+    playerSeekRef.current?.(captionTimelineStart + srtTimeTarget)
+  }, [captionTimelineStart])
 
   const handleGenerateCaptions = async () => {
     if (!clipId || generatingCaptions) return
@@ -970,6 +1082,7 @@ export default function Editor() {
     setCaptionError('')
     try {
       const srt = await invoke<string>('generate_clip_captions', { clipId })
+      setCaptionTimelineStart(isCommunityClip ? 0 : startSeconds)
       setCaptionsText(srt)
 
       // Game detection is manual — no auto-inference after subtitle generation
@@ -1026,7 +1139,7 @@ export default function Editor() {
 
     if (hasSrtCaptions && aiEmphasisEnabled) {
       for (const phrase of emphasisSummary) {
-        const absTime = originalStart + phrase.time
+        const absTime = captionTimelineStart + phrase.time
         if (absTime >= originalStart && absTime <= originalEnd) {
           const markerType = phrase.type === 'urgency' ? 'reaction' as const
             : phrase.type === 'payoff' || phrase.type === 'punchline' ? 'payoff' as const
@@ -1037,12 +1150,17 @@ export default function Editor() {
     }
 
     return { timelineMarkers: markers, suggestedHookStart: hookSuggestion }
-  }, [highlight, originalStart, originalEnd, startSeconds, hasSrtCaptions, aiEmphasisEnabled, emphasisSummary])
+  }, [highlight, originalStart, originalEnd, startSeconds, captionTimelineStart, hasSrtCaptions, aiEmphasisEnabled, emphasisSummary])
 
   // ── Load clip data ──
   useEffect(() => {
     if (!clipId) return
     publishMetaInitRef.current = false // reset so next publishMeta update from load is skipped
+    setEditorLoadError(null)
+    setClip(null)
+    setHighlight(null)
+    setVod(null)
+    setVideoSrc(null)
     ;(async () => {
       try {
         const c = await invoke<Clip>('get_clip_detail', { clipId })
@@ -1057,12 +1175,20 @@ export default function Editor() {
         setCaptionsEnabled(c.captions_enabled === 1)
         setCaptionsText(c.captions_text || '')
         setCaptionsPosition(c.captions_position || 'bottom')
+        setCaptionYOffset(Math.max(-20, Math.min(20, c.caption_y_offset ?? 0)))
         setCaptionStyleId(c.caption_style || 'clean')
         setCaptionFontScale(clampCaptionFontScale(c.caption_font_scale ?? 1))
+        setCaptionTimelineStart(getCaptionTimelineStart(c))
         const savedLayout = LAYOUT_OPTIONS.some((layout) => layout.id === c.facecam_layout)
           ? c.facecam_layout as LayoutMode
           : 'none'
         setFacecamLayout(savedLayout)
+        setFacecamSettings(parseFacecamSettings(c.facecam_settings))
+        setContextBackgroundPath(c.context_background_path || null)
+        setContextBackgroundMode(c.context_background_mode === 'branding' ? 'branding' : 'blur')
+        setContextBlurStrength(normalizeContextBlurStrength(c.context_blur_strength))
+        setContextVideoY(normalizeContextVideoY(c.context_video_y))
+        setBrandingError('')
         setExportDone(c.render_status === 'completed')
         setOriginalStart(c.start_seconds)
         setOriginalEnd(c.end_seconds)
@@ -1096,7 +1222,7 @@ export default function Editor() {
           captionsPosition: c.captions_position || 'bottom',
           captionStyleId: c.caption_style || 'clean',
           captionFontScale: clampCaptionFontScale(c.caption_font_scale ?? 1),
-          captionYOffset: 0,
+          captionYOffset: Math.max(-20, Math.min(20, c.caption_y_offset ?? 0)),
           publishTitle: c.title,
           publishDescription: '',
           publishHashtags: [],
@@ -1114,28 +1240,36 @@ export default function Editor() {
           if (loadedHighlight) setHighlight(loadedHighlight)
         } catch { /* non-critical */ }
 
-        const v = await invoke<Vod>('get_vod_detail', { vodId: c.vod_id })
-        setVod(v)
+        if (c.source_media_path) {
+          setVod(null)
+          setGame(c.game || '')
+          const previewPath = await invoke<string>('prepare_clip_preview_source', { clipId })
+          setVideoSrc(convertFileSrc(previewPath))
+        } else {
+          const v = await invoke<Vod>('get_vod_detail', { vodId: c.vod_id })
+          setVod(v)
 
-        // Load game from stored values — clip.game takes priority, then VOD.game_name
-        const storedGame = c.game || v.game_name || ''
-        console.log('[Editor] Game loaded — clip.game:', JSON.stringify(c.game), '| vod.game_name:', JSON.stringify(v.game_name), '→', JSON.stringify(storedGame))
-        setGame(storedGame)
+          // Load game from stored values — clip.game takes priority, then VOD.game_name
+          const storedGame = c.game || v.game_name || ''
+          console.log('[Editor] Game loaded — clip.game:', JSON.stringify(c.game), '| vod.game_name:', JSON.stringify(v.game_name), '→', JSON.stringify(storedGame))
+          setGame(storedGame)
 
-        // Community-clip MP4: a standalone, already-trimmed file. When present
-        // the preview plays THAT file directly (0 → its own duration) instead
-        // of seeking into the VOD. Falls back to the VOD source otherwise.
-        if (c.community_clip_mp4_path) {
-          setVideoSrc(convertFileSrc(c.community_clip_mp4_path))
-        } else if (v.local_path) {
-          setVideoSrc(convertFileSrc(v.local_path))
+          // Community-clip MP4 is already trimmed, so its preview is 0-based.
+          if (c.community_clip_mp4_path) {
+            setVideoSrc(convertFileSrc(c.community_clip_mp4_path))
+          } else if (v.local_path) {
+            setVideoSrc(convertFileSrc(v.local_path))
+          }
         }
+
+        invoke('record_clip_opened', { clipId }).catch(() => {})
 
       } catch (err) {
         console.error('Failed to load clip:', err)
+        setEditorLoadError(String(err))
       }
     })()
-  }, [clipId, history])
+  }, [clipId, history, editorLoadAttempt])
 
   // ── Sync aspect ratio when export preset changes ──
   useEffect(() => {
@@ -1157,7 +1291,13 @@ export default function Editor() {
         captionsPosition,
         captionStyle: captionStyleId,
         captionFontScale,
+        captionYOffset,
         facecamLayout,
+        facecamSettings: JSON.stringify(facecamSettings),
+        contextBackgroundPath,
+        contextBackgroundMode,
+        contextBlurStrength,
+        contextVideoY,
         game: game || null,
       })
       setSaved(true)
@@ -1187,7 +1327,9 @@ export default function Editor() {
       aspectRatio: targetAspectRatio,
       captionsEnabled: captionsEnabled ? 1 : 0,
       captionsText: captionsText || null,
-      captionsPosition, captionStyle: captionStyleId, captionFontScale, facecamLayout,
+      captionsPosition, captionStyle: captionStyleId, captionFontScale, captionYOffset, facecamLayout,
+      facecamSettings: JSON.stringify(facecamSettings),
+      contextBackgroundPath, contextBackgroundMode, contextBlurStrength, contextVideoY,
       game: game || null,
     })
 
@@ -1289,6 +1431,16 @@ export default function Editor() {
     return 'fit'
   })()
   const captionCollision = computeSubtitleCollision(captionY, facecamLayout, facecamSettings)
+  const layoutSupportsBranding = facecamLayout === 'context_fit'
+    || facecamLayout === 'split'
+    || facecamLayout === 'pip'
+  const brandingActive = layoutSupportsBranding
+    && contextBackgroundMode === 'branding'
+    && !!contextBackgroundPath
+  const brandingMediaSrc = brandingActive && contextBackgroundPath
+    ? convertFileSrc(contextBackgroundPath)
+    : null
+  const secondaryContentLabel = brandingActive ? 'Branding' : 'Facecam'
   // CSS positioning: 'bottom' anchors from the bottom edge so tall/multi-line
   // captions grow UPWARD instead of off the bottom of the frame.
   const captionPositionStyle: React.CSSProperties =
@@ -1347,11 +1499,41 @@ export default function Editor() {
   }
 
   if (!clip) {
-    return <div className="flex items-center justify-center h-64"><p className="text-slate-400">Loading editor...</p></div>
+    if (editorLoadError) {
+      return (
+        <div className="flex min-h-64 items-center justify-center">
+          <div className="max-w-lg border-l-2 border-red-400 bg-red-500/5 px-5 py-4">
+            <h2 className="text-sm font-semibold text-white">Could not open this clip</h2>
+            <p className="mt-1 break-words text-xs text-red-200">{editorLoadError}</p>
+            <div className="mt-4 flex gap-2">
+              <button type="button" className="v4-btn primary" onClick={() => setEditorLoadAttempt(attempt => attempt + 1)}>
+                Retry
+              </button>
+              <button type="button" className="v4-btn ghost" onClick={() => navigate('/clips')}>
+                Back to clips
+              </button>
+            </div>
+          </div>
+        </div>
+      )
+    }
+    return (
+      <div className="flex h-64 items-center justify-center gap-2 text-sm text-slate-400" role="status">
+        <Loader2 className="h-4 w-4 animate-spin" /> Loading editor
+      </div>
+    )
   }
 
   return (
     <div className="space-y-6">
+      {editorLoadError && (
+        <div role="alert" className="flex items-center justify-between gap-3 border-l-2 border-red-400 bg-red-500/5 px-3 py-2 text-xs text-red-200">
+          <span className="min-w-0 break-words">Preview could not be prepared: {editorLoadError}</span>
+          <button type="button" className="v4-btn ghost shrink-0" onClick={() => setEditorLoadAttempt(attempt => attempt + 1)}>
+            Retry
+          </button>
+        </div>
+      )}
       {/* Cam region edit modal -- shown on top of everything when in edit mode */}
       {regionEditScope && vod && videoSrc && (
         <CamRegionModal
@@ -1396,6 +1578,20 @@ export default function Editor() {
           />
         </div>
         <div className="flex items-center gap-1.5">
+          <Tooltip text="Save clip changes" position="bottom">
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className={`v4-editor-save-button ${saved ? 'saved' : ''}`}
+            >
+              {saving
+                ? <Loader2 className="w-4 h-4 animate-spin" />
+                : saved
+                  ? <Check className="w-4 h-4" />
+                  : <Save className="w-4 h-4" />}
+              <span>{saving ? 'Saving...' : saved ? 'Saved' : 'Save'}</span>
+            </button>
+          </Tooltip>
           <Tooltip text={history.canUndo() ? `Undo (${history.undoCount()} step${history.undoCount() === 1 ? '' : 's'})` : 'Nothing to undo'} position="bottom">
             <button onClick={handleUndo} disabled={!history.canUndo()}
               className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-surface-800 border border-surface-600 text-slate-400 hover:text-white hover:bg-surface-700 hover:border-surface-500 transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed">
@@ -1413,9 +1609,9 @@ export default function Editor() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="v4-editor-layout">
         {/* ── Left: Preview ── */}
-        <div className="space-y-4">
+        <div className="v4-editor-preview-column space-y-4">
           <div className="v4-panel" style={{padding: 16}}>
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-sm font-semibold text-slate-300">Preview</h2>
@@ -1427,6 +1623,7 @@ export default function Editor() {
               <div className={`relative rounded-lg overflow-hidden ${previewAspect} ${previewWidth} transition-all duration-300 ease-in-out`}>
                 <ClipPlayer
                   src={videoSrc}
+                  poster={thumbnailPath ? convertFileSrc(thumbnailPath) : null}
                   clipStart={startSeconds}
                   clipEnd={endSeconds}
                   fullFile={isCommunityClip}
@@ -1437,6 +1634,11 @@ export default function Editor() {
                   onPlayChange={setIsPlaying}
                   seekRef={playerSeekRef}
                   videoElementRef={mainVideoElementRef}
+                  objectFit={facecamLayout === 'context_fit' ? 'contain' : 'cover'}
+                  blurBackground={facecamLayout === 'context_fit'}
+                  backgroundMedia={facecamLayout === 'context_fit' ? brandingMediaSrc : null}
+                  backgroundBlurStrength={contextBlurStrength}
+                  objectPositionY={contextVideoY}
                   overlay={<>
                     {/* ── Layout mode overlay — interactive ── */}
                     {facecamLayout === 'split' && (
@@ -1444,17 +1646,25 @@ export default function Editor() {
                         <div className="absolute inset-0 pointer-events-none z-[8]">
                           <div className="absolute left-1 text-[7px] text-white/40 font-mono" style={{ top: '2%' }}>GAME</div>
                           <div className="absolute left-1 text-[7px] text-white/40 font-mono"
-                            style={{ top: `${facecamSettings.splitRatio * 100 + 2}%` }}>FACECAM</div>
-                          {/* Facecam region preview — bottom slot */}
+                            style={{ top: `${facecamSettings.splitRatio * 100 + 2}%` }}>
+                            {brandingActive ? 'BRANDING' : 'FACECAM'}
+                          </div>
+                          {/* Secondary panel preview — branding or facecam crop */}
                           <div className="absolute left-0 right-0 bottom-0 overflow-hidden"
                             style={{ top: `${facecamSettings.splitRatio * 100}%`, background: 'rgba(60,20,100,0.25)' }}>
-                            {effectiveRegion && videoSrc && (
+                            {brandingActive && brandingMediaSrc ? (
+                              <img
+                                src={brandingMediaSrc}
+                                alt=""
+                                className="h-full w-full object-cover"
+                              />
+                            ) : effectiveRegion && videoSrc ? (
                               <CamRegionPreview
                                 sourceVideoRef={mainVideoElementRef}
                                 region={effectiveRegion}
                                 fitMode={effectiveFitMode}
                               />
-                            )}
+                            ) : null}
                           </div>
                         </div>
                         <DraggableSplitDivider
@@ -1466,8 +1676,21 @@ export default function Editor() {
                     )}
                     {facecamLayout === 'pip' && (
                       <>
-                        {/* PiP cam-region preview -- sits beneath the draggable overlay */}
-                        {effectiveRegion && videoSrc && (
+                        {/* PiP content sits beneath the draggable position/size overlay. */}
+                        {brandingActive && brandingMediaSrc ? (
+                          <div
+                            className="absolute overflow-hidden pointer-events-none"
+                            style={{
+                              left: `${facecamSettings.pipX}%`,
+                              top: `${facecamSettings.pipY}%`,
+                              width: `${facecamSettings.pipW}%`,
+                              height: `${facecamSettings.pipH}%`,
+                              zIndex: 4,
+                            }}
+                          >
+                            <img src={brandingMediaSrc} alt="" className="h-full w-full object-contain" />
+                          </div>
+                        ) : effectiveRegion && videoSrc ? (
                           <div
                             className="absolute overflow-hidden pointer-events-none"
                             style={{
@@ -1484,13 +1707,14 @@ export default function Editor() {
                               fitMode={effectiveFitMode}
                             />
                           </div>
-                        )}
+                        ) : null}
                         <DraggablePipOverlay
                           settings={facecamSettings}
                           onChange={setFacecamSettings}
                           frameWidth={frameWidthPx}
                           frameHeight={frameHeightPx}
-                          transparent={!!effectiveRegion}
+                          transparent={brandingActive || !!effectiveRegion}
+                          contentLabel={brandingActive ? 'BRANDING' : 'FACECAM'}
                         />
                       </>
                     )}
@@ -1546,7 +1770,7 @@ export default function Editor() {
                       ) : (
                         <div className="absolute bottom-[8%] left-0 right-0 flex justify-center pointer-events-none z-10">
                           <span className="text-center text-xs text-slate-400/80 bg-black/50 px-3 py-1.5 rounded">
-                            {generatingCaptions ? 'Generating subtitles...' : 'No subtitles available'}
+                            {generatingCaptions ? 'Generating subtitles...' : 'No subtitles yet'}
                           </span>
                         </div>
                       )
@@ -1597,44 +1821,52 @@ export default function Editor() {
             </div>
           </div>
 
-          {/* Export status */}
-          {exportDone && clip.output_path && (
-            <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-4">
-              <div className="flex items-center gap-2 text-emerald-400 text-sm font-medium mb-1">
-                <Check className="w-4 h-4" />
-                Exported successfully
-              </div>
-              <p className="text-xs text-slate-400 font-mono truncate">{clip.output_path}</p>
-            </div>
-          )}
-
-          {/* Thumbnail selector */}
-          <div className="v4-panel" style={{padding: 16}}>
-            <h2 className="text-sm font-semibold text-slate-300 mb-3">Thumbnail</h2>
-            <ThumbnailSelector
-              clipId={clipId!}
-              currentTime={playbackTime}
-              thumbnailPath={thumbnailPath}
-              onThumbnailSet={(path) => {
-                setThumbnailPath(path)
-                setClip(prev => prev ? { ...prev, thumbnail_path: path } : prev)
-              }}
-            />
-          </div>
-
-          {/* Duration warning */}
-          {clipDuration > exportPreset.maxDuration && (
-            <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3">
-              <p className="text-xs text-amber-400">
-                Clip is {formatTime(clipDuration)} — {exportPreset.name} max is {formatTime(exportPreset.maxDuration)}.
-                Consider trimming to fit.
-              </p>
-            </div>
-          )}
         </div>
 
         {/* ── Right: Settings ── */}
-        <div className="space-y-4 overflow-y-auto max-h-[calc(100vh-10rem)] pr-1">
+        <aside className="v4-editor-tools">
+          <nav className="v4-editor-tabs" role="tablist" aria-label="Clip editor workspaces">
+            {([
+              { id: 'edit' as const, label: 'Edit', Icon: Film },
+              { id: 'captions' as const, label: 'Captions', Icon: MessageSquare },
+              { id: 'publish' as const, label: 'Publish', Icon: Upload },
+            ]).map(({ id, label, Icon }) => {
+              const isActive = editorWorkspace === id
+              return (
+                <button
+                  key={id}
+                  ref={node => { editorWorkspaceTabRefs.current[id] = node }}
+                  id={`editor-tab-${id}`}
+                  type="button"
+                  role="tab"
+                  tabIndex={isActive ? 0 : -1}
+                  aria-selected={isActive}
+                  aria-controls={`editor-panel-${id}`}
+                  className={`v4-editor-tab ${isActive ? 'active' : ''}`}
+                  onClick={() => {
+                    setEditorWorkspace(id)
+                    if (id !== 'edit') {
+                      setTemplateDropdownOpen(false)
+                      setLayoutPickerOpen(false)
+                    }
+                  }}
+                  onKeyDown={event => handleEditorWorkspaceKeyDown(event, id)}
+                >
+                  <Icon className="w-4 h-4" aria-hidden="true" />
+                  <span>{label}</span>
+                </button>
+              )
+            })}
+          </nav>
+
+          <div className="v4-editor-workspace-scroll">
+            <div
+              id="editor-panel-edit"
+              role="tabpanel"
+              aria-labelledby="editor-tab-edit"
+              className="v4-editor-workspace"
+              hidden={editorWorkspace !== 'edit'}
+            >
           {/* Title */}
           <Section title="Title">
             <div className="flex gap-1.5">
@@ -1894,35 +2126,6 @@ export default function Editor() {
           </Section>
 
           {/* Layout */}
-          {/* Publish Metadata */}
-          <Section title="Post Details">
-            {(() => {
-              const platformKey = exportPreset.id === 'tiktok' ? 'tiktok'
-                : exportPreset.id === 'reels' ? 'instagram'
-                : exportPreset.id === 'shorts' || exportPreset.id === 'youtube' ? 'youtube'
-                : 'tiktok'
-              return (
-                <PublishComposer
-                  platform={platformKey}
-                  metadata={publishMeta}
-                  onChange={setPublishMeta}
-                  clipId={clipId}
-                  clipContext={{
-                    title: title,
-                    eventTags: highlight?.tags ?? [],
-                    emotionTags: [],
-                    transcriptExcerpt: highlight?.transcript_snippet || undefined,
-                    eventSummary: highlight?.event_summary || undefined,
-                    transcript: trimmedTranscriptText,
-                    vodTitle: vod?.title || undefined,
-                    game: game || undefined,
-                    duration: clipDuration,
-                  }}
-                />
-              )
-            })()}
-          </Section>
-
           <Section title="Layout">
             {/* Current layout display + change button */}
             <div className="flex items-center gap-3">
@@ -1962,10 +2165,11 @@ export default function Editor() {
                 layout={facecamLayout}
                 settings={facecamSettings}
                 onChange={setFacecamSettings}
+                contentLabel={secondaryContentLabel}
               />
             )}
             {/* Cam region (crop from source) — visible whenever layout has a cam slot */}
-            {clip && vod && (facecamLayout === 'split' || facecamLayout === 'pip') && (
+            {clip && vod && !brandingActive && (facecamLayout === 'split' || facecamLayout === 'pip') && (
               <div className="mt-3">
                 <CamRegionRow
                   vodId={vod.id}
@@ -1981,13 +2185,171 @@ export default function Editor() {
                 />
               </div>
             )}
+            {layoutSupportsBranding && (
+              <div className="mt-4 border-t border-surface-600/70 pt-4 space-y-4">
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[10px] font-medium uppercase text-slate-500">
+                      {facecamLayout === 'context_fit'
+                        ? 'Background'
+                        : facecamLayout === 'split'
+                          ? 'Secondary panel'
+                          : 'Floating panel'}
+                    </span>
+                    <span className="text-[10px] text-slate-500">
+                      {contextBackgroundMode === 'branding'
+                        ? 'Branding'
+                        : facecamLayout === 'context_fit' ? 'Video blur' : 'Facecam'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1 rounded-md bg-surface-900 p-1 border border-surface-600">
+                    <button
+                      type="button"
+                      aria-pressed={contextBackgroundMode === 'blur'}
+                      onClick={() => setContextBackgroundMode('blur')}
+                      className={`h-8 rounded text-xs font-medium transition-colors cursor-pointer ${
+                        contextBackgroundMode === 'blur'
+                          ? 'bg-cyan-500/15 text-cyan-300'
+                          : 'text-slate-500 hover:text-slate-300'
+                      }`}
+                    >
+                      {facecamLayout === 'context_fit' ? 'Video blur' : 'Facecam'}
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={contextBackgroundMode === 'branding'}
+                      onClick={() => {
+                        if (contextBackgroundPath) setContextBackgroundMode('branding')
+                        else void handlePickContextBranding()
+                      }}
+                      className={`h-8 rounded text-xs font-medium transition-colors cursor-pointer ${
+                        contextBackgroundMode === 'branding'
+                          ? 'bg-cyan-500/15 text-cyan-300'
+                          : 'text-slate-500 hover:text-slate-300'
+                      }`}
+                    >
+                      Branding
+                    </button>
+                  </div>
+                  {brandingError && <p className="mt-1.5 text-[10px] text-red-400">{brandingError}</p>}
+                </div>
+
+                {facecamLayout === 'context_fit' && contextBackgroundMode === 'blur' && (
+                  <label className="block">
+                    <span className="flex items-center justify-between text-[10px] text-slate-500 mb-1.5">
+                      <span>Background softness</span>
+                      <span>{Math.round(contextBlurStrength * 100)}%</span>
+                    </span>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="1"
+                      value={Math.round(contextBlurStrength * 100)}
+                      onChange={(event) => setContextBlurStrength(
+                        normalizeContextBlurStrength(Number(event.target.value) / 100),
+                      )}
+                      className="w-full accent-cyan-400 cursor-pointer"
+                    />
+                  </label>
+                )}
+
+                {contextBackgroundMode === 'branding' && (
+                  <div>
+                    {contextBackgroundPath ? (
+                      <div className="flex items-center gap-3">
+                        <img
+                          src={convertFileSrc(contextBackgroundPath)}
+                          alt=""
+                          className="h-14 w-10 shrink-0 rounded object-cover border border-surface-600"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-xs text-slate-300">{brandingAssetName(contextBackgroundPath)}</p>
+                          <p className="text-[9px] text-slate-600">PNG, JPG, WebP, or animated GIF</p>
+                        </div>
+                        <button
+                          type="button"
+                          title="Replace branding"
+                          aria-label="Replace branding"
+                          disabled={pickingBranding}
+                          onClick={() => void handlePickContextBranding()}
+                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded border border-surface-600 text-slate-400 hover:border-cyan-500/40 hover:text-cyan-300 disabled:opacity-50 cursor-pointer"
+                        >
+                          {pickingBranding
+                            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            : <ImagePlus className="h-3.5 w-3.5" />}
+                        </button>
+                        <button
+                          type="button"
+                          title="Remove branding"
+                          aria-label="Remove branding"
+                          onClick={() => {
+                            setContextBackgroundPath(null)
+                            setContextBackgroundMode('blur')
+                          }}
+                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded border border-surface-600 text-slate-500 hover:border-red-500/40 hover:text-red-400 cursor-pointer"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={pickingBranding}
+                        onClick={() => void handlePickContextBranding()}
+                        className="flex h-9 w-full items-center justify-center gap-2 rounded border border-dashed border-surface-500 text-xs text-slate-400 hover:border-cyan-500/50 hover:text-cyan-300 disabled:opacity-50 cursor-pointer"
+                      >
+                        {pickingBranding
+                          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          : <ImagePlus className="h-3.5 w-3.5" />}
+                        Choose branding
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {facecamLayout === 'context_fit' && (
+                  <label className="block">
+                  <span className="flex items-center justify-between text-[10px] text-slate-500 mb-1.5">
+                    <span>Video placement</span>
+                    <span>{contextVideoPositionLabel(contextVideoY)}</span>
+                  </span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={Math.round(contextVideoY * 100)}
+                    onChange={(event) => setContextVideoY(
+                      normalizeContextVideoY(Number(event.target.value) / 100),
+                    )}
+                    className="w-full accent-cyan-400 cursor-pointer"
+                  />
+                  <div className="mt-1 flex justify-between text-[9px] text-slate-600">
+                    <span>Top</span>
+                    <span>Bottom</span>
+                  </div>
+                  </label>
+                )}
+              </div>
+            )}
             {facecamLayout === 'none' && (
-              <p className="text-[9px] text-slate-600 mt-2">Select Split or PiP layout to add facecam controls.</p>
+              <p className="text-[9px] text-slate-600 mt-2">
+                Full Frame fills the canvas with a center crop. Choose Context Fit to preserve the whole scene.
+              </p>
             )}
           </Section>
+            </div>
 
-          {/* Captions */}
-          <Section title="Captions">
+            <div
+              id="editor-panel-captions"
+              role="tabpanel"
+              aria-labelledby="editor-tab-captions"
+              className="v4-editor-workspace"
+              hidden={editorWorkspace !== 'captions'}
+            >
+              {/* Captions */}
+              <Section title="Captions">
             <div className="flex items-center justify-between mb-3">
               <span className="text-xs text-slate-400">Subtitles</span>
               <label className="flex items-center gap-2 cursor-pointer">
@@ -2005,7 +2367,20 @@ export default function Editor() {
                     <>
                       <div className="flex items-center justify-between mb-1">
                         <label className="text-xs text-slate-400">Subtitle Segments ({subtitleSegments.length})</label>
-                        <span className="text-[9px] text-slate-600">Click time to seek</span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[9px] text-slate-600">Click time to seek</span>
+                          <Tooltip text="Regenerate subtitles from the clip audio" position="left">
+                            <button
+                              type="button"
+                              onClick={handleGenerateCaptions}
+                              disabled={generatingCaptions}
+                              aria-label="Regenerate subtitles"
+                              className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-surface-600 text-slate-400 transition-colors hover:border-violet-500/60 hover:text-violet-300 disabled:cursor-wait disabled:opacity-50"
+                            >
+                              <RefreshCw className={`h-3.5 w-3.5 ${generatingCaptions ? 'animate-spin' : ''}`} />
+                            </button>
+                          </Tooltip>
+                        </div>
                       </div>
                       <SubtitleEditor
                         segments={subtitleSegments}
@@ -2017,6 +2392,9 @@ export default function Editor() {
                         onDelete={handleSubtitleDelete}
                         onSeek={handleSubtitleSeek}
                       />
+                      {captionError && (
+                        <p className="mt-2 text-[10px] text-red-400">{captionError}</p>
+                      )}
                     </>
                   ) : (
                     /* No SRT — manual text input + empty state info */
@@ -2027,7 +2405,7 @@ export default function Editor() {
                         className="w-full px-3 py-2 bg-surface-900 border border-surface-600 rounded-lg text-white text-sm focus:outline-none focus:border-violet-500 placeholder-slate-500" />
                       {!captionsText && (
                         <div className="mt-2 p-2.5 bg-surface-900 border border-surface-600 rounded-lg space-y-2">
-                          {vod?.local_path ? (
+                          {canGenerateSubtitles ? (
                             <>
                               <button
                                 onClick={handleGenerateCaptions}
@@ -2049,12 +2427,12 @@ export default function Editor() {
                                 <p className="text-[10px] text-red-400">{captionError}</p>
                               )}
                               <p className="text-[10px] text-slate-600">
-                                Requires Python with faster-whisper installed. You can also type a caption above for a static overlay.
+                                Uses ClipGoblin's local Whisper model. Imported source videos are not changed.
                               </p>
                             </>
                           ) : (
                             <p className="text-[10px] text-slate-500 leading-relaxed">
-                              VOD not downloaded. Download the VOD first to generate timed subtitles, or type a caption above.
+                              Source video unavailable. Download the Twitch VOD or restore the imported video to generate timed subtitles.
                             </p>
                           )}
                         </div>
@@ -2193,28 +2571,98 @@ export default function Editor() {
                 )}
               </div>
             )}
-          </Section>
+              </Section>
+            </div>
 
-          {/* Actions: Save / Export / Upload */}
-          <ActionsBar
-            clipId={clipId || ''}
-            clip={clip}
-            saving={saving}
-            saved={saved}
-            exporting={exporting}
-            exportProgress={exportProgress}
-            exportDone={exportDone}
-            exportError={exportError}
-            vodPath={!!vod?.local_path}
-            exportPreset={exportPreset}
-            onSave={handleSave}
-            onExportForFormat={handleExportForFormat}
-            publishMeta={publishMeta}
-            clipTitle={title}
-            uploadHistory={uploadHistory}
-            onUploadHistoryChange={(platform, url) => setUploadHistory(prev => ({ ...prev, [platform]: url }))}
-          />
-        </div>
+            <div
+              id="editor-panel-publish"
+              role="tabpanel"
+              aria-labelledby="editor-tab-publish"
+              className="v4-editor-workspace"
+              hidden={editorWorkspace !== 'publish'}
+            >
+              {/* Publish Metadata */}
+              <Section title="Post Details">
+                {(() => {
+                  const platformKey = exportPreset.id === 'tiktok' ? 'tiktok'
+                    : exportPreset.id === 'reels' ? 'instagram'
+                    : exportPreset.id === 'shorts' || exportPreset.id === 'youtube' ? 'youtube'
+                    : 'tiktok'
+                  return (
+                    <PublishComposer
+                      platform={platformKey}
+                      metadata={publishMeta}
+                      onChange={setPublishMeta}
+                      clipId={clipId}
+                      clipContext={{
+                        title: title,
+                        eventTags: highlight?.tags ?? [],
+                        emotionTags: [],
+                        transcriptExcerpt: highlight?.transcript_snippet || undefined,
+                        eventSummary: highlight?.event_summary || undefined,
+                        transcript: trimmedTranscriptText,
+                        vodTitle: vod?.title || undefined,
+                        game: game || undefined,
+                        duration: clipDuration,
+                      }}
+                    />
+                  )
+                })()}
+              </Section>
+
+              <Section title="Thumbnail">
+                <ThumbnailSelector
+                  clipId={clipId!}
+                  currentTime={playbackTime}
+                  thumbnailPath={thumbnailPath}
+                  onThumbnailSet={(path) => {
+                    setThumbnailPath(path)
+                    setClip(prev => prev ? { ...prev, thumbnail_path: path } : prev)
+                  }}
+                />
+              </Section>
+
+              {clipDuration > exportPreset.maxDuration && (
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3">
+                  <p className="text-xs text-amber-400">
+                    Clip is {formatTime(clipDuration)} — {exportPreset.name} max is {formatTime(exportPreset.maxDuration)}.
+                    Consider trimming to fit.
+                  </p>
+                </div>
+              )}
+
+              {exportDone && clip.output_path && (
+                <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-4">
+                  <div className="flex items-center gap-2 text-emerald-400 text-sm font-medium mb-1">
+                    <Check className="w-4 h-4" />
+                    Exported successfully
+                  </div>
+                  <p className="text-xs text-slate-400 font-mono truncate">{clip.output_path}</p>
+                </div>
+              )}
+
+              {/* Actions: Save / Export / Upload */}
+              <ActionsBar
+                clipId={clipId || ''}
+                clip={clip}
+                saving={saving}
+                saved={saved}
+                exporting={exporting}
+                exportProgress={exportProgress}
+                exportDone={exportDone}
+                exportError={exportError}
+                mediaAvailable={hasUsableSourceMedia(clip, vod)}
+                exportPreset={exportPreset}
+                onSave={handleSave}
+                onExportForFormat={handleExportForFormat}
+                publishMeta={publishMeta}
+                clipTitle={title}
+                uploadHistory={uploadHistory}
+                onUploadHistoryChange={(platform, url) => setUploadHistory(prev => ({ ...prev, [platform]: url }))}
+              />
+            </div>
+          </div>
+        </aside>
       </div>
     </div>
   )

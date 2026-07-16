@@ -14,16 +14,13 @@ export interface UiSettings {
   autoShipHighConfidence: boolean
   /** Use GPU (CUDA) for transcription. Default: true (falls back to CPU if unavailable). */
   useGpu: boolean
-  /** Show dev-only clip review tools (rating buttons + note + Export). Default: false. */
+  /** Show local personalized-detection feedback controls on clip cards. Default: false. */
   showReviewTools: boolean
   /**
    * Internal: true once the user has unlocked developer mode via the
-   * 7-tap-on-version-number gesture in Settings. When false, all
-   * dev-only toggles (currently `showReviewTools`) and the Developer
-   * Tools section in Settings are hidden, and the Review UI in
-   * Vods/Clips pages does not render even if `showReviewTools` is
-   * true. Reset to false on Settings → Reset. Persists across
-   * launches like other UI settings.
+   * 7-tap-on-version-number gesture in Settings. It gates only
+   * diagnostic developer actions such as raw review export; normal
+   * personalization feedback is controlled by `showReviewTools`.
    */
   developerModeUnlocked: boolean
 }

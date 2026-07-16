@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { UserRound } from 'lucide-react'
+import { LockKeyhole, UserRound } from 'lucide-react'
 import type { TikTokComplianceValue } from '../lib/tiktokCompliance'
 
 // Mirrors the Rust `TikTokCreatorInfo` struct (src-tauri/src/social/tiktok.rs).
@@ -25,6 +25,10 @@ const PRIVACY_LABELS: Record<string, string> = {
 // TikTok-required consent links (Content Sharing Guidelines).
 const MUSIC_URL = 'https://www.tiktok.com/legal/page/global/music-usage-confirmation/en'
 const BRANDED_POLICY_URL = 'https://www.tiktok.com/legal/page/global/bc-policy/en'
+
+// TikTok restricts unaudited Direct Post clients to SELF_ONLY. Flip this after
+// TikTok approves ClipGoblin's Content Posting API audit.
+const DIRECT_POST_AUDIT_PENDING = true
 
 // mm:ss formatter for the per-account max-duration hint.
 function fmtDuration(totalSec: number): string {
@@ -79,8 +83,13 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
   useEffect(() => {
     if (!info || seededRef.current) return
     seededRef.current = true
+    const privacyLevel = DIRECT_POST_AUDIT_PENDING
+      && info.privacy_level_options.includes('SELF_ONLY')
+      ? 'SELF_ONLY'
+      : value.privacyLevel
     onChange({
       ...value,
+      privacyLevel,
       disableComment: info.comment_disabled || value.disableComment,
       disableDuet: info.duet_disabled || value.disableDuet,
       disableStitch: info.stitch_disabled || value.disableStitch,
@@ -95,7 +104,14 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
   const discloseMissing = value.discloseContent && !value.yourBrand && !value.brandedContent
   const maxDurationSec = info?.max_video_post_duration_sec ?? 0
   const durationExceeded = clipDurationSec != null && maxDurationSec > 0 && clipDurationSec > maxDurationSec
-  const valid = !!info && !error && value.privacyLevel != null && !discloseMissing && !brandedOnPrivate && !durationExceeded
+  const privacyOptions = info && DIRECT_POST_AUDIT_PENDING
+    ? info.privacy_level_options.includes('SELF_ONLY')
+      ? ['SELF_ONLY']
+      : info.privacy_level_options
+    : info?.privacy_level_options ?? []
+  const valid = !!info && !error && value.privacyLevel != null
+    && privacyOptions.includes(value.privacyLevel)
+    && !discloseMissing && !brandedOnPrivate && !durationExceeded
   useEffect(() => {
     onValidityChange?.(valid)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -121,7 +137,6 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
     : value.yourBrand
       ? "Your video will be labeled as 'Promotional content'."
       : null
-
   return (
     <div className="space-y-3 border border-surface-600 rounded-lg p-3 bg-surface-900/40">
       {/* Posting as */}
@@ -155,6 +170,17 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
         </p>
       )}
 
+      {DIRECT_POST_AUDIT_PENDING && (
+        <div className="flex items-start gap-2 rounded border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[10px] leading-relaxed text-amber-200">
+          <LockKeyhole className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <span>
+            TikTok approval is pending. TikTok only permits <strong>Only me (private)</strong>
+            {' '}posts while ClipGoblin's Direct Post integration is under review. Wider audiences
+            will unlock after TikTok approves the app.
+          </span>
+        </div>
+      )}
+
       {/* Privacy level — options come straight from creator_info */}
       <div>
         <label className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold block mb-1">
@@ -170,7 +196,7 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
           className="w-full px-3 py-1.5 bg-surface-800 border border-surface-600 rounded text-sm text-white focus:outline-none focus:border-violet-500"
         >
           <option value="" disabled>Select…</option>
-          {info.privacy_level_options.map(lvl => (
+          {privacyOptions.map(lvl => (
             <option key={lvl} value={lvl}>{PRIVACY_LABELS[lvl] || lvl}</option>
           ))}
         </select>

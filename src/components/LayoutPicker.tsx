@@ -79,7 +79,7 @@ export default function LayoutPicker({ current, aspectRatio, platformName, onSel
 
         {/* Layout grid */}
         <div className="p-5">
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-4 gap-3">
             {LAYOUT_OPTIONS.map(option => {
               const isSelected = option.id === current
               const isHovered = option.id === hoveredId

@@ -1,8 +1,10 @@
-import { useEffect, useState, useRef } from 'react'
-import { Save, FolderOpen, Info, Brain, Check, Loader2, X, Zap, Sun, Moon, Bookmark, Pencil, Trash2, HardDrive, ExternalLink, Gauge, Tv, LogOut, Download, Mic, Cpu, AlertTriangle } from 'lucide-react'
+import { useEffect, useState, useRef, type KeyboardEvent } from 'react'
+import { Save, FolderOpen, FolderInput, Info, Brain, Check, Loader2, X, Zap, Sun, Moon, Bookmark, Pencil, Trash2, HardDrive, ExternalLink, Gauge, Tv, LogOut, Download, Mic, Cpu, AlertTriangle, ClipboardCopy, RotateCcw } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { useLocation } from 'react-router-dom'
 import ConnectedAccounts from '../components/ConnectedAccounts'
+import ExternalSourcesPanel from '../components/ExternalSourcesPanel'
 import Tooltip from '../components/Tooltip'
 import { useAiStore, PROVIDER_META, MODEL_OPTIONS, type AiProvider } from '../stores/aiStore'
 import { useAppStore } from '../stores/appStore'
@@ -10,13 +12,35 @@ import { useUiStore, tryAdvanceTapCounter, type TapCounterState } from '../store
 import { useTemplateStore } from '../stores/templateStore'
 import { CAPTION_STYLES, EXPORT_PRESETS } from '../lib/editTypes'
 import { requiresHighDetectionCostConsent, type DetectionSensitivity } from '../lib/detectionCostConsent'
+import {
+  getNextSettingsSection,
+  resolveSettingsSection,
+  type SettingsNavigationKey,
+  type SettingsSectionId,
+} from '../lib/settingsNavigation'
+import { getPersonalizationStatusCopy, type PersonalizationStatus } from '../types/clipReview'
 import { version as appVersion } from '../../package.json'
 
 const PROVIDERS: AiProvider[] = ['free', 'openai', 'claude', 'gemini']
 type CostConsentRequest = 'high-detection' | 'sonnet-final-pass'
 
+const SETTINGS_SECTIONS: Array<{
+  id: SettingsSectionId
+  label: string
+  description: string
+  icon: typeof Tv
+}> = [
+  { id: 'account', label: 'Accounts', description: 'Twitch and publishing connections', icon: Tv },
+  { id: 'sources', label: 'Clip Sources', description: 'Medal, OBS, Meld, and local video', icon: FolderInput },
+  { id: 'detection', label: 'Detection', description: 'Clip finding and transcription', icon: Gauge },
+  { id: 'ai', label: 'AI', description: 'BYOK provider and paid features', icon: Brain },
+  { id: 'editing', label: 'Editing', description: 'Templates and editor behavior', icon: Pencil },
+  { id: 'storage', label: 'Storage', description: 'Folders and local app data', icon: HardDrive },
+  { id: 'appearance', label: 'Appearance', description: 'Theme, tooltips, and app info', icon: Sun },
+]
+
 /** Manage custom clip templates — rename and delete */
-function TemplateManager() {
+function TemplateManager({ hidden = false }: { hidden?: boolean }) {
   const store = useTemplateStore()
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
@@ -43,7 +67,7 @@ function TemplateManager() {
   }
 
   return (
-    <section className="v4-section">
+    <section className="v4-section" hidden={hidden}>
       <h3 className="v4-section-label">
         <Bookmark className="w-3.5 h-3.5 inline-block mr-1.5 text-violet-400" style={{verticalAlign: -2}} />
         Clip Templates
@@ -151,6 +175,7 @@ function TemplateManager() {
 }
 
 export default function SettingsPage() {
+  const location = useLocation()
   const [downloadDir, setDownloadDir] = useState('—')
   const [aiSaved, setAiSaved] = useState(false)
   const [testing, setTesting] = useState(false)
@@ -163,6 +188,19 @@ export default function SettingsPage() {
   const [useCommunityClips, setUseCommunityClips] = useState(true)
   const [aiClipDetection, setAiClipDetection] = useState(false)
   const [allowPerClipCamOverride, setAllowPerClipCamOverride] = useState(false)
+  const [personalizationStatus, setPersonalizationStatus] = useState<PersonalizationStatus | null>(null)
+  const [personalizationAction, setPersonalizationAction] = useState<'copy' | 'reset' | null>(null)
+  const [personalizationNotice, setPersonalizationNotice] = useState<string | null>(null)
+  const [confirmResetPersonalization, setConfirmResetPersonalization] = useState(false)
+  const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSectionId>(() => (
+    resolveSettingsSection((location.state as { settingsSection?: unknown } | null)?.settingsSection)
+  ))
+
+  useEffect(() => {
+    setActiveSettingsSection(
+      resolveSettingsSection((location.state as { settingsSection?: unknown } | null)?.settingsSection),
+    )
+  }, [location.state])
 
   // Transcription model state
   const [modelStatus, setModelStatus] = useState<{ base: { downloaded: boolean }; medium: { downloaded: boolean } } | null>(null)
@@ -178,6 +216,35 @@ export default function SettingsPage() {
   const ai = useAiStore()
   const ui = useUiStore()
   const tapStateRef = useRef<TapCounterState>({ count: 0, lastTap: 0 })
+  const settingsContentRef = useRef<HTMLDivElement>(null)
+  const settingsNavButtonRefs = useRef<Partial<Record<SettingsSectionId, HTMLButtonElement | null>>>({})
+
+  const selectSettingsSection = (section: SettingsSectionId) => {
+    setActiveSettingsSection(section)
+    requestAnimationFrame(() => {
+      settingsContentRef.current?.closest('main')?.scrollTo({ top: 0, left: 0 })
+    })
+  }
+
+  const handleSettingsNavKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    current: SettingsSectionId,
+  ) => {
+    const supportedKeys: SettingsNavigationKey[] = [
+      'ArrowDown',
+      'ArrowLeft',
+      'ArrowRight',
+      'ArrowUp',
+      'End',
+      'Home',
+    ]
+    if (!supportedKeys.includes(event.key as SettingsNavigationKey)) return
+
+    event.preventDefault()
+    const next = getNextSettingsSection(current, event.key as SettingsNavigationKey)
+    selectSettingsSection(next)
+    requestAnimationFrame(() => settingsNavButtonRefs.current[next]?.focus())
+  }
 
   const handleVersionTap = () => {
     const result = tryAdvanceTapCounter(
@@ -203,6 +270,9 @@ export default function SettingsPage() {
   const detectionModel = s.provider === 'claude'
     ? s.claudeJudgeModel
     : ((s[modelField] as string) || 'Default model')
+  const personalizationCopy = personalizationStatus
+    ? getPersonalizationStatusCopy(personalizationStatus)
+    : null
 
   useEffect(() => {
     const load = async () => {
@@ -222,6 +292,10 @@ export default function SettingsPage() {
         const allow = await invoke<boolean>('get_allow_per_clip_override')
         setAllowPerClipCamOverride(allow)
       } catch { /* default false */ }
+      try {
+        const status = await invoke<PersonalizationStatus>('get_personalization_status')
+        setPersonalizationStatus(status)
+      } catch (error) { console.error('get_personalization_status failed:', error) }
       // Load whisper model status (separate try/catch so earlier failures don't block it)
       try {
         console.log('About to call check_model_status')
@@ -330,6 +404,36 @@ export default function SettingsPage() {
     void applySensitivity(next)
   }
 
+  const handleCopyPersonalizationHistory = async () => {
+    setPersonalizationAction('copy')
+    setPersonalizationNotice(null)
+    try {
+      const historyJson = await invoke<string>('export_personalization_history')
+      await navigator.clipboard.writeText(historyJson)
+      setPersonalizationNotice('Learning history copied. It contains no media or API keys.')
+    } catch (error) {
+      setPersonalizationNotice(`Could not copy learning history: ${String(error)}`)
+    } finally {
+      setPersonalizationAction(null)
+    }
+  }
+
+  const handleResetPersonalizationHistory = async () => {
+    setPersonalizationAction('reset')
+    setPersonalizationNotice(null)
+    try {
+      await invoke('reset_personalization_history')
+      const status = await invoke<PersonalizationStatus>('get_personalization_status')
+      setPersonalizationStatus(status)
+      setConfirmResetPersonalization(false)
+      setPersonalizationNotice('Personalized detection history reset.')
+    } catch (error) {
+      setPersonalizationNotice(`Could not reset learning history: ${String(error)}`)
+    } finally {
+      setPersonalizationAction(null)
+    }
+  }
+
   const handleCostConsentAccept = () => {
     const request = costConsentRequest
     setCostConsentRequest(null)
@@ -362,16 +466,43 @@ export default function SettingsPage() {
   const btnCls = "flex items-center gap-2 px-5 py-2.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors cursor-pointer"
 
   return (
-    <div className="space-y-6 max-w-3xl">
+    <div className="v4-settings-page">
       <div className="v4-page-header">
         <div>
-          <div className="v4-page-title">Settings ⚙</div>
-          <div className="v4-page-sub">Connect platforms, configure AI, set detection sensitivity</div>
+          <div className="v4-page-title">Settings</div>
+          <div className="v4-page-sub">Accounts, detection, editing, storage, and appearance</div>
         </div>
       </div>
 
+      <div className="v4-settings-layout">
+        <nav className="v4-settings-nav" aria-label="Settings sections">
+          {SETTINGS_SECTIONS.map(section => {
+            const SectionIcon = section.icon
+            const isActive = activeSettingsSection === section.id
+            return (
+              <button
+                key={section.id}
+                ref={node => { settingsNavButtonRefs.current[section.id] = node }}
+                type="button"
+                className={`v4-settings-nav-button ${isActive ? 'active' : ''}`}
+                aria-current={isActive ? 'page' : undefined}
+                onClick={() => selectSettingsSection(section.id)}
+                onKeyDown={event => handleSettingsNavKeyDown(event, section.id)}
+              >
+                <SectionIcon className="v4-settings-nav-icon" aria-hidden="true" />
+                <span className="min-w-0">
+                  <span className="v4-settings-nav-title">{section.label}</span>
+                  <span className="v4-settings-nav-description">{section.description}</span>
+                </span>
+              </button>
+            )
+          })}
+        </nav>
+
+        <div ref={settingsContentRef} className="v4-settings-content">
+
       {/* Twitch Account */}
-      <section className="v4-section">
+      <section className="v4-section" hidden={activeSettingsSection !== 'account'}>
         <h3 className="v4-section-label">Connected accounts</h3>
 
         {/* Twitch row */}
@@ -428,9 +559,18 @@ export default function SettingsPage() {
         <ConnectedAccounts />
       </section>
 
+      <ExternalSourcesPanel hidden={activeSettingsSection !== 'sources'} />
+
       {/* AI Provider */}
-      <section className="v4-section">
-        <h3 className="v4-section-label">🧠 AI Provider (BYOK)</h3>
+      <section className="v4-section" hidden={activeSettingsSection !== 'ai'}>
+        <h3 className="v4-section-label">
+          <Brain className="w-3.5 h-3.5 inline-block mr-1.5 text-violet-400" style={{verticalAlign: -2}} />
+          AI Provider (BYOK)
+        </h3>
+        <div className="v4-settings-cost-note">
+          <Info className="w-4 h-4 shrink-0" />
+          <span>Free mode has no API charges. BYOK usage is billed directly by your provider, and higher-cost options require confirmation.</span>
+        </div>
         <div className="v4-setting-row">
           <div className="v4-setting-info">
             <div className="v4-setting-name flex items-center gap-2">
@@ -660,7 +800,7 @@ export default function SettingsPage() {
       </section>
 
       {/* Detection */}
-      <section className="v4-section">
+      <section className="v4-section" hidden={activeSettingsSection !== 'detection'}>
         <h3 className="v4-section-label">
           <Gauge className="w-3.5 h-3.5 inline-block mr-1.5 text-violet-400" style={{verticalAlign: -2}} />
           Detection
@@ -720,6 +860,87 @@ export default function SettingsPage() {
           />
         </div>
 
+        <div className="v4-setting-row">
+          <div className="v4-setting-info">
+            <div className="v4-setting-name">Personalized detection feedback</div>
+            <div className="v4-setting-desc">
+              Ratings and edit issues tune future ranking and clip boundaries. Opens, trims, exports, publishes, and deletes add lighter local evidence. Normal quality gates always stay in charge.
+              {personalizationCopy && (
+                <span className={`block mt-1 ${
+                  personalizationCopy.tone === 'active'
+                    ? 'text-emerald-400'
+                    : personalizationCopy.tone === 'learning'
+                      ? 'text-violet-300'
+                      : personalizationCopy.tone === 'attention'
+                        ? 'text-amber-300'
+                        : 'text-slate-500'
+                }`}>
+                  {personalizationCopy.label}: {personalizationCopy.detail}
+                </span>
+              )}
+              {ui.settings.showReviewTools && (
+                <span className="mt-2 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    className="v4-btn ghost"
+                    onClick={() => void handleCopyPersonalizationHistory()}
+                    disabled={personalizationAction !== null}
+                  >
+                    {personalizationAction === 'copy' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ClipboardCopy className="w-3.5 h-3.5" />}
+                    Copy history
+                  </button>
+                  {!confirmResetPersonalization ? (
+                    <button
+                      type="button"
+                      className="v4-btn ghost"
+                      onClick={() => {
+                        setConfirmResetPersonalization(true)
+                        setPersonalizationNotice(null)
+                      }}
+                      disabled={personalizationAction !== null}
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      Reset learning
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        className="v4-btn danger"
+                        onClick={() => void handleResetPersonalizationHistory()}
+                        disabled={personalizationAction !== null}
+                      >
+                        {personalizationAction === 'reset' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                        Confirm reset
+                      </button>
+                      <button
+                        type="button"
+                        className="v4-btn ghost"
+                        onClick={() => setConfirmResetPersonalization(false)}
+                        disabled={personalizationAction !== null}
+                      >
+                        Keep history
+                      </button>
+                    </>
+                  )}
+                  {personalizationNotice && (
+                    <span role="status" className="basis-full text-[11px] text-slate-400">
+                      {personalizationNotice}
+                    </span>
+                  )}
+                </span>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => ui.update({ showReviewTools: !ui.settings.showReviewTools })}
+            className={`v4-toggle ${ui.settings.showReviewTools ? 'on' : ''}`}
+            aria-label="Toggle personalized detection feedback"
+            aria-pressed={ui.settings.showReviewTools}
+          />
+        </div>
+
         {/* AI clip detection (opt-in, BYOK) */}
         <div className="v4-setting-row">
           <div className="v4-setting-info">
@@ -732,7 +953,16 @@ export default function SettingsPage() {
                 </span>
               )}
               {!ai.isByok() && (
-                <span className="block mt-1 text-slate-500">Requires an AI provider — configure one above.</span>
+                <span className="block mt-1 text-slate-500">
+                  Requires an AI provider.
+                  <button
+                    type="button"
+                    onClick={() => selectSettingsSection('ai')}
+                    className="ml-1 font-semibold text-violet-300 hover:text-violet-200 cursor-pointer"
+                  >
+                    Open AI settings
+                  </button>
+                </span>
               )}
             </div>
           </div>
@@ -783,34 +1013,10 @@ export default function SettingsPage() {
           />
         </div>
 
-        {/* Per-clip cam region overrides */}
-        <div className="v4-setting-row">
-          <div className="v4-setting-info">
-            <div className="v4-setting-name">Per-clip cam region overrides</div>
-            <div className="v4-setting-desc">
-              When on, each clip can override its VOD's cam region. Off keeps the simpler one-region-per-VOD flow. Any saved overrides are preserved in the database when this toggle is off -- they just aren't used at export time.
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={async () => {
-              const next = !allowPerClipCamOverride
-              setAllowPerClipCamOverride(next)
-              try { await invoke('set_allow_per_clip_override', { enabled: next }) }
-              catch (err) {
-                console.error('[Settings] set_allow_per_clip_override failed', err)
-                setAllowPerClipCamOverride(!next)
-              }
-            }}
-            className={`v4-toggle ${allowPerClipCamOverride ? 'on' : ''}`}
-            aria-label="Toggle per-clip cam region overrides"
-            aria-pressed={allowPerClipCamOverride}
-          />
-        </div>
       </section>
 
       {/* Transcription Model */}
-      <section className="v4-section">
+      <section className="v4-section" hidden={activeSettingsSection !== 'detection'}>
         <h3 className="v4-section-label">
           <Mic className="w-3.5 h-3.5 inline-block mr-1.5 text-violet-400" style={{verticalAlign: -2}} />
           Transcription Model
@@ -997,7 +1203,7 @@ export default function SettingsPage() {
       </section>
 
       {/* Storage */}
-      <section className="v4-section">
+      <section className="v4-section" hidden={activeSettingsSection !== 'storage'}>
         <h3 className="v4-section-label">
           <HardDrive className="w-3.5 h-3.5 inline-block mr-1.5 text-violet-400" style={{verticalAlign: -2}} />
           Storage
@@ -1048,8 +1254,11 @@ export default function SettingsPage() {
       </section>
 
       {/* UI Preferences */}
-      <section className="v4-section">
-        <h3 className="v4-section-label">👁 UI Preferences</h3>
+      <section className="v4-section" hidden={activeSettingsSection !== 'appearance'}>
+        <h3 className="v4-section-label">
+          <Sun className="w-3.5 h-3.5 inline-block mr-1.5 text-violet-400" style={{verticalAlign: -2}} />
+          Appearance
+        </h3>
         <div className="v4-setting-row">
           <div className="v4-setting-info">
             <div className="v4-setting-name">Show Tooltips</div>
@@ -1086,37 +1295,48 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      {/* Developer tools — hidden behind 7-tap-on-version unlock (see uiStore.ts tryAdvanceTapCounter). */}
-      {ui.settings.developerModeUnlocked && (
-        <section className="v4-section">
-          <h3 className="v4-section-label">🔧 Developer Tools</h3>
-          <div className="v4-setting-row">
-            <div className="v4-setting-info">
-              <div className="v4-setting-name">Show Clip Review Tools</div>
-              <div className="v4-setting-desc">
-                Adds rating buttons and notes to each clip card, plus an "Export review data" button on the Vods page.
-                Used to gather feedback for tuning the clip scoring model. Off by default. No effect on normal clip generation.
-              </div>
+      {/* Editor behavior */}
+      <section className="v4-section" hidden={activeSettingsSection !== 'editing'}>
+        <h3 className="v4-section-label">
+          <Pencil className="w-3.5 h-3.5 inline-block mr-1.5 text-violet-400" style={{verticalAlign: -2}} />
+          Editor Behavior
+        </h3>
+        <div className="v4-setting-row">
+          <div className="v4-setting-info">
+            <div className="v4-setting-name">Per-clip cam region overrides</div>
+            <div className="v4-setting-desc">
+              Let individual clips override the VOD's camera region. Existing overrides stay saved while this is off and are ignored during export.
             </div>
-            <button
-              type="button"
-              onClick={() => ui.update({ showReviewTools: !ui.settings.showReviewTools })}
-              className={`v4-toggle ${ui.settings.showReviewTools ? 'on' : ''}`}
-              aria-label="Toggle clip review tools"
-              aria-pressed={ui.settings.showReviewTools}
-            />
           </div>
-        </section>
-      )}
+          <button
+            type="button"
+            onClick={async () => {
+              const next = !allowPerClipCamOverride
+              setAllowPerClipCamOverride(next)
+              try { await invoke('set_allow_per_clip_override', { enabled: next }) }
+              catch (err) {
+                console.error('[Settings] set_allow_per_clip_override failed', err)
+                setAllowPerClipCamOverride(!next)
+              }
+            }}
+            className={`v4-toggle ${allowPerClipCamOverride ? 'on' : ''}`}
+            aria-label="Toggle per-clip cam region overrides"
+            aria-pressed={allowPerClipCamOverride}
+          />
+        </div>
+      </section>
 
       {/* Clip Templates */}
-      <TemplateManager />
+      <TemplateManager hidden={activeSettingsSection !== 'editing'} />
 
       {/* About */}
-      <section className="v4-section">
-        <h3 className="v4-section-label">ℹ About</h3>
+      <section className="v4-section" hidden={activeSettingsSection !== 'appearance'}>
+        <h3 className="v4-section-label">
+          <Info className="w-3.5 h-3.5 inline-block mr-1.5 text-violet-400" style={{verticalAlign: -2}} />
+          About
+        </h3>
         <p className="text-sm text-slate-400 mb-4">
-          ClipGoblin is a Twitch stream clip generator powered by AI analysis.
+          ClipGoblin is a local-first Twitch clip generator with optional bring-your-own-key AI.
         </p>
         <div className="space-y-2 text-sm">
           <div className="flex gap-2">
@@ -1135,6 +1355,9 @@ export default function SettingsPage() {
           </div>
         </div>
       </section>
+
+        </div>
+      </div>
 
       {costConsentRequest && (
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">

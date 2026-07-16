@@ -1,4 +1,5 @@
 mod bin_manager;
+mod boundary_learning;
 mod cam_region;
 mod ai_provider;
 mod ai_usage;
@@ -15,6 +16,7 @@ mod db;
 mod detection;
 mod emote_signal;
 mod engine;
+mod external_sources;
 mod game_config;
 mod integration_test;
 mod clip_selector;
@@ -23,7 +25,9 @@ mod error;
 mod hardware;
 mod job_queue;
 mod pipeline;
+mod personalization;
 mod post_captions;
+mod recorders;
 mod scene_signal;
 mod transcript_signal;
 mod twitch;
@@ -67,7 +71,11 @@ use commands::cam_region::{
     set_clip_fit_mode, set_allow_per_clip_override, get_allow_per_clip_override,
 };
 use commands::captions::{generate_post_captions, generate_ai_title, test_ai_connection};
-use commands::clip::{export_review_data_for_vod, get_clip_detail, save_clip_review, save_clip_to_disk, update_clip_settings};
+use commands::clip::{
+    export_personalization_history, export_review_data_for_vod, get_clip_detail,
+    get_personalization_status, record_clip_opened, reset_personalization_history,
+    pick_context_branding_asset, save_clip_review, save_clip_to_disk, update_clip_settings,
+};
 use commands::export::{export_clip, set_clip_thumbnail, generate_clip_captions};
 use commands::model::{check_model_status, download_model, delete_model};
 use commands::binaries::{check_binary_status, download_binaries, force_refresh_ytdlp};
@@ -85,6 +93,13 @@ use commands::social::{
     connect_platform, disconnect_platform, get_connected_account,
     get_all_connected_accounts, upload_to_platform, get_upload_status, tiktok_get_creator_info,
     get_clip_upload_history, restore_deleted_vods, refresh_upload_stats,
+};
+use commands::sources::{
+    create_stream_marker, get_external_source_configs, get_recorder_connection_settings,
+    import_external_candidates, list_recent_stream_markers, pick_and_import_media,
+    pick_external_source_folder, prepare_clip_preview_source, save_obs_connection_settings,
+    save_replay_and_import,
+    scan_external_source, set_external_source_auto_import, test_recorder_connection,
 };
 use commands::vod::{
     download_vod, get_cached_vods, ensure_vod_thumbnail, analyze_vod, open_vod, get_vods,
@@ -218,6 +233,7 @@ pub fn run() {
             set_clip_thumbnail,
             generate_clip_captions,
             update_clip_settings,
+            pick_context_branding_asset,
             get_clip_detail,
             get_all_highlights,
             generate_post_captions,
@@ -245,6 +261,10 @@ pub fn run() {
             reschedule_upload,
             open_url,
             export_review_data_for_vod,
+            get_personalization_status,
+            record_clip_opened,
+            export_personalization_history,
+            reset_personalization_history,
             save_clip_review,
             save_clip_to_disk,
             refresh_vod_metadata,
@@ -275,6 +295,19 @@ pub fn run() {
             set_clip_fit_mode,
             set_allow_per_clip_override,
             get_allow_per_clip_override,
+            get_external_source_configs,
+            pick_external_source_folder,
+            set_external_source_auto_import,
+            scan_external_source,
+            import_external_candidates,
+            pick_and_import_media,
+            prepare_clip_preview_source,
+            get_recorder_connection_settings,
+            save_obs_connection_settings,
+            test_recorder_connection,
+            save_replay_and_import,
+            create_stream_marker,
+            list_recent_stream_markers,
         ])
         .setup(|app| {
             let _ = APP_HANDLE.set(app.handle().clone());
@@ -293,6 +326,9 @@ pub fn run() {
 
             // Start background upload scheduler
             start_upload_scheduler(app.handle().clone());
+
+            // Watch configured Medal/OBS/Meld folders without delaying startup.
+            external_sources::start_source_monitor(app.handle().clone());
 
             // Background: keep the bundled yt-dlp fresh so Twitch-extractor
             // breakage self-heals. Non-blocking; gated on a bundled binary

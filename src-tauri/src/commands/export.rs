@@ -26,12 +26,44 @@ pub async fn generate_clip_captions(
             .map_err(|e| format!("DB error: {}", e))?
             .ok_or("Clip not found")?;
         let vod = db::get_vod_by_id(&conn, &clip.vod_id)
-            .map_err(|e| format!("DB error: {}", e))?
-            .ok_or("VOD not found")?;
+            .map_err(|e| format!("DB error: {}", e))?;
         (clip, vod)
     };
 
-    let vod_path = vod.local_path.clone().ok_or("VOD not downloaded")?;
+    let standalone_source = clip
+        .source_media_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            clip.community_clip_mp4_path
+                .as_deref()
+                .filter(|path| !path.trim().is_empty())
+                .map(std::path::PathBuf::from)
+        });
+    let media_path = if let Some(path) = standalone_source.as_ref() {
+        if !path.is_file() {
+            return Err(format!("The source video is missing: {}", path.display()));
+        }
+        path.to_string_lossy().to_string()
+    } else {
+        vod.as_ref()
+            .and_then(|vod| vod.local_path.clone())
+            .ok_or("VOD not downloaded")?
+    };
+    let transcript_clip_start = if clip.community_clip_mp4_path.is_some() {
+        0.0
+    } else {
+        clip.start_seconds
+    };
+    let transcript_clip_end = if clip.community_clip_mp4_path.is_some() {
+        standalone_source
+            .as_deref()
+            .and_then(probe_media_duration)
+            .unwrap_or(clip.end_seconds.max(0.1))
+    } else {
+        clip.end_seconds
+    };
 
     // Check for cached transcript first
     let transcript_dir = dirs::data_dir()
@@ -39,9 +71,10 @@ pub async fn generate_clip_captions(
         .join("clipviral")
         .join("transcripts");
     std::fs::create_dir_all(&transcript_dir).ok();
-    let transcript_path = transcript_dir.join(format!("{}.json", vod.id));
+    let transcript_owner = vod.as_ref().map(|vod| vod.id.as_str()).unwrap_or(&clip.id);
+    let transcript_path = transcript_dir.join(format!("{}.json", transcript_owner));
 
-    let cached_transcript: Option<TranscriptResult> = if transcript_path.exists() {
+    let cached_transcript: Option<TranscriptResult> = if standalone_source.is_none() && transcript_path.exists() {
         match std::fs::read_to_string(&transcript_path)
             .ok()
             .and_then(|json| serde_json::from_str(&json).ok())
@@ -50,7 +83,7 @@ pub async fn generate_clip_captions(
             None => {
                 log::warn!(
                     "[Captions] Cached transcript for VOD {} could not be read; regenerating this clip",
-                    vod.id
+                    transcript_owner
                 );
                 None
             }
@@ -61,8 +94,8 @@ pub async fn generate_clip_captions(
 
     let cache_has_word_timing = cached_transcript.as_ref().map_or(false, |transcript| {
         transcript.segments.iter().any(|segment| {
-            segment.end > clip.start_seconds
-                && segment.start < clip.end_seconds
+            segment.end > transcript_clip_start
+                && segment.start < transcript_clip_end
                 && !segment.words.is_empty()
         })
     });
@@ -70,8 +103,8 @@ pub async fn generate_clip_captions(
     let (transcript, transcript_start, transcript_end) = if cache_has_word_timing {
         (
             cached_transcript.ok_or_else(|| "Cached transcript became unavailable".to_string())?,
-            clip.start_seconds,
-            clip.end_seconds,
+            transcript_clip_start,
+            transcript_clip_end,
         )
     } else {
         if cached_transcript.is_some() {
@@ -80,16 +113,20 @@ pub async fn generate_clip_captions(
                 clip.id
             );
         }
-        let vod_path_for_task = vod_path.clone();
-        let clip_start = clip.start_seconds;
-        let clip_end = clip.end_seconds;
+        let media_path_for_task = media_path.clone();
+        let clip_start = transcript_clip_start;
+        let clip_end = transcript_clip_end;
         let transcript = tokio::task::spawn_blocking(move || {
-            run_clip_transcription_native(&vod_path_for_task, clip_start, clip_end)
+            run_clip_transcription_native(&media_path_for_task, clip_start, clip_end)
         })
         .await
         .map_err(|error| format!("Caption transcription task failed: {error}"))?
         .map_err(|error| error.to_string())?;
-        (transcript, 0.0, (clip.end_seconds - clip.start_seconds).max(0.0))
+        (
+            transcript,
+            0.0,
+            (transcript_clip_end - transcript_clip_start).max(0.0),
+        )
     };
 
     // Generate SRT for this clip's time range
@@ -113,10 +150,11 @@ pub async fn generate_clip_captions(
     {
         let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
         db::save_setting(&conn, &format!("clip_{}_captions", clip_id), &srt_text).ok();
-        // Update clip captions_text directly
+        // Keep the SRT's source-media origin with the text. Future trim edits
+        // can then shift cues into the exported clip without regenerating them.
         conn.execute(
-            "UPDATE clips SET captions_text = ?1 WHERE id = ?2",
-            rusqlite::params![srt_text, clip_id],
+            "UPDATE clips SET captions_text = ?1, captions_source_start = ?2 WHERE id = ?3",
+            rusqlite::params![srt_text, transcript_clip_start, clip_id],
         ).map_err(|e| format!("DB error: {}", e))?;
     }
 
@@ -132,15 +170,28 @@ pub fn set_clip_thumbnail(
 ) -> Result<String, String> {
     let ffmpeg = find_ffmpeg()?;
 
-    let vod_path = {
+    let media_path = {
         let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
         let clip = db::get_clip_by_id(&conn, &clip_id)
             .map_err(|e| format!("DB error: {}", e))?
             .ok_or("Clip not found")?;
-        let vod = db::get_vod_by_id(&conn, &clip.vod_id)
-            .map_err(|e| format!("DB error: {}", e))?
-            .ok_or("VOD not found")?;
-        vod.local_path.ok_or("VOD not downloaded")?
+        if let Some(path) = clip
+            .source_media_path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+            .or_else(|| clip.community_clip_mp4_path.as_deref())
+        {
+            let path = std::path::PathBuf::from(path);
+            if !path.is_file() {
+                return Err(format!("The source video is missing: {}", path.display()));
+            }
+            path.to_string_lossy().to_string()
+        } else {
+            let vod = db::get_vod_by_id(&conn, &clip.vod_id)
+                .map_err(|e| format!("DB error: {}", e))?
+                .ok_or("VOD not found")?;
+            vod.local_path.ok_or("VOD not downloaded")?
+        }
     };
 
     let thumb_dir = dirs::data_dir()
@@ -150,7 +201,7 @@ pub fn set_clip_thumbnail(
     std::fs::create_dir_all(&thumb_dir).ok();
     let thumb_path = thumb_dir.join(format!("{}.jpg", clip_id));
 
-    generate_thumbnail(&ffmpeg, &vod_path, timestamp, &thumb_path)?;
+    generate_thumbnail(&ffmpeg, &media_path, timestamp, &thumb_path)?;
 
     let path_str = thumb_path.to_string_lossy().to_string();
     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
@@ -170,15 +221,14 @@ pub async fn export_clip(
 ) -> Result<(), String> {
     let ffmpeg = find_ffmpeg().map_err(|e| report_error(&app, e))?;
 
-    let (clip, vod, vod_path, allow_override) = {
+    let (clip, vod, media_path, allow_override) = {
         let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
         let clip = db::get_clip_by_id(&conn, &clip_id)
             .map_err(|e| format!("DB error: {}", e))?
             .ok_or("Clip not found")?;
         let vod = db::get_vod_by_id(&conn, &clip.vod_id)
-            .map_err(|e| format!("DB error: {}", e))?
-            .ok_or("VOD not found")?;
-        let path = vod.local_path.clone().ok_or("VOD not downloaded — download it first to export clips")?;
+            .map_err(|e| format!("DB error: {}", e))?;
+        let path = resolve_media_path(&clip, vod.as_ref())?;
         let allow = matches!(
             db::get_setting(&conn, "allow_per_clip_cam_region_override")
                 .ok()
@@ -215,7 +265,13 @@ pub async fn export_clip(
 
         // ── Building export request ──
         handle.set_progress(5);
-        let request = clip_to_export_request(&clip, &vod, &vod_path, &output_path, allow_override);
+        let request = clip_to_export_request(
+            &clip,
+            vod.as_ref(),
+            &media_path,
+            &output_path,
+            allow_override,
+        );
 
         // ── Running ffmpeg with real progress ──
         let output_ref = output_path.clone();
@@ -240,6 +296,24 @@ pub async fn export_clip(
                 &conn, &clip_id_ref, "completed",
                 Some(&output_ref.to_string_lossy()),
             ).ok();
+            let metadata = serde_json::json!({ "aspectRatio": &clip.aspect_ratio }).to_string();
+            let dedupe_key = format!(
+                "export:{}:{:.1}:{:.1}:{}",
+                clip_id_ref, clip.start_seconds, clip.end_seconds, clip.aspect_ratio
+            );
+            let _ = db::record_clip_behavior(
+                &conn,
+                &clip_id_ref,
+                "export",
+                Some(0.82),
+                0.45,
+                None,
+                None,
+                Some(clip.start_seconds),
+                Some(clip.end_seconds),
+                Some(&metadata),
+                &dedupe_key,
+            );
             handle.set_progress(100);
             Ok(())
         } else {
@@ -267,7 +341,7 @@ pub(crate) async fn render_clip_by_id(clip_id: &str) -> Result<std::path::PathBu
     let ffmpeg = find_ffmpeg().map_err(|e| e.to_string())?;
 
     // Load clip + vod path (sync)
-    let (clip, vod, vod_path, allow_override) = {
+    let (clip, vod, media_path, allow_override) = {
         let db_path = db::db_path().map_err(|e| format!("DB path: {}", e))?;
         let conn = rusqlite::Connection::open(&db_path)
             .map_err(|e| format!("DB open: {}", e))?;
@@ -275,9 +349,8 @@ pub(crate) async fn render_clip_by_id(clip_id: &str) -> Result<std::path::PathBu
             .map_err(|e| format!("DB error: {}", e))?
             .ok_or_else(|| "Clip not found".to_string())?;
         let vod = db::get_vod_by_id(&conn, &clip.vod_id)
-            .map_err(|e| format!("DB error: {}", e))?
-            .ok_or_else(|| "VOD not found".to_string())?;
-        let path = vod.local_path.clone().ok_or_else(|| "VOD not downloaded".to_string())?;
+            .map_err(|e| format!("DB error: {}", e))?;
+        let path = resolve_media_path(&clip, vod.as_ref())?;
         let allow = matches!(
             db::get_setting(&conn, "allow_per_clip_cam_region_override")
                 .ok()
@@ -305,7 +378,13 @@ pub(crate) async fn render_clip_by_id(clip_id: &str) -> Result<std::path::PathBu
             .map_err(|e| format!("DB error: {}", e))?;
     }
 
-    let request = clip_to_export_request(&clip, &vod, &vod_path, &output_path, allow_override);
+    let request = clip_to_export_request(
+        &clip,
+        vod.as_ref(),
+        &media_path,
+        &output_path,
+        allow_override,
+    );
     let output_ref = output_path.clone();
     let clip_id_owned = clip_id.to_string();
 
@@ -325,6 +404,24 @@ pub(crate) async fn render_clip_by_id(clip_id: &str) -> Result<std::path::PathBu
     if result.success {
         db::update_clip_render_status(&conn, &clip_id_owned, "completed",
             Some(&output_ref.to_string_lossy())).ok();
+        let metadata = serde_json::json!({ "aspectRatio": &clip.aspect_ratio }).to_string();
+        let dedupe_key = format!(
+            "export:{}:{:.1}:{:.1}:{}",
+            clip_id_owned, clip.start_seconds, clip.end_seconds, clip.aspect_ratio
+        );
+        let _ = db::record_clip_behavior(
+            &conn,
+            &clip_id_owned,
+            "export",
+            Some(0.82),
+            0.45,
+            None,
+            None,
+            Some(clip.start_seconds),
+            Some(clip.end_seconds),
+            Some(&metadata),
+            &dedupe_key,
+        );
         Ok(output_ref)
     } else {
         db::update_clip_render_status(&conn, &clip_id_owned, "failed", None).ok();
@@ -340,7 +437,7 @@ pub(crate) async fn render_clip_by_id(clip_id: &str) -> Result<std::path::PathBu
 /// Probe a media file's duration (seconds) via ffprobe. Returns `None` on any
 /// failure (ffprobe missing, parse error, etc.). Used by the community-clip
 /// export branch to bound `-to` at the downloaded clip's full length.
-fn probe_media_duration(path: &std::path::Path) -> Option<f64> {
+pub(crate) fn probe_media_duration(path: &std::path::Path) -> Option<f64> {
     let ffprobe = crate::bin_manager::ffprobe_path().ok()?;
     let mut cmd = std::process::Command::new(&ffprobe);
     cmd.arg("-v").arg("error")
@@ -363,14 +460,41 @@ fn probe_media_duration(path: &std::path::Path) -> Option<f64> {
     if dur.is_finite() && dur > 0.0 { Some(dur) } else { None }
 }
 
+fn resolve_media_path(clip: &db::ClipRow, vod: Option<&db::VodRow>) -> Result<String, String> {
+    if let Some(path) = clip
+        .source_media_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .or_else(|| {
+            clip.community_clip_mp4_path
+                .as_deref()
+                .filter(|path| !path.trim().is_empty())
+        })
+    {
+        let path = std::path::PathBuf::from(path);
+        if path.is_file() {
+            return Ok(path.to_string_lossy().to_string());
+        }
+        return Err(format!("The source video is missing: {}", path.display()));
+    }
+    vod.and_then(|vod| vod.local_path.clone())
+        .ok_or_else(|| "VOD not downloaded — download it first to export clips".to_string())
+}
+
 /// Convert a DB ClipRow into an ExportRequest for the vertical_crop module.
 fn clip_to_export_request(
     clip: &db::ClipRow,
-    vod: &db::VodRow,
-    vod_path: &str,
+    vod: Option<&db::VodRow>,
+    media_path: &str,
     output_path: &std::path::Path,
     allow_per_clip_override: bool,
 ) -> vertical_crop::ExportRequest {
+    let imported_source = clip
+        .source_media_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_file());
     // ── Community-clip source override ──
     // When this clip is backed by a downloaded Twitch clip MP4 (viewer-made
     // clip), that file IS the clip's video: export it WHOLE (0-based, no
@@ -400,15 +524,55 @@ fn clip_to_export_request(
     let platform = vertical_crop::Platform::from_aspect_ratio(&clip.aspect_ratio);
     let target = platform.resolution();
 
-    // Resolve layout from DB string
-    let layout = vertical_crop::LayoutMode::from_db(&clip.facecam_layout);
-
-    // Build caption filter if captions are enabled
-    let caption_filter = build_caption_filter(clip, target.width as i32, target.height as i32);
+    // Resolve layout and its persisted editor geometry from DB state.
+    let layout_settings = vertical_crop::EditorLayoutSettings::from_json(
+        clip.facecam_settings.as_deref(),
+    );
+    let layout = match vertical_crop::LayoutMode::from_db(&clip.facecam_layout) {
+        vertical_crop::LayoutMode::Split { .. } => vertical_crop::LayoutMode::Split {
+            ratio: layout_settings.split_ratio,
+        },
+        other => other,
+    };
+    let layout_supports_branding = matches!(
+        &layout,
+        vertical_crop::LayoutMode::ContextFit
+            | vertical_crop::LayoutMode::Split { .. }
+            | vertical_crop::LayoutMode::Pip { .. }
+    );
+    let context_background_path = if layout_supports_branding
+        && clip.context_background_mode == "branding"
+    {
+        clip.context_background_path
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.is_file())
+            .filter(|path| {
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| {
+                        matches!(
+                            extension.to_ascii_lowercase().as_str(),
+                            "png" | "jpg" | "jpeg" | "webp" | "gif"
+                        )
+                    })
+            })
+    } else {
+        None
+    };
+    if layout_supports_branding
+        && clip.context_background_mode == "branding"
+        && context_background_path.is_none()
+    {
+        log::warn!(
+            "[export] clip {} branding asset unavailable; falling back to the layout's video source",
+            clip.id
+        );
+    }
 
     // Resolve the effective cam region using override precedence + settings toggle.
     let effective_region = crate::cam_region::resolve_effective_region(
-        vod.cam_region_norm.as_deref(),
+        vod.and_then(|vod| vod.cam_region_norm.as_deref()),
         clip.cam_region_norm_override.as_deref(),
         allow_per_clip_override,
     );
@@ -426,14 +590,34 @@ fn clip_to_export_request(
 
     // Source + span: community-clip file whole (0..duration) when present,
     // otherwise the VOD path trimmed to the clip's start/end.
-    let (source_path, start, end) = match community_source {
-        Some((src, dur)) => (src, 0.0, dur),
-        None => (
-            std::path::PathBuf::from(vod_path),
+    let (source_path, start, end) = match (imported_source, community_source) {
+        (Some(src), _) => (src, clip.start_seconds, clip.end_seconds),
+        (None, Some((src, dur))) => (src, 0.0, dur),
+        (None, None) => (
+            std::path::PathBuf::from(media_path),
             clip.start_seconds,
             clip.end_seconds,
         ),
     };
+    let captions_source_start = clip
+        .captions_source_start
+        .filter(|value| value.is_finite())
+        .unwrap_or_else(|| {
+            if clip.source_media_path.as_deref().is_some_and(|path| !path.trim().is_empty())
+                || clip.community_clip_mp4_path.as_deref().is_some_and(|path| !path.trim().is_empty())
+            {
+                0.0
+            } else {
+                clip.start_seconds
+            }
+        });
+    let caption_filter = build_caption_filter(
+        clip,
+        target.width as i32,
+        target.height as i32,
+        start - captions_source_start,
+        (end - start).max(0.0),
+    );
 
     vertical_crop::ExportRequest {
         source_path,
@@ -443,9 +627,13 @@ fn clip_to_export_request(
         platform,
         target,
         layout,
+        layout_settings,
         caption_filter,
         effective_region,
         fit_mode,
+        context_background_path,
+        context_blur_strength: clip.context_blur_strength,
+        context_video_y: clip.context_video_y,
     }
 }
 
@@ -552,7 +740,8 @@ fn cardboard_uses_black_text(text: &str) -> bool {
 fn cardboard_ass_drawings(
     target_width: i32,
     target_height: i32,
-    margin_v: i32,
+    anchor_y: i32,
+    position: &str,
 ) -> (String, String) {
     let board_width = if target_height > target_width {
         target_width * 82 / 100
@@ -561,9 +750,13 @@ fn cardboard_ass_drawings(
     };
     let board_height = if target_height > target_width { 128 } else { 112 };
     let left = (target_width - board_width) / 2;
-    let baseline = target_height - margin_v;
-    let bottom = (baseline + 28).min(target_height - 12);
-    let top = (bottom - board_height).max(8);
+    let desired_top = match position {
+        "top" => anchor_y,
+        "center" => anchor_y - board_height / 2,
+        _ => anchor_y - board_height,
+    };
+    let top = desired_top.clamp(8, (target_height - board_height - 12).max(8));
+    let bottom = top + board_height;
     let right = left + board_width;
     let actual_height = bottom - top;
 
@@ -640,7 +833,14 @@ mod caption_style_tests {
             captions_position: "bottom".into(),
             caption_style: style.into(),
             caption_font_scale: 1.0,
+            caption_y_offset: 0.0,
+            captions_source_start: Some(0.0),
             facecam_layout: "none".into(),
+            facecam_settings: None,
+            context_background_path: None,
+            context_background_mode: "blur".into(),
+            context_blur_strength: 0.25,
+            context_video_y: 0.5,
             render_status: "pending".into(),
             output_path: None,
             thumbnail_path: None,
@@ -651,6 +851,10 @@ mod caption_style_tests {
             cam_region_norm_override: None,
             cam_fit_mode: None,
             community_clip_mp4_path: None,
+            source_kind: "twitch_vod".to_string(),
+            source_media_path: None,
+            source_fingerprint: None,
+            source_recorded_at: None,
         }
     }
 
@@ -663,7 +867,7 @@ mod caption_style_tests {
 
     #[test]
     fn cardboard_drawing_stays_inside_the_vertical_video_width() {
-        let (board, texture) = cardboard_ass_drawings(1080, 1920, 57);
+        let (board, texture) = cardboard_ass_drawings(1080, 1920, 1862, "bottom");
         assert!(board.starts_with("m 97 "));
         assert!(board.contains(" 982 "));
         assert!(!board.contains(" 1080 "));
@@ -674,15 +878,16 @@ mod caption_style_tests {
     fn cardboard_filter_emits_timed_board_texture_and_black_red_hierarchy() {
         let captions = "1\n00:00:00,000 --> 00:00:00,500\nhello\n\n2\n00:00:00,600 --> 00:00:01,000\nworld.\n";
         let clip = clip_with_style("bold-white", captions);
-        let filter = build_caption_filter(&clip, 1080, 1920).expect("cardboard filter");
+        let filter = build_caption_filter(&clip, 1080, 1920, 0.0, 2.0)
+            .expect("cardboard filter");
         assert!(filter.starts_with("ass='"));
 
         let ass_path = std::env::temp_dir().join(format!("clip_{}.ass", clip.id));
         let ass = std::fs::read_to_string(&ass_path).expect("generated ASS file");
         assert_eq!(ass.matches("Cardboard,,").count(), 2);
         assert_eq!(ass.matches("CardboardTexture,,").count(), 2);
-        assert!(ass.contains("{\\b900\\fs52\\1c&H0C1015&}HELLO"));
-        assert!(ass.contains("{\\b900\\fs52}WORLD."));
+        assert!(ass.contains("{\\an2\\pos(540,1862)\\b900\\fs52\\1c&H0C1015&}HELLO"));
+        assert!(ass.contains("{\\an2\\pos(540,1862)\\b900\\fs52}WORLD."));
         let _ = std::fs::remove_file(ass_path);
     }
 
@@ -690,7 +895,8 @@ mod caption_style_tests {
     fn highlight_filter_stages_and_loads_the_bundled_distressed_font() {
         let captions = "1\n00:00:00,000 --> 00:00:01,000\nclutch\n";
         let clip = clip_with_style("fire", captions);
-        let filter = build_caption_filter(&clip, 1080, 1920).expect("highlight filter");
+        let filter = build_caption_filter(&clip, 1080, 1920, 0.0, 2.0)
+            .expect("highlight filter");
         assert!(filter.contains(":fontsdir='"));
 
         let font_path = bundled_caption_font("fire").expect("bundled highlight font");
@@ -703,7 +909,25 @@ mod caption_style_tests {
         let ass_path = std::env::temp_dir().join(format!("clip_{}.ass", clip.id));
         let ass = std::fs::read_to_string(&ass_path).expect("generated ASS file");
         assert!(ass.contains("Style: Default,Rubik Dirt,60"));
-        assert!(ass.contains("{\\b400\\fs60}CLUTCH"));
+        assert!(ass.contains("{\\an2\\pos(540,1862)\\b400\\fs60}CLUTCH"));
+        let _ = std::fs::remove_file(ass_path);
+    }
+
+    #[test]
+    fn trimmed_imported_captions_shift_to_clip_time_and_use_editor_anchor() {
+        let captions = "1\n00:00:05,000 --> 00:00:06,000\nclutch\n\n2\n00:00:20,000 --> 00:00:21,000\nlate\n";
+        let mut clip = clip_with_style("clean", captions);
+        clip.captions_position = "center".into();
+        clip.caption_y_offset = 10.0;
+
+        build_caption_filter(&clip, 1080, 1920, 4.5, 10.0)
+            .expect("shifted caption filter");
+        let ass_path = std::env::temp_dir().join(format!("clip_{}.ass", clip.id));
+        let ass = std::fs::read_to_string(&ass_path).expect("generated ASS file");
+
+        assert!(ass.contains("Dialogue: 2,0:00:00.50,0:00:01.50"));
+        assert!(ass.contains("\\an5\\pos(540,1152)"));
+        assert!(!ass.to_lowercase().contains("late"));
         let _ = std::fs::remove_file(ass_path);
     }
 
@@ -727,7 +951,8 @@ mod caption_style_tests {
 
         let captions = "1\n00:00:00,000 --> 00:00:01,000\nclutch\n";
         let clip = clip_with_style("boxed", captions);
-        build_caption_filter(&clip, 1080, 1920).expect("frosted filter");
+        build_caption_filter(&clip, 1080, 1920, 0.0, 2.0)
+            .expect("frosted filter");
         let ass_path = std::env::temp_dir().join(format!("clip_{}.ass", clip.id));
         let ass = std::fs::read_to_string(&ass_path).expect("generated ASS file");
         assert!(ass.contains("Style: Default,Coiny,58,&H00FFFFFF"));
@@ -929,27 +1154,37 @@ fn fitted_caption_font_size(
     requested.min(hard_max).min(width_fit).max(8.0).floor() as i32
 }
 
-/// Convert SRT timestamp "HH:MM:SS,mmm" to ASS timestamp "H:MM:SS.cc".
-fn srt_time_to_ass(srt: &str) -> String {
-    // SRT: "00:01:23,456" → ASS: "0:01:23.46"
-    let s = srt.replace(',', ".");
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() == 3 {
-        let h: u32 = parts[0].parse().unwrap_or(0);
-        // ASS uses centiseconds (2 digits), SRT uses milliseconds (3 digits)
-        let sec_parts: Vec<&str> = parts[2].split('.').collect();
-        let secs = sec_parts[0];
-        let ms: u32 = sec_parts.get(1).unwrap_or(&"0").parse().unwrap_or(0);
-        let cs = ms / 10; // milliseconds → centiseconds
-        format!("{}:{}:{}.{:02}", h, parts[1], secs, cs)
-    } else {
-        "0:00:00.00".to_string()
+fn parse_srt_time_seconds(srt: &str) -> Option<f64> {
+    let timestamp = srt.trim().split_whitespace().next()?.replace(',', ".");
+    let mut parts = timestamp.split(':');
+    let hours: f64 = parts.next()?.parse().ok()?;
+    let minutes: f64 = parts.next()?.parse().ok()?;
+    let seconds: f64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !hours.is_finite() || !minutes.is_finite() || !seconds.is_finite() {
+        return None;
     }
+    Some((hours * 3600.0 + minutes * 60.0 + seconds).max(0.0))
+}
+
+/// Convert non-negative seconds to ASS timestamp "H:MM:SS.cc".
+fn seconds_to_ass_time(seconds: f64) -> String {
+    let total_centiseconds = (seconds.max(0.0) * 100.0).round() as u64;
+    let hours = total_centiseconds / 360_000;
+    let minutes = (total_centiseconds / 6_000) % 60;
+    let secs = (total_centiseconds / 100) % 60;
+    let centiseconds = total_centiseconds % 100;
+    format!("{hours}:{minutes:02}:{secs:02}.{centiseconds:02}")
 }
 
 /// Build the caption filter string from clip settings.
 /// Returns None if captions are disabled or empty.
-pub(crate) fn build_caption_filter(clip: &db::ClipRow, target_width: i32, target_height: i32) -> Option<String> {
+pub(crate) fn build_caption_filter(
+    clip: &db::ClipRow,
+    target_width: i32,
+    target_height: i32,
+    caption_time_offset: f64,
+    clip_duration: f64,
+) -> Option<String> {
     if clip.captions_enabled != 1 {
         return None;
     }
@@ -963,14 +1198,24 @@ pub(crate) fn build_caption_filter(clip: &db::ClipRow, target_width: i32, target
     let bundled_font_path = bundled_caption_font(&clip.caption_style);
     let is_srt = text.contains("-->") && text.lines().count() > 2;
 
-    // MarginV = distance from the BOTTOM edge for Alignment=2 (bottom-center).
-    // ASS naturally grows multi-line text upward from this anchor, so a small
-    // value safely keeps tall captions inside the frame.
-    let margin_v = match clip.captions_position.as_str() {
-        "top" => target_height - (target_height * 18 / 100),
-        "center" => target_height / 2 - 30,
-        _ => target_height * 3 / 100, // ~3% from frame bottom -- text grows upward
+    // Match the editor's anchor semantics exactly: top grows downward, center
+    // grows around the anchor, and bottom grows upward.
+    let (caption_base_y, caption_alignment) = match clip.captions_position.as_str() {
+        "top" => (8.0, 8),
+        "center" => (50.0, 5),
+        _ => (97.0, 2),
     };
+    let caption_y_percent = (caption_base_y
+        + db::normalize_caption_y_offset(clip.caption_y_offset))
+        .clamp(3.0, 97.0);
+    let caption_anchor_y = ((target_height as f64 * caption_y_percent / 100.0).round() as i32)
+        .clamp(0, target_height);
+    let caption_position_tag = format!(
+        "\\an{}\\pos({},{})",
+        caption_alignment,
+        target_width / 2,
+        caption_anchor_y,
+    );
     let margin_h = ((target_width as f64 * (1.0 - style.safe_width_ratio) / 2.0).round()
         as i32)
         .max(10);
@@ -994,8 +1239,14 @@ pub(crate) fn build_caption_filter(clip: &db::ClipRow, target_width: i32, target
         let bold_flag: i32 = if style.font_weight >= 700 { -1 } else { 0 };
 
         let has_glow = !style.glow_colour.is_empty();
-        let cardboard_drawings = is_cardboard
-            .then(|| cardboard_ass_drawings(target_width, target_height, margin_v));
+        let cardboard_drawings = is_cardboard.then(|| {
+            cardboard_ass_drawings(
+                target_width,
+                target_height,
+                caption_anchor_y,
+                &clip.captions_position,
+            )
+        });
 
         // ASS header — PlayRes matches export resolution so FontSize = pixels
         let mut ass = format!("\
@@ -1008,7 +1259,7 @@ ScaledBorderAndShadow: yes\r\n\
 \r\n\
 [V4+ Styles]\r\n\
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\r\n\
-Style: Default,{fn_},{fs},&H00{pc},&H00FFFFFF,&H00{oc},{bc},{bold},0,0,0,100,100,{sp:.1},0,{bs},{ol},{sh},2,{mh},{mh},{mv},1\r\n",
+Style: Default,{fn_},{fs},&H00{pc},&H00FFFFFF,&H00{oc},{bc},{bold},0,0,0,100,100,{sp:.1},0,{bs},{ol},{sh},{an},{mh},{mh},0,1\r\n",
             tw = target_width,
             th = target_height,
             fn_ = style.font_name,
@@ -1022,7 +1273,7 @@ Style: Default,{fn_},{fs},&H00{pc},&H00FFFFFF,&H00{oc},{bc},{bold},0,0,0,100,100
             ol = style.outline,
             sh = style.shadow,
             mh = margin_h,
-            mv = margin_v,
+            an = caption_alignment,
         );
 
         if is_cardboard {
@@ -1040,7 +1291,7 @@ Style: CardboardTexture,Arial,20,&H902B4C7A,&H902B4C7A,&H902B4C7A,&H00000000,0,0
             // Fully opaque version of glow colour (replace alpha byte with 00)
             let glow_opaque = format!("&H00{}", &style.glow_colour[4..]);
             ass.push_str(&format!("\
-Style: Glow,{fn_},{fs},{go},{go},{gc},&H00000000,{bold},0,0,0,100,100,{sp:.1},0,1,8,0,2,{mh},{mh},{mv},1\r\n",
+Style: Glow,{fn_},{fs},{go},{go},{gc},&H00000000,{bold},0,0,0,100,100,{sp:.1},0,1,8,0,{an},{mh},{mh},0,1\r\n",
                 fn_ = style.font_name,
                 fs = default_font_size,
                 go = glow_opaque,      // fully opaque green for primary/secondary
@@ -1048,7 +1299,7 @@ Style: Glow,{fn_},{fs},{go},{go},{gc},&H00000000,{bold},0,0,0,100,100,{sp:.1},0,
                 bold = bold_flag,
                 sp = style.spacing,
                 mh = margin_h,
-                mv = margin_v,
+                an = caption_alignment,
             ));
         }
 
@@ -1068,8 +1319,30 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
                 let timing = lines[ti];
                 let parts: Vec<&str> = timing.split("-->").collect();
                 if parts.len() == 2 {
-                    let start_ass = srt_time_to_ass(parts[0].trim());
-                    let end_ass = srt_time_to_ass(parts[1].trim());
+                    let Some(raw_start) = parse_srt_time_seconds(parts[0]) else {
+                        continue;
+                    };
+                    let Some(raw_end) = parse_srt_time_seconds(parts[1]) else {
+                        continue;
+                    };
+                    let shifted_start = raw_start - caption_time_offset;
+                    let shifted_end = raw_end - caption_time_offset;
+                    if shifted_end <= 0.0
+                        || (clip_duration > 0.0 && shifted_start >= clip_duration)
+                    {
+                        continue;
+                    }
+                    let clipped_start = shifted_start.max(0.0);
+                    let clipped_end = if clip_duration > 0.0 {
+                        shifted_end.min(clip_duration)
+                    } else {
+                        shifted_end
+                    };
+                    if clipped_end <= clipped_start {
+                        continue;
+                    }
+                    let start_ass = seconds_to_ass_time(clipped_start);
+                    let end_ass = seconds_to_ass_time(clipped_end);
                     // Remaining lines after timing are the subtitle text
                     let sub_text: String = lines[ti + 1..].iter()
                         .map(|l| l.trim())
@@ -1124,15 +1397,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
                     // If glow style exists, emit a blurred glow layer on Layer 0
                     if has_glow {
                         ass.push_str(&format!(
-                            "Dialogue: 0,{},{},Glow,,0,0,0,,{{{wt}{size}\\blur{blur}}}{txt}\r\n",
+                            "Dialogue: 0,{},{},Glow,,0,0,0,,{{{pos}{wt}{size}\\blur{blur}}}{txt}\r\n",
                             start_ass, end_ass,
-                            wt = weight_tag, size = size_tag, blur = style.glow_blur, txt = sub_text
+                            pos = caption_position_tag, wt = weight_tag, size = size_tag, blur = style.glow_blur, txt = sub_text
                         ));
                     }
                     // Crisp foreground text on Layer 2 (above glow/cardboard layers).
                     ass.push_str(&format!(
-                        "Dialogue: 2,{},{},Default,,0,0,0,,{{{wt}{size}{colour}}}{txt}\r\n",
-                        start_ass, end_ass, wt = weight_tag, size = size_tag, colour = colour_tag, txt = sub_text
+                        "Dialogue: 2,{},{},Default,,0,0,0,,{{{pos}{wt}{size}{colour}}}{txt}\r\n",
+                        start_ass, end_ass, pos = caption_position_tag, wt = weight_tag, size = size_tag, colour = colour_tag, txt = sub_text
                     ));
                 }
             }
@@ -1169,12 +1442,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
             .replace('[', "\\[")
             .replace(']', "\\]")
             .replace(';', "\\;");
-        // 'bottom' anchors the text's BOTTOM edge ~3% above the frame bottom
-        // so tall / multi-line text grows upward instead of clipping off-frame.
+        let anchor_ratio = caption_anchor_y as f64 / target_height.max(1) as f64;
         let ypos = match clip.captions_position.as_str() {
-            "top" => "h*0.08",
-            "center" => "(h-text_h)/2",
-            _ => "h-text_h-h*0.03",
+            "top" => format!("h*{anchor_ratio:.6}"),
+            "center" => format!("h*{anchor_ratio:.6}-text_h/2"),
+            _ => format!("h*{anchor_ratio:.6}-text_h"),
         };
 
         let mut filter = format!(

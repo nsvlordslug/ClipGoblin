@@ -29,9 +29,10 @@ interface Props {
   layout: 'split' | 'pip'
   settings: FacecamSettings
   onChange: (s: FacecamSettings) => void
+  contentLabel?: string
 }
 
-export default function FacecamEditor({ layout, settings, onChange }: Props) {
+export default function FacecamEditor({ layout, settings, onChange, contentLabel = 'Facecam' }: Props) {
   const update = (patch: Partial<FacecamSettings>) => onChange({ ...settings, ...patch })
 
   if (layout === 'split') {
@@ -45,7 +46,7 @@ export default function FacecamEditor({ layout, settings, onChange }: Props) {
           <span className="text-[10px] text-slate-500 font-mono w-10 text-right">{Math.round(settings.splitRatio * 100)}%</span>
         </div>
         <p className="text-[9px] text-slate-600">
-          Game {Math.round(settings.splitRatio * 100)}% top — Facecam {Math.round((1 - settings.splitRatio) * 100)}% bottom. Drag the divider on the preview.
+          Game {Math.round(settings.splitRatio * 100)}% top — {contentLabel} {Math.round((1 - settings.splitRatio) * 100)}% bottom. Drag the divider on the preview.
         </p>
       </div>
     )
@@ -55,7 +56,7 @@ export default function FacecamEditor({ layout, settings, onChange }: Props) {
     <div className="space-y-2 mt-3">
       <div className="flex items-center gap-2">
         <Move className="w-3 h-3 text-slate-500 shrink-0" />
-        <span className="text-[10px] text-slate-500">Drag facecam on the preview. It snaps to corners and edges.</span>
+        <span className="text-[10px] text-slate-500">Drag {contentLabel.toLowerCase()} on the preview. It snaps to corners and edges.</span>
       </div>
       <div className="grid grid-cols-2 gap-2">
         <div>
@@ -91,12 +92,13 @@ export default function FacecamEditor({ layout, settings, onChange }: Props) {
 }
 
 /** Draggable PiP overlay with snap-to-edge behavior and alignment guides. */
-export function DraggablePipOverlay({ settings, onChange, frameWidth, frameHeight, transparent = false }: {
+export function DraggablePipOverlay({ settings, onChange, frameWidth, frameHeight, transparent = false, contentLabel = 'FACECAM' }: {
   settings: FacecamSettings; onChange: (s: FacecamSettings) => void
   frameWidth: number; frameHeight: number
   /** When true, drop the placeholder gradient + FACECAM label so an underlying
    *  preview (e.g. CamRegionPreview canvas) shows through. Border + handles stay. */
   transparent?: boolean
+  contentLabel?: string
 }) {
   const [dragging, setDragging] = useState(false)
   const [guides, setGuides] = useState<SnapGuide[]>([])
@@ -158,7 +160,7 @@ export function DraggablePipOverlay({ settings, onChange, frameWidth, frameHeigh
           }}>
           {!transparent && (
             <div className="w-full h-full flex items-center justify-center">
-              <span className="text-[8px] text-white/50 font-mono">FACECAM</span>
+              <span className="text-[8px] text-white/50 font-mono">{contentLabel}</span>
             </div>
           )}
         </div>

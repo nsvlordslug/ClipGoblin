@@ -1,5 +1,7 @@
 import { EXPORT_PRESETS } from './editTypes'
 
+export { isSuccessfulUploadHandoff, shouldOfferForcedReupload } from './uploadStatus'
+
 const PLATFORM_PRESET_MAP: Record<string, string> = {
   tiktok: 'tiktok',
   youtube: 'youtube',
@@ -82,6 +84,7 @@ export type PlatformUploadStatus =
   | 'uploading'
   | 'processing'
   | 'done'
+  | 'duplicate'
   | 'error'
 
 export interface PlatformUploadState {
@@ -90,8 +93,5 @@ export interface PlatformUploadState {
   error?: string
   videoUrl?: string
   duplicateUrl?: string
-}
-
-export function isSuccessfulUploadHandoff(status: PlatformUploadStatus | undefined): boolean {
-  return status === 'done' || status === 'processing'
+  acceptedWithoutLink?: boolean
 }

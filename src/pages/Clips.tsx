@@ -3,7 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom'
 import {
   Scissors, Trash2, Pencil, Film, CheckSquare, Square, Upload, X, Clock,
   ChevronDown, ChevronRight, ArrowUp, LocateFixed, SlidersHorizontal,
-  ArrowUpDown, Eye, EyeOff, Undo2, Loader2,
+  ArrowUpDown, Eye, EyeOff, Undo2, Loader2, Brain, ListChecks, FileVideo,
 } from 'lucide-react'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import { useAppStore } from '../stores/appStore'
@@ -13,9 +13,23 @@ import Tooltip from '../components/Tooltip'
 import BatchUploadDialog from '../components/BatchUploadDialog'
 import { useScheduleStore } from '../stores/scheduleStore'
 import type { Clip, Vod } from '../types'
-import type { ClipReviewRating } from '../types/clipReview'
-import { REVIEW_RATING_LABELS, REVIEW_RATING_COLORS } from '../types/clipReview'
+import type { ClipReviewIssue, ClipReviewRating, PersonalizationStatus } from '../types/clipReview'
+import {
+  getPersonalizationStatusCopy,
+  parseClipReviewIssues,
+  REVIEW_ISSUE_OPTIONS,
+  REVIEW_RATING_LABELS,
+  REVIEW_RATING_COLORS,
+  toggleExpandedReviewClip,
+} from '../types/clipReview'
 import TwitchProvenanceBadges from '../components/TwitchProvenanceBadges'
+import {
+  CLIP_SOURCE_TABS,
+  clipMatchesSourceTab,
+  clipSourceTabFor,
+  countClipsBySource,
+} from '../lib/clipSources'
+import type { ClipSourceTab } from '../lib/clipSources'
 
 // ─── Helpers ───────────────────────────────────────────────────────
 
@@ -144,9 +158,9 @@ interface PendingDelete {
   timer: ReturnType<typeof setTimeout>
 }
 
-// ─── ClipCard (unchanged logic, extracted for clarity) ────────────
+// ─── Clip card ────────────────────────────────────────────────────
 
-function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, selectMode, selected, onToggleSelect, scheduledPlatforms }: {
+function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, onReviewSaved, reviewExpanded, onToggleReview, selectMode, selected, onToggleSelect, scheduledPlatforms }: {
   clip: Clip
   highlight?: {
     id?: string
@@ -156,24 +170,67 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
     transcript_snippet?: string
     review_rating?: 'good' | 'meh' | 'boring' | null
     review_note?: string | null
+    review_issues?: string | null
   }
   confidence: number | null
   posterSrc: string | null
   onDelete: () => void
   onEdit: () => void
+  onReviewSaved: () => Promise<void>
+  reviewExpanded: boolean
+  onToggleReview: () => void
   selectMode: boolean
   selected: boolean
   onToggleSelect: () => void
   scheduledPlatforms?: Array<{ platform: string; scheduled_time: string }>
 }) {
   const [videoSrc, setVideoSrc] = useState<string | null>(null)
-  // Phase A v1.3.13: review tools require BOTH the developer-mode unlock AND
-  // the explicit showReviewTools toggle. Either being false hides the UI.
-  const showReviewTools = useUiStore(
-    (s) => s.settings.developerModeUnlocked && s.settings.showReviewTools,
-  )
+  const [preparingPreview, setPreparingPreview] = useState(false)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+  const showReviewTools = useUiStore((s) => s.settings.showReviewTools)
   const fetchHighlights = useAppStore((s) => s.fetchHighlights)
   const [savingReview, setSavingReview] = useState(false)
+  const [reviewError, setReviewError] = useState<string | null>(null)
+  const [reviewNoteDraft, setReviewNoteDraft] = useState(highlight?.review_note ?? '')
+  const reviewIssues = useMemo(
+    () => parseClipReviewIssues(highlight?.review_issues),
+    [highlight?.review_issues],
+  )
+  const hasReviewFeedback = Boolean(
+    highlight?.review_rating
+    || reviewIssues.length > 0
+    || highlight?.review_note?.trim(),
+  )
+
+  useEffect(() => {
+    setReviewNoteDraft(highlight?.review_note ?? '')
+  }, [highlight?.review_note])
+
+  const persistReview = async (
+    rating: ClipReviewRating | null,
+    note: string | null,
+    issues: ClipReviewIssue[],
+  ) => {
+    const highlightId = highlight?.id ?? clip.highlight_id
+    if (!highlightId) return
+    setSavingReview(true)
+    setReviewError(null)
+    try {
+      await invoke('save_clip_review', {
+        highlightId,
+        rating,
+        note,
+        issues,
+      })
+      await fetchHighlights()
+      await onReviewSaved()
+    } catch (error) {
+      console.error('Failed to save clip review:', error)
+      setReviewError(String(error))
+    } finally {
+      setSavingReview(false)
+    }
+  }
 
   const displayTitle = useMemo(
     () => clipDisplayTitle(clip, highlight),
@@ -181,7 +238,21 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
   )
 
   const ensureSrc = useCallback(async () => {
-    if (videoSrc) return
+    if (videoSrc || preparingPreview) return
+    setPreviewError(null)
+    if (clip.source_media_path) {
+      setPreparingPreview(true)
+      try {
+        const path = await invoke<string>('prepare_clip_preview_source', { clipId: clip.id })
+        setVideoSrc(convertFileSrc(path))
+      } catch (error) {
+        console.warn(`[Clips] Failed to prepare imported preview for ${clip.id}`, error)
+        setPreviewError(String(error))
+      } finally {
+        setPreparingPreview(false)
+      }
+      return
+    }
     // Community-clip MP4: a standalone, already-trimmed file. Play it directly
     // (no VOD lookup, no seek/trim window). Falls back to the VOD source.
     if (clip.community_clip_mp4_path) {
@@ -191,10 +262,11 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
     try {
       const v = await invoke<Vod>('get_vod_detail', { vodId: clip.vod_id })
       if (v.local_path) setVideoSrc(convertFileSrc(v.local_path))
-    } catch {
+    } catch (error) {
       console.warn(`[Clips] Failed to load VOD source for clip ${clip.id}`)
+      setPreviewError(String(error))
     }
-  }, [videoSrc, clip.id, clip.vod_id, clip.community_clip_mp4_path])
+  }, [videoSrc, preparingPreview, clip.id, clip.vod_id, clip.community_clip_mp4_path, clip.source_media_path])
 
   const handleClick = () => {
     if (selectMode) onToggleSelect()
@@ -210,7 +282,7 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
         selectMode && selected
           ? '!border-violet-500 ring-1 ring-violet-500/30'
           : ''
-      } ${selectMode ? 'cursor-pointer' : ''}`}
+      } ${reviewExpanded ? 'review-open !border-violet-500/60' : ''} ${selectMode ? 'cursor-pointer' : ''}`}
       onClick={handleClick}
     >
       {selectMode && (
@@ -233,6 +305,24 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
           className="w-full h-full"
           objectFit="contain"
         />
+        {preparingPreview && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center gap-2 bg-black/70 text-xs text-slate-200">
+            <Loader2 className="h-4 w-4 animate-spin" /> Preparing preview
+          </div>
+        )}
+        {previewError && !preparingPreview && (
+          <button
+            type="button"
+            className="absolute inset-x-2 bottom-2 z-10 rounded bg-red-950/90 px-2 py-1.5 text-left text-[10px] text-red-200"
+            title={previewError}
+            onClick={(event) => {
+              event.stopPropagation()
+              void ensureSrc()
+            }}
+          >
+            Preview unavailable. Click to retry.
+          </button>
+        )}
         {/* v4 score overlay — top right */}
         {confidence !== null && (
           <span className="v4-lib-score">{Math.round(confidence * 100)}%</span>
@@ -259,6 +349,29 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
           </h3>
           {!selectMode && (
             <div className="flex gap-1 shrink-0">
+              {showReviewTools && (
+                <Tooltip text={reviewExpanded ? 'Close clip feedback' : 'Rate clip and flag edit issues'}>
+                  <button
+                    type="button"
+                    aria-label={reviewExpanded ? 'Close clip feedback' : 'Rate clip and flag edit issues'}
+                    aria-expanded={reviewExpanded}
+                    aria-controls={`clip-feedback-${clip.id}`}
+                    onClick={(e) => { e.stopPropagation(); onToggleReview() }}
+                    className={`relative p-1.5 rounded-lg transition-colors cursor-pointer ${
+                      reviewExpanded
+                        ? 'bg-violet-500/15 text-violet-300'
+                        : hasReviewFeedback
+                          ? 'text-emerald-400 hover:bg-emerald-500/10'
+                          : 'text-slate-500 hover:text-violet-400 hover:bg-violet-500/10'
+                    }`}
+                  >
+                    <ListChecks className="w-4 h-4" />
+                    {hasReviewFeedback && !reviewExpanded && (
+                      <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                    )}
+                  </button>
+                </Tooltip>
+              )}
               <Tooltip text="Edit clip in the Editor">
                 <button
                   onClick={(e) => { e.stopPropagation(); onEdit() }}
@@ -292,11 +405,31 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
             </span>
           )}
         </div>
-        {showReviewTools && (
+        {showReviewTools && reviewExpanded && (
           <div
+            id={`clip-feedback-${clip.id}`}
             className="mt-1 pt-2 border-t border-surface-700/50 flex flex-col gap-2"
             onClick={(e) => e.stopPropagation()}
           >
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-[11px] font-semibold text-slate-300">Clip feedback</div>
+              <div className="flex items-center gap-1">
+                {savingReview && (
+                  <span className="inline-flex items-center gap-1 text-[10px] text-slate-500">
+                    <Loader2 className="h-3 w-3 animate-spin" /> Saving
+                  </span>
+                )}
+                <button
+                  type="button"
+                  aria-label="Close clip feedback"
+                  onClick={(event) => { event.stopPropagation(); onToggleReview() }}
+                  className="p-1 rounded text-slate-500 hover:bg-surface-700 hover:text-white transition-colors cursor-pointer"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+            <div className="text-[10px] font-medium uppercase text-slate-500">Moment quality</div>
             <div className="flex items-center gap-1.5">
               {(['good', 'meh', 'boring'] as ClipReviewRating[]).map((r) => {
                 const isActive = highlight?.review_rating === r
@@ -305,28 +438,14 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
                     key={r}
                     type="button"
                     disabled={savingReview}
-                    onClick={async (e) => {
+                    onClick={(e) => {
                       e.stopPropagation()
-                      const hid = highlight?.id ?? clip.highlight_id
-                      if (!hid) return
                       const nextRating: ClipReviewRating | null = isActive ? null : r
-                      setSavingReview(true)
-                      try {
-                        await invoke('save_clip_review', {
-                          highlightId: hid,
-                          rating: nextRating,
-                          note: highlight?.review_note ?? null,
-                        })
-                        // Re-fetch ALL highlights, not just this VOD's. The store's
-                        // fetchHighlights(vodId) replaces the whole highlights array
-                        // with one VOD's results, which would erase highlight data
-                        // for every other VOD currently visible on the Clips page.
-                        await fetchHighlights()
-                      } catch (err) {
-                        console.error('Failed to save clip review rating:', err)
-                      } finally {
-                        setSavingReview(false)
-                      }
+                      void persistReview(
+                        nextRating,
+                        reviewNoteDraft.trim() || null,
+                        reviewIssues,
+                      )
                     }}
                     className={`flex-1 px-2 py-1 text-[11px] rounded border transition-colors cursor-pointer disabled:opacity-50 ${
                       isActive
@@ -339,32 +458,68 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, se
                 )
               })}
             </div>
+            <div>
+              <div className="mb-1 text-[10px] font-medium uppercase text-slate-500">
+                Edit issues <span className="normal-case font-normal">(choose all that apply)</span>
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {REVIEW_ISSUE_OPTIONS.map((option) => {
+                  const isActive = reviewIssues.includes(option.id)
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      disabled={savingReview}
+                      aria-pressed={isActive}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        const nextIssues = isActive
+                          ? reviewIssues.filter((issue) => issue !== option.id)
+                          : [...reviewIssues, option.id]
+                        void persistReview(
+                          highlight?.review_rating ?? null,
+                          reviewNoteDraft.trim() || null,
+                          nextIssues,
+                        )
+                      }}
+                      className={`px-2 py-1 text-[10px] rounded border transition-colors cursor-pointer disabled:opacity-50 ${
+                        isActive
+                          ? 'bg-amber-500/15 text-amber-200 border-amber-500/40'
+                          : 'bg-surface-800 text-slate-400 border-surface-600 hover:text-white hover:border-surface-500'
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
             <textarea
-              defaultValue={highlight?.review_note ?? ''}
-              onBlur={async (e) => {
-                const hid = highlight?.id ?? clip.highlight_id
-                if (!hid) return
+              value={reviewNoteDraft}
+              maxLength={2000}
+              onChange={(event) => setReviewNoteDraft(event.target.value)}
+              onBlur={(e) => {
+                if (
+                  e.relatedTarget instanceof HTMLElement
+                  && e.currentTarget.parentElement?.contains(e.relatedTarget)
+                ) return
                 const noteValue = e.target.value.trim() || null
                 if ((highlight?.review_note ?? null) === noteValue) return  // no-op if unchanged
-                setSavingReview(true)
-                try {
-                  await invoke('save_clip_review', {
-                    highlightId: hid,
-                    rating: highlight?.review_rating ?? null,
-                    note: noteValue,
-                  })
-                  // Re-fetch ALL highlights — see note in the rating-save handler above.
-                  await fetchHighlights()
-                } catch (err) {
-                  console.error('Failed to save clip review note:', err)
-                } finally {
-                  setSavingReview(false)
-                }
+                void persistReview(
+                  highlight?.review_rating ?? null,
+                  noteValue,
+                  reviewIssues,
+                )
               }}
-              placeholder="Notes (saves on blur)..."
+              placeholder="Optional review note (saves on blur)..."
               className="w-full text-xs px-2 py-1 rounded bg-surface-800 border border-surface-600 text-slate-200 focus:border-violet-500 focus:outline-none resize-y min-h-[2rem]"
               rows={1}
             />
+            {reviewError && (
+              <p className="text-[10px] text-rose-300" role="alert">
+                Could not save feedback: {reviewError}
+              </p>
+            )}
           </div>
         )}
       </div>
@@ -438,10 +593,39 @@ export default function Clips() {
   // the bug — react-router default scroll behavior puts them at the top of
   // the previous page's scroll position which makes no sense for a fresh
   // analysis result that just appeared at a different point in the list).
-  const focusVodId = (location.state as { focusVodId?: string } | null)?.focusVodId ?? null
+  const routeState = location.state as {
+    focusVodId?: string
+    focusClipId?: string
+    openReview?: boolean
+  } | null
+  const focusVodId = routeState?.focusVodId ?? null
+  const focusClipId = routeState?.focusClipId ?? null
+  const openFocusedReview = routeState?.openReview === true
   const { clips, highlights, fetchClips, fetchHighlights, refreshVods, loggedInUser } = useAppStore()
   const { uploads: scheduledUploads, load: loadSchedules } = useScheduleStore()
+  const showReviewTools = useUiStore((state) => state.settings.showReviewTools)
   const [vodMap, setVodMap] = useState<Record<string, Vod>>({})
+  const [personalizationStatus, setPersonalizationStatus] = useState<PersonalizationStatus | null>(null)
+  const [importingMedia, setImportingMedia] = useState(false)
+  const [importNotice, setImportNotice] = useState<{ ok: boolean; text: string } | null>(null)
+  const loadPersonalizationStatus = useCallback(async () => {
+    if (!showReviewTools) {
+      setPersonalizationStatus(null)
+      return
+    }
+    try {
+      const status = await invoke<PersonalizationStatus>('get_personalization_status')
+      setPersonalizationStatus(status)
+    } catch (error) {
+      console.error('Failed to load personalization status:', error)
+    }
+  }, [showReviewTools])
+  const personalizationCopy = useMemo(
+    () => personalizationStatus
+      ? getPersonalizationStatusCopy(personalizationStatus)
+      : null,
+    [personalizationStatus],
+  )
 
   // "Preparing clip previews..." banner state. When the user lands on /clips
   // right after an analysis completes (focusVodId set in location.state), we
@@ -462,6 +646,9 @@ export default function Clips() {
   const [selectMode, setSelectMode] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [showBatchUpload, setShowBatchUpload] = useState(false)
+  const [activeReviewClipId, setActiveReviewClipId] = useState<string | null>(null)
+  const handledRouteFocusRef = useRef<string | null>(null)
+  const autoCollapsedMedalRef = useRef(false)
 
   // Collapsible sections
   const [collapsedVods, setCollapsedVods] = useState<Set<string>>(loadCollapsed)
@@ -471,6 +658,7 @@ export default function Clips() {
   const [sortDir, setSortDir] = useState<SortDir>(() => loadSort().dir)
   const [hideDone, setHideDone] = useState<boolean>(loadHideDone)
   const [showSortBar, setShowSortBar] = useState(false)
+  const [sourceTab, setSourceTab] = useState<ClipSourceTab>(focusVodId ? 'twitch' : 'all')
 
   // Delete confirmation
   const [confirmDelete, setConfirmDelete] = useState<{ clipIds: string[] } | null>(null)
@@ -498,11 +686,72 @@ export default function Clips() {
     loadSchedules()
   }, [fetchClips, fetchHighlights, loadSchedules])
 
+  useEffect(() => {
+    if (autoCollapsedMedalRef.current) return
+    const medalGroupIds = [...new Set(clips
+      .filter(clip => clip.source_kind === 'medal')
+      .map(clip => clip.game?.trim()
+        ? `external:medal:${clip.game.trim().toLocaleLowerCase()}`
+        : clip.vod_id))]
+    if (medalGroupIds.length <= 1) return
+    autoCollapsedMedalRef.current = true
+    setCollapsedVods(previous => {
+      const next = new Set(previous)
+      medalGroupIds.forEach(id => next.add(id))
+      saveCollapsed(next)
+      return next
+    })
+  }, [clips])
+
+  const importLocalMedia = async () => {
+    setImportingMedia(true)
+    setImportNotice(null)
+    try {
+      const results = await invoke<Array<{ status: string }>>('pick_and_import_media')
+      if (results.length === 0) return
+      await Promise.all([fetchClips(), fetchHighlights()])
+      const imported = results.filter(result => result.status === 'imported').length
+      const duplicates = results.length - imported
+      setImportNotice({
+        ok: true,
+        text: `${imported} video${imported === 1 ? '' : 's'} imported${duplicates ? `, ${duplicates} already in your library` : ''}.`,
+      })
+    } catch (error) {
+      setImportNotice({ ok: false, text: `Import failed: ${String(error)}` })
+    } finally {
+      setImportingMedia(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadPersonalizationStatus()
+  }, [loadPersonalizationStatus])
+
+  useEffect(() => {
+    if (!showReviewTools) setActiveReviewClipId(null)
+  }, [showReviewTools])
+
+  useEffect(() => {
+    if (!activeReviewClipId) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setActiveReviewClipId(null)
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [activeReviewClipId])
+
+  useEffect(() => {
+    if (activeReviewClipId && !clips.some((clip) => clip.id === activeReviewClipId)) {
+      setActiveReviewClipId(null)
+    }
+  }, [activeReviewClipId, clips])
+
   // ── Auto-enter select mode when navigated with ?action=schedule or ?action=export ──
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const action = params.get('action')
     if (action === 'schedule' || action === 'export') {
+      setActiveReviewClipId(null)
       setSelectMode(true)
     }
   }, [])
@@ -604,7 +853,9 @@ export default function Clips() {
 
   // ── Fetch VOD details ──
   useEffect(() => {
-    const vodIds = [...new Set(clips.map(c => c.vod_id))]
+    const vodIds = [...new Set(clips
+      .filter(c => !c.source_media_path && !c.vod_id.startsWith('external:'))
+      .map(c => c.vod_id))]
     setVodMap(prev => {
       const missing = vodIds.filter(id => !prev[id])
       if (missing.length === 0) return prev
@@ -655,6 +906,9 @@ export default function Clips() {
   }
 
   const executeDelete = (clipIds: string[]) => {
+    setActiveReviewClipId((current) => (
+      current && clipIds.includes(current) ? null : current
+    ))
     // Cancel any existing pending delete first (commit it immediately)
     if (pendingDelete) {
       clearTimeout(pendingDelete.timer)
@@ -731,6 +985,7 @@ export default function Clips() {
   // ── Select mode ──
 
   const toggleSelectMode = () => {
+    setActiveReviewClipId(null)
     if (selectMode) {
       setSelectMode(false)
       setSelectedIds(new Set())
@@ -748,8 +1003,17 @@ export default function Clips() {
     })
   }
 
-  // Filter out hidden (pending-delete) clips
-  const visibleClips = clips.filter(c => !hiddenIds.has(c.id))
+  // Filter out hidden (pending-delete) clips, then apply the source workspace.
+  const sourceCounts = useMemo(() => countClipsBySource(clips), [clips])
+  const visibleClips = clips.filter(c => (
+    !hiddenIds.has(c.id) && clipMatchesSourceTab(c, sourceTab)
+  ))
+
+  const selectSourceTab = (tab: ClipSourceTab) => {
+    setSourceTab(tab)
+    setSelectedIds(new Set())
+    setActiveReviewClipId(null)
+  }
 
   const selectAll = () => setSelectedIds(new Set(visibleClips.map(c => c.id)))
   const deselectAll = () => setSelectedIds(new Set())
@@ -768,7 +1032,7 @@ export default function Clips() {
   }
 
   const collapseAll = () => {
-    const all = new Set(groupedClips.map(g => g.title))
+    const all = new Set(groupedClips.map(g => g.id))
     setCollapsedVods(all)
     saveCollapsed(all)
   }
@@ -794,37 +1058,58 @@ export default function Clips() {
   // ── Group clips by VOD ──
 
   const groupedClips = useMemo(() => {
-    const titleMap = new Map<string, { vod: Vod | null; clips: Clip[] }>()
+    const sourceTitle = (clip: Clip) => {
+      if (clip.source_kind === 'medal') return clip.game?.trim() || 'Other Medal clips'
+      if (clip.source_kind === 'obs') return 'OBS replays'
+      if (clip.source_kind === 'meld') return 'Meld clips'
+      if (clip.source_kind === 'manual') return 'Local video imports'
+      return clip.vod_id
+    }
+    const groupKey = (clip: Clip) => (
+      clip.source_kind === 'medal' && clip.game?.trim()
+        ? `external:medal:${clip.game.trim().toLocaleLowerCase()}`
+        : clip.vod_id
+    )
+    const groupsById = new Map<string, { id: string; title: string; vod: Vod | null; clips: Clip[] }>()
     for (const clip of visibleClips) {
       const vod = vodMap[clip.vod_id] || null
-      const title = vod?.title || clip.vod_id
-      if (!titleMap.has(title)) titleMap.set(title, { vod, clips: [] })
-      titleMap.get(title)!.clips.push(clip)
+      const title = vod?.title || sourceTitle(clip)
+      const id = groupKey(clip)
+      if (!groupsById.has(id)) {
+        groupsById.set(id, { id, title, vod, clips: [] })
+      }
+      groupsById.get(id)!.clips.push(clip)
     }
 
-    const groups: { title: string; vod: Vod | null; clips: Clip[] }[] = []
-    for (const [title, group] of titleMap) {
-      group.clips.sort((a, b) => a.start_seconds - b.start_seconds)
-      groups.push({ title, vod: group.vod, clips: group.clips })
+    const groups: { id: string; title: string; vod: Vod | null; clips: Clip[] }[] = []
+    for (const group of groupsById.values()) {
+      group.clips.sort((a, b) => {
+        if (a.source_media_path || b.source_media_path) {
+          return (b.source_recorded_at || '')
+            .localeCompare(a.source_recorded_at || '')
+        }
+        return a.start_seconds - b.start_seconds
+      })
+      groups.push(group)
     }
 
     // Sort groups
     groups.sort((a, b) => {
       if (sortBy === 'stream_date') {
-        const aVal = a.vod?.stream_date || '1970-01-01'
-        const bVal = b.vod?.stream_date || '1970-01-01'
+        const aVal = a.vod?.stream_date || a.clips[0]?.source_recorded_at || '1970-01-01'
+        const bVal = b.vod?.stream_date || b.clips[0]?.source_recorded_at || '1970-01-01'
         const cmp = aVal.localeCompare(bVal)
         return sortDir === 'desc' ? -cmp : cmp
       } else {
         // Download order: use position of first clip in the master clips array
-        const aIdx = visibleClips.findIndex(c => c.vod_id === (a.vod?.id || ''))
-        const bIdx = visibleClips.findIndex(c => c.vod_id === (b.vod?.id || ''))
+        const aIdx = visibleClips.findIndex(c => groupKey(c) === a.id)
+        const bIdx = visibleClips.findIndex(c => groupKey(c) === b.id)
         const cmp = aIdx - bIdx
         return sortDir === 'desc' ? cmp : -cmp
       }
     })
 
-    // Filter out fully completed VODs if hideDone is true
+    // Filter out fully completed VOD/source groups if hideDone is true.
     if (hideDone) {
       return groups.filter(g => {
         const allExported = g.clips.every(c => c.render_status === 'completed' && c.output_path)
@@ -834,6 +1119,70 @@ export default function Clips() {
 
     return groups
   }, [visibleClips, vodMap, sortBy, sortDir, hideDone])
+
+  // Dashboard inbox links land on one exact card and can open its review
+  // disclosure. Reveal completed/collapsed groups before attempting to scroll.
+  useEffect(() => {
+    if (!focusClipId || handledRouteFocusRef.current === focusClipId) return
+    const targetClip = clips.find(clip => clip.id === focusClipId)
+    if (!targetClip) return
+
+    if (!clipMatchesSourceTab(targetClip, sourceTab)) {
+      setSourceTab(clipSourceTabFor(targetClip))
+      return
+    }
+
+    const groupTitle = targetClip.source_kind === 'medal' && targetClip.game?.trim()
+      ? `external:medal:${targetClip.game.trim().toLocaleLowerCase()}`
+      : targetClip.vod_id
+
+    if (hideDone) setHideDone(false)
+    if (collapsedVods.has(groupTitle)) {
+      setCollapsedVods(previous => {
+        const next = new Set(previous)
+        next.delete(groupTitle)
+        saveCollapsed(next)
+        return next
+      })
+    }
+    if (openFocusedReview && showReviewTools) setActiveReviewClipId(focusClipId)
+
+    let cancelled = false
+    let raf = 0
+    let attempts = 0
+    const timers: ReturnType<typeof setTimeout>[] = []
+    const run = () => {
+      if (cancelled) return
+      const element = document.querySelector<HTMLElement>(`[data-clip-id="${focusClipId}"]`)
+      if (!element) {
+        if (attempts++ < 60) raf = requestAnimationFrame(run)
+        return
+      }
+
+      scrollCardIntoView(element, 'center')
+      element.classList.add('ring-2', 'ring-violet-500/60')
+      timers.push(setTimeout(() => element.classList.remove('ring-2', 'ring-violet-500/60'), 1200))
+      handledRouteFocusRef.current = focusClipId
+      window.history.replaceState(null, '', location.pathname)
+    }
+
+    raf = requestAnimationFrame(run)
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(raf)
+      timers.forEach(clearTimeout)
+    }
+  }, [
+    clips,
+    collapsedVods,
+    focusClipId,
+    hideDone,
+    location.pathname,
+    openFocusedReview,
+    showReviewTools,
+    sourceTab,
+    vodMap,
+  ])
 
   // ── VOD status stats ──
 
@@ -871,11 +1220,22 @@ export default function Clips() {
         <div>
           <div className="v4-page-title">Clip Library ✂</div>
           <div className="v4-page-sub">
-            {clips.length} total clips{visibleClips.length !== clips.length ? ` · ${visibleClips.length} shown` : ''}
+            {clips.length} total clips{sourceTab !== 'all' ? ` · ${sourceCounts[sourceTab]} in ${CLIP_SOURCE_TABS.find(tab => tab.id === sourceTab)?.label}` : ''}
           </div>
         </div>
-        {visibleClips.length > 0 && (
-          <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void importLocalMedia()}
+            disabled={importingMedia}
+            className="v4-btn ghost"
+            title="Import clips recorded by Medal, OBS, Meld, or another app"
+          >
+            {importingMedia ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileVideo className="w-3.5 h-3.5" />}
+            Import videos
+          </button>
+          {visibleClips.length > 0 && (
+            <>
             {selectMode && (
               <>
                 <button
@@ -914,29 +1274,68 @@ export default function Clips() {
             >
               {selectMode ? <><X className="w-3.5 h-3.5" /> Exit Select</> : <><CheckSquare className="w-3.5 h-3.5" /> Select</>}
             </button>
-            <button
-              onClick={() => navigate('/vods')}
-              className="v4-btn primary"
-              style={{padding:'6px 12px', fontSize:12}}
-              title="Pick a VOD to clip from"
-            >
-              + New clip
-            </button>
-          </div>
-        )}
-        {/* Show "+ New clip" even in empty state so it's discoverable */}
-        {visibleClips.length === 0 && (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => navigate('/vods')}
-              className="v4-btn primary"
-              style={{padding:'6px 12px', fontSize:12}}
-            >
-              + New clip
-            </button>
-          </div>
-        )}
+            </>
+          )}
+          <button
+            onClick={() => navigate('/vods')}
+            className="v4-btn primary"
+            style={{padding:'6px 12px', fontSize:12}}
+            title="Pick a Twitch VOD to clip from"
+          >
+            + New clip
+          </button>
+        </div>
       </div>
+
+      <div role="tablist" aria-label="Clip source" className="flex items-center gap-1 overflow-x-auto border-b border-surface-700">
+        {CLIP_SOURCE_TABS.map(tab => (
+          <button
+            key={tab.id}
+            type="button"
+            role="tab"
+            aria-selected={sourceTab === tab.id}
+            onClick={() => selectSourceTab(tab.id)}
+            className={`flex shrink-0 items-center gap-2 border-b-2 px-3 py-2 text-xs font-medium transition-colors ${
+              sourceTab === tab.id
+                ? 'border-violet-400 text-white'
+                : 'border-transparent text-slate-500 hover:text-slate-300'
+            }`}
+          >
+            {tab.label}
+            <span className={`text-[10px] ${sourceTab === tab.id ? 'text-violet-300' : 'text-slate-600'}`}>
+              {sourceCounts[tab.id]}
+            </span>
+          </button>
+        ))}
+      </div>
+
+      {importNotice && (
+        <div role="status" className={`border-l-2 px-3 py-2 text-xs ${importNotice.ok ? 'border-emerald-400 bg-emerald-500/5 text-emerald-300' : 'border-red-400 bg-red-500/5 text-red-300'}`}>
+          {importNotice.text}
+        </div>
+      )}
+
+      {showReviewTools && personalizationCopy && (
+        <div className={`flex items-start gap-3 border-l-2 px-3 py-2 ${
+          personalizationCopy.tone === 'active'
+            ? 'border-emerald-400 bg-emerald-500/5'
+            : personalizationCopy.tone === 'learning'
+              ? 'border-violet-400 bg-violet-500/5'
+              : personalizationCopy.tone === 'attention'
+                ? 'border-amber-400 bg-amber-500/5'
+                : 'border-slate-500 bg-surface-800/40'
+        }`}>
+          <Brain className="mt-0.5 h-4 w-4 shrink-0 text-violet-300" />
+          <div className="min-w-0">
+            <div className="text-xs font-semibold text-slate-200">
+              {personalizationCopy.label}
+            </div>
+            <div className="mt-0.5 text-[11px] leading-4 text-slate-400">
+              {personalizationCopy.detail}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Sort / Filter bar ── */}
       {visibleClips.length > 0 && (
@@ -1001,7 +1400,7 @@ export default function Clips() {
                 }`}
               >
                 {hideDone ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                {hideDone ? 'Showing incomplete only' : 'Hide completed VODs'}
+                {hideDone ? 'Showing incomplete only' : 'Hide completed groups'}
               </button>
             </div>
           )}
@@ -1024,10 +1423,23 @@ export default function Clips() {
             Analyze VODs to find highlights, then review them here.
           </p>
         </div>
+      ) : visibleClips.length === 0 && sourceTab !== 'all' ? (
+        <div className="v4-panel p-10 text-center">
+          <FileVideo className="mx-auto mb-3 h-10 w-10 text-slate-600" />
+          <h3 className="mb-1 text-base font-medium text-white">
+            No {CLIP_SOURCE_TABS.find(tab => tab.id === sourceTab)?.label} clips yet
+          </h3>
+          <p className="mb-4 text-sm text-slate-400">
+            Imported and detected clips will appear in their matching source tab.
+          </p>
+          <button type="button" onClick={() => selectSourceTab('all')} className="v4-btn ghost">
+            Show all clips
+          </button>
+        </div>
       ) : groupedClips.length === 0 && hideDone ? (
         <div className="v4-panel text-center p-12">
           <Eye className="w-12 h-12 text-slate-600 mx-auto mb-4" />
-          <h3 className="text-lg font-medium text-white mb-2">All VODs completed</h3>
+          <h3 className="text-lg font-medium text-white mb-2">All groups completed</h3>
           <p className="text-slate-400 text-sm mb-4">
             Every clip has been exported. Nice work!
           </p>
@@ -1041,7 +1453,7 @@ export default function Clips() {
       ) : (
         /* ── VOD groups ── */
         groupedClips.map(group => {
-          const isCollapsed = collapsedVods.has(group.title)
+          const isCollapsed = collapsedVods.has(group.id)
           const stats = vodStats(group.clips)
 
           // VOD ID is consistent across all clips in a group (grouping key
@@ -1057,9 +1469,9 @@ export default function Clips() {
 
           return (
             <div
-              key={group.title}
+              key={group.id}
               className="space-y-3"
-              ref={(el) => { vodSectionRefs.current[group.title] = el }}
+              ref={(el) => { vodSectionRefs.current[group.id] = el }}
               data-vod-id={groupVodId}
             >
               {/* "Preparing previews..." banner — visible only on the freshly-
@@ -1082,8 +1494,8 @@ export default function Clips() {
               {/* Collapsible VOD header */}
               <button
                 onClick={() => {
-                  toggleCollapse(group.title)
-                  setActiveVodTitle(group.title)
+                  toggleCollapse(group.id)
+                  setActiveVodTitle(group.id)
                 }}
                 className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg bg-surface-800/60 border border-surface-700 hover:border-surface-600 transition-colors cursor-pointer group"
               >
@@ -1098,6 +1510,9 @@ export default function Clips() {
                   </h2>
                   {group.vod?.stream_date && (
                     <p className="text-xs text-slate-500">{formatDate(group.vod.stream_date)}</p>
+                  )}
+                  {!group.vod && group.clips[0]?.source_recorded_at && (
+                    <p className="text-xs text-slate-500">Latest import {formatDate(group.clips[0].source_recorded_at!)}</p>
                   )}
                 </div>
                 {/* Status indicators */}
@@ -1127,11 +1542,18 @@ export default function Clips() {
                       <ClipCard
                         key={clip.id}
                         clip={clip}
-                        highlight={hl ? { id: hl.id, description: hl.description, tags: hl.tags, signal_sources: hl.signal_sources, transcript_snippet: hl.transcript_snippet, review_rating: hl.review_rating, review_note: hl.review_note } : undefined}
+                        highlight={hl ? { id: hl.id, description: hl.description, tags: hl.tags, signal_sources: hl.signal_sources, transcript_snippet: hl.transcript_snippet, review_rating: hl.review_rating, review_note: hl.review_note, review_issues: hl.review_issues } : undefined}
                         confidence={getConfidence(clip.highlight_id)}
                         posterSrc={getPosterSrc(clip)}
                         onDelete={() => requestDelete([clip.id])}
                         onEdit={() => navigateToEditor(clip.id)}
+                        onReviewSaved={loadPersonalizationStatus}
+                        reviewExpanded={activeReviewClipId === clip.id}
+                        onToggleReview={() => {
+                          setActiveReviewClipId((current) => (
+                            toggleExpandedReviewClip(current, clip.id)
+                          ))
+                        }}
                         selectMode={selectMode}
                         selected={selectedIds.has(clip.id)}
                         onToggleSelect={() => toggleSelect(clip.id)}

@@ -1587,7 +1587,42 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
             // ── Twitch community clips (optional detection signal) ──
             // Fetched here in async context so the sync `run_analysis_signals`
             // worker can consume them without needing tokio itself.
-            let community_clips = fetch_community_clips_for_vod(&db, &vod_clone, &app).await;
+            let mut community_clips = fetch_community_clips_for_vod(&db, &vod_clone, &app).await;
+            if let Ok(conn) = db.lock() {
+                if let Ok(markers) = db::get_stream_markers_for_vod(&conn, &vod_clone) {
+                    if let Ok(stream_start) = chrono::DateTime::parse_from_rfc3339(&vod_clone.stream_date) {
+                        for marker in markers {
+                            let Ok(marked_at) = chrono::DateTime::parse_from_rfc3339(&marker.recorded_at) else {
+                                continue;
+                            };
+                            let offset = (marked_at - stream_start).num_milliseconds() as f64 / 1000.0;
+                            if offset < 0.0 || offset >= vod_clone.duration_seconds as f64 {
+                                continue;
+                            }
+                            let start = (offset - 12.0).max(0.0);
+                            let duration = (40.0_f64)
+                                .min(vod_clone.duration_seconds as f64 - start)
+                                .max(1.0);
+                            community_clips.push(clip_selector::CommunityClip {
+                                vod_offset_seconds: start,
+                                duration_seconds: duration,
+                                view_count: 5_000,
+                                title: marker
+                                    .label
+                                    .clone()
+                                    .unwrap_or_else(|| "Marked during stream".to_string()),
+                                clip_url: None,
+                                is_streamer_created: true,
+                                creator_name: "You".to_string(),
+                                creator_id: format!("stream-marker:{}", marker.id),
+                                is_featured: false,
+                                is_stream_marker: true,
+                            });
+                            let _ = db::mark_stream_marker_matched(&conn, &marker.id, &vod_clone.id);
+                        }
+                    }
+                }
+            }
             if !community_clips.is_empty() {
                 log::info!("[community-clips] {} clips feeding into selector", community_clips.len());
             }
@@ -1674,100 +1709,144 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
                 )
                 .await;
 
-                if let Ok(conn) = db.lock() {
-                    // Clear previous analysis
-                    db::delete_clips_for_vod(&conn, &vod_id_bg).ok();
-                    db::delete_highlights_for_vod(&conn, &vod_id_bg).ok();
+                // Build every row before touching the old successful result set.
+                // The database replacement below is one transaction, so any
+                // failure rolls back instead of leaving a half-empty library.
+                let now = chrono::Utc::now().to_rfc3339();
+                let captions_dir = dirs::data_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("clipviral")
+                    .join("captions");
+                let mut analysis_rows = Vec::with_capacity(highlights.len());
 
-                    let now = chrono::Utc::now().to_rfc3339();
+                for h in &highlights {
+                    let clip_id = uuid::Uuid::new_v4().to_string();
+                    let srt_path = captions_dir.join(format!("{}.srt", h.id));
+                    let srt_exists = srt_path.exists();
+                    let auto_captions = srt_exists
+                        .then(|| std::fs::read_to_string(&srt_path).ok())
+                        .flatten();
+                    let auto_captions_path = srt_exists
+                        .then(|| srt_path.to_string_lossy().to_string());
 
-                    for h in &highlights {
-                        db::insert_highlight(&conn, h).ok();
-
-                        // Create a clip for each highlight
-                        let clip_id = uuid::Uuid::new_v4().to_string();
-
-                        // Check if auto-captions SRT exists for this highlight
-                        let captions_dir = dirs::data_dir()
-                            .unwrap_or_else(|| std::path::PathBuf::from("."))
-                            .join("clipviral")
-                            .join("captions");
-                        let srt_path = captions_dir.join(format!("{}.srt", h.id));
-                        let auto_captions = if srt_path.exists() {
-                            // Read SRT content to use as captions_text
-                            std::fs::read_to_string(&srt_path).ok()
+                    let clip = db::ClipRow {
+                        id: clip_id.clone(),
+                        highlight_id: h.id.clone(),
+                        vod_id: h.vod_id.clone(),
+                        title: h.description.clone().unwrap_or_else(|| "Highlight".to_string()),
+                        start_seconds: h.start_seconds,
+                        end_seconds: h.end_seconds,
+                        aspect_ratio: "9:16".to_string(),
+                        crop_x: None,
+                        crop_y: None,
+                        crop_width: None,
+                        crop_height: None,
+                        captions_enabled: 1,
+                        captions_text: auto_captions.clone(),
+                        captions_position: "bottom".to_string(),
+                        caption_style: "clean".to_string(),
+                        caption_font_scale: 1.0,
+                        caption_y_offset: 0.0,
+                        captions_source_start: auto_captions.as_ref().map(|_| {
+                            if h.community_clip_mp4_path.is_some() { 0.0 } else { h.start_seconds }
+                        }),
+                        facecam_layout: "none".to_string(),
+                        facecam_settings: None,
+                        context_background_path: None,
+                        context_background_mode: "blur".to_string(),
+                        context_blur_strength: 0.25,
+                        context_video_y: 0.5,
+                        render_status: "pending".to_string(),
+                        output_path: None,
+                        thumbnail_path: None,
+                        created_at: now.clone(),
+                        game: vod_clone.game_name.clone(),
+                        publish_description: None,
+                        publish_hashtags: None,
+                        cam_region_norm_override: None,
+                        cam_fit_mode: None,
+                        community_clip_mp4_path: h.community_clip_mp4_path.clone(),
+                        source_kind: if h.community_clip_mp4_path.is_some() {
+                            "twitch_community".to_string()
                         } else {
-                            None
-                        };
+                            "twitch_vod".to_string()
+                        },
+                        source_media_path: None,
+                        source_fingerprint: None,
+                        source_recorded_at: None,
+                    };
 
-                        let clip = db::ClipRow {
-                            id: clip_id.clone(),
-                            highlight_id: h.id.clone(),
-                            vod_id: h.vod_id.clone(),
-                            title: h.description.clone().unwrap_or_else(|| "Highlight".to_string()),
-                            start_seconds: h.start_seconds,
-                            end_seconds: h.end_seconds,
-                            aspect_ratio: "9:16".to_string(),
-                            crop_x: None,
-                            crop_y: None,
-                            crop_width: None,
-                            crop_height: None,
-                            captions_enabled: 1,
-                            captions_text: auto_captions,
-                            captions_position: "bottom".to_string(),
-                            caption_style: "clean".to_string(),
-                            caption_font_scale: 1.0,
-                            facecam_layout: "none".to_string(),
-                            render_status: "pending".to_string(),
-                            output_path: None,
-                            thumbnail_path: None,
-                            created_at: now.clone(),
-                            game: vod_clone.game_name.clone(),
-                            publish_description: None,
-                            publish_hashtags: None,
-                            cam_region_norm_override: None,
-                            cam_fit_mode: None,
-                            // Carry the downloaded Twitch clip MP4 path (if any) from
-                            // the highlight so export + the frontend use the actual
-                            // viewer clip file instead of a VOD re-cut.
-                            community_clip_mp4_path: h.community_clip_mp4_path.clone(),
-                        };
-                        db::insert_clip(&conn, &clip).ok();
-
-                        // Save auto-captions path to clip
-                        if srt_path.exists() {
-                            db::update_clip_auto_captions(&conn, &clip_id, &srt_path.to_string_lossy()).ok();
-                        }
-
-                        // Remember clip for auto-ship if it meets the confidence threshold.
-                        let conf = h.confidence_score.unwrap_or(h.virality_score);
-                        if conf >= 0.9 {
-                            auto_ship_candidates.push((clip_id.clone(), conf));
-                        }
-
-                        clip_thumb_info.push((clip_id, h.start_seconds));
+                    let conf = h.confidence_score.unwrap_or(h.virality_score);
+                    if conf >= 0.9 {
+                        auto_ship_candidates.push((clip_id.clone(), conf));
                     }
-
-                    db::update_vod_analysis_progress(&conn, &vod_id_bg, 88).ok();
-
-                    // ── Auto-ship high-confidence clips ──
-                    // Sort candidates by confidence desc so the per-VOD cap picks the strongest.
-                    auto_ship_candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                    let candidate_ids: Vec<String> = auto_ship_candidates.iter().map(|(id, _)| id.clone()).collect();
-                    match run_auto_ship_for_vod(&conn, &vod_id_bg, &candidate_ids) {
-                        Ok(report) if report.clips_queued > 0 => {
-                            use tauri::Emitter;
-                            log::info!(
-                                "[auto-ship] queued {} clips across {:?} · next publish {:?}",
-                                report.clips_queued, report.platforms, report.next_publish_at,
-                            );
-                            let _ = app.emit("auto-ship-queued", &report);
-                        }
-                        Ok(_) => { /* nothing queued — either disabled or no candidates */ }
-                        Err(e) => log::warn!("[auto-ship] failed non-fatally: {}", e),
-                    }
+                    clip_thumb_info.push((clip_id, h.start_seconds));
+                    analysis_rows.push(db::AnalysisResultRow {
+                        highlight: h.clone(),
+                        clip,
+                        auto_captions_path,
+                    });
                 }
-                // conn lock dropped here
+
+                auto_ship_candidates.sort_by(|a, b| {
+                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let candidate_ids: Vec<String> = auto_ship_candidates
+                    .iter()
+                    .map(|(id, _)| id.clone())
+                    .collect();
+
+                let persistence_result: Result<Option<AutoShipReport>, String> = match db.lock() {
+                    Ok(mut conn) => match db::replace_analysis_results(
+                        &mut conn,
+                        &vod_id_bg,
+                        &analysis_rows,
+                    ) {
+                        Ok(()) => {
+                            db::update_vod_analysis_progress(&conn, &vod_id_bg, 88).ok();
+                            let report = match run_auto_ship_for_vod(&conn, &vod_id_bg, &candidate_ids) {
+                                Ok(report) if report.clips_queued > 0 => Some(report),
+                                Ok(_) => None,
+                                Err(e) => {
+                                    log::warn!("[auto-ship] failed non-fatally: {}", e);
+                                    None
+                                }
+                            };
+                            Ok(report)
+                        }
+                        Err(e) => Err(format!("Could not save analysis results: {e}")),
+                    },
+                    Err(e) => Err(format!("Could not lock the database to save analysis: {e}")),
+                };
+
+                let auto_ship_report = match persistence_result {
+                    Ok(report) => report,
+                    Err(reason) => {
+                        log::error!("[analyze_vod] {}. Previous clips were preserved.", reason);
+                        if let Ok(conn) = db.lock() {
+                            db::update_vod_analysis_status(&conn, &vod_id_bg, "failed").ok();
+                            db::update_vod_analysis_progress(&conn, &vod_id_bg, 0).ok();
+                        }
+                        use tauri::Emitter;
+                        let _ = app.emit(
+                            "vod-analysis-failed",
+                            serde_json::json!({
+                                "vodId": vod_id_bg,
+                                "reason": format!("{}. Your previous clips were kept.", reason),
+                            }),
+                        );
+                        return;
+                    }
+                };
+
+                if let Some(report) = auto_ship_report {
+                    use tauri::Emitter;
+                    log::info!(
+                        "[auto-ship] queued {} clips across {:?} · next publish {:?}",
+                        report.clips_queued, report.platforms, report.next_publish_at,
+                    );
+                    let _ = app.emit("auto-ship-queued", &report);
+                }
 
                 // Generate thumbnails outside DB lock (88-98%)
                 if let Ok(ffmpeg_path) = find_ffmpeg() {
@@ -2148,6 +2227,7 @@ async fn fetch_community_clips_for_vod(
                     creator_name: c.creator_name,
                     creator_id: c.creator_id,
                     is_featured: c.is_featured,
+                    is_stream_marker: false,
                 })
             }).collect()
         }
@@ -2526,6 +2606,32 @@ fn run_analysis_signals(
     set_analysis_progress(vod_id, 52);
     // AI clip-worthiness judge (opt-in, BYOK) — empty Vec when off / no key / error.
     let ai_moments = run_ai_judge(transcript.as_ref(), vod_id, &vod.title, duration);
+    // Build a local preference profile from durable Good / Meh / Boring
+    // feedback. Invalid/legacy rows are skipped by the profile builder, and an
+    // inactive profile is a strict no-op until enough varied ratings exist.
+    let (personalization_profile, boundary_profile) = db::db_path()
+        .ok()
+        .and_then(|path| rusqlite::Connection::open(path).ok())
+        .map(|conn| {
+            let feedback = db::get_detection_feedback(&conn).unwrap_or_default();
+            let behavior = db::get_clip_behavior_events(&conn).unwrap_or_default();
+            let edit_feedback = db::get_clip_edit_feedback(&conn).unwrap_or_default();
+            (
+                crate::personalization::PersonalizationProfile::from_evidence(
+                    &feedback,
+                    &behavior,
+                    Some(&vod.channel_id),
+                    vod.game_name.as_deref(),
+                ),
+                crate::boundary_learning::BoundaryPreferenceProfile::from_evidence(
+                    &edit_feedback,
+                    &behavior,
+                    Some(&vod.channel_id),
+                    vod.game_name.as_deref(),
+                ),
+            )
+        })
+        .unwrap_or_default();
     let (selected, detection_stats): (Vec<clip_selector::ClipCandidate>, _) = clip_selector::select_clips(
         audio_ctx.as_ref(),
         transcript.as_ref(),
@@ -2536,6 +2642,8 @@ fn run_analysis_signals(
         duration,
         sensitivity,
         &game_config.selector,
+        personalization_profile.is_active().then_some(&personalization_profile),
+        boundary_profile.is_active().then_some(&boundary_profile),
     );
     set_analysis_progress(vod_id, 60);
 
@@ -2675,6 +2783,7 @@ fn run_analysis_signals(
             signal_sources: Some(serialize_signal_sources(&c.signal_sources)),
             review_rating: None,       // user-set via Review UI
             review_note: None,         // user-set via Review UI
+            review_issues: None,       // user-set edit-quality feedback
             community_clip_mp4_path,
         });
 
@@ -2781,6 +2890,7 @@ fn run_analysis(
             signal_sources: None,
             review_rating: None,       // user-set via Review UI
             review_note: None,         // user-set via Review UI
+            review_issues: None,       // user-set edit-quality feedback
             community_clip_mp4_path: None, // position-fallback — no Twitch clip file
         });
     } else {
@@ -2822,6 +2932,7 @@ fn run_analysis(
                 signal_sources: None,
                 review_rating: None,       // user-set via Review UI
                 review_note: None,         // user-set via Review UI
+                review_issues: None,       // user-set edit-quality feedback
                 community_clip_mp4_path: None, // chat/position fallback — no Twitch clip file
             });
         }
@@ -2939,6 +3050,7 @@ fn analyze_via_chat(
                 signal_sources: None,
                 review_rating: None,       // user-set via Review UI
                 review_note: None,         // user-set via Review UI
+                review_issues: None,       // user-set edit-quality feedback
                 community_clip_mp4_path: None, // chat/position fallback — no Twitch clip file
             });
         }
@@ -2996,6 +3108,7 @@ fn analyze_via_chat(
                     signal_sources: None,
                     review_rating: None,       // user-set via Review UI
                     review_note: None,         // user-set via Review UI
+                    review_issues: None,       // user-set edit-quality feedback
                     community_clip_mp4_path: None, // emote/position fallback — no Twitch clip file
                 });
             }
@@ -3181,15 +3294,33 @@ pub fn delete_clip(clip_id: String, db: State<'_, DbConn>) -> Result<(), String>
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
 
     // Get the vod_id before deleting so we can check remaining clips
-    let vod_id: Option<String> = conn.query_row(
-        "SELECT vod_id FROM clips WHERE id = ?1", rusqlite::params![clip_id],
-        |row| row.get(0),
+    let clip_source: Option<(String, String)> = conn.query_row(
+        "SELECT vod_id, source_kind FROM clips WHERE id = ?1", rusqlite::params![clip_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
     ).ok();
+
+    let metadata = serde_json::json!({
+        "sourceKind": clip_source.as_ref().map(|(_, source)| source.as_str()).unwrap_or("unknown")
+    })
+    .to_string();
+    let _ = db::record_clip_behavior(
+        &conn,
+        &clip_id,
+        "delete",
+        Some(0.10),
+        0.35,
+        None,
+        None,
+        None,
+        None,
+        Some(&metadata),
+        &format!("delete:{clip_id}"),
+    );
 
     db::delete_clip(&conn, &clip_id).map_err(|e| format!("DB error: {}", e))?;
 
     // If no clips remain for this VOD, reset analysis_status so user can re-analyze
-    if let Some(vid) = vod_id {
+    if let Some((vid, _)) = clip_source.filter(|(_, source)| source == "twitch_vod" || source == "twitch_community") {
         let remaining: i64 = conn.query_row(
             "SELECT COUNT(*) FROM clips WHERE vod_id = ?1", rusqlite::params![vid],
             |row| row.get(0),

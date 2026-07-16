@@ -166,6 +166,10 @@ pub enum LayoutMode {
     #[serde(alias = "none")]
     GameplayFocus,
 
+    /// Keep the complete source frame visible over a blurred full-canvas copy.
+    /// Best for: landscape recordings where UI and action context span the frame.
+    ContextFit,
+
     /// Game on top (60%), facecam on bottom (40%).
     /// Best for: streamers with webcam, reaction content.
     /// ffmpeg: `-filter_complex` with split+vstack.
@@ -195,11 +199,78 @@ fn default_pip_x() -> f64 { 0.93 }
 fn default_pip_y() -> f64 { 0.93 }
 fn default_pip_size() -> f64 { 0.3 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EditorLayoutSettings {
+    pub pip_x: f64,
+    pub pip_y: f64,
+    pub pip_w: f64,
+    pub pip_h: f64,
+    pub split_ratio: f64,
+    pub crop_x: f64,
+    pub crop_y: f64,
+    pub crop_w: f64,
+    pub crop_h: f64,
+}
+
+impl Default for EditorLayoutSettings {
+    fn default() -> Self {
+        Self {
+            pip_x: 68.0,
+            pip_y: 65.0,
+            pip_w: 28.0,
+            pip_h: 28.0,
+            split_ratio: 0.6,
+            crop_x: 0.0,
+            crop_y: 0.6,
+            crop_w: 0.4,
+            crop_h: 0.4,
+        }
+    }
+}
+
+impl EditorLayoutSettings {
+    pub fn normalized(self) -> Self {
+        let defaults = Self::default();
+        let finite = |value: f64, fallback: f64| {
+            if value.is_finite() { value } else { fallback }
+        };
+        let pip_w = finite(self.pip_w, defaults.pip_w).clamp(15.0, 45.0);
+        let pip_h = finite(self.pip_h, defaults.pip_h).clamp(15.0, 45.0);
+        let crop_w = finite(self.crop_w, defaults.crop_w).clamp(0.05, 1.0);
+        let crop_h = finite(self.crop_h, defaults.crop_h).clamp(0.05, 1.0);
+
+        Self {
+            pip_x: finite(self.pip_x, defaults.pip_x).clamp(0.0, 100.0 - pip_w),
+            pip_y: finite(self.pip_y, defaults.pip_y).clamp(0.0, 100.0 - pip_h),
+            pip_w,
+            pip_h,
+            split_ratio: finite(self.split_ratio, defaults.split_ratio).clamp(0.3, 0.8),
+            crop_x: finite(self.crop_x, defaults.crop_x).clamp(0.0, 1.0 - crop_w),
+            crop_y: finite(self.crop_y, defaults.crop_y).clamp(0.0, 1.0 - crop_h),
+            crop_w,
+            crop_h,
+        }
+    }
+
+    pub fn from_json(value: Option<&str>) -> Self {
+        value
+            .and_then(|json| serde_json::from_str::<Self>(json).ok())
+            .unwrap_or_default()
+            .normalized()
+    }
+
+    pub fn parse_json(value: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str::<Self>(value).map(Self::normalized)
+    }
+}
+
 impl LayoutMode {
     /// Parse from the DB string value.  Unknown values fall back to
     /// GameplayFocus (the smart fallback).
     pub fn from_db(s: &str) -> Self {
         match s {
+            "context_fit" => Self::ContextFit,
             "split" => Self::Split { ratio: 0.6 },
             "pip" => Self::Pip { x: 0.93, y: 0.93, size: 0.3 },
             _ => Self::GameplayFocus,
@@ -377,6 +448,8 @@ pub fn layout_filter(
             (filter, false)
         }
 
+        LayoutMode::ContextFit => context_fit_filter(target, caption_filter, false, 0.25, 0.5),
+
         LayoutMode::Split { ratio } => {
             let r = ratio.clamp(0.3, 0.8);
             let th_top = (th as f64 * r) as u32;
@@ -427,6 +500,108 @@ pub fn layout_filter(
     }
 }
 
+fn context_fit_filter(
+    target: OutputSize,
+    caption_filter: Option<&str>,
+    branding_input: bool,
+    blur_strength: f64,
+    video_y: f64,
+) -> (String, bool) {
+    let tw = target.width;
+    let th = target.height;
+    let blur_strength = if blur_strength.is_finite() {
+        blur_strength.clamp(0.0, 1.0)
+    } else {
+        0.25
+    };
+    let video_y = if video_y.is_finite() {
+        video_y.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let blur_radius = 1 + (blur_strength * 9.0).round() as u32;
+
+    let mut filter = if branding_input {
+        format!(
+            "[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase:flags=lanczos,\
+             crop={tw}:{th},setsar=1,fps=30,setpts=PTS-STARTPTS[background];\
+             [0:v]scale={tw}:{th}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,setsar=1,setpts=PTS-STARTPTS[full];\
+             [background][full]overlay=(W-w)/2:(H-h)*{video_y:.3}:shortest=1:eof_action=endall:repeatlast=0"
+        )
+    } else {
+        format!(
+            "[0:v]split=2[blur_src][full_src];\
+             [blur_src]scale={tw}:{th}:force_original_aspect_ratio=increase:flags=lanczos,\
+             crop={tw}:{th},setsar=1,boxblur={blur_radius}:1,eq=contrast=0.92:brightness=0.01:saturation=0.90,setpts=PTS-STARTPTS[background];\
+             [full_src]scale={tw}:{th}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,setsar=1,setpts=PTS-STARTPTS[full];\
+             [background][full]overlay=(W-w)/2:(H-h)*{video_y:.3}:shortest=1:eof_action=endall:repeatlast=0"
+        )
+    };
+    if let Some(caption_filter) = caption_filter {
+        filter.push_str(&format!("[composed];[composed]{caption_filter}[out]"));
+    } else {
+        filter.push_str("[out]");
+    }
+    (filter, true)
+}
+
+fn branded_split_filter(
+    target: OutputSize,
+    caption_filter: Option<&str>,
+    settings: EditorLayoutSettings,
+) -> (String, bool) {
+    let tw = target.width;
+    let th = target.height;
+    let ratio = settings.normalized().split_ratio;
+    let top_height = ((th as f64 * ratio).round() as u32).clamp(2, th - 2);
+    let bottom_height = th - top_height;
+    let mut filter = format!(
+        "[0:v]scale={tw}:{top_height}:force_original_aspect_ratio=increase:flags=lanczos,\
+         crop={tw}:{top_height},setsar=1,setpts=PTS-STARTPTS[top];\
+         [1:v]scale={tw}:{bottom_height}:force_original_aspect_ratio=increase:flags=lanczos,\
+         crop={tw}:{bottom_height},setsar=1,fps=30,setpts=PTS-STARTPTS[brand];\
+         [top][brand]vstack=inputs=2:shortest=1"
+    );
+    if let Some(caption_filter) = caption_filter {
+        filter.push_str(&format!("[composed];[composed]{caption_filter}[out]"));
+    } else {
+        filter.push_str("[out]");
+    }
+    (filter, true)
+}
+
+fn branded_pip_filter(
+    target: OutputSize,
+    caption_filter: Option<&str>,
+    settings: EditorLayoutSettings,
+) -> (String, bool) {
+    let tw = target.width;
+    let th = target.height;
+    let settings = settings.normalized();
+    let even = |value: f64| ((value.round() as u32).max(2) / 2) * 2;
+    let slot_width = even(tw as f64 * settings.pip_w / 100.0).min(tw);
+    let slot_height = even(th as f64 * settings.pip_h / 100.0).min(th);
+    let slot_x = (tw as f64 * settings.pip_x / 100.0).round() as u32;
+    let slot_y = (th as f64 * settings.pip_y / 100.0).round() as u32;
+    let slot_x = slot_x.min(tw.saturating_sub(slot_width));
+    let slot_y = slot_y.min(th.saturating_sub(slot_height));
+
+    let mut filter = format!(
+        "[0:v]scale={tw}:{th}:force_original_aspect_ratio=increase:flags=lanczos,\
+         crop={tw}:{th},setsar=1,setpts=PTS-STARTPTS[main];\
+         [1:v]scale={slot_width}:{slot_height}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,\
+         setsar=1,fps=30,setpts=PTS-STARTPTS[brand];\
+         [main][brand]overlay={slot_x}+({slot_width}-w)/2:{slot_y}+({slot_height}-h)/2:\
+         shortest=1:eof_action=endall:repeatlast=0"
+    );
+    if let Some(caption_filter) = caption_filter {
+        filter.push_str(&format!("[composed];[composed]{caption_filter}[out]"));
+    } else {
+        filter.push_str("[out]");
+    }
+    (filter, true)
+}
+
 /// Layout filter builder that incorporates a per-VOD cam region (cropped
 /// from the source frame, not an external file).
 ///
@@ -459,7 +634,7 @@ pub fn layout_filter_with_region(
     let crop_expr = region.to_crop_expr();
 
     match mode {
-        LayoutMode::GameplayFocus => {
+        LayoutMode::GameplayFocus | LayoutMode::ContextFit => {
             // No cam slot; region irrelevant.
             layout_filter(mode, target, caption_filter)
         }
@@ -552,6 +727,8 @@ pub struct ExportRequest {
     pub target: OutputSize,
     /// Layout mode (gameplay focus, split, pip).
     pub layout: LayoutMode,
+    /// Persisted editor geometry used by branded Split and PiP exports.
+    pub layout_settings: EditorLayoutSettings,
     /// Optional caption/subtitle filter string.
     pub caption_filter: Option<String>,
     /// Optional source-frame region to use as the cam slot's content.
@@ -559,6 +736,82 @@ pub struct ExportRequest {
     pub effective_region: Option<crate::cam_region::CamRegion>,
     /// Fit mode for the region within the cam slot. Defaults to Fit.
     pub fit_mode: crate::cam_region::CamFitMode,
+    /// Optional second input used by Context Fit, Split, or PiP branding.
+    pub context_background_path: Option<PathBuf>,
+    /// Normalized 0..1 softness for the live-video Context Fit background.
+    pub context_blur_strength: f64,
+    /// Normalized 0..1 placement of the fitted video from top to bottom.
+    pub context_video_y: f64,
+}
+
+fn export_layout_filter(request: &ExportRequest) -> (String, bool) {
+    if matches!(request.layout, LayoutMode::ContextFit) {
+        return context_fit_filter(
+            request.target,
+            request.caption_filter.as_deref(),
+            request.context_background_path.is_some(),
+            request.context_blur_strength,
+            request.context_video_y,
+        );
+    }
+    if request.context_background_path.is_some() {
+        match &request.layout {
+            LayoutMode::Split { .. } => {
+                return branded_split_filter(
+                    request.target,
+                    request.caption_filter.as_deref(),
+                    request.layout_settings,
+                );
+            }
+            LayoutMode::Pip { .. } => {
+                return branded_pip_filter(
+                    request.target,
+                    request.caption_filter.as_deref(),
+                    request.layout_settings,
+                );
+            }
+            LayoutMode::GameplayFocus | LayoutMode::ContextFit => {}
+        }
+    }
+    layout_filter_with_region(
+        &request.layout,
+        request.target,
+        request.caption_filter.as_deref(),
+        request.effective_region,
+        request.fit_mode,
+    )
+}
+
+fn append_export_inputs(cmd: &mut Command, request: &ExportRequest) {
+    cmd.arg("-ss")
+        .arg(format!("{:.3}", request.start))
+        .arg("-to")
+        .arg(format!("{:.3}", request.end))
+        .arg("-i")
+        .arg(&request.source_path);
+
+    let Some(background) = request.context_background_path.as_deref() else {
+        return;
+    };
+    let is_gif = background
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gif"));
+    if is_gif {
+        cmd.arg("-stream_loop").arg("-1");
+    } else {
+        cmd.arg("-loop").arg("1").arg("-framerate").arg("30");
+    }
+    cmd.arg("-i").arg(background);
+}
+
+fn export_duration(request: &ExportRequest) -> f64 {
+    let duration = request.end - request.start;
+    if duration.is_finite() && duration > 0.0 {
+        duration
+    } else {
+        0.001
+    }
 }
 
 /// Codec and quality settings for the export.
@@ -638,21 +891,12 @@ pub fn build_ffmpeg_command(
     encode: &EncodeSettings,
 ) -> Command {
     // Build the filter graph
-    let caption = request.caption_filter.as_deref();
-    let (filter, is_complex) = layout_filter_with_region(
-        &request.layout,
-        request.target,
-        caption,
-        request.effective_region,
-        request.fit_mode,
-    );
+    let (filter, is_complex) = export_layout_filter(request);
 
     let mut cmd = Command::new(ffmpeg_path);
 
     // ── Input seeking (fast — seeks to nearest keyframe) ──
-    cmd.arg("-ss").arg(format!("{:.3}", request.start))
-       .arg("-to").arg(format!("{:.3}", request.end))
-       .arg("-i").arg(&request.source_path);
+    append_export_inputs(&mut cmd, request);
 
     // ── Filter graph ──
     if is_complex {
@@ -664,6 +908,9 @@ pub fn build_ffmpeg_command(
         // Simple: single chain, ffmpeg auto-maps audio
         cmd.arg("-vf").arg(&filter);
     }
+
+    // Infinite image/GIF inputs must never outlive the source clip.
+    cmd.arg("-t").arg(format!("{:.3}", export_duration(request)));
 
     // ── Video codec ──
     cmd.arg("-c:v").arg(&encode.video_codec)
@@ -725,23 +972,15 @@ pub fn run_export(
     on_progress: impl Fn(u8),
 ) -> ExportResult {
     let encode = request.platform.encode_settings();
-    let caption = request.caption_filter.as_deref();
-    let (filter, is_complex) = layout_filter_with_region(
-        &request.layout,
-        request.target,
-        caption,
-        request.effective_region,
-        request.fit_mode,
-    );
+    let (filter, is_complex) = export_layout_filter(request);
 
-    let duration_us = ((request.end - request.start) * 1_000_000.0) as u64;
+    let duration = export_duration(request);
+    let duration_us = (duration * 1_000_000.0) as u64;
 
     let mut cmd = Command::new(ffmpeg_path);
 
     // Input seeking
-    cmd.arg("-ss").arg(format!("{:.3}", request.start))
-       .arg("-to").arg(format!("{:.3}", request.end))
-       .arg("-i").arg(&request.source_path);
+    append_export_inputs(&mut cmd, request);
 
     // Filter graph
     if is_complex {
@@ -751,6 +990,9 @@ pub fn run_export(
     } else {
         cmd.arg("-vf").arg(&filter);
     }
+
+    // Bound looping branding media to the requested clip duration.
+    cmd.arg("-t").arg(format!("{duration:.3}"));
 
     // Encoding
     cmd.arg("-c:v").arg(&encode.video_codec)
@@ -956,6 +1198,108 @@ mod tests {
     }
 
     #[test]
+    fn context_fit_preserves_full_frame_over_blurred_fill() {
+        let (f, complex) = layout_filter(
+            &LayoutMode::ContextFit,
+            OutputSize::VERTICAL_1080,
+            None,
+        );
+        assert!(complex, "context fit needs a two-branch filter graph");
+        assert!(f.contains("[0:v]split=2"), "filter: {f}");
+        assert!(f.contains("boxblur=3:1"), "default blur should stay gentle: {f}");
+        assert!(
+            f.contains("brightness=0.01") && !f.contains("gamma="),
+            "background should remain visibly derived from the source: {f}"
+        );
+        assert!(
+            f.contains("[full_src]scale=1080:1920:force_original_aspect_ratio=decrease"),
+            "foreground must contain the complete source frame: {f}"
+        );
+        assert!(f.contains("overlay=(W-w)/2:(H-h)*0.500"), "filter: {f}");
+        assert!(f.ends_with("[out]"), "filter: {f}");
+    }
+
+    #[test]
+    fn context_fit_branding_uses_second_input_and_clamped_video_position() {
+        let (f, complex) = context_fit_filter(
+            OutputSize::VERTICAL_1080,
+            None,
+            true,
+            0.25,
+            2.0,
+        );
+        assert!(complex);
+        assert!(f.contains("[1:v]scale=1080:1920"), "branding input missing: {f}");
+        assert!(!f.contains("boxblur="), "branding should remain unblurred: {f}");
+        assert!(f.contains("(H-h)*1.000:shortest=1"), "position should clamp: {f}");
+    }
+
+    #[test]
+    fn caption_appended_after_context_fit_composition() {
+        let (f, complex) = layout_filter(
+            &LayoutMode::ContextFit,
+            OutputSize::VERTICAL_1080,
+            Some("drawtext=text='test'"),
+        );
+        assert!(complex);
+        assert!(f.contains("[composed];[composed]drawtext"), "filter: {f}");
+        assert!(f.ends_with("[out]"), "filter: {f}");
+    }
+
+    #[test]
+    fn editor_layout_settings_parse_and_clamp_to_the_preview_bounds() {
+        let settings = EditorLayoutSettings::parse_json(
+            r#"{"pipX":99,"pipY":-5,"pipW":80,"pipH":20,"splitRatio":2}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.pip_w, 45.0);
+        assert_eq!(settings.pip_x, 55.0);
+        assert_eq!(settings.pip_y, 0.0);
+        assert_eq!(settings.split_ratio, 0.8);
+    }
+
+    #[test]
+    fn branded_split_uses_the_saved_ratio_and_second_input() {
+        let settings = EditorLayoutSettings {
+            split_ratio: 0.7,
+            ..EditorLayoutSettings::default()
+        };
+        let (filter, complex) = branded_split_filter(
+            OutputSize::VERTICAL_1080,
+            Some("drawtext=text='clip'"),
+            settings,
+        );
+        assert!(complex);
+        assert!(filter.contains("[0:v]scale=1080:1344"), "filter: {filter}");
+        assert!(filter.contains("[1:v]scale=1080:576"), "filter: {filter}");
+        assert!(filter.contains("vstack=inputs=2:shortest=1"), "filter: {filter}");
+        assert!(filter.contains("[composed]drawtext=text='clip'[out]"), "filter: {filter}");
+    }
+
+    #[test]
+    fn branded_pip_uses_the_saved_rectangular_geometry() {
+        let settings = EditorLayoutSettings {
+            pip_x: 10.0,
+            pip_y: 20.0,
+            pip_w: 30.0,
+            pip_h: 25.0,
+            ..EditorLayoutSettings::default()
+        };
+        let (filter, complex) = branded_pip_filter(
+            OutputSize::VERTICAL_1080,
+            None,
+            settings,
+        );
+        assert!(complex);
+        assert!(filter.contains("[1:v]scale=324:480"), "filter: {filter}");
+        assert!(
+            filter.contains("overlay=108+(324-w)/2:384+(480-h)/2"),
+            "filter: {filter}"
+        );
+        assert!(filter.ends_with("[out]"), "filter: {filter}");
+    }
+
+    #[test]
     fn split_is_complex_filter() {
         let (f, complex) = layout_filter(
             &LayoutMode::Split { ratio: 0.6 },
@@ -1003,6 +1347,7 @@ mod tests {
     #[test]
     fn from_db_unknown_falls_back() {
         assert!(matches!(LayoutMode::from_db("none"), LayoutMode::GameplayFocus));
+        assert!(matches!(LayoutMode::from_db("context_fit"), LayoutMode::ContextFit));
         assert!(matches!(LayoutMode::from_db("split"), LayoutMode::Split { .. }));
         assert!(matches!(LayoutMode::from_db("pip"), LayoutMode::Pip { .. }));
         assert!(matches!(LayoutMode::from_db("invalid"), LayoutMode::GameplayFocus));
@@ -1031,19 +1376,21 @@ mod tests {
             platform: Platform::TikTok,
             target: OutputSize::VERTICAL_1080,
             layout: LayoutMode::GameplayFocus,
+            layout_settings: EditorLayoutSettings::default(),
             caption_filter: None,
             effective_region: None,
             fit_mode: crate::cam_region::CamFitMode::Fit,
+            context_background_path: None,
+            context_blur_strength: 0.25,
+            context_video_y: 0.5,
         }
     }
 
     /// Helper: collect Command args as strings for assertion.
     fn cmd_args(cmd: &Command) -> Vec<String> {
-        let debug = format!("{:?}", cmd);
-        // Parse the debug repr — not ideal but works for testing
-        // arg positions in the Command struct.
-        // Instead, just verify the command builds without panic.
-        vec![debug]
+        cmd.get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect()
     }
 
     #[test]
@@ -1058,6 +1405,36 @@ mod tests {
         let mut req = sample_request();
         req.layout = LayoutMode::Split { ratio: 0.6 };
         let _cmd = build_export_command(Path::new("ffmpeg"), &req);
+    }
+
+    #[test]
+    fn command_with_context_fit_builds() {
+        let mut req = sample_request();
+        req.layout = LayoutMode::ContextFit;
+        let _cmd = build_export_command(Path::new("ffmpeg"), &req);
+    }
+
+    #[test]
+    fn context_fit_gif_command_loops_second_input() {
+        let mut req = sample_request();
+        req.layout = LayoutMode::ContextFit;
+        req.context_background_path = Some(PathBuf::from("/tmp/brand.gif"));
+        let cmd = build_export_command(Path::new("ffmpeg"), &req);
+        let args = cmd_args(&cmd);
+        assert!(args.windows(2).any(|pair| pair == ["-stream_loop", "-1"]));
+        assert_eq!(args.iter().filter(|arg| arg.as_str() == "-i").count(), 2);
+        assert!(args.iter().any(|arg| arg.contains("[1:v]scale=1080:1920")));
+    }
+
+    #[test]
+    fn context_fit_static_branding_command_loops_image() {
+        let mut req = sample_request();
+        req.layout = LayoutMode::ContextFit;
+        req.context_background_path = Some(PathBuf::from("/tmp/brand.png"));
+        let args = cmd_args(&build_export_command(Path::new("ffmpeg"), &req));
+        assert!(args.windows(2).any(|pair| pair == ["-loop", "1"]));
+        assert!(args.windows(2).any(|pair| pair == ["-framerate", "30"]));
+        assert!(args.windows(2).any(|pair| pair == ["-t", "29.500"]));
     }
 
     #[test]
@@ -1167,6 +1544,7 @@ mod tests {
         let target = OutputSize { width: 1080, height: 1920 };
         let modes = [
             LayoutMode::GameplayFocus,
+            LayoutMode::ContextFit,
             LayoutMode::Split { ratio: 0.6 },
             LayoutMode::Pip { x: 0.93, y: 0.93, size: 0.3 },
         ];

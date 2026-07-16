@@ -196,7 +196,7 @@ export const EXPORT_PRESETS: ExportPreset[] = [
 
 // ── Layout Modes ──
 
-export type LayoutMode = 'none' | 'split' | 'pip'
+export type LayoutMode = 'none' | 'context_fit' | 'split' | 'pip'
 
 export interface LayoutOption {
   id: LayoutMode
@@ -216,6 +216,14 @@ export const LAYOUT_OPTIONS: LayoutOption[] = [
     tag: 'Best for gameplay', accent: '#3b82f6',
     regions: [
       { label: 'GAME', x: 0, y: 0, w: 100, h: 100, fill: '#1e3a5f' },
+    ],
+  },
+  {
+    id: 'context_fit', name: 'Context Fit', description: 'Keeps the entire video visible over a softly blurred vertical fill',
+    tag: 'Best for imports', accent: '#06b6d4',
+    regions: [
+      { label: 'BLUR', x: 0, y: 0, w: 100, h: 100, fill: '#164e63' },
+      { label: 'FULL GAME', x: 4, y: 34, w: 92, h: 32, fill: '#0f172a' },
     ],
   },
   {

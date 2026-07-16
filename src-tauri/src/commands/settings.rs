@@ -47,6 +47,14 @@ pub(crate) fn app_data_root() -> PathBuf {
         .join("clipviral")
 }
 
+fn app_owned_asset_roots(tauri_app_data: PathBuf) -> Vec<PathBuf> {
+    let mut roots = vec![app_data_root()];
+    if !roots.contains(&tauri_app_data) {
+        roots.push(tauri_app_data);
+    }
+    roots
+}
+
 fn is_plain_local_absolute(path: &Path) -> bool {
     if !path.is_absolute()
         || path
@@ -124,18 +132,36 @@ pub(crate) fn allow_configured_asset_directories(
     app: &AppHandle,
     db_conn: &DbConn,
 ) -> Result<(), String> {
-    let base = app_data_root();
-    std::fs::create_dir_all(&base)
-        .map_err(|e| format!("Failed to create app data directory: {e}"))?;
-    app.asset_protocol_scope()
-        .allow_directory(&base, true)
-        .map_err(|e| format!("Failed to allow app media directory: {e}"))?;
+    // The database and older media caches use the historical `clipviral`
+    // folder, while Tauri's path resolver uses the bundle identifier (for
+    // example `com.clipgoblin.desktop`). Imported thumbnails and preview
+    // proxies can therefore live under either app-owned root.
+    let tauri_app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to locate Tauri app data directory: {e}"))?;
+    for base in app_owned_asset_roots(tauri_app_data) {
+        std::fs::create_dir_all(&base)
+            .map_err(|e| format!("Failed to create app data directory: {e}"))?;
+        app.asset_protocol_scope()
+            .allow_directory(&base, true)
+            .map_err(|e| format!("Failed to allow app media directory: {e}"))?;
+    }
 
     let configured = {
         let conn = db_conn.lock().map_err(|e| format!("DB lock: {e}"))?;
-        db::get_setting(&conn, "download_dir").map_err(|e| format!("DB error: {e}"))?
+        let mut directories = Vec::new();
+        for key in ["download_dir"] {
+            if let Some(path) = db::get_setting(&conn, key)
+                .map_err(|e| format!("DB error: {e}"))?
+            {
+                directories.push(path);
+            }
+        }
+        directories
     };
-    if let Some(path) = configured
+    for path in configured
+        .into_iter()
         .map(PathBuf::from)
         .filter(|path| is_plain_local_absolute(path) && path.is_dir())
     {
@@ -460,6 +486,16 @@ pub fn get_detection_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn asset_roots_include_legacy_and_tauri_app_data_directories() {
+        let legacy = app_data_root();
+        let tauri = legacy.with_file_name("com.clipgoblin.desktop");
+
+        let roots = app_owned_asset_roots(tauri.clone());
+        assert_eq!(roots, vec![legacy.clone(), tauri]);
+        assert_eq!(app_owned_asset_roots(legacy.clone()), vec![legacy]);
+    }
 
     #[cfg(windows)]
     #[test]

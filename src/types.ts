@@ -45,10 +45,12 @@ export interface Highlight {
   scoring_dimensions?: string | null;
   /** JSON-serialized array of signal-source identifiers. Null for pre-Phase-C rows. */
   signal_sources?: string | null;
-  /** User-supplied review rating from the dev-only Review UI. Null if unrated. */
+  /** User-supplied moment rating. Null if unrated. */
   review_rating?: 'good' | 'meh' | 'boring' | null;
-  /** Free-form user note from the dev-only Review UI. Null if no note set. */
+  /** Free-form user review note. Null if no note is set. */
   review_note?: string | null;
+  /** JSON-serialized multi-select edit-quality issues. */
+  review_issues?: string | null;
 }
 
 export interface Clip {
@@ -68,7 +70,15 @@ export interface Clip {
   captions_position: string;
   caption_style: string;
   caption_font_scale: number;
+  caption_y_offset?: number;
+  /** Absolute source-media timestamp represented by SRT time 0:00. */
+  captions_source_start?: number | null;
   facecam_layout: string;
+  facecam_settings?: string | null;
+  context_background_path?: string | null;
+  context_background_mode?: 'blur' | 'branding';
+  context_blur_strength?: number;
+  context_video_y?: number;
   render_status: 'pending' | 'rendering' | 'completed' | 'failed';
   output_path: string | null;
   /**
@@ -79,6 +89,11 @@ export interface Clip {
    * Null/absent = normal VOD-seek behavior (unchanged).
    */
   community_clip_mp4_path?: string | null;
+  /** Editable standalone media imported from a local source. */
+  source_kind?: 'twitch_vod' | 'twitch_community' | 'medal' | 'obs' | 'meld' | 'manual' | string;
+  source_media_path?: string | null;
+  source_fingerprint?: string | null;
+  source_recorded_at?: string | null;
   thumbnail_path: string | null;
   game: string | null;
   publish_description: string | null;

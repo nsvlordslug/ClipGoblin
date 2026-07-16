@@ -15,11 +15,12 @@ import { localDateTimeAfter } from '../lib/dateTime'
 
 interface ClipUploadStatus {
   clipId: string
-  status: 'pending' | 'exporting' | 'uploading' | 'processing' | 'done' | 'error' | 'skipped'
+  status: 'pending' | 'exporting' | 'uploading' | 'processing' | 'done' | 'duplicate' | 'error' | 'skipped'
   exportProgress?: number
   error?: string
   videoUrl?: string
   duplicateUrl?: string
+  acceptedWithoutLink?: boolean
 }
 
 interface BatchUploadDialogProps {
@@ -151,10 +152,15 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
   // ALL clips participate (not just exported ones)
   const totalJobs = clips.length * activePlatforms.length
   const doneJobs = Object.values(clipStatuses).reduce((acc, platformMap) => {
-    return acc + Object.values(platformMap).filter(s => s.status === 'done' || s.status === 'processing' || s.status === 'error' || s.status === 'skipped').length
+    return acc + Object.values(platformMap).filter(s => s.status === 'done' || s.status === 'duplicate' || s.status === 'processing' || s.status === 'error' || s.status === 'skipped').length
   }, 0)
   const failedJobs = Object.values(clipStatuses).reduce((acc, platformMap) => {
     return acc + Object.values(platformMap).filter(s => s.status === 'error').length
+  }, 0)
+  const attentionJobs = Object.values(clipStatuses).reduce((acc, platformMap) => {
+    return acc + Object.values(platformMap).filter(s =>
+      s.status === 'duplicate' || s.acceptedWithoutLink === true
+    ).length
   }, 0)
 
   useEffect(() => {
@@ -164,6 +170,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
       && totalJobs > 0
       && doneJobs === totalJobs
       && failedJobs === 0
+      && attentionJobs === 0
     if (!uploadSucceeded) return
 
     const timer = window.setTimeout(() => {
@@ -173,6 +180,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
     return () => window.clearTimeout(timer)
   }, [
     completed,
+    attentionJobs,
     doneJobs,
     failedJobs,
     onClose,
@@ -281,9 +289,16 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
           const result = await invoke<UploadResult>('upload_to_platform', { platform, meta })
 
           if (result.status.status === 'complete') {
-            updateClipStatus(platform, clip.id, { status: 'done', videoUrl: result.status.video_url ?? undefined })
+            updateClipStatus(platform, clip.id, {
+              status: 'done',
+              videoUrl: result.status.video_url ?? undefined,
+              acceptedWithoutLink: platform === 'tiktok' && !result.status.video_url,
+            })
           } else if (result.status.status === 'duplicate') {
-            updateClipStatus(platform, clip.id, { status: 'done', duplicateUrl: result.status.existing_url ?? undefined })
+            const duplicateUrl = result.status.existing_url ?? undefined
+            updateClipStatus(platform, clip.id, duplicateUrl
+              ? { status: 'done', duplicateUrl }
+              : { status: 'duplicate' })
           } else if (result.status.status === 'failed') {
             updateClipStatus(platform, clip.id, { status: 'error', error: result.status.error })
           } else if (result.status.status === 'processing') {
@@ -503,6 +518,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
                 <div className="flex justify-between text-xs text-slate-400 mb-1">
                   <span>{doneJobs} of {totalJobs} uploads</span>
                   {failedJobs > 0 && <span className="text-red-400">{failedJobs} failed</span>}
+                  {attentionJobs > 0 && <span className="text-amber-400">{attentionJobs} to check</span>}
                 </div>
                 <div className="h-2 bg-surface-700 rounded-full overflow-hidden">
                   <div
@@ -563,10 +579,17 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
                                     <a href={st.duplicateUrl} target="_blank" rel="noopener noreferrer" className="text-amber-400 hover:underline flex items-center gap-0.5">
                                       Duplicate <ExternalLink className="w-3 h-3" />
                                     </a>
+                                  ) : st?.acceptedWithoutLink ? (
+                                    <span className="text-cyan-400">Accepted - check TikTok Private tab</span>
                                   ) : (
                                     <span className="text-green-400">Done</span>
                                   )}
                                 </>
+                              )}
+                              {status === 'duplicate' && (
+                                <span className="text-amber-400 flex items-center gap-0.5" title="TikTok previously accepted this clip; no new copy was sent">
+                                  <AlertCircle className="w-3 h-3" /> Previously accepted
+                                </span>
                               )}
                               {status === 'error' && (
                                 <span className="text-red-400 flex items-center gap-0.5" title={st?.error}>

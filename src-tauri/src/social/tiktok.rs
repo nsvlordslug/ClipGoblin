@@ -785,7 +785,7 @@ fn map_visibility_to_privacy(visibility: &str) -> &'static str {
 fn friendly_tiktok_error(code: &str, message: &str) -> String {
     let hint = match code {
         "unaudited_client_can_only_post_to_private_accounts" =>
-            "ClipGoblin is still being audited by TikTok. Until it's approved, set your TikTok account to Private to post (audit submitted — usually 2–4 weeks).",
+            "TikTok has not approved ClipGoblin's Direct Post integration yet. Choose 'Only me (private)' while testing; wider audiences unlock after TikTok approves the app.",
         "access_token_invalid" | "access_token_expired" =>
             "Your TikTok session has expired. Reconnect TikTok in Settings and try again.",
         "scope_not_authorized" | "scope_permission_missed" =>
@@ -1217,8 +1217,8 @@ mod error_message_tests {
     fn maps_audit_code_to_private_account_guidance() {
         let msg =
             friendly_tiktok_error("unaudited_client_can_only_post_to_private_accounts", "raw");
-        assert!(msg.contains("audited"), "got: {msg}");
-        assert!(msg.contains("Private"), "got: {msg}");
+        assert!(msg.contains("Only me (private)"), "got: {msg}");
+        assert!(msg.contains("approves"), "got: {msg}");
         assert!(
             !msg.contains("unaudited_client"),
             "should not leak raw code: {msg}"

@@ -73,13 +73,24 @@ function StatusIndicator({ state, platformName, onViewUrl }: {
   if (state.status === 'waiting') return (
     <span className="text-[9px] text-slate-500">Queued</span>
   )
-  if (state.status === 'done' && state.videoUrl) return (
+  if (state.status === 'duplicate') return (
+    <span className="text-[9px] text-amber-400 flex items-center gap-0.5" title={`${platformName} previously accepted this clip; no new upload was sent`}>
+      <AlertCircle className="w-3 h-3" /> Previously accepted
+    </span>
+  )
+  const viewUrl = state.videoUrl || state.duplicateUrl
+  if (state.status === 'done' && viewUrl) return (
     <Tooltip text={`Open your video on ${platformName}`} position="left">
-      <button onClick={() => onViewUrl?.(state.videoUrl!)}
+      <button onClick={() => onViewUrl?.(viewUrl)}
         className="text-[9px] text-green-400 hover:text-green-300 cursor-pointer flex items-center gap-0.5">
         <Check className="w-3 h-3" /> View
       </button>
     </Tooltip>
+  )
+  if (state.status === 'done' && state.acceptedWithoutLink) return (
+    <span className="text-[9px] text-cyan-400 flex items-center gap-0.5" title={`${platformName} accepted the private post but does not provide a link for it`}>
+      <Check className="w-3 h-3" /> Accepted
+    </span>
   )
   if (state.status === 'done') return (
     <span className="text-[9px] text-green-400 flex items-center gap-0.5">
@@ -135,8 +146,9 @@ export default function PlatformUploadSelector({
         // For YouTube, show combined status from sub-formats
         const mainState = states[platform] || { status: 'idle', progress: 0 }
         const shortsState = states['youtube_shorts'] || { status: 'idle', progress: 0 }
-        const isActive = mainState.status !== 'idle' && mainState.status !== 'done' && mainState.status !== 'error'
-        const shortsActive = shortsState.status !== 'idle' && shortsState.status !== 'done' && shortsState.status !== 'error'
+        const terminalStatuses = new Set(['idle', 'done', 'duplicate', 'error'])
+        const isActive = !terminalStatuses.has(mainState.status)
+        const shortsActive = !terminalStatuses.has(shortsState.status)
         const anyActive = isActive || (isYouTube && shortsActive)
 
         // For non-YouTube platforms, compute format badge normally

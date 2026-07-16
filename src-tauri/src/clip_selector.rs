@@ -55,6 +55,8 @@ pub struct CommunityClip {
     pub creator_id: String,
     /// The broadcaster explicitly featured this clip on Twitch.
     pub is_featured: bool,
+    /// A local timestamp explicitly marked by the creator while live.
+    pub is_stream_marker: bool,
 }
 
 /// Multi-signal moment after fusion.
@@ -380,6 +382,9 @@ pub fn generate_community_candidates(clips: &[CommunityClip]) -> Vec<RawSignal> 
         if c.is_featured {
             tags.push("featured-clip".to_string());
         }
+        if c.is_stream_marker {
+            tags.push("stream-marker".to_string());
+        }
         RawSignal {
             // Center the signal mid-clip so the fusion window catches nearby
             // audio/chat/transcript peaks.
@@ -540,6 +545,13 @@ fn audio_boost(local_z: f64, corroborated: bool) -> f64 {
     if corroborated { base } else { base.min(UNCORROBORATED_BOOST_CAP) }
 }
 
+fn is_unreliable_single_signal_shock(c: &ClipCandidate) -> bool {
+    let tag_check = |tag: &str| matches!(tag, "shock" | "jumpscare" | "scream" | "surprise");
+    c.signal_sources.len() == 1
+        && (c.event_tags.iter().any(|tag| tag_check(tag))
+            || c.emotion_tags.iter().any(|tag| tag_check(tag)))
+}
+
 pub fn score_clip_candidate(c: &mut ClipCandidate) {
     // Phase A: transcript-only candidates emit a boilerplate dimension
     // fingerprint (typically context=0.88 from the "shock" tag branch in
@@ -557,12 +569,7 @@ pub fn score_clip_candidate(c: &mut ClipCandidate) {
     // identified. Multi-signal clips with the same tags are unaffected
     // (their other signals provide independent confirmation). See
     // docs/superpowers/specs/2026-05-07-phase-a-scoring-fix-design.md §7a
-    let has_shock_family_tag = {
-        let tag_check = |t: &str| matches!(t, "shock" | "jumpscare" | "scream" | "surprise");
-        c.event_tags.iter().any(|t| tag_check(t.as_str()))
-            || c.emotion_tags.iter().any(|t| tag_check(t.as_str()))
-    };
-    let is_unreliable_single_signal = c.signal_sources.len() == 1 && has_shock_family_tag;
+    let is_unreliable_single_signal = is_unreliable_single_signal_shock(c);
     if is_unreliable_single_signal {
         c.context_simplicity = 0.50;
         c.emotional_spike = 0.40;
@@ -752,6 +759,28 @@ fn passes_quality_gates(c: &ClipCandidate, audio: Option<&AudioContext>, cfg: &C
     true
 }
 
+fn apply_learned_boundaries(
+    candidates: &mut [ClipCandidate],
+    profile: Option<&crate::boundary_learning::BoundaryPreferenceProfile>,
+    duration: f64,
+) -> usize {
+    let Some(profile) = profile.filter(|profile| profile.is_active()) else {
+        return 0;
+    };
+
+    let mut adjusted = 0;
+    for candidate in candidates {
+        let (start, end, changed) =
+            profile.adjust_window(candidate.start_time, candidate.end_time, duration);
+        if changed {
+            candidate.start_time = start;
+            candidate.end_time = end;
+            adjusted += 1;
+        }
+    }
+    adjusted
+}
+
 /// Detects scene-card / transition segments (starting-soon / BRB / ending cards):
 /// the transcript over the clip is a music annotation — either the WHOLE snippet
 /// (e.g. "(upbeat music)", pure music with no speech) OR a music tag sitting near
@@ -912,6 +941,61 @@ fn fuse_ai_moments(
         c.similarity_fingerprint = compute_similarity_fingerprint(&c);
         candidates.push(c);
     }
+}
+
+fn apply_personalization(
+    candidates: &mut [ClipCandidate],
+    profile: Option<&crate::personalization::PersonalizationProfile>,
+) -> usize {
+    let Some(profile) = profile.filter(|profile| profile.is_active()) else {
+        return 0;
+    };
+
+    let mut adjusted = 0usize;
+    for candidate in candidates {
+        let mut tags = candidate.event_tags.clone();
+        tags.extend(candidate.emotion_tags.iter().cloned());
+        let sources: Vec<&str> = candidate
+            .signal_sources
+            .iter()
+            .map(|source| match source {
+                SignalSource::Audio => "audio",
+                SignalSource::Transcript => "transcript",
+                SignalSource::Chat => "chat",
+                SignalSource::Community => "community",
+                SignalSource::EmoteBurst => "emote_burst",
+                SignalSource::Semantic => "ai",
+            })
+            .collect();
+        let adjustment = profile.score_adjustment(
+            [
+                candidate.hook_strength,
+                candidate.emotional_spike,
+                candidate.payoff_clarity,
+                candidate.event_reaction_alignment,
+                candidate.context_simplicity,
+                candidate.replay_value,
+            ],
+            &tags,
+            &sources,
+        );
+        if adjustment.abs() > 1e-6 {
+            let safety_cap = if is_unreliable_single_signal_shock(candidate) {
+                0.65
+            } else {
+                0.99
+            };
+            candidate.total_score = (candidate.total_score + adjustment).clamp(0.0, safety_cap);
+            adjusted += 1;
+        }
+    }
+    log::info!(
+        "Clip selector: personalized {} candidate(s) from {} usable rating(s), confidence={:.0}%",
+        adjusted,
+        profile.sample_count(),
+        profile.confidence() * 100.0,
+    );
+    adjusted
 }
 
 /// Two-gate selection. Gate A = the no-noise quality gates + the per-sensitivity
@@ -1291,6 +1375,7 @@ struct CommunityMoment<'a> {
     has_streamer_created: bool,
     has_viewer_created: bool,
     is_featured: bool,
+    is_stream_marker: bool,
 }
 
 impl CommunityMoment<'_> {
@@ -1311,8 +1396,13 @@ impl CommunityMoment<'_> {
     }
 }
 
-fn community_clip_preference(clip: &CommunityClip) -> (bool, bool, i64) {
-    (clip.is_featured, clip.is_streamer_created, clip.view_count)
+fn community_clip_preference(clip: &CommunityClip) -> (bool, bool, bool, i64) {
+    (
+        clip.is_stream_marker,
+        clip.is_featured,
+        clip.is_streamer_created,
+        clip.view_count,
+    )
 }
 
 fn community_creator_key(clip: &CommunityClip) -> String {
@@ -1372,6 +1462,7 @@ fn cluster_community_clips(clips: &[CommunityClip]) -> Vec<CommunityMoment<'_>> 
             moment.has_streamer_created |= clip.is_streamer_created;
             moment.has_viewer_created |= !clip.is_streamer_created;
             moment.is_featured |= clip.is_featured;
+            moment.is_stream_marker |= clip.is_stream_marker;
             if prefer_clip {
                 moment.representative = clip;
             }
@@ -1384,6 +1475,7 @@ fn cluster_community_clips(clips: &[CommunityClip]) -> Vec<CommunityMoment<'_>> 
                 has_streamer_created: clip.is_streamer_created,
                 has_viewer_created: !clip.is_streamer_created,
                 is_featured: clip.is_featured,
+                is_stream_marker: clip.is_stream_marker,
             });
         }
     }
@@ -1421,6 +1513,7 @@ fn community_has_local_support(
 
 fn community_priority_score(moment: &CommunityMoment<'_>, locally_corroborated: bool) -> f64 {
     normalized_community_views(moment.total_views)
+        + if moment.is_stream_marker { 1.10 } else { 0.0 }
         + if moment.is_featured { 0.90 } else { 0.0 }
         + if moment.has_streamer_created { 0.70 } else { 0.0 }
         + ((moment.consensus_count().saturating_sub(1) as f64) * 0.22).min(0.66)
@@ -1436,6 +1529,7 @@ fn community_display_score(
             * (COMMUNITY_SCORE_CEIL - COMMUNITY_SCORE_FLOOR);
     let metadata_boost = if moment.is_featured { 0.04 } else { 0.0 }
         + if moment.has_streamer_created { 0.03 } else { 0.0 }
+        + if moment.is_stream_marker { 0.06 } else { 0.0 }
         + ((moment.consensus_count().saturating_sub(1) as f64) * 0.025).min(0.075)
         + if locally_corroborated { 0.04 } else { 0.0 };
     (base + metadata_boost).clamp(COMMUNITY_SCORE_FLOOR, COMMUNITY_ENRICHED_SCORE_CEIL)
@@ -1616,6 +1710,9 @@ fn pin_community_clips(
         if moment.is_featured {
             event_tags.push("featured-clip".to_string());
         }
+        if moment.is_stream_marker {
+            event_tags.push("stream-marker".to_string());
+        }
         if moment.consensus_count() > 1 {
             event_tags.push("community-consensus".to_string());
             event_tags.push(format!(
@@ -1660,7 +1757,9 @@ fn pin_community_clips(
             merge_candidate_evidence(&mut pin, candidate);
         }
 
-        let source_label = if moment.is_featured && moment.has_streamer_created {
+        let source_label = if moment.is_stream_marker {
+            "creator-marked moment"
+        } else if moment.is_featured && moment.has_streamer_created {
             "featured streamer clip"
         } else if moment.is_featured {
             "featured Twitch clip"
@@ -1735,6 +1834,12 @@ pub struct DetectionStats {
     pub duplicates_suppressed: usize,
     pub clips_selected: usize,
     pub sensitivity: String,
+    pub personalization_samples: usize,
+    pub personalization_confidence: f64,
+    pub personalized_candidates: usize,
+    pub boundary_feedback_samples: usize,
+    pub boundary_confidence: f64,
+    pub boundary_adjusted_candidates: usize,
 }
 
 /// Pre-selector: identify audio time ranges worth transcribing.
@@ -1896,8 +2001,14 @@ pub fn select_clips(
     duration: f64,
     sensitivity: &str,
     selector_config: &crate::game_config::SelectorConfig,
+    personalization: Option<&crate::personalization::PersonalizationProfile>,
+    boundary_preferences: Option<&crate::boundary_learning::BoundaryPreferenceProfile>,
 ) -> (Vec<ClipCandidate>, DetectionStats) {
     let cfg = CurationConfig::for_duration(duration, sensitivity, selector_config);
+    let personalization_samples = personalization.map_or(0, |profile| profile.sample_count());
+    let personalization_confidence = personalization.map_or(0.0, |profile| profile.confidence());
+    let boundary_feedback_samples = boundary_preferences.map_or(0, |profile| profile.sample_count());
+    let boundary_confidence = boundary_preferences.map_or(0.0, |profile| profile.confidence());
 
     // ── Stage 1: Generate candidates ──
     let mut all_signals: Vec<RawSignal> = Vec::new();
@@ -1928,6 +2039,12 @@ pub fn select_clips(
             candidates_found: 0, candidates_rejected: 0,
             duplicates_suppressed: 0, clips_selected: 0,
             sensitivity: sensitivity.to_string(),
+            personalization_samples,
+            personalization_confidence,
+            personalized_candidates: 0,
+            boundary_feedback_samples,
+            boundary_confidence,
+            boundary_adjusted_candidates: 0,
         };
         return (Vec::new(), stats);
     }
@@ -2002,6 +2119,11 @@ pub fn select_clips(
 
     // ── Stage 4: Optimize boundaries ──
     for c in &mut candidates { optimize_clip_boundaries(c, audio, duration); }
+    let mut boundary_adjusted_candidates = apply_learned_boundaries(
+        &mut candidates,
+        boundary_preferences,
+        duration,
+    );
 
     // ── Stage 5: Suppress duplicates ──
     let before_dedup = candidates.len();
@@ -2017,7 +2139,16 @@ pub fn select_clips(
         cfg.cooldown_window, cfg.cooldown_distinctness_threshold, cfg.cooldown_penalty,
         cfg.max_same_type, cfg.max_clips, cfg.min_display_score);
     // Fuse the AI verdict (no-op when AI detection is off / found nothing).
+    let before_ai_rescue = candidates.len();
     fuse_ai_moments(&mut candidates, ai_moments, duration);
+    boundary_adjusted_candidates += apply_learned_boundaries(
+        &mut candidates[before_ai_rescue..],
+        boundary_preferences,
+        duration,
+    );
+    // User preferences are deliberately applied after the base/AI score is
+    // complete and before ranking. Structural quality gates still run below.
+    let personalized_candidates = apply_personalization(&mut candidates, personalization);
     let before_gate = candidates.len();
     let mut final_clips = apply_two_gate_selection(&mut candidates, audio, transcript, duration, &cfg);
     let rejected = before_gate.saturating_sub(candidates.len());
@@ -2047,6 +2178,12 @@ pub fn select_clips(
         duplicates_suppressed,
         clips_selected: final_clips.len(),
         sensitivity: sensitivity.to_string(),
+        personalization_samples,
+        personalization_confidence,
+        personalized_candidates,
+        boundary_feedback_samples,
+        boundary_confidence,
+        boundary_adjusted_candidates,
     };
 
     (final_clips, stats)
@@ -2077,6 +2214,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn personalization_cannot_lift_single_signal_shock_above_safety_cap() {
+        let feedback = (0..40)
+            .map(|index| {
+                let (rating, hook, tag) = if index < 20 {
+                    ("good", 1.0, "shock")
+                } else {
+                    ("boring", 0.0, "idle")
+                };
+                crate::db::DetectionFeedbackRow {
+                    channel_id: Some("creator-1".to_string()),
+                    game_name: Some("Test Game".to_string()),
+                    rating: rating.to_string(),
+                    scoring_dimensions: Some(
+                        serde_json::json!({
+                            "hook": hook,
+                            "emotion": 0.5,
+                            "payoff": 0.5,
+                            "align": 0.5,
+                            "context": 0.5,
+                            "replay": 0.5,
+                        })
+                        .to_string(),
+                    ),
+                    signal_sources: Some(r#"["audio"]"#.to_string()),
+                    tags: Some(tag.to_string()),
+                }
+            })
+            .collect::<Vec<_>>();
+        let profile = crate::personalization::PersonalizationProfile::from_feedback(
+            &feedback,
+            Some("creator-1"),
+            Some("Test Game"),
+        );
+        let mut candidate = build_test_candidate(vec![SignalSource::Audio]);
+        candidate.event_tags = vec!["shock".to_string()];
+        candidate.hook_strength = 1.0;
+        candidate.total_score = 0.65;
+
+        assert_eq!(apply_personalization(std::slice::from_mut(&mut candidate), Some(&profile)), 1);
+        assert!(candidate.total_score <= 0.65);
+    }
+
     fn build_community_clip(
         offset: f64,
         duration: f64,
@@ -2099,6 +2279,7 @@ mod tests {
             },
             creator_id: url.to_string(),
             is_featured: featured,
+            is_stream_marker: false,
         }
     }
 
@@ -2317,7 +2498,9 @@ mod tests {
         }
         let audio = AudioContext::new(rms, vec![]);
         let sel = crate::game_config::SelectorConfig { min_clip_duration: 15, max_clip_duration: 60, min_gap_between_clips: 30 };
-        let (clips, _stats) = select_clips(Some(&audio), None, &[], &[], &[], &[], dur, "medium", &sel);
+        let (clips, _stats) = select_clips(
+            Some(&audio), None, &[], &[], &[], &[], dur, "medium", &sel, None, None,
+        );
         assert!(clips.len() >= 4, "loud stream with many real spikes should yield a healthy set, got {}", clips.len());
     }
 
@@ -2580,5 +2763,28 @@ mod tests {
 
         assert!(c.total_score <= 0.65 + 1e-6,
             "audio-only-with-shock-tag total_score should be capped at 0.65, got {}", c.total_score);
+    }
+
+    #[test]
+    fn stream_markers_enter_selection_as_explicit_creator_provenance() {
+        let signals = generate_community_candidates(&[CommunityClip {
+            vod_offset_seconds: 120.0,
+            duration_seconds: 40.0,
+            view_count: 5_000,
+            title: "Marked clutch".to_string(),
+            clip_url: None,
+            is_streamer_created: true,
+            creator_name: "You".to_string(),
+            creator_id: "stream-marker:test".to_string(),
+            is_featured: false,
+            is_stream_marker: true,
+        }]);
+
+        assert_eq!(signals.len(), 1);
+        assert_eq!(signals[0].source, SignalSource::Community);
+        assert_eq!(signals[0].center, 140.0);
+        assert!(signals[0].tags.iter().any(|tag| tag == "stream-marker"));
+        assert!(signals[0].tags.iter().any(|tag| tag == "streamer-created"));
+        assert_eq!(signals[0].transcript_snippet.as_deref(), Some("Marked clutch"));
     }
 }

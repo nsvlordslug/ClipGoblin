@@ -1,15 +1,20 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { invoke } from '@tauri-apps/api/core'
+import { AlertTriangle, ArrowRight, CheckCircle2, CircleDot, Loader2, MessageSquareText, RefreshCw, Send, Settings2, Sparkles, Video } from 'lucide-react'
+import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useAppStore } from '../stores/appStore'
 import { useScheduleStore } from '../stores/scheduleStore'
 import { PLATFORM_INFO } from '../stores/platformStore'
 import ImportVodDialog from '../components/ImportVodDialog'
 import TesterChecklist from '../components/TesterChecklist'
-import TwitchProvenanceBadges from '../components/TwitchProvenanceBadges'
-import { formatViewerCount } from '../hooks/useStreamStatus'
 import heroGoblinImg from '../assets/hero-goblin-v2.png'
+import {
+  buildDashboardInbox,
+  getDashboardConfidence,
+  getDashboardInboxTarget,
+} from '../lib/dashboardInbox'
+import type { ImportedClipResult, RecorderStatus } from '../lib/externalSources'
 
 interface AutoShipReport {
   clips_queued: number
@@ -17,40 +22,10 @@ interface AutoShipReport {
   next_publish_at: string | null
 }
 
-// Compress legacy virality_score to calibrated confidence.
-function legacyToConfidence(virality: number): number {
-  const n = Math.max(0, Math.min(virality * 0.85 - 0.10, 0.99))
-  const anchors: [number, number][] = [
-    [0.00, 0.00], [0.25, 0.25], [0.40, 0.55], [0.50, 0.65],
-    [0.60, 0.77], [0.70, 0.84], [0.80, 0.89], [0.90, 0.93],
-  ]
-  if (n >= 0.90) return Math.min(0.93 + (n - 0.90) * 0.20, 0.95)
-  for (let i = 1; i < anchors.length; i++) {
-    if (n <= anchors[i][0]) {
-      const [x0, y0] = anchors[i - 1]
-      const [x1, y1] = anchors[i]
-      return y0 + ((n - x0) / (x1 - x0)) * (y1 - y0)
-    }
-  }
-  return 0.95
-}
-
 function fmtTime(secs: number): string {
   const m = Math.floor(secs / 60)
   const s = Math.floor(secs % 60)
   return `${m}:${String(s).padStart(2, '0')}`
-}
-
-function parseTags(tags: unknown): string[] {
-  if (!tags) return []
-  if (Array.isArray(tags)) return tags as string[]
-  if (typeof tags !== 'string') return []
-  const s = tags.trim()
-  if (!s) return []
-  if (s.startsWith('[')) {
-    try { const parsed = JSON.parse(s); return Array.isArray(parsed) ? parsed : [] } catch { return [] }
-  }
-  return s.split(',').map(t => t.trim()).filter(Boolean)
 }
 
 function fmtCountdown(targetISO: string): string {
@@ -62,21 +37,20 @@ function fmtCountdown(targetISO: string): string {
   return `${h}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`
 }
 
-const THUMB_STYLES = ['a', 'b', 'c', 'd', 'e', 'f'] as const
-
-type WorkbenchTab = 'review' | 'ready' | 'scheduled' | 'published' | 'failed'
-
 export default function Dashboard() {
   const { channels, vods, highlights, clips, checkLogin, fetchHighlights, fetchClips, fetchVods, loggedInUser } =
     useAppStore()
   const { uploads: scheduledUploads, load: loadSchedules } = useScheduleStore()
   const navigate = useNavigate()
-  const [tab, setTab] = useState<WorkbenchTab>('review')
   const [, setTick] = useState(0)
   const [hunting, setHunting] = useState(false)
   const [huntStatus, setHuntStatus] = useState<string | null>(null)
   const [showImportDialog, setShowImportDialog] = useState(false)
   const [autoShipReport, setAutoShipReport] = useState<AutoShipReport | null>(null)
+  const [recorderKind, setRecorderKind] = useState<'obs' | 'meld'>('obs')
+  const [recorderBusy, setRecorderBusy] = useState<'test' | 'mark' | 'replay' | null>(null)
+  const [recorderStatus, setRecorderStatus] = useState<RecorderStatus | null>(null)
+  const [recorderNotice, setRecorderNotice] = useState<{ ok: boolean; text: string } | null>(null)
 
   useEffect(() => {
     checkLogin()
@@ -108,27 +82,14 @@ export default function Dashboard() {
   const vodsComplete = vods.filter(v => v.analysis_status === 'completed')
 
   const pendingScheduled = scheduledUploads.filter(u => u.status === 'pending' || u.status === 'uploading')
-  const failedScheduled = scheduledUploads.filter(u => u.status === 'failed')
   const completedScheduled = scheduledUploads.filter(u => u.status === 'completed')
 
   const clipMap = useMemo(() => Object.fromEntries(clips.map(c => [c.id, c])), [clips])
-  const clipByHighlight = useMemo(
-    () => Object.fromEntries(clips.map(c => [c.highlight_id, c])),
-    [clips],
+  const vodMap = useMemo(() => Object.fromEntries(vods.map(vod => [vod.id, vod])), [vods])
+  const inbox = useMemo(
+    () => buildDashboardInbox(highlights, clips, scheduledUploads),
+    [highlights, clips, scheduledUploads],
   )
-
-  // Categorize highlights / clips for the 5 workbench tabs
-  const reviewHighlights = [...highlights]
-    .filter(h => {
-      const score = h.confidence_score ?? legacyToConfidence(h.virality_score)
-      return score < 0.85
-    })
-    .sort((a, b) => (b.confidence_score ?? b.virality_score) - (a.confidence_score ?? a.virality_score))
-    .slice(0, 6)
-
-  const readyClips = clips
-    .filter(c => c.render_status === 'completed')
-    .slice(0, 6)
 
   // Scrubber: most recent VOD with highlights
   const scrubberVod = vodsAnalyzing[0] ?? vodsComplete[0]
@@ -157,14 +118,14 @@ export default function Dashboard() {
       key: 'highlights', icon: '✨',
       label: 'Highlights',
       count: highlights.length,
-      sub: reviewHighlights.length ? `${reviewHighlights.length} need review` : 'all reviewed',
-      subClass: reviewHighlights.length ? 'good' : '',
+      sub: inbox.counts.review ? `${inbox.counts.review} need review` : 'all reviewed',
+      subClass: inbox.counts.review ? 'good' : '',
       iconBg: 'rgba(251,191,36,0.15)', iconColor: '#fbbf24',
     },
     {
       key: 'clips', icon: '✂',
       label: 'Clips ready',
-      count: readyClips.length,
+      count: inbox.counts.ready,
       sub: 'captions + titles set',
       subClass: '',
       iconBg: 'rgba(167,139,250,0.15)', iconColor: '#a78bfa',
@@ -190,14 +151,6 @@ export default function Dashboard() {
       iconBg: 'rgba(74,222,128,0.15)', iconColor: '#4ade80',
     },
   ]
-
-  const tabCounts = {
-    review: reviewHighlights.length,
-    ready: readyClips.length,
-    scheduled: pendingScheduled.length,
-    published: completedScheduled.length,
-    failed: failedScheduled.length,
-  }
 
   const greetingName = loggedInUser?.display_name || channels[0]?.display_name || 'streamer'
 
@@ -237,6 +190,51 @@ export default function Dashboard() {
       setTimeout(() => setHuntStatus(null), 3500)
     } finally {
       setHunting(false)
+    }
+  }
+
+  const testRecorder = async () => {
+    setRecorderBusy('test')
+    setRecorderNotice(null)
+    try {
+      const status = await invoke<RecorderStatus>('test_recorder_connection', { kind: recorderKind })
+      setRecorderStatus(status)
+      setRecorderNotice({ ok: status.reachable, text: status.detail })
+    } catch (error) {
+      setRecorderStatus(null)
+      setRecorderNotice({ ok: false, text: String(error) })
+    } finally {
+      setRecorderBusy(null)
+    }
+  }
+
+  const markStreamMoment = async () => {
+    setRecorderBusy('mark')
+    setRecorderNotice(null)
+    try {
+      await invoke('create_stream_marker', { recorderKind, label: null })
+      setRecorderNotice({ ok: true, text: 'Moment marked. The matching Twitch VOD will favor it during analysis.' })
+    } catch (error) {
+      setRecorderNotice({ ok: false, text: String(error) })
+    } finally {
+      setRecorderBusy(null)
+    }
+  }
+
+  const saveRecorderReplay = async () => {
+    setRecorderBusy('replay')
+    setRecorderNotice(null)
+    try {
+      const result = await invoke<ImportedClipResult>('save_replay_and_import', { kind: recorderKind })
+      await Promise.all([fetchClips(), fetchHighlights()])
+      setRecorderNotice({
+        ok: true,
+        text: result.status === 'already_imported' ? 'That replay is already in your library.' : `${result.title} is ready in Clips.`,
+      })
+    } catch (error) {
+      setRecorderNotice({ ok: false, text: String(error) })
+    } finally {
+      setRecorderBusy(null)
     }
   }
 
@@ -291,11 +289,11 @@ export default function Dashboard() {
             {vodsAnalyzing.length > 0 && (
               <>A VOD is analyzing · <b className="text-white">{vodsAnalyzing[0].title}</b>. </>
             )}
-            {reviewHighlights.length > 0 && (
-              <>You have <b className="text-white">{reviewHighlights.length} highlights</b> waiting for review. </>
+            {inbox.counts.review > 0 && (
+              <>You have <b className="text-white">{inbox.counts.review} highlights</b> waiting for review. </>
             )}
-            {readyClips.length > 0 && (
-              <><b className="text-white">{readyClips.length} clips ready</b> to ship.</>
+            {inbox.counts.ready > 0 && (
+              <><b className="text-white">{inbox.counts.ready} clips ready</b> to ship.</>
             )}
             {highlights.length === 0 && 'Connect Twitch and import a VOD to start finding clips.'}
           </p>
@@ -371,7 +369,7 @@ export default function Dashboard() {
               {scrubberHighlights.map(h => {
                 const pct = (h.start_seconds / scrubberVod.duration_seconds) * 100
                 const widthPct = Math.max(0.5, ((h.end_seconds - h.start_seconds) / scrubberVod.duration_seconds) * 100)
-                const score = h.confidence_score ?? legacyToConfidence(h.virality_score)
+                const score = getDashboardConfidence(h)
                 const hot = score >= 0.85
                 return (
                   <div
@@ -394,278 +392,188 @@ export default function Dashboard() {
         )}
       </section>
 
-      {/* ═════ TWO COLUMN: Workbench + Right rail ═════ */}
-      <div className="grid gap-[18px]" style={{gridTemplateColumns:'1.7fr 1fr'}}>
-        {/* ─── Clip Workbench ─── */}
-        <div className="v4-panel">
-          <div className="flex justify-between items-center mb-3.5">
-            <div>
-              <div className="text-[15px] font-bold text-white">Clip Workbench</div>
-              <div className="text-xs text-slate-500 mt-0.5">Review, edit, schedule, and ship in one place</div>
+      {/* ═════ TWO COLUMN: Priority inbox + Right rail ═════ */}
+      <div className="v4-dashboard-main-grid">
+        <div className="v4-panel v4-inbox-panel">
+          <div className="v4-inbox-header">
+            <div className="v4-inbox-heading">
+              <span className="v4-inbox-heading-icon">
+                <Sparkles className="w-4 h-4" aria-hidden="true" />
+              </span>
+              <div>
+                <div className="text-[15px] font-bold text-white">Priority Inbox</div>
+                <div className="text-xs text-slate-500 mt-0.5">
+                  {inbox.total === 0
+                    ? 'Nothing needs your attention'
+                    : `${inbox.total} item${inbox.total === 1 ? '' : 's'} need your attention`}
+                </div>
+              </div>
             </div>
-            <button className="px-3 py-1.5 rounded-md text-xs font-semibold bg-surface-800 border border-surface-700 text-white cursor-pointer">
-              Bulk actions ▾
+            <button
+              type="button"
+              className="v4-inbox-library-link"
+              onClick={() => navigate('/clips')}
+            >
+              Open library
+              <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
           </div>
 
-          <div className="v4-tabs" role="tablist">
-            {(['review','ready','scheduled','published','failed'] as const).map(t => (
-              <button
-                key={t}
-                className={`v4-tab ${tab === t ? 'active' : ''}`}
-                onClick={() => setTab(t)}
-                style={t === 'failed' ? {color:'#f87171'} : undefined}
-              >
-                {t === 'review' && '⭐ Needs review'}
-                {t === 'ready' && '✂ Ready'}
-                {t === 'scheduled' && '🕒 Scheduled'}
-                {t === 'published' && '🚀 Published'}
-                {t === 'failed' && '⚠ Failed'}
-                <span className="v4-tab-count">{tabCounts[t]}</span>
-              </button>
-            ))}
+          <div className="v4-inbox-summary" aria-label="Priority inbox totals">
+            <span className={inbox.counts.failed > 0 ? 'failed' : ''}><i />{inbox.counts.failed} failed</span>
+            <span className="review"><i />{inbox.counts.review} to review</span>
+            <span className="ready"><i />{inbox.counts.ready} ready</span>
           </div>
 
-          {tab === 'review' && (
-            <div>
-              <div className="v4-tip">💡 Click a highlight to open it in the editor.</div>
-              {reviewHighlights.length === 0 ? (
-                <div className="p-10 text-center text-sm text-slate-500">No highlights need review.</div>
-              ) : reviewHighlights.map((h, i) => {
-                const score = h.confidence_score ?? legacyToConfidence(h.virality_score)
-                const clip = clipByHighlight[h.id]
-                const openEditor = () => navigate(clip ? `/editor/${clip.id}` : '/clips')
-                return (
-                  <div
-                    key={h.id}
-                    className="v4-clip-row"
-                    onClick={openEditor}
-                  >
-                    <div className={`v4-clip-thumb ${THUMB_STYLES[i % THUMB_STYLES.length]}`}>
-                      <span className="v4-clip-dur">{fmtTime(h.end_seconds - h.start_seconds)}</span>
-                      <div className="v4-waveform">
-                        {Array.from({length:10}).map((_,j) => (
-                          <div key={j} className="v4-wave-bar" style={{height:`${20 + ((j * 37) % 70)}%`}}/>
-                        ))}
-                      </div>
-                    </div>
-                    <div className="v4-clip-info">
-                      <div className="v4-clip-title">
-                        {h.event_summary || h.description || h.transcript_snippet || 'Untitled highlight'}
-                      </div>
-                      <div className="v4-clip-meta">
-                        <span>{fmtTime(h.start_seconds)} – {fmtTime(h.end_seconds)}</span>
-                        {parseTags(h.tags).slice(0,2).map(tg => (
-                          <span key={tg} className={`v4-tone-chip ${tg === 'hype' ? 'hype' : ''}`}>{tg}</span>
-                        ))}
-                        <TwitchProvenanceBadges
-                          tags={h.tags}
-                          signalSources={h.signal_sources}
-                          compact
-                        />
-                      </div>
-                    </div>
-                    <div className="v4-confidence">
-                      <div className={`v4-conf-label ${score < 0.75 ? 'low' : score >= 0.85 ? 'high' : ''}`}>
-                        {Math.round(score * 100)}%
-                      </div>
-                      <div className="v4-conf-bar">
-                        <div
-                          className="v4-conf-fill"
-                          style={{
-                            width:`${Math.round(score * 100)}%`,
-                            ...(score < 0.75 ? {background:'linear-gradient(90deg,#fbbf24,#f472b6)'} : {})
-                          }}
-                        />
-                      </div>
-                    </div>
-                    <div className="v4-platforms">
-                      <div className="v4-plat yt">▶</div>
-                      <div className="v4-plat tt">𝄩</div>
-                    </div>
-                    <button className="v4-clip-action" onClick={(e) => { e.stopPropagation(); openEditor() }}>
-                      Review
-                    </button>
-                  </div>
-                )
-              })}
-            </div>
-          )}
-
-          {tab === 'ready' && (
-            <div>
-              <div className="v4-tip">✂ These clips are rendered. Click to publish or edit.</div>
-              {readyClips.length === 0 ? (
-                <div className="p-10 text-center text-sm text-slate-500">No clips ready yet.</div>
-              ) : readyClips.map((c, i) => {
-                const hl = highlights.find(h => h.id === c.highlight_id)
-                const score = hl ? (hl.confidence_score ?? legacyToConfidence(hl.virality_score)) : 0
-                const isViral = score >= 0.9
-                return (
-                <div
-                  key={c.id}
-                  className="v4-clip-row"
-                  onClick={() => navigate(`/editor/${c.id}`)}
-                >
-                  <div className={`v4-clip-thumb ${THUMB_STYLES[i % THUMB_STYLES.length]}`}>
-                    <span className="v4-clip-dur">{fmtTime(c.end_seconds - c.start_seconds)}</span>
-                  </div>
-                  <div className="v4-clip-info">
-                    <div className="v4-clip-title">{c.title || 'Untitled clip'}</div>
-                    <div className="v4-clip-meta">
-                      <span>{fmtTime(c.start_seconds)} – {fmtTime(c.end_seconds)}</span>
-                      <span className="v4-tone-chip">{c.aspect_ratio}</span>
-                      {isViral && <span className="v4-viral-badge">🔥 VIRAL PICK</span>}
-                    </div>
-                  </div>
-                  <div />
-                  <div className="v4-platforms">
-                    <div className="v4-plat yt">▶</div>
-                    <div className="v4-plat tt">𝄩</div>
-                  </div>
-                  <button className="v4-clip-action primary" onClick={(e) => { e.stopPropagation(); navigate(`/editor/${c.id}`) }}>
-                    Ship →
-                  </button>
-                </div>
-              )})}
-            </div>
-          )}
-
-          {tab === 'scheduled' && (
-            <div>
-              <div className="v4-tip">🕒 Scheduled uploads post automatically.</div>
-              {pendingScheduled.length === 0 ? (
-                <div className="p-10 text-center text-sm text-slate-500">No uploads scheduled.</div>
-              ) : pendingScheduled.slice(0, 6).map((u, i) => {
-                const clip = clipMap[u.clip_id]
-                const platformInfo = PLATFORM_INFO[u.platform]
-                return (
-                  <div key={u.id} className="v4-clip-row" onClick={() => navigate('/scheduled')}>
-                    <div className={`v4-clip-thumb ${THUMB_STYLES[i % THUMB_STYLES.length]}`}>
-                      <span className="v4-clip-dur">
-                        {clip ? fmtTime(clip.end_seconds - clip.start_seconds) : ''}
-                      </span>
-                    </div>
-                    <div className="v4-clip-info">
-                      <div className="v4-clip-title">{clip?.title || u.clip_id}</div>
-                      <div className="v4-clip-meta">
-                        <span>{platformInfo?.name || u.platform}</span>
-                        <span className="v4-tone-chip">
-                          {new Date(u.scheduled_time).toLocaleString(undefined, {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'})}
-                        </span>
-                      </div>
-                    </div>
-                    <div />
-                    <div className="v4-platforms">
-                      <div className={`v4-plat ${u.platform === 'youtube' ? 'yt' : u.platform === 'tiktok' ? 'tt' : 'ig'}`}>
-                        {u.platform === 'youtube' ? '▶' : u.platform === 'tiktok' ? '𝄩' : '○'}
-                      </div>
-                    </div>
-                    <button className="v4-clip-action" onClick={(e) => { e.stopPropagation(); navigate('/scheduled') }}>
-                      Edit
-                    </button>
-                  </div>
-                )
-              })}
-            </div>
-          )}
-
-          {tab === 'published' && (
-            <div>
-              <div className="v4-tip">🚀 Published uploads from your schedule.</div>
-              {completedScheduled.length === 0 ? (
-                <div className="p-10 text-center text-sm text-slate-500">Nothing published yet.</div>
-              ) : completedScheduled.slice(0, 6).map((u, i) => {
-                const clip = clipMap[u.clip_id]
-                return (
-                  <div key={u.id} className="v4-clip-row">
-                    <div className={`v4-clip-thumb ${THUMB_STYLES[i % THUMB_STYLES.length]}`}>
-                      <span className="v4-clip-dur">
-                        {clip ? fmtTime(clip.end_seconds - clip.start_seconds) : ''}
-                      </span>
-                    </div>
-                    <div className="v4-clip-info">
-                      <div className="v4-clip-title">{clip?.title || u.clip_id}</div>
-                      <div className="v4-clip-meta">
-                        <span>Published {new Date(u.scheduled_time).toLocaleDateString()}</span>
-                      </div>
-                    </div>
-                    <div className="v4-views">
-                      <span className="v4-views-num">
-                        {u.view_count != null ? formatViewerCount(u.view_count) : '—'}
-                      </span>
-                      <span className="v4-views-lbl">
-                        {u.view_count != null
-                          ? (u.ctr_percent != null ? `VIEWS · ${u.ctr_percent.toFixed(1)}% CTR` : 'VIEWS')
-                          : 'VIEWS · CTR'}
-                      </span>
-                      {u.view_count != null && u.view_count >= 10_000 && (
-                        <span className="v4-viral-badge">🔥 TRENDING</span>
-                      )}
-                    </div>
-                    <div className="v4-platforms">
-                      <div className={`v4-plat ${u.platform === 'youtube' ? 'yt' : u.platform === 'tiktok' ? 'tt' : 'ig'}`}>
-                        {u.platform === 'youtube' ? '▶' : u.platform === 'tiktok' ? '𝄩' : '○'}
-                      </div>
-                    </div>
-                    <button
-                      className="v4-clip-action"
-                      onClick={() => u.video_url && window.open(u.video_url, '_blank')}
-                    >
-                      {u.video_url ? 'View' : 'Analytics'}
-                    </button>
-                  </div>
-                )
-              })}
-            </div>
-          )}
-
-          {tab === 'failed' && (
-            <div>
-              <div className="v4-tip" style={{background:'rgba(248,113,113,0.08)',borderColor:'rgba(248,113,113,0.25)',color:'#f87171'}}>
-                ⚠ Failed uploads — click Retry to attempt again.
+          {inbox.items.length === 0 ? (
+            <div className="v4-inbox-empty">
+              <CheckCircle2 className="w-8 h-8" aria-hidden="true" />
+              <div>
+                <div className="font-semibold text-slate-200">You're caught up</div>
+                <div className="text-xs text-slate-500 mt-0.5">No failed uploads, pending reviews, or ready exports.</div>
               </div>
-              {failedScheduled.length === 0 ? (
-                <div className="p-10 text-center text-sm text-slate-500">No failures. 🎉</div>
-              ) : failedScheduled.slice(0, 6).map((u, i) => {
-                const clip = clipMap[u.clip_id]
+            </div>
+          ) : (
+            <div className="v4-inbox-list">
+              {inbox.items.map(item => {
+                const target = getDashboardInboxTarget(item)
+                let title: string
+                let detail: string
+                let action: string
+                let ItemIcon = MessageSquareText
+                const clipForVisual = item.clip
+                const poster = clipForVisual?.thumbnail_path
+                  ? convertFileSrc(clipForVisual.thumbnail_path)
+                  : clipForVisual
+                    ? vodMap[clipForVisual.vod_id]?.thumbnail_url || null
+                    : null
+                let visualTag = ''
+
+                if (item.kind === 'failed') {
+                  title = item.clip?.title || 'Upload needs attention'
+                  detail = `${PLATFORM_INFO[item.upload.platform]?.name || item.upload.platform} · ${item.upload.error_message || 'Upload failed'}`
+                  action = item.needsReconnect ? 'Reconnect' : 'Resolve'
+                  ItemIcon = AlertTriangle
+                  visualTag = (PLATFORM_INFO[item.upload.platform]?.name || item.upload.platform).slice(0, 2).toUpperCase()
+                } else if (item.kind === 'review') {
+                  title = item.highlight.event_summary
+                    || item.highlight.description
+                    || item.highlight.transcript_snippet
+                    || 'Untitled highlight'
+                  detail = `${Math.round(item.confidence * 100)}% confidence · ${fmtTime(item.highlight.start_seconds)}–${fmtTime(item.highlight.end_seconds)}`
+                  action = 'Review'
+                  visualTag = fmtTime(item.highlight.end_seconds - item.highlight.start_seconds)
+                } else {
+                  title = item.clip.title || 'Untitled clip'
+                  detail = `${item.clip.aspect_ratio} · ${fmtTime(item.clip.end_seconds - item.clip.start_seconds)} · Export complete`
+                  action = 'Publish'
+                  ItemIcon = Send
+                  visualTag = fmtTime(item.clip.end_seconds - item.clip.start_seconds)
+                }
+
                 return (
-                  <div key={u.id} className="v4-clip-row">
-                    <div className={`v4-clip-thumb ${THUMB_STYLES[i % THUMB_STYLES.length]}`}>
-                      <span className="v4-clip-dur">
-                        {clip ? fmtTime(clip.end_seconds - clip.start_seconds) : ''}
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`v4-inbox-row ${item.kind}`}
+                    onClick={() => navigate(target.pathname, { state: target.state })}
+                    aria-label={`${action}: ${title}`}
+                  >
+                    <span className="v4-inbox-visual" aria-hidden="true">
+                      <span className="v4-inbox-visual-bars">
+                        {[38, 72, 48, 88, 58, 78, 42].map((height, index) => (
+                          <i key={index} style={{ height: `${height}%` }} />
+                        ))}
                       </span>
-                    </div>
-                    <div className="v4-clip-info">
-                      <div className="v4-clip-title">{clip?.title || u.clip_id}</div>
-                      <div className="v4-clip-meta">
-                        <span style={{color:'#f87171'}}>{u.error_message || 'Upload failed'}</span>
-                      </div>
-                    </div>
-                    <div />
-                    <div className="v4-platforms">
-                      <div className={`v4-plat ${u.platform === 'youtube' ? 'yt' : u.platform === 'tiktok' ? 'tt' : 'ig'}`}>
-                        {u.platform === 'youtube' ? '▶' : u.platform === 'tiktok' ? '𝄩' : '○'}
-                      </div>
-                    </div>
-                    <button
-                      className="v4-clip-action"
-                      style={{background:'rgba(248,113,113,0.15)',border:'1px solid rgba(248,113,113,0.4)',color:'#f87171'}}
-                      onClick={() => navigate('/scheduled')}
-                    >
-                      {u.error_message?.toLowerCase().includes('auth') || u.error_message?.toLowerCase().includes('token') || u.error_message?.toLowerCase().includes('expired')
-                        ? 'Reconnect'
-                        : `Retry ${u.platform === 'youtube' ? 'YT' : u.platform === 'tiktok' ? 'TT' : 'IG'}`}
-                    </button>
-                  </div>
+                      {poster && (
+                        <img
+                          src={poster}
+                          alt=""
+                          onError={event => { event.currentTarget.style.display = 'none' }}
+                        />
+                      )}
+                      <span className="v4-inbox-visual-shade" />
+                      <span className="v4-inbox-visual-icon">
+                        <ItemIcon className="w-3.5 h-3.5" />
+                      </span>
+                      <span className="v4-inbox-visual-tag">{visualTag}</span>
+                    </span>
+                    <span className="v4-inbox-row-copy">
+                      <span className="v4-inbox-row-kind">
+                        {item.kind === 'failed' ? 'Upload failed' : item.kind === 'review' ? 'Needs review' : 'Ready to publish'}
+                      </span>
+                      <span className="v4-inbox-row-title" title={title}>{title}</span>
+                      <span className="v4-inbox-row-detail" title={detail}>{detail}</span>
+                    </span>
+                    <span className="v4-inbox-row-action">
+                      {action}
+                      <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
+                    </span>
+                  </button>
                 )
               })}
             </div>
           )}
+
         </div>
 
         {/* ─── Right rail ─── */}
         <div className="space-y-3.5">
+          <div className="v4-panel" style={{padding: '16px'}}>
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-[13px] font-bold text-white">Recorder capture</div>
+                <div className="mt-0.5 text-[11px] text-slate-500">Mark a live moment or pull the latest replay into Clips.</div>
+              </div>
+              <button type="button" className="rounded p-1.5 text-slate-500 hover:bg-surface-700 hover:text-white" onClick={() => navigate('/settings', { state: { settingsSection: 'sources' } })} title="Recorder settings" aria-label="Open recorder settings">
+                <Settings2 className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <div className="inline-flex rounded-md border border-surface-700 bg-surface-900 p-0.5" role="group" aria-label="Recorder">
+                {(['obs', 'meld'] as const).map(kind => (
+                  <button
+                    key={kind}
+                    type="button"
+                    className={`px-2.5 py-1 text-[11px] font-semibold uppercase transition-colors ${recorderKind === kind ? 'bg-violet-500/20 text-violet-200' : 'text-slate-500 hover:text-slate-300'}`}
+                    onClick={() => {
+                      setRecorderKind(kind)
+                      setRecorderStatus(null)
+                      setRecorderNotice(null)
+                    }}
+                    aria-pressed={recorderKind === kind}
+                  >
+                    {kind}
+                  </button>
+                ))}
+              </div>
+              <button type="button" className="v4-btn ghost" onClick={() => void testRecorder()} disabled={recorderBusy !== null} title={`Test ${recorderKind.toUpperCase()} connection`}>
+                {recorderBusy === 'test' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                Test
+              </button>
+              {recorderStatus && (
+                <span className={`text-[10px] font-semibold ${recorderStatus.reachable ? 'text-emerald-400' : 'text-red-300'}`}>
+                  {recorderStatus.reachable ? 'Connected' : 'Offline'}
+                </span>
+              )}
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              <button type="button" className="v4-btn ghost justify-center" onClick={() => void markStreamMoment()} disabled={recorderBusy !== null}>
+                {recorderBusy === 'mark' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CircleDot className="h-3.5 w-3.5" />}
+                Mark moment
+              </button>
+              <button type="button" className="v4-btn primary justify-center" onClick={() => void saveRecorderReplay()} disabled={recorderBusy !== null}>
+                {recorderBusy === 'replay' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Video className="h-3.5 w-3.5" />}
+                Save replay
+              </button>
+            </div>
+            {recorderNotice && (
+              <div role="status" className={`mt-2 text-[11px] leading-4 ${recorderNotice.ok ? 'text-emerald-300' : 'text-red-300'}`}>
+                {recorderNotice.text}
+              </div>
+            )}
+          </div>
+
           {/* AI Insight */}
           <div className="v4-insight">
             <div className="flex items-center gap-2 mb-2.5 relative">
@@ -682,10 +590,10 @@ export default function Dashboard() {
                   Avg confidence: <b className="text-white">
                     {Math.round(
                       (highlights.reduce((s, h) =>
-                        s + (h.confidence_score ?? legacyToConfidence(h.virality_score)), 0) / highlights.length
+                        s + getDashboardConfidence(h), 0) / highlights.length
                       ) * 100
                     )}%
-                  </b> — top {reviewHighlights.length > 0 ? reviewHighlights.length : 0} need your review.
+                  </b> — {inbox.counts.review} need your review.
                 </>
               ) : (
                 'Once you have a few VODs analyzed, Goblin will surface patterns in what\'s working.'
@@ -699,7 +607,7 @@ export default function Dashboard() {
                 Go to VODs
               </button>
               <button
-                onClick={() => navigate('/settings')}
+                onClick={() => navigate('/settings', { state: { settingsSection: 'detection' } })}
                 className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-white/5 border border-violet-400/30 cursor-pointer"
               >
                 Tune detection

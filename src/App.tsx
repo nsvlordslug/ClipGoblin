@@ -5,7 +5,7 @@ import { usePlatformStore } from './stores/platformStore'
 import { useAiStore } from './stores/aiStore'
 import { useUiStore } from './stores/uiStore'
 import { useTemplateStore } from './stores/templateStore'
-import { AlertTriangle, Sun, Moon, X } from 'lucide-react'
+import { AlertTriangle, FileCheck2, Sun, Moon, X } from 'lucide-react'
 import Tooltip from './components/Tooltip'
 import FirstRunSetup from './components/FirstRunSetup'
 import BinariesSetup from './components/BinariesSetup'
@@ -46,6 +46,15 @@ interface VodAnalysisWarning {
   vodId: string
   code: 'twitch_reconnect_required'
   message: string
+}
+
+interface ExternalImportNotice {
+  count: number
+  source: string
+}
+
+interface ExternalImportEvent {
+  sourceKind: string
 }
 
 // ── Error Boundary ──
@@ -105,6 +114,7 @@ class ErrorBoundary extends Component<EBProps, EBState> {
 
 export default function App() {
   const [analysisWarning, setAnalysisWarning] = useState<VodAnalysisWarning | null>(null)
+  const [externalImportNotice, setExternalImportNotice] = useState<ExternalImportNotice | null>(null)
   const loadPlatforms = usePlatformStore(s => s.load)
   const loadAi = useAiStore(s => s.load)
   const loadUi = useUiStore(s => s.load)
@@ -116,6 +126,8 @@ export default function App() {
   const vods = useAppStore(s => s.vods)
   const highlights = useAppStore(s => s.highlights)
   const loggedInUser = useAppStore(s => s.loggedInUser)
+  const fetchClips = useAppStore(s => s.fetchClips)
+  const fetchHighlights = useAppStore(s => s.fetchHighlights)
   const scheduledUploads = useScheduleStore(s => s.uploads)
   const liveVodCount = vods.filter(v => v.analysis_status === 'analyzing').length
   const reviewCount = highlights.filter(h => (h.confidence_score ?? h.virality_score) < 0.85).length
@@ -149,6 +161,33 @@ export default function App() {
       unlisten?.()
     }
   }, [])
+
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    let dismissTimer: ReturnType<typeof setTimeout> | undefined
+    listen<ExternalImportEvent[]>('external-clips-imported', (event) => {
+      const imported = event.payload
+      if (imported.length === 0) return
+      void Promise.all([fetchClips(), fetchHighlights()])
+      setExternalImportNotice({
+        count: imported.length,
+        source: imported[0]?.sourceKind || 'recording folder',
+      })
+      if (dismissTimer) clearTimeout(dismissTimer)
+      dismissTimer = setTimeout(() => setExternalImportNotice(null), 8000)
+    }).then((cleanup) => {
+      if (disposed) cleanup()
+      else unlisten = cleanup
+    }).catch((error) => {
+      console.error('Failed to listen for external clip imports:', error)
+    })
+    return () => {
+      disposed = true
+      unlisten?.()
+      if (dismissTimer) clearTimeout(dismissTimer)
+    }
+  }, [fetchClips, fetchHighlights])
 
   const toggleTheme = () => updateUi({ theme: theme === 'dark' ? 'light' : 'dark' })
 
@@ -314,6 +353,30 @@ export default function App() {
               className="rounded p-1 text-slate-500 hover:bg-surface-800 hover:text-white"
               aria-label="Dismiss Twitch warning"
             >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+      {externalImportNotice && (
+        <div
+          role="status"
+          className="fixed bottom-4 right-4 z-[60] w-[min(340px,calc(100vw-2rem))] rounded-lg border border-emerald-500/35 bg-surface-900 p-3.5 shadow-xl"
+        >
+          <div className="flex items-start gap-2.5">
+            <FileCheck2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold text-white">
+                {externalImportNotice.count} new clip{externalImportNotice.count === 1 ? '' : 's'} imported
+              </p>
+              <p className="mt-1 text-xs text-slate-400">
+                Added from {externalImportNotice.source.toUpperCase()} and ready to edit.
+              </p>
+              <NavLink to="/clips" onClick={() => setExternalImportNotice(null)} className="mt-2 inline-flex text-xs font-semibold text-violet-300 hover:text-violet-200">
+                Open clips
+              </NavLink>
+            </div>
+            <button type="button" onClick={() => setExternalImportNotice(null)} className="rounded p-1 text-slate-500 hover:bg-surface-800 hover:text-white" aria-label="Dismiss import notification">
               <X className="h-3.5 w-3.5" />
             </button>
           </div>

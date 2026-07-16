@@ -13,12 +13,19 @@ export interface ClipTemplate {
   captionPosition: 'top' | 'center' | 'bottom'
   /** Optional for backward compatibility with templates saved before v1.5.10. */
   captionFontScale?: number
+  /** Fine vertical adjustment from the selected caption anchor, in percentage points. */
+  captionYOffset?: number
   /** Preferred caption tone for generation */
   captionTone: CopyTone
   /** Default hashtags applied when template is loaded */
   hashtags: string[]
   /** Export preset id (tiktok, youtube, reels, shorts) */
   exportPresetId: string
+  /** Optional Context Fit background saved with custom templates. */
+  contextBackgroundPath?: string | null
+  contextBackgroundMode?: 'blur' | 'branding'
+  contextBlurStrength?: number
+  contextVideoY?: number
   createdAt: string
 }
 

@@ -14,4 +14,5 @@ pub mod model;
 pub mod scheduled;
 pub mod settings;
 pub mod social;
+pub mod sources;
 pub mod vod;

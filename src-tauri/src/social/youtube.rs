@@ -45,6 +45,17 @@ const UPLOAD_CHUNK_SIZE: usize = 5 * 1024 * 1024;
 
 static YOUTUBE_REFRESH_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+fn youtube_proxy_error(error: String) -> AppError {
+    if error.contains("invalid_client") {
+        AppError::Api(
+            "ClipGoblin's YouTube OAuth configuration is invalid. Update the auth Worker's YOUTUBE_CLIENT_SECRET for the configured Google client ID, deploy the Worker, then reconnect YouTube in Settings."
+                .into(),
+        )
+    } else {
+        AppError::Api(error)
+    }
+}
+
 /// Embedded YouTube OAuth client ID — safe to ship in the binary since OAuth
 /// client IDs are public identifiers (the actual client *secret* stays in the
 /// Cloudflare Worker). Same value already lives in `worker/wrangler.toml`.
@@ -431,7 +442,7 @@ async fn do_refresh_token_net(refresh_tok: &str) -> Result<TokenResponse, AppErr
     let proxy = AuthProxy::new()
         .map_err(|e| AppError::Api(format!("Auth proxy init failed: {}", e)))?;
     let proxy_resp = proxy.youtube_refresh(refresh_tok).await
-        .map_err(|e| AppError::Api(e))?;
+        .map_err(youtube_proxy_error)?;
 
     if let Some(err) = proxy_resp.error {
         let desc = proxy_resp.error_description.unwrap_or_default();
@@ -611,7 +622,7 @@ async fn exchange_code(code: &str) -> Result<TokenResponse, AppError> {
     let proxy = AuthProxy::new()
         .map_err(|e| AppError::Api(format!("Auth proxy init failed: {}", e)))?;
     let proxy_resp = proxy.youtube_token_exchange(code, REDIRECT_URI).await
-        .map_err(|e| AppError::Api(e))?;
+        .map_err(youtube_proxy_error)?;
 
     if let Some(err) = proxy_resp.error {
         let desc = proxy_resp.error_description.unwrap_or_default();

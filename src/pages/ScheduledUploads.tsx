@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { Clock, Trash2, CalendarClock, ExternalLink, AlertCircle, CheckCircle2, Loader2 } from 'lucide-react'
 import { useScheduleStore } from '../stores/scheduleStore'
 import { useAppStore } from '../stores/appStore'
@@ -100,11 +100,16 @@ function StatusBadge({ upload }: { upload: ScheduledUpload }) {
 
 export default function ScheduledUploads() {
   const navigate = useNavigate()
+  const location = useLocation()
+  const routeState = location.state as { focusUploadId?: string; openReschedule?: boolean } | null
+  const focusUploadId = routeState?.focusUploadId ?? null
+  const openFocusedReschedule = routeState?.openReschedule === true
   const { uploads, loading, load, cancel, reschedule } = useScheduleStore()
   const { clips } = useAppStore()
   const [rescheduleId, setRescheduleId] = useState<string | null>(null)
   const [rescheduleTime, setRescheduleTime] = useState('')
   const [, setTick] = useState(0)
+  const handledRouteFocusRef = useRef<string | null>(null)
 
   useEffect(() => { load() }, [load])
   // Live countdown tick
@@ -112,6 +117,35 @@ export default function ScheduledUploads() {
     const id = setInterval(() => setTick(t => t + 1), 1000)
     return () => clearInterval(id)
   }, [])
+
+  useEffect(() => {
+    if (!focusUploadId || handledRouteFocusRef.current === focusUploadId || loading) return
+    const upload = uploads.find(item => item.id === focusUploadId)
+    if (!upload) return
+
+    let cancelled = false
+    let pulseTimer: ReturnType<typeof setTimeout> | undefined
+    const raf = requestAnimationFrame(() => {
+      if (cancelled) return
+      const element = document.querySelector<HTMLElement>(`[data-upload-id="${focusUploadId}"]`)
+      if (!element) return
+      if (openFocusedReschedule && (upload.status === 'pending' || upload.status === 'failed')) {
+        setRescheduleId(focusUploadId)
+        setRescheduleTime('')
+      }
+      element.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      element.classList.add('v4-route-focus')
+      pulseTimer = setTimeout(() => element.classList.remove('v4-route-focus'), 1400)
+      handledRouteFocusRef.current = focusUploadId
+      window.history.replaceState(null, '', location.pathname)
+    })
+
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(raf)
+      if (pulseTimer) clearTimeout(pulseTimer)
+    }
+  }, [focusUploadId, loading, location.pathname, openFocusedReschedule, uploads])
 
   const clipMap = Object.fromEntries(clips.map(c => [c.id, c]))
 
@@ -140,7 +174,7 @@ export default function ScheduledUploads() {
     const thumbStyle = THUMB_STYLES[idx % THUMB_STYLES.length]
 
     return (
-      <div key={upload.id} className="v4-sched-slot relative">
+      <div key={upload.id} data-upload-id={upload.id} className="v4-sched-slot relative">
         <div className="v4-slot-time">{formatTimeShort(upload.scheduled_time)}</div>
         <div className={`v4-slot-thumb v4-clip-thumb ${thumbStyle}`}>
           {clip && (

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback, useId } from 'react'
 import { Play, Pause, Volume2, VolumeX, RotateCcw } from 'lucide-react'
 import { usePlaybackStore } from '../stores/playbackStore'
+import { contextBlurPixels, normalizeContextVideoY } from '../lib/contextFit'
 
 const PLAYBACK_FAILED_MSG = 'Playback failed'
 
@@ -42,6 +43,14 @@ interface Props {
   seekRef?: React.MutableRefObject<((absoluteTime: number) => void) | null>
   /** How the video fits its container: 'cover' crops to fill, 'contain' fits inside with bars. Default: 'cover' */
   objectFit?: 'cover' | 'contain'
+  /** Show a softened poster behind contained video to preview a context-preserving vertical export. */
+  blurBackground?: boolean
+  /** Optional app-managed image/GIF shown behind Context Fit video instead of the live blur. */
+  backgroundMedia?: string | null
+  /** Normalized 0..1 softness for the live-video background. */
+  backgroundBlurStrength?: number
+  /** Normalized 0..1 placement of contained video from top to bottom. */
+  objectPositionY?: number
   /** Optional ref that receives the underlying <video> element so external
    * code (e.g. the cam-region preview) can read frames via canvas drawImage
    * without opening a second decoder on the same source. */
@@ -51,9 +60,11 @@ interface Props {
 export default function ClipPlayer({
   src, poster, clipStart, clipEnd, mode = 'compact', className = '', overlay,
   controlsOverlay = false, onPlayChange, onTimeUpdate, seekRef: externalSeekRef,
-  objectFit = 'cover', videoElementRef, fullFile = false,
+  objectFit = 'cover', blurBackground = false, backgroundMedia = null,
+  backgroundBlurStrength = 0.25, objectPositionY = 0.5, videoElementRef, fullFile = false,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
+  const backgroundCanvasRef = useRef<HTMLCanvasElement>(null)
   // Mirror our internal video ref into the external ref (if provided)
   // so callers can drawImage frames without opening a second decoder.
   useEffect(() => {
@@ -193,6 +204,41 @@ export default function ClipPlayer({
     let disposed = false
     let lastReportedTime = Number.NEGATIVE_INFINITY
 
+    const drawBlurBackground = () => {
+      if (!blurBackground || backgroundMedia || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return
+      const canvas = backgroundCanvasRef.current
+      if (!canvas || video.videoWidth <= 0 || video.videoHeight <= 0) return
+
+      const width = Math.max(1, Math.round(canvas.clientWidth))
+      const height = Math.max(1, Math.round(canvas.clientHeight))
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width
+        canvas.height = height
+      }
+
+      const sourceRatio = video.videoWidth / video.videoHeight
+      const targetRatio = width / height
+      let sx = 0
+      let sy = 0
+      let sw = video.videoWidth
+      let sh = video.videoHeight
+      if (sourceRatio > targetRatio) {
+        sw = video.videoHeight * targetRatio
+        sx = (video.videoWidth - sw) / 2
+      } else {
+        sh = video.videoWidth / targetRatio
+        sy = (video.videoHeight - sh) / 2
+      }
+
+      const context = canvas.getContext('2d')
+      if (!context) return
+      try {
+        context.drawImage(video, sx, sy, sw, sh, 0, 0, width, height)
+      } catch {
+        // The poster fallback remains visible if this WebView cannot sample the video.
+      }
+    }
+
     const reportTime = (time: number, force = false) => {
       if (!force && Math.abs(time - lastReportedTime) < 1 / 30) return
       lastReportedTime = time
@@ -201,6 +247,7 @@ export default function ClipPlayer({
     }
 
     const syncPlaybackTime = (force = false) => {
+      drawBlurBackground()
       const time = video.currentTime
       if (time >= effClipEnd) {
         video.pause()
@@ -245,12 +292,19 @@ export default function ClipPlayer({
     }
     const onTime = () => syncPlaybackTime()
     const onSeek = () => syncPlaybackTime(true)
+    const onLoadedData = () => drawBlurBackground()
+    const resizeObserver = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(drawBlurBackground)
 
     video.addEventListener('play', onPlay)
     video.addEventListener('pause', onPause)
     video.addEventListener('timeupdate', onTime)
     video.addEventListener('seeking', onSeek)
     video.addEventListener('seeked', onSeek)
+    video.addEventListener('loadeddata', onLoadedData)
+    if (backgroundCanvasRef.current) resizeObserver?.observe(backgroundCanvasRef.current)
+    drawBlurBackground()
     if (!video.paused) scheduleFrame()
 
     return () => {
@@ -261,8 +315,10 @@ export default function ClipPlayer({
       video.removeEventListener('timeupdate', onTime)
       video.removeEventListener('seeking', onSeek)
       video.removeEventListener('seeked', onSeek)
+      video.removeEventListener('loadeddata', onLoadedData)
+      resizeObserver?.disconnect()
     }
-  }, [effClipStart, effClipEnd, setPlayingState])
+  }, [backgroundMedia, blurBackground, effClipStart, effClipEnd, setPlayingState])
 
   // ── Expose seek function to parent via ref ──
   useEffect(() => {
@@ -381,13 +437,44 @@ export default function ClipPlayer({
     setMuted(m => !m)
   }
 
+  const useLiveBlur = blurBackground && !backgroundMedia
+  const blurPixels = contextBlurPixels(backgroundBlurStrength)
+  const containedVideoPosition = `${normalizeContextVideoY(objectPositionY) * 100}%`
+
   return (
     <div className={`flex flex-col ${className}`}>
       {/* ── Video area ── */}
       <div className={`relative bg-surface-900 cursor-pointer group flex-1 min-h-0`} onClick={togglePlay}>
+        {backgroundMedia && (
+          <img
+            src={backgroundMedia}
+            alt=""
+            aria-hidden="true"
+            className="absolute inset-0 h-full w-full object-cover"
+          />
+        )}
+        {useLiveBlur && poster && (
+          <img
+            src={poster}
+            alt=""
+            aria-hidden="true"
+            className="absolute -inset-3 h-[calc(100%+1.5rem)] w-[calc(100%+1.5rem)] scale-105 object-cover opacity-90"
+            style={{ filter: `blur(${blurPixels}px) brightness(0.97) saturate(1.04)` }}
+          />
+        )}
+        {useLiveBlur && (
+          <canvas
+            ref={backgroundCanvasRef}
+            aria-hidden="true"
+            className="absolute -inset-3 h-[calc(100%+1.5rem)] w-[calc(100%+1.5rem)] scale-105 opacity-95"
+            style={{ filter: `blur(${blurPixels}px) brightness(0.97) saturate(1.04)` }}
+          />
+        )}
+        {useLiveBlur && <div className="absolute inset-0 bg-black/5" aria-hidden="true" />}
         <video
           ref={videoRef}
-          className={`absolute inset-0 w-full h-full ${objectFit === 'contain' ? 'object-contain' : 'object-cover'}`}
+          className={`absolute inset-0 z-[1] w-full h-full ${objectFit === 'contain' ? 'object-contain' : 'object-cover'}`}
+          style={objectFit === 'contain' ? { objectPosition: `center ${containedVideoPosition}` } : undefined}
           playsInline
           poster={poster || undefined}
         />

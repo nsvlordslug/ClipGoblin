@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Video, Download, Search, Eye, Tv, LogIn, Check, RotateCcw, RefreshCw, Trash2, X, Gamepad2, Plus, Play } from 'lucide-react'
+import { Video, Download, Search, Eye, Tv, LogIn, RotateCcw, RefreshCw, Trash2, X, Gamepad2, Plus, Play, MoreHorizontal } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
 import { useUiStore } from '../stores/uiStore'
 import { useAiStore } from '../stores/aiStore'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import ImportVodDialog from '../components/ImportVodDialog'
+import { getVodPrimaryAction } from '../lib/vodActions'
 
 function formatDuration(seconds: number) {
   const h = Math.floor(seconds / 3600)
@@ -113,40 +114,31 @@ function formatBytes(bytes: number) {
   return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`
 }
 
-const statusBadge: Record<string, string> = {
-  pending: 'bg-slate-500/20 text-slate-400 border-slate-500/30',
-  downloading: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
-  downloaded: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
-  analyzing: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
-  completed: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
-  failed: 'bg-red-500/20 text-red-400 border-red-500/30',
-}
-
 // Map analysis status → v4-vod-status class variant.
 function v4StatusClass(vod: { analysis_status: string; download_status: string }): string {
   if (vod.analysis_status === 'completed') return 'done'
   if (vod.analysis_status === 'analyzing') return 'analyzing'
-  if (vod.analysis_status === 'failed') return 'failed'
   if (vod.download_status === 'failed') return 'failed'
-  if (vod.download_status === 'downloading' || vod.download_status === 'downloaded') return 'queued'
+  if (vod.download_status !== 'downloaded') return 'queued'
+  if (vod.analysis_status === 'failed') return 'failed'
   return 'queued'
 }
 
 function v4StatusLabel(vod: { analysis_status: string; analysis_progress?: number; download_status: string; download_progress?: number }): string {
   if (vod.analysis_status === 'completed') return 'COMPLETE'
   if (vod.analysis_status === 'analyzing') return `ANALYZING · ${vod.analysis_progress ?? 0}%`
-  if (vod.analysis_status === 'failed') return 'FAILED · RETRY'
   if (vod.download_status === 'failed') return 'DOWNLOAD FAILED · RETRY'
   if (vod.download_status === 'downloading') return `DOWNLOADING · ${vod.download_progress ?? 0}%`
-  if (vod.download_status === 'downloaded') return 'READY TO ANALYZE'
-  return 'PENDING'
+  if (vod.download_status !== 'downloaded') return 'READY TO DOWNLOAD'
+  if (vod.analysis_status === 'failed') return 'ANALYSIS FAILED · RETRY'
+  return 'READY TO ANALYZE'
 }
 
 export default function Vods() {
   const { loggedInUser, vods, isLoading, checkLogin, fetchVods, refreshVods, removeVod, updateVod, removeClipsForVod } = useAppStore()
-  // Phase A v1.3.13: review tools require BOTH the developer-mode unlock AND
-  // the explicit showReviewTools toggle. Either being false hides the UI.
-  const showReviewTools = useUiStore(
+  // Raw scoring export remains a diagnostic action even though normal clip
+  // feedback is now a user-facing Detection setting.
+  const showReviewExport = useUiStore(
     (s) => s.settings.developerModeUnlocked && s.settings.showReviewTools,
   )
   // BYOK cost UI: only show estimates/actuals when a paid provider is active.
@@ -166,6 +158,7 @@ export default function Vods() {
   const [refreshingId, setRefreshingId] = useState<string | null>(null)
   const [refreshedId, setRefreshedId] = useState<string | null>(null)
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
+  const [openActionMenuId, setOpenActionMenuId] = useState<string | null>(null)
   const [diskUsage, setDiskUsage] = useState<{
     has_file: boolean
     vod_size: number
@@ -178,7 +171,17 @@ export default function Vods() {
   const [gameInput, setGameInput] = useState('')
   const [restoringVods, setRestoringVods] = useState(false)
   const [showImportDialog, setShowImportDialog] = useState(false)
-  const [detectionStats, setDetectionStats] = useState<Record<string, { candidatesFound: number; candidatesRejected: number; duplicatesSuppressed: number; clipsSelected: number; sensitivity: string }>>({})
+  const [detectionStats, setDetectionStats] = useState<Record<string, {
+    candidatesFound: number
+    candidatesRejected: number
+    duplicatesSuppressed: number
+    clipsSelected: number
+    sensitivity: string
+    personalizationSamples: number
+    personalizedCandidates: number
+    boundaryFeedbackSamples: number
+    boundaryAdjustedCandidates: number
+  }>>({})
   const detectionStatsRequestedRef = useRef(new Set<string>())
   // Pre-run cost estimate per VOD (USD), keyed by vod.id. Only fetched when a
   // paid AI provider is active. null = not yet fetched / unavailable.
@@ -196,6 +199,29 @@ export default function Vods() {
   // After an analyze completes we surface the actual spend in a brief toast.
   const [analyzeCostUsd, setAnalyzeCostUsd] = useState<number | null>(null)
 
+  useEffect(() => {
+    if (!openActionMenuId) return
+
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target
+      if (target instanceof Element) {
+        const menuRoot = target.closest('[data-vod-actions]')
+        if (menuRoot?.getAttribute('data-vod-actions') === openActionMenuId) return
+      }
+      setOpenActionMenuId(null)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpenActionMenuId(null)
+    }
+
+    document.addEventListener('pointerdown', closeOnOutsidePointer)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsidePointer)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [openActionMenuId])
+
   // Load detection stats for completed VODs
   useEffect(() => {
     const loadStats = async () => {
@@ -203,7 +229,17 @@ export default function Vods() {
         if (vod.analysis_status === 'completed' && !detectionStatsRequestedRef.current.has(vod.id)) {
           detectionStatsRequestedRef.current.add(vod.id)
           try {
-            const stats = await invoke<{ candidates_found: number; candidates_rejected: number; duplicates_suppressed: number; clips_selected: number; sensitivity: string } | null>('get_detection_stats', { vodId: vod.id })
+            const stats = await invoke<{
+              candidates_found: number
+              candidates_rejected: number
+              duplicates_suppressed: number
+              clips_selected: number
+              sensitivity: string
+              personalization_samples?: number
+              personalized_candidates?: number
+              boundary_feedback_samples?: number
+              boundary_adjusted_candidates?: number
+            } | null>('get_detection_stats', { vodId: vod.id })
             if (stats) {
               setDetectionStats(prev => ({
                 ...prev,
@@ -213,6 +249,10 @@ export default function Vods() {
                   duplicatesSuppressed: stats.duplicates_suppressed,
                   clipsSelected: stats.clips_selected,
                   sensitivity: stats.sensitivity,
+                  personalizationSamples: stats.personalization_samples ?? 0,
+                  personalizedCandidates: stats.personalized_candidates ?? 0,
+                  boundaryFeedbackSamples: stats.boundary_feedback_samples ?? 0,
+                  boundaryAdjustedCandidates: stats.boundary_adjusted_candidates ?? 0,
                 },
               }))
             }
@@ -611,8 +651,35 @@ export default function Vods() {
         </div>
       ) : (
         <div className="v4-vod-grid">
-          {vods.map((vod) => (
-            <div key={vod.id} className="v4-vod-card flex flex-col">
+          {vods.map((vod) => {
+            const primaryAction = getVodPrimaryAction({
+              analysisStatus: vod.analysis_status,
+              downloadStatus: vod.download_status,
+            })
+            const PrimaryActionIcon = primaryAction.id === 'view-clips'
+              ? Video
+              : primaryAction.id === 'download' || primaryAction.id === 'downloading'
+                ? Download
+                : primaryAction.id === 'analyze' || primaryAction.id === 'analyzing'
+                  ? Search
+                  : RotateCcw
+            const primaryActionLabel = primaryAction.id === 'downloading'
+              ? `Downloading ${vod.download_progress || 0}%`
+              : primaryAction.id === 'analyzing'
+                ? `Analyzing ${vod.analysis_progress || 0}%`
+                : primaryAction.id === 'repair-download' && updatingYtdlpVodId === vod.id
+                  ? 'Updating yt-dlp...'
+                  : primaryAction.label
+            const primaryActionDisabled = primaryAction.disabled
+              || (primaryAction.id === 'repair-download' && updatingYtdlpVodId !== null)
+            const isActionMenuOpen = openActionMenuId === vod.id
+            const isDeleteConfirmOpen = deleteConfirmId === vod.id
+
+            return (
+            <div
+              key={vod.id}
+              className={`v4-vod-card flex flex-col ${isActionMenuOpen || isDeleteConfirmOpen ? 'action-open' : ''}`}
+            >
               {/* Thumbnail */}
               <div className="v4-vod-thumb" style={{height:150}}>
                 {/* Preview: a working Twitch thumbnail, else a frame from the
@@ -639,10 +706,12 @@ export default function Vods() {
                     <div className="v4-vod-progress-bar" style={{width:`${vod.download_progress || 0}%`}} />
                   </div>
                 )}
-                {/* Play/Download overlay on thumbnail */}
+                {/* Local playback is a familiar thumbnail action. Downloading
+                    stays passive here; Download itself is the card primary. */}
                 {vod.download_status === 'downloaded' ? (
                   <button
                     onClick={() => navigate(`/player/${vod.id}`)}
+                    aria-label={`Play ${vod.title}`}
                     className="absolute inset-0 flex items-center justify-center bg-black/40 hover:bg-black/30 transition-colors cursor-pointer group/play"
                   >
                     <Play className="w-10 h-10 text-white/90 drop-shadow group-hover/play:scale-110 transition-transform" />
@@ -654,17 +723,7 @@ export default function Vods() {
                       <span className="text-xs text-blue-300 font-medium">{vod.download_progress}%</span>
                     </div>
                   </div>
-                ) : (
-                  <button
-                    onClick={() => handleDownload(vod.id)}
-                    className="absolute inset-0 flex items-center justify-center bg-black/40 hover:bg-black/30 transition-colors cursor-pointer group/play"
-                  >
-                    <div className="flex flex-col items-center gap-1">
-                      <Download className="w-8 h-8 text-white/80 drop-shadow group-hover/play:scale-110 transition-transform" />
-                      <span className="text-[10px] text-white/70 font-medium">Download to play</span>
-                    </div>
-                  </button>
-                )}
+                ) : null}
               </div>
 
               {/* Info */}
@@ -715,20 +774,6 @@ export default function Vods() {
                   </button>
                 )}
 
-                {/* Status badges */}
-                <div className="flex gap-2 flex-wrap">
-                  <span
-                    className={`text-xs px-2 py-0.5 rounded-full border ${statusBadge[vod.download_status]}`}
-                  >
-                    DL: {vod.download_status}
-                  </span>
-                  <span
-                    className={`text-xs px-2 py-0.5 rounded-full border ${statusBadge[vod.analysis_status]}`}
-                  >
-                    AI: {vod.analysis_status}
-                  </span>
-                </div>
-
                 {/* Download Progress Bar */}
                 {vod.download_status === 'downloading' && (
                   <div className="space-y-1">
@@ -768,6 +813,16 @@ export default function Vods() {
                     {detectionStats[vod.id].sensitivity !== 'medium' && (
                       <span className="ml-1 text-violet-400/70">({detectionStats[vod.id].sensitivity} sensitivity)</span>
                     )}
+                    {detectionStats[vod.id].personalizedCandidates > 0 && (
+                      <span className="ml-1 text-emerald-400/70">
+                        · personalized from {detectionStats[vod.id].personalizationSamples} feedback signals
+                      </span>
+                    )}
+                    {detectionStats[vod.id].boundaryAdjustedCandidates > 0 && (
+                      <span className="ml-1 text-cyan-400/70">
+                        · learned timing applied from {detectionStats[vod.id].boundaryFeedbackSamples} edited clips
+                      </span>
+                    )}
                   </div>
                 )}
 
@@ -779,109 +834,140 @@ export default function Vods() {
                   </p>
                 )}
 
-                {/* Actions — primary row */}
-                <div className="flex gap-2 mt-auto">
-                  {vod.download_status === 'failed' ? (
+                {/* One lifecycle-aware primary action; secondary commands stay
+                    available through a single disclosure. */}
+                <div className="mt-auto" data-vod-actions={vod.id}>
+                  <div className="v4-vod-action-row">
                     <button
-                      onClick={() => handleUpdateYtdlpAndRetry(vod.id)}
-                      disabled={updatingYtdlpVodId !== null}
-                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg transition-colors cursor-pointer bg-amber-500/20 text-amber-400 border border-amber-500/30 hover:bg-amber-500/30 disabled:opacity-40"
-                      title="Twitch download failed — usually a stale yt-dlp. This updates yt-dlp and retries."
+                      type="button"
+                      onClick={() => {
+                        setOpenActionMenuId(null)
+                        if (primaryAction.id === 'view-clips') {
+                          navigate('/clips', { state: { focusVodId: vod.id } })
+                        } else if (primaryAction.id === 'repair-download') {
+                          void handleUpdateYtdlpAndRetry(vod.id)
+                        } else if (primaryAction.id === 'download') {
+                          void handleDownload(vod.id)
+                        } else if (primaryAction.id === 'analyze' || primaryAction.id === 'retry-analysis') {
+                          void handleAnalyze(vod.id)
+                        }
+                      }}
+                      disabled={primaryActionDisabled || isDeleteConfirmOpen}
+                      className={`v4-vod-primary-action ${primaryAction.tone}`}
+                      title={primaryAction.id === 'repair-download'
+                        ? 'Refresh yt-dlp and retry the Twitch download'
+                        : undefined}
                     >
-                      {updatingYtdlpVodId === vod.id ? 'Updating yt-dlp…' : 'Update yt-dlp & Retry'}
+                      <PrimaryActionIcon className={`w-4 h-4 ${
+                        primaryAction.id === 'downloading' ? 'animate-bounce' :
+                          primaryAction.id === 'analyzing' ? 'animate-pulse' : ''
+                      }`} />
+                      <span>{primaryActionLabel}</span>
                     </button>
-                  ) : vod.download_status === 'downloaded' ? (
                     <button
-                      onClick={() => navigate(`/player/${vod.id}`)}
-                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg transition-colors cursor-pointer bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30"
+                      type="button"
+                      className={`v4-vod-more-button ${isActionMenuOpen ? 'active' : ''}`}
+                      aria-label={`More actions for ${vod.title}`}
+                      aria-expanded={isActionMenuOpen}
+                      aria-controls={`vod-actions-${vod.id}`}
+                      disabled={isDeleteConfirmOpen}
+                      onClick={() => {
+                        setOpenActionMenuId(current => current === vod.id ? null : vod.id)
+                        setDeleteConfirmId(null)
+                        setDiskUsage(null)
+                      }}
                     >
-                      <Check className="w-3.5 h-3.5" /> Open
+                      <MoreHorizontal className="w-4 h-4" />
                     </button>
-                  ) : (
-                    <button
-                      onClick={() => handleDownload(vod.id)}
-                      disabled={vod.download_status === 'downloading'}
-                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg transition-colors cursor-pointer bg-surface-700 hover:bg-surface-600 disabled:opacity-40 text-slate-200"
+                  </div>
+
+                  {isActionMenuOpen && (
+                    <div
+                      id={`vod-actions-${vod.id}`}
+                      className="v4-vod-action-menu"
+                      role="group"
+                      aria-label={`Actions for ${vod.title}`}
                     >
-                      {vod.download_status === 'downloading' ? (
-                        <><Download className="w-3.5 h-3.5 animate-bounce" /> {vod.download_progress}%</>
-                      ) : (
-                        <><Download className="w-3.5 h-3.5" /> Download</>
+                      {vod.download_status === 'downloaded' && (
+                        <button
+                          type="button"
+                          className="v4-vod-menu-item"
+                          onClick={() => {
+                            setOpenActionMenuId(null)
+                            navigate(`/player/${vod.id}`)
+                          }}
+                        >
+                          <Play className="w-3.5 h-3.5" />
+                          Play downloaded VOD
+                        </button>
                       )}
-                    </button>
+                      <button
+                        type="button"
+                        className="v4-vod-menu-item"
+                        onClick={() => {
+                          setOpenActionMenuId(null)
+                          void handleOpenVod(vod.id)
+                        }}
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                        Watch on Twitch
+                      </button>
+                      <button
+                        type="button"
+                        disabled={refreshingId === vod.id}
+                        className="v4-vod-menu-item"
+                        onClick={() => { void handleRefreshMetadata(vod.id) }}
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${refreshingId === vod.id ? 'animate-spin' : ''}`} />
+                        {refreshingId === vod.id
+                          ? 'Refreshing metadata...'
+                          : refreshedId === vod.id
+                            ? 'Metadata updated'
+                            : 'Refresh Twitch metadata'}
+                      </button>
+                      {vod.analysis_status === 'completed' && (
+                        <button
+                          type="button"
+                          className="v4-vod-menu-item"
+                          onClick={() => {
+                            setOpenActionMenuId(null)
+                            void handleAnalyze(vod.id)
+                          }}
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          Re-analyze VOD
+                        </button>
+                      )}
+                      {showReviewExport && vod.analysis_status === 'completed' && (
+                        <button
+                          type="button"
+                          className="v4-vod-menu-item"
+                          onClick={() => {
+                            setOpenActionMenuId(null)
+                            void handleExportReviewData(vod.id)
+                          }}
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          Copy review diagnostics
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="v4-vod-menu-item danger"
+                        onClick={() => {
+                          setOpenActionMenuId(null)
+                          void handleShowDeleteConfirm(vod.id)
+                        }}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        Manage local files
+                      </button>
+                    </div>
                   )}
-                  {vod.analysis_status === 'completed' && (
-                    <button
-                      onClick={() => navigate('/clips')}
-                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg transition-colors cursor-pointer bg-violet-500/20 text-violet-400 border border-violet-500/30 hover:bg-violet-500/30"
-                    >
-                      <Search className="w-3.5 h-3.5" />
-                      View Clips
-                    </button>
-                  )}
-                  {showReviewTools && vod.analysis_status === 'completed' && (
-                    <button
-                      onClick={() => handleExportReviewData(vod.id)}
-                      className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg transition-colors cursor-pointer bg-amber-500/20 text-amber-400 border border-amber-500/30 hover:bg-amber-500/30"
-                      title="Copy clip-by-clip review data to clipboard for offline analysis"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      Export Reviews
-                    </button>
-                  )}
-                  <button
-                    onClick={() => handleAnalyze(vod.id)}
-                    disabled={vod.analysis_status === 'analyzing'}
-                    className={`${vod.analysis_status === 'completed' ? '' : 'flex-1'} flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg transition-colors cursor-pointer disabled:opacity-40 ${
-                      vod.analysis_status === 'completed'
-                        ? 'bg-surface-800 text-slate-400 border border-surface-600 hover:text-white hover:border-surface-500'
-                        : vod.analysis_status === 'failed'
-                          ? 'bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20'
-                          : 'bg-surface-700 hover:bg-surface-600 text-slate-200'
-                    }`}
-                  >
-                    {vod.analysis_status === 'analyzing' ? (
-                      <><Search className="w-3.5 h-3.5 animate-pulse" /> Analyzing...</>
-                    ) : vod.analysis_status === 'completed' ? (
-                      <><RotateCcw className="w-3.5 h-3.5" /> Re-analyze</>
-                    ) : vod.analysis_status === 'failed' ? (
-                      <><RotateCcw className="w-3.5 h-3.5" /> Retry</>
-                    ) : (
-                      <><Search className="w-3.5 h-3.5" /> Analyze</>
-                    )}
-                  </button>
-                </div>
-                {/* Utility icons row */}
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => handleOpenVod(vod.id)}
-                    title="Watch on Twitch"
-                    className="flex items-center justify-center px-2 py-1.5 bg-surface-700 hover:bg-surface-600 text-slate-400 hover:text-slate-200 rounded-lg transition-colors cursor-pointer"
-                  >
-                    <Eye className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    onClick={() => handleRefreshMetadata(vod.id)}
-                    disabled={refreshingId === vod.id}
-                    title="Refresh metadata from Twitch"
-                    className="flex items-center justify-center px-2 py-1.5 bg-surface-700 hover:bg-surface-600 text-slate-400 hover:text-slate-200 rounded-lg transition-colors cursor-pointer disabled:opacity-40"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${refreshingId === vod.id ? 'animate-spin' : ''}`} />
-                  </button>
-                  {refreshedId === vod.id && (
-                    <span className="text-xs text-emerald-400">Updated!</span>
-                  )}
-                  <button
-                    onClick={() => handleShowDeleteConfirm(vod.id)}
-                    title="Delete VOD"
-                    className="flex items-center justify-center px-2 py-1.5 bg-surface-700 hover:bg-red-900/40 text-slate-400 hover:text-red-400 rounded-lg transition-colors cursor-pointer"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
                 </div>
 
                 {deleteConfirmId === vod.id && (
-                  <div className="mt-3 p-3 bg-red-950/40 border border-red-500/30 rounded-lg space-y-2">
+                  <div className="v4-vod-delete-panel space-y-2">
                     <p className="text-xs text-red-300 font-medium">Free up disk for this VOD?</p>
                     <p className="text-[11px] text-slate-400">Removes the local files only — the VOD stays in your list and re-downloadable from Twitch. If it's aged off Twitch, freeing it means it's gone for good.</p>
                     {diskUsage && (
@@ -918,7 +1004,8 @@ export default function Vods() {
                 )}
               </div>
             </div>
-          ))}
+            )
+          })}
         </div>
       )}
       <ImportVodDialog
