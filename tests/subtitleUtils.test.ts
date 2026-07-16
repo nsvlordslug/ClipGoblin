@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   findActiveSegment,
   parseSrt,
+  shiftSubtitleSegments,
   splitSubtitleSegmentsByWord,
 } from '../src/lib/subtitleUtils.ts'
 
@@ -46,4 +47,28 @@ test('normalizes overlapping cues so two words never show together', () => {
 
   assert.equal(split[0].endTime, 10.5)
   assert.equal(findActiveSegment(split, 10.6)?.text, 'second')
+})
+
+test('shifts every subtitle while preserving durations and gaps', () => {
+  const segments = parseSrt(
+    '1\n00:00:01,000 --> 00:00:01,400\nfirst\n\n2\n00:00:02,000 --> 00:00:02,600\nsecond',
+  )
+  const shifted = shiftSubtitleSegments(segments, 0.3)
+
+  assert.deepEqual(
+    shifted.map(segment => [segment.startTime, segment.endTime]),
+    [[1.3, 1.7], [2.3, 2.9]],
+  )
+})
+
+test('clamps an earlier shift at zero without changing relative timing', () => {
+  const segments = parseSrt(
+    '1\n00:00:00,050 --> 00:00:00,300\nfirst\n\n2\n00:00:01,000 --> 00:00:01,500\nsecond',
+  )
+  const shifted = shiftSubtitleSegments(segments, -0.1)
+
+  assert.deepEqual(
+    shifted.map(segment => [segment.startTime, segment.endTime]),
+    [[0, 0.25], [0.95, 1.45]],
+  )
 })

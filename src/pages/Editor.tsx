@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from 'react'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
-import { ArrowLeft, Save, Download, Check, Loader2, MessageSquare, Upload, Film, Link2, Undo2, Redo2, RefreshCw, Bookmark, ChevronDown, X, Plus, Clock, CalendarClock, ImagePlus } from 'lucide-react'
+import { ArrowLeft, Save, Download, Check, Loader2, MessageSquare, Upload, Film, Link2, Undo2, Redo2, RefreshCw, Bookmark, ChevronDown, ChevronLeft, ChevronRight, X, Plus, Clock, CalendarClock, ImagePlus } from 'lucide-react'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 // Use our own Tauri command to open URLs in the system default browser
@@ -27,7 +27,7 @@ import FacecamEditor, { DraggablePipOverlay, DraggableSplitDivider } from '../co
 import { DEFAULT_FACECAM, computeSubtitleCollision, parseFacecamSettings } from '../lib/facecam'
 import type { FacecamSettings } from '../lib/facecam'
 import SubtitleEditor from '../components/SubtitleEditor'
-import { parseSrt, serializeSrt, findActiveSegment, splitSubtitleSegmentsByWord } from '../lib/subtitleUtils'
+import { parseSrt, serializeSrt, findActiveSegment, shiftSubtitleSegments, splitSubtitleSegmentsByWord } from '../lib/subtitleUtils'
 import type { SubtitleSegment } from '../lib/subtitleUtils'
 import { usePlaybackStore } from '../stores/playbackStore'
 import { usePlatformStore, PLATFORM_INFO } from '../stores/platformStore'
@@ -1096,6 +1096,14 @@ export default function Editor() {
   const handleSubtitleSeek = useCallback((srtTimeTarget: number) => {
     playerSeekRef.current?.(captionTimelineStart + srtTimeTarget)
   }, [captionTimelineStart])
+  const handleSubtitleShift = useCallback((deltaSeconds: number) => {
+    const shifted = shiftSubtitleSegments(subtitleSegments, deltaSeconds)
+    const srt = serializeSrt(shifted.filter(segment => segment.text.trim()))
+    captionsTextRef.current = srt
+    setSubtitleSegments(shifted)
+    setCaptionsText(srt)
+    setSaved(false)
+  }, [subtitleSegments])
 
   const handleGenerateCaptions = async () => {
     if (!clipId || generatingCaptions) return
@@ -2413,8 +2421,7 @@ export default function Editor() {
                     <>
                       <div className="flex items-center justify-between mb-1">
                         <label className="text-xs text-slate-400">Subtitle Segments ({subtitleSegments.length})</label>
-                        <div className="flex items-center gap-2">
-                          <span className="text-[9px] text-slate-600">Click time to seek</span>
+                        <div className="flex items-center gap-1">
                           <Tooltip text="Regenerate subtitles from the clip audio" position="left">
                             <button
                               type="button"
@@ -2424,6 +2431,34 @@ export default function Editor() {
                               className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-surface-600 text-slate-400 transition-colors hover:border-violet-500/60 hover:text-violet-300 disabled:cursor-wait disabled:opacity-50"
                             >
                               <RefreshCw className={`h-3.5 w-3.5 ${generatingCaptions ? 'animate-spin' : ''}`} />
+                            </button>
+                          </Tooltip>
+                        </div>
+                      </div>
+                      <div className="mb-2 flex items-center justify-between gap-2 border-y border-surface-600/70 py-1.5">
+                        <span className="text-[10px] font-medium text-slate-400">Timing</span>
+                        <div className="flex items-center gap-1">
+                          <Tooltip text="Move every subtitle 0.1 seconds earlier" position="top">
+                            <button
+                              type="button"
+                              onClick={() => handleSubtitleShift(-0.1)}
+                              aria-label="Move subtitles earlier"
+                              className="inline-flex h-7 items-center gap-1 rounded-md border border-surface-600 px-2 text-[10px] text-slate-300 transition-colors hover:border-cyan-500/60 hover:text-cyan-300"
+                            >
+                              <ChevronLeft className="h-3 w-3" />
+                              Earlier
+                            </button>
+                          </Tooltip>
+                          <span className="px-1 text-[9px] tabular-nums text-slate-600">0.1s</span>
+                          <Tooltip text="Move every subtitle 0.1 seconds later" position="top">
+                            <button
+                              type="button"
+                              onClick={() => handleSubtitleShift(0.1)}
+                              aria-label="Move subtitles later"
+                              className="inline-flex h-7 items-center gap-1 rounded-md border border-surface-600 px-2 text-[10px] text-slate-300 transition-colors hover:border-cyan-500/60 hover:text-cyan-300"
+                            >
+                              Later
+                              <ChevronRight className="h-3 w-3" />
                             </button>
                           </Tooltip>
                         </div>

@@ -56,6 +56,17 @@ const AUTH_TIMEOUT_SECS: u64 = 120;
 const UPLOAD_CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10 MB per chunk for large files
 const SINGLE_CHUNK_LIMIT: usize = 64 * 1024 * 1024; // Files under 64 MB → single chunk
 
+fn upload_chunk_plan(total_size: u64) -> (u64, u64) {
+    if total_size <= SINGLE_CHUNK_LIMIT as u64 {
+        return (total_size, 1);
+    }
+
+    let chunk_size = UPLOAD_CHUNK_SIZE as u64;
+    // TikTok requires floor(video_size / chunk_size). The final declared chunk
+    // absorbs the remainder instead of becoming an extra undersized chunk.
+    (chunk_size, total_size / chunk_size)
+}
+
 /// Embedded TikTok OAuth client key — safe to ship in the binary since OAuth
 /// client keys are public identifiers (the actual client *secret* stays in the
 /// Cloudflare Worker). Same value already lives in `worker/wrangler.toml`.
@@ -871,13 +882,7 @@ where
     //    TikTok Content Posting API rules:
     //    - Files ≤ 64 MB: upload as single chunk (chunk_size = video_size, count = 1)
     //    - Files > 64 MB: split into 10 MB chunks (each 5–64 MB allowed, final up to 128 MB)
-    let (actual_chunk_size, chunk_count) = if total_size <= SINGLE_CHUNK_LIMIT as u64 {
-        (total_size, 1_u64)
-    } else {
-        let chunk_size = UPLOAD_CHUNK_SIZE as u64;
-        let count = (total_size + chunk_size - 1) / chunk_size;
-        (chunk_size, count)
-    };
+    let (actual_chunk_size, chunk_count) = upload_chunk_plan(total_size);
 
     // 2. Initialize either a Direct Post or an inbox draft. TikTok's draft
     // endpoint accepts media only; caption, privacy, interactions, and
@@ -1004,8 +1009,12 @@ where
     let mut offset: u64 = 0;
     let mut chunk_idx: u64 = 0;
 
-    while offset < total_size {
-        let end = std::cmp::min(offset + actual_chunk_size, total_size);
+    while chunk_idx < chunk_count {
+        let end = if chunk_idx + 1 == chunk_count {
+            total_size
+        } else {
+            offset + actual_chunk_size
+        };
         let chunk_len = (end - offset) as usize;
         let mut chunk = vec![0_u8; chunk_len];
         file.read_exact(&mut chunk)
@@ -1232,6 +1241,47 @@ mod error_message_tests {
     fn oauth_scopes_match_the_approved_live_app() {
         assert_eq!(SCOPES, "user.info.basic,video.publish,video.upload");
         assert!(!video_stats_enabled());
+    }
+
+    #[test]
+    fn small_upload_uses_one_whole_file_chunk() {
+        let total_size = 3 * 1024 * 1024;
+        assert_eq!(upload_chunk_plan(total_size), (total_size, 1));
+    }
+
+    #[test]
+    fn upload_at_single_chunk_limit_stays_single() {
+        let total_size = SINGLE_CHUNK_LIMIT as u64;
+        assert_eq!(upload_chunk_plan(total_size), (total_size, 1));
+    }
+
+    #[test]
+    fn large_upload_uses_floor_count_so_final_chunk_absorbs_remainder() {
+        let total_size = 69 * 1024 * 1024;
+        assert_eq!(
+            upload_chunk_plan(total_size),
+            (UPLOAD_CHUNK_SIZE as u64, 6)
+        );
+    }
+
+    #[test]
+    fn exact_large_upload_multiple_has_no_extra_chunk() {
+        let total_size = 70 * 1024 * 1024;
+        assert_eq!(
+            upload_chunk_plan(total_size),
+            (UPLOAD_CHUNK_SIZE as u64, 7)
+        );
+    }
+
+    #[test]
+    fn first_byte_over_single_limit_uses_valid_multi_chunk_plan() {
+        let total_size = SINGLE_CHUNK_LIMIT as u64 + 1;
+        let (chunk_size, chunk_count) = upload_chunk_plan(total_size);
+        let final_chunk_size = total_size - chunk_size * (chunk_count - 1);
+
+        assert_eq!(chunk_count, 6);
+        assert!(final_chunk_size >= 5 * 1024 * 1024);
+        assert!(final_chunk_size <= 128 * 1024 * 1024);
     }
 
     #[test]

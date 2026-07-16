@@ -63,6 +63,26 @@ export function findActiveSegment(
   return null
 }
 
+/** Shift every cue by the same amount while preserving durations and gaps. */
+export function shiftSubtitleSegments(
+  segments: SubtitleSegment[],
+  deltaSeconds: number,
+): SubtitleSegment[] {
+  if (segments.length === 0 || !Number.isFinite(deltaSeconds) || deltaSeconds === 0) {
+    return segments
+  }
+
+  const earliestStart = Math.min(...segments.map(segment => segment.startTime))
+  const appliedDelta = Math.max(deltaSeconds, -earliestStart)
+  const toMilliseconds = (seconds: number) => Math.round(seconds * 1000) / 1000
+
+  return segments.map(segment => ({
+    ...segment,
+    startTime: toMilliseconds(segment.startTime + appliedDelta),
+    endTime: toMilliseconds(segment.endTime + appliedDelta),
+  }))
+}
+
 function visibleWordDuration(word: string): number {
   const characterCount = Math.max(1, word.replace(/[^\p{L}\p{N}]/gu, '').length)
   return Math.min(1.2, Math.max(0.475, 0.4 + characterCount * 0.075))

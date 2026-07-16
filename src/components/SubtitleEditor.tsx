@@ -66,6 +66,7 @@ export default memo(function SubtitleEditor({
       {visible.map(seg => {
         const isActive = seg.id === activeId
         const isOutOfBounds = seg.startTime < trimStart || seg.endTime > trimEnd
+        const clipRelativeStart = Math.max(0, seg.startTime - trimStart)
         const progress = isActive && seg.endTime > seg.startTime
           ? Math.max(0, Math.min(1, (currentTime - seg.startTime) / (seg.endTime - seg.startTime)))
           : 0
@@ -93,9 +94,9 @@ export default memo(function SubtitleEditor({
                 className={`shrink-0 text-[9px] font-mono tabular-nums mt-0.5 px-1 py-0.5 rounded cursor-pointer transition-colors ${
                   isActive ? 'text-cyan-400 bg-cyan-500/20' : 'text-slate-500 hover:text-slate-300 hover:bg-surface-700'
                 }`}
-                title={`Seek to ${fmtShort(seg.startTime)}`}
+                title={`Seek to ${fmtShort(clipRelativeStart)} in the clip`}
               >
-                {fmtShort(seg.startTime)}
+                {fmtShort(clipRelativeStart)}
               </button>
 
               {/* Editable text */}
