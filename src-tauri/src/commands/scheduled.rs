@@ -323,6 +323,22 @@ pub(crate) fn process_due_uploads(handle: &tauri::AppHandle) -> Result<(), Strin
                         }),
                     );
                 }
+                social::UploadResultStatus::InboxDelivered => {
+                    let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                    db::update_scheduled_upload_processing(
+                        &conn,
+                        &upload.id,
+                        &upload_result.job_id,
+                    )
+                    .ok();
+                    let _ = handle.emit(
+                        "scheduled-upload-status",
+                        serde_json::json!({
+                            "id": upload.id, "status": "processing", "clip_id": upload.clip_id,
+                            "platform": upload.platform, "draft_handoff": true,
+                        }),
+                    );
+                }
                 social::UploadResultStatus::Uploading { .. } => {
                     log::warn!(
                         "[Scheduler] Adapter returned a transient uploading result for {}",
@@ -360,11 +376,22 @@ async fn reconcile_processing_uploads(handle: &tauri::AppHandle) -> Result<(), S
             continue;
         };
         match social::tiktok::fetch_publish_status(&access_token, publish_id).await {
-            Ok(
-                social::tiktok::PublishPollResult::Processing
-                | social::tiktok::PublishPollResult::InboxDelivered,
-            ) => {
+            Ok(status @ (social::tiktok::PublishPollResult::Processing
+                | social::tiktok::PublishPollResult::InboxDelivered)) => {
+                let inbox_delivered = matches!(
+                    status,
+                    social::tiktok::PublishPollResult::InboxDelivered
+                );
                 let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+                if inbox_delivered {
+                    db::mark_upload_inbox_delivered(
+                        &conn,
+                        &upload.clip_id,
+                        "tiktok",
+                        publish_id,
+                    )
+                    .map_err(|e| format!("DB error: {}", e))?;
+                }
                 db::record_direct_upload_state_for_analytics(
                     &conn,
                     &upload.clip_id,
@@ -383,12 +410,23 @@ async fn reconcile_processing_uploads(handle: &tauri::AppHandle) -> Result<(), S
                     .map(|row| row.id)
                     .collect();
                 drop(conn);
+                let phase = if inbox_delivered {
+                    "inbox_delivered"
+                } else {
+                    "processing"
+                };
+                let _ = handle.emit(
+                    "upload-status",
+                    serde_json::json!({
+                        "clip_id": &upload.clip_id, "platform": "tiktok", "phase": phase,
+                    }),
+                );
                 for id in ids {
                     let _ = handle.emit(
                         "scheduled-upload-status",
                         serde_json::json!({
                             "id": id, "status": "processing", "clip_id": &upload.clip_id,
-                            "platform": "tiktok",
+                            "platform": "tiktok", "draft_handoff": inbox_delivered,
                         }),
                     );
                 }
@@ -425,6 +463,13 @@ async fn reconcile_processing_uploads(handle: &tauri::AppHandle) -> Result<(), S
                     .map(|row| row.id)
                     .collect();
                 drop(conn);
+                let _ = handle.emit(
+                    "upload-status",
+                    serde_json::json!({
+                        "clip_id": &upload.clip_id, "platform": "tiktok", "phase": "complete",
+                        "video_url": &video_url,
+                    }),
+                );
                 for id in ids {
                     let _ = handle.emit(
                         "scheduled-upload-status",
@@ -457,6 +502,13 @@ async fn reconcile_processing_uploads(handle: &tauri::AppHandle) -> Result<(), S
                     .map(|row| row.id)
                     .collect();
                 drop(conn);
+                let _ = handle.emit(
+                    "upload-status",
+                    serde_json::json!({
+                        "clip_id": &upload.clip_id, "platform": "tiktok", "phase": "failed",
+                        "error": &error,
+                    }),
+                );
                 for id in ids {
                     let _ = handle.emit(
                         "scheduled-upload-status",

@@ -144,7 +144,9 @@ pub async fn upload_to_platform(
             platform_video_id.as_deref(),
             None,
         )),
-        social::UploadResultStatus::Processing if !result.job_id.is_empty() => {
+        social::UploadResultStatus::Processing | social::UploadResultStatus::InboxDelivered
+            if !result.job_id.is_empty() =>
+        {
             Some(("processing", None, None, None))
         }
         social::UploadResultStatus::Failed { error } => {

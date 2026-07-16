@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   isSuccessfulUploadHandoff,
+  isTikTokInboxDelivered,
   shouldOfferForcedReupload,
 } from '../src/lib/uploadStatus.ts'
 
@@ -23,4 +24,11 @@ test('completed and processing uploads remain successful handoffs', () => {
   assert.equal(isSuccessfulUploadHandoff('done'), true)
   assert.equal(isSuccessfulUploadHandoff('processing'), true)
   assert.equal(isSuccessfulUploadHandoff('error'), false)
+})
+
+test('only TikTok inbox delivery is classified as a draft handoff', () => {
+  assert.equal(isTikTokInboxDelivered('inbox_delivered'), true)
+  assert.equal(isTikTokInboxDelivered('processing'), false)
+  assert.equal(isTikTokInboxDelivered('complete'), false)
+  assert.equal(isTikTokInboxDelivered(undefined), false)
 })

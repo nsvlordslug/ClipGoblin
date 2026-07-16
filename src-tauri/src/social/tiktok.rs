@@ -448,6 +448,12 @@ impl PlatformAdapter for TikTokAdapter {
                     job_id: job_id.unwrap_or_default(),
                 });
             }
+            db::UploadClaim::InboxDelivered { job_id } => {
+                return Ok(UploadResult {
+                    status: UploadResultStatus::InboxDelivered,
+                    job_id: job_id.unwrap_or_default(),
+                });
+            }
             db::UploadClaim::Acquired => {}
         }
 
@@ -515,6 +521,22 @@ impl PlatformAdapter for TikTokAdapter {
                 status: UploadResultStatus::Processing,
                 job_id: publish_id,
             }),
+            Ok((publish_id, UploadResultStatus::InboxDelivered)) => {
+                let conn = db
+                    .lock()
+                    .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+                db::mark_upload_inbox_delivered(
+                    &conn,
+                    &meta.clip_id,
+                    "tiktok",
+                    &publish_id,
+                )
+                .map_err(|e| AppError::Database(e.to_string()))?;
+                Ok(UploadResult {
+                    status: UploadResultStatus::InboxDelivered,
+                    job_id: publish_id,
+                })
+            }
             Ok((publish_id, UploadResultStatus::Failed { error })) => {
                 let conn = db
                     .lock()
@@ -1166,7 +1188,12 @@ async fn fetch_publish_status_with_client(
 
     let json: serde_json::Value = serde_json::from_str(&body_text)
         .map_err(|e| AppError::Api(format!("TikTok publish status parse error: {}", e)))?;
-    publish_poll_result_from_json(&json)
+    let result = publish_poll_result_from_json(&json);
+    match &result {
+        Ok(status) => log::info!("TikTok publish status {}: {:?}", publish_id, status),
+        Err(error) => log::warn!("TikTok publish status {} failed: {}", publish_id, error),
+    }
+    result
 }
 
 pub(crate) async fn fetch_publish_status(
@@ -1213,7 +1240,7 @@ async fn poll_publish_status(
                     "TikTok delivered draft {} to the creator inbox",
                     publish_id
                 );
-                return UploadResultStatus::Processing;
+                return UploadResultStatus::InboxDelivered;
             }
             Err(error) => {
                 log::warn!(

@@ -340,6 +340,14 @@ impl PlatformAdapter for YouTubeAdapter {
                     job_id: job_id.unwrap_or_default(),
                 });
             }
+            db::UploadClaim::InboxDelivered { .. } => {
+                return Ok(UploadResult {
+                    status: UploadResultStatus::Duplicate {
+                        existing_url: None,
+                    },
+                    job_id: String::new(),
+                });
+            }
             db::UploadClaim::Acquired => {}
         }
 

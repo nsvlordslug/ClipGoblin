@@ -10,6 +10,7 @@ import type { TikTokComplianceValue } from '../lib/tiktokCompliance'
 import type { Clip } from '../types'
 import { errorMessage } from '../lib/errors'
 import { localDateTimeAfter } from '../lib/dateTime'
+import { isTikTokInboxDelivered } from '../lib/platformUpload'
 
 // ── Types ──
 
@@ -206,6 +207,39 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
     }))
   }, [])
 
+  useEffect(() => {
+    const unlisten = listen<{
+      platform: string
+      clip_id: string
+      phase: string
+      progress_pct?: number
+      error?: string
+      video_url?: string | null
+    }>('upload-status', event => {
+      const update = event.payload
+      if (!clipMapRef.current[update.clip_id]) return
+      if (update.phase === 'inbox_delivered') {
+        updateClipStatus(update.platform, update.clip_id, { status: 'done', draftHandoff: true })
+      } else if (update.phase === 'complete') {
+        updateClipStatus(update.platform, update.clip_id, {
+          status: 'done',
+          videoUrl: update.video_url || undefined,
+          acceptedWithoutLink: !update.video_url,
+        })
+      } else if (update.phase === 'failed') {
+        updateClipStatus(update.platform, update.clip_id, {
+          status: 'error',
+          error: update.error || 'Upload failed',
+        })
+      } else if (update.phase === 'processing') {
+        updateClipStatus(update.platform, update.clip_id, { status: 'processing' })
+      } else if (update.phase === 'uploading') {
+        updateClipStatus(update.platform, update.clip_id, { status: 'uploading' })
+      }
+    })
+    return () => { unlisten.then(stop => stop()) }
+  }, [updateClipStatus])
+
   /** Ensure a clip is exported, exporting it if needed. Returns the up-to-date clip. */
   const ensureExported = useCallback(async (clip: Clip, firstPlatform: string): Promise<Clip> => {
     // Check latest state — might have been exported in a previous iteration
@@ -303,11 +337,10 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
               : { status: 'duplicate' })
           } else if (result.status.status === 'failed') {
             updateClipStatus(platform, clip.id, { status: 'error', error: result.status.error })
+          } else if (isTikTokInboxDelivered(result.status.status)) {
+            updateClipStatus(platform, clip.id, { status: 'done', draftHandoff: true })
           } else if (result.status.status === 'processing') {
-            updateClipStatus(platform, clip.id,
-              platform === 'tiktok' && tiktokCompliance.publishMode === 'draft'
-                ? { status: 'done', draftHandoff: true }
-                : { status: 'processing' })
+            updateClipStatus(platform, clip.id, { status: 'processing' })
           } else {
             updateClipStatus(platform, clip.id, { status: 'uploading' })
           }

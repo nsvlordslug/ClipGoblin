@@ -946,6 +946,7 @@ fn default_upload_status() -> String {
 pub enum UploadClaim {
     Acquired,
     Completed { video_url: Option<String> },
+    InboxDelivered { job_id: Option<String> },
     InProgress { job_id: Option<String> },
 }
 
@@ -2312,6 +2313,11 @@ pub fn begin_upload(
                     job_id: existing.job_id,
                 });
             }
+            "inbox_delivered" if !force => {
+                return Ok(UploadClaim::InboxDelivered {
+                    job_id: existing.job_id,
+                });
+            }
             "completed" if !force => {
                 return Ok(UploadClaim::Completed {
                     video_url: existing.video_url,
@@ -2394,6 +2400,23 @@ pub fn mark_upload_complete(
     Ok(())
 }
 
+pub fn mark_upload_inbox_delivered(
+    conn: &Connection,
+    clip_id: &str,
+    platform: &str,
+    job_id: &str,
+) -> SqliteResult<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE upload_history SET status = 'inbox_delivered', job_id = ?3,
+                uploaded_at = COALESCE(uploaded_at, ?4), last_error = NULL,
+                updated_at = ?4
+         WHERE clip_id = ?1 AND platform = ?2",
+        params![clip_id, platform, job_id, now],
+    )?;
+    Ok(())
+}
+
 pub fn mark_upload_failed(
     conn: &Connection,
     clip_id: &str,
@@ -2417,7 +2440,8 @@ pub fn get_processing_uploads(
     let mut stmt = conn.prepare(
         "SELECT id, clip_id, platform, video_url, uploaded_at, status, job_id,
                 platform_video_id, last_error, updated_at
-         FROM upload_history WHERE platform = ?1 AND status = 'processing'",
+         FROM upload_history
+         WHERE platform = ?1 AND status IN ('processing', 'inbox_delivered')",
     )?;
     let rows = stmt.query_map(params![platform], upload_history_from_row)?;
     rows.collect()
@@ -3077,6 +3101,31 @@ mod tests {
         assert_eq!(
             edit_feedback[0].note.as_deref(),
             Some("setup and punchline are both clipped")
+        );
+    }
+
+    #[test]
+    fn inbox_delivery_is_persisted_deduplicated_and_still_reconcilable() {
+        let conn = fresh_db();
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+
+        assert_eq!(
+            begin_upload(&conn, "clip1", "tiktok", false).unwrap(),
+            UploadClaim::Acquired
+        );
+        mark_upload_processing(&conn, "clip1", "tiktok", "inbox-123").unwrap();
+        mark_upload_inbox_delivered(&conn, "clip1", "tiktok", "inbox-123").unwrap();
+
+        assert_eq!(
+            begin_upload(&conn, "clip1", "tiktok", false).unwrap(),
+            UploadClaim::InboxDelivered {
+                job_id: Some("inbox-123".to_string())
+            }
+        );
+        assert_eq!(get_processing_uploads(&conn, "tiktok").unwrap().len(), 1);
+        assert_eq!(
+            begin_upload(&conn, "clip1", "tiktok", true).unwrap(),
+            UploadClaim::Acquired
         );
     }
 

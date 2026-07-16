@@ -1,6 +1,6 @@
 import { EXPORT_PRESETS } from './editTypes'
 
-export { isSuccessfulUploadHandoff, shouldOfferForcedReupload } from './uploadStatus'
+export { isSuccessfulUploadHandoff, isTikTokInboxDelivered, shouldOfferForcedReupload } from './uploadStatus'
 
 const PLATFORM_PRESET_MAP: Record<string, string> = {
   tiktok: 'tiktok',

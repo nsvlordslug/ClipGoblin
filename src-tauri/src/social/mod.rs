@@ -70,6 +70,8 @@ pub enum UploadResultStatus {
     Uploading { progress_pct: u8 },
     #[serde(rename = "processing")]
     Processing,
+    #[serde(rename = "inbox_delivered")]
+    InboxDelivered,
     #[serde(rename = "complete")]
     Complete {
         video_url: Option<String>,
@@ -229,5 +231,11 @@ mod tests {
             serde_json::from_value::<TikTokPublishMode>(json).unwrap(),
             TikTokPublishMode::Draft
         );
+    }
+
+    #[test]
+    fn inbox_delivery_serializes_as_a_distinct_upload_status() {
+        let json = serde_json::to_value(UploadResultStatus::InboxDelivered).unwrap();
+        assert_eq!(json, serde_json::json!({ "status": "inbox_delivered" }));
     }
 }

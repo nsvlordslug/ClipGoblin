@@ -40,7 +40,7 @@ import { EMPTY_TIKTOK_COMPLIANCE } from '../lib/tiktokCompliance'
 import type { TikTokComplianceValue } from '../lib/tiktokCompliance'
 import { useScheduleStore } from '../stores/scheduleStore'
 import PlatformUploadSelector from '../components/PlatformUploadSelector'
-import { expandYouTubeSubFormat, getDefaultVisibility, getDefaultYouTubeSubFormat, getPresetForPlatform, isSuccessfulUploadHandoff, shouldOfferForcedReupload } from '../lib/platformUpload'
+import { expandYouTubeSubFormat, getDefaultVisibility, getDefaultYouTubeSubFormat, getPresetForPlatform, isSuccessfulUploadHandoff, isTikTokInboxDelivered, shouldOfferForcedReupload } from '../lib/platformUpload'
 import type { PlatformUploadState, YouTubeSubFormat } from '../lib/platformUpload'
 import { useEditorHistory } from '../hooks/useEditorHistory'
 import type { EditorSnapshot } from '../hooks/useEditorHistory'
@@ -141,6 +141,47 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
   const [platformVisibilities, setPlatformVisibilities] = useState<Record<string, string>>({})
   const [multiUploading, setMultiUploading] = useState(false)
 
+  useEffect(() => {
+    invoke<Array<{
+      platform: string
+      status: string
+      video_url: string | null
+      last_error: string | null
+    }>>('get_clip_upload_history', { clipId })
+      .then(rows => {
+        const tiktok = rows.find(row => row.platform === 'tiktok')
+        if (!tiktok) return
+        setPlatformStates(prev => {
+          if (prev.tiktok?.status === 'uploading') return prev
+          if (tiktok.status === 'inbox_delivered') {
+            return { ...prev, tiktok: { status: 'done', progress: 100, draftHandoff: true } }
+          }
+          if (tiktok.status === 'processing' || tiktok.status === 'uploading') {
+            return { ...prev, tiktok: { status: 'processing', progress: 100 } }
+          }
+          if (tiktok.status === 'failed') {
+            return {
+              ...prev,
+              tiktok: { status: 'error', progress: 0, error: tiktok.last_error || 'TikTok processing failed' },
+            }
+          }
+          if (tiktok.status === 'completed') {
+            return {
+              ...prev,
+              tiktok: {
+                status: 'done',
+                progress: 100,
+                videoUrl: tiktok.video_url || undefined,
+                acceptedWithoutLink: !tiktok.video_url,
+              },
+            }
+          }
+          return prev
+        })
+      })
+      .catch(() => {})
+  }, [clipId])
+
   // Schedule state
   const { schedule: scheduleUpload, getForClip: getScheduledForClip } = useScheduleStore()
   const [scheduleMode, setScheduleMode] = useState(false)
@@ -222,6 +263,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
     && platformStates.tiktok.acceptedWithoutLink === true
   const tiktokDraftHandoff = platformStates.tiktok?.status === 'done'
     && platformStates.tiktok.draftHandoff === true
+  const tiktokProcessing = platformStates.tiktok?.status === 'processing'
   const tiktokPreviouslyAccepted = platformStates.tiktok?.status === 'duplicate'
 
   // Build upload metadata — includes title from main field, caption, and hashtags
@@ -284,10 +326,10 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
           : { status: 'duplicate', progress: 100 }
       } else if (result.status.status === 'failed') {
         return { status: 'error', progress: 0, error: result.status.error }
+      } else if (isTikTokInboxDelivered(result.status.status)) {
+        return { status: 'done', progress: 100, draftHandoff: true }
       } else if (result.status.status === 'processing') {
-        return adapterPlatform === 'tiktok' && tiktokCompliance.publishMode === 'draft'
-          ? { status: 'done', progress: 100, draftHandoff: true }
-          : { status: 'processing', progress: 100 }
+        return { status: 'processing', progress: 100 }
       } else if (result.status.status === 'uploading') {
         return { status: 'uploading', progress: result.status.progress_pct }
       }
@@ -301,7 +343,14 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
   // processing phase). Only applies while a platform row is mid-upload, so stale
   // or cross-clip events can't clobber terminal states (done/error).
   useEffect(() => {
-    const unlisten = listen<{ platform: string; clip_id: string; phase: string; progress_pct?: number }>(
+    const unlisten = listen<{
+      platform: string
+      clip_id: string
+      phase: string
+      progress_pct?: number
+      error?: string
+      video_url?: string | null
+    }>(
       'upload-status',
       (e) => {
         const p = e.payload
@@ -309,6 +358,29 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
         setPlatformStates(prev => {
           const cur = prev[p.platform]
           if (!cur || (cur.status !== 'uploading' && cur.status !== 'processing')) return prev
+          if (p.phase === 'inbox_delivered') {
+            return {
+              ...prev,
+              [p.platform]: { status: 'done' as const, progress: 100, draftHandoff: true },
+            }
+          }
+          if (p.phase === 'complete') {
+            return {
+              ...prev,
+              [p.platform]: {
+                status: 'done' as const,
+                progress: 100,
+                videoUrl: p.video_url || undefined,
+                acceptedWithoutLink: !p.video_url,
+              },
+            }
+          }
+          if (p.phase === 'failed') {
+            return {
+              ...prev,
+              [p.platform]: { status: 'error' as const, progress: 0, error: p.error || 'Upload failed' },
+            }
+          }
           if (p.phase === 'processing') {
             return { ...prev, [p.platform]: { ...cur, status: 'processing' as const, progress: 100 } }
           }
@@ -575,6 +647,14 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
             onValidityChange={setTiktokComplianceValid}
             clipDurationSec={clipDuration}
           />
+        )}
+
+        {tiktokProcessing && (
+          <div role="status" className="border-l-2 border-cyan-400 bg-cyan-500/5 px-3 py-2 text-[11px] leading-relaxed text-cyan-100">
+            TikTok received the video and is still processing it. TikTok has not confirmed an
+            Inbox handoff or finished post yet. ClipGoblin will update this screen when TikTok
+            reports the next state. Do not upload another copy while waiting.
+          </div>
         )}
 
         {tiktokDraftHandoff && (

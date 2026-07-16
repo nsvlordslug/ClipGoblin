@@ -18,6 +18,7 @@ export interface UploadResult {
 export type UploadResultStatus =
   | { status: 'uploading'; progress_pct: number }
   | { status: 'processing' }
+  | { status: 'inbox_delivered' }
   | { status: 'complete'; video_url: string | null; platform_video_id: string | null }
   | { status: 'failed'; error: string }
   | { status: 'duplicate'; existing_url: string | null }
