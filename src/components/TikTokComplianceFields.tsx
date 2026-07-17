@@ -85,13 +85,8 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
   useEffect(() => {
     if (!info || seededRef.current) return
     seededRef.current = true
-    const privacyLevel = DIRECT_POST_AUDIT_PENDING
-      && info.privacy_level_options.includes('SELF_ONLY')
-      ? 'SELF_ONLY'
-      : value.privacyLevel
     onChange({
       ...value,
-      privacyLevel,
       disableComment: info.comment_disabled || value.disableComment,
       disableDuet: info.duet_disabled || value.disableDuet,
       disableStitch: info.stitch_disabled || value.disableStitch,

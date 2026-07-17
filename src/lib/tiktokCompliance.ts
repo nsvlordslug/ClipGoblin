@@ -14,9 +14,11 @@ export interface TikTokComplianceValue {
 export const EMPTY_TIKTOK_COMPLIANCE: TikTokComplianceValue = {
   publishMode: 'direct',
   privacyLevel: null,
-  disableComment: false,
-  disableDuet: false,
-  disableStitch: false,
+  // TikTok requires every interaction permission to start unchecked so the
+  // creator explicitly opts in before publishing.
+  disableComment: true,
+  disableDuet: true,
+  disableStitch: true,
   discloseContent: false,
   yourBrand: false,
   brandedContent: false,
