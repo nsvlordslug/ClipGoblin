@@ -11,7 +11,7 @@ import PublishComposer from '../components/PublishComposer'
 import type { PublishMetadata } from '../components/PublishComposer'
 import ClipPlayer from '../components/ClipPlayer'
 import { errorMessage } from '../lib/errors'
-import { filterAvailableMontageClips, montageSourceGroup } from '../lib/montage'
+import { filterAvailableMontageClips, montageSourceGroup, nextMontageClipId } from '../lib/montage'
 import type { MontageSourceFilter } from '../lib/montage'
 
 function fmt(s: number) {
@@ -42,7 +42,7 @@ export default function MontageBuilder() {
     title: '', description: '', hashtags: [], visibility: 'public',
   })
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null)
-  const [previewSrc, setPreviewSrc] = useState<string | null>(null)
+  const [previewMedia, setPreviewMedia] = useState<{ key: string; src: string } | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [clipSearch, setClipSearch] = useState('')
@@ -53,6 +53,7 @@ export default function MontageBuilder() {
   const [exportError, setExportError] = useState<string | null>(null)
   const [exportResult, setExportResult] = useState<MontageExportResult | null>(null)
   const [previewMode, setPreviewMode] = useState<'clip' | 'export'>('clip')
+  const [sequenceAutoPlay, setSequenceAutoPlay] = useState(false)
   const loadedProjectIdRef = useRef<string | null>(null)
 
   useEffect(() => { fetchClips(); fetchHighlights() }, [fetchClips, fetchHighlights])
@@ -76,6 +77,14 @@ export default function MontageBuilder() {
       : segment.endSeconds - segment.startSeconds)
   }, 0) || 0
   const selectedClip = selectedClipId ? clipById.get(selectedClipId) ?? null : null
+  const segmentClipIds = project?.segments.map(segment => segment.clipId) ?? []
+  const activeSegmentIndex = selectedClipId ? segmentClipIds.indexOf(selectedClipId) : -1
+  const currentPreviewKey = previewMode === 'export'
+    ? exportResult ? `export:${exportResult.outputPath}` : null
+    : selectedClip ? `clip:${selectedClip.id}` : null
+  const previewSrc = currentPreviewKey && previewMedia?.key === currentPreviewKey
+    ? previewMedia.src
+    : null
   const exportInputSignature = project
     ? `${project.id}|${project.exportPreset}|${project.title}|${project.segments.map(segment => {
         const clip = clipById.get(segment.clipId)
@@ -87,7 +96,8 @@ export default function MontageBuilder() {
     if (!project) return
     if (project.segments.length === 0) {
       setSelectedClipId(null)
-      setPreviewSrc(null)
+      setPreviewMedia(null)
+      setSequenceAutoPlay(false)
       return
     }
     if (!project.segments.some(segment => segment.clipId === selectedClipId)) {
@@ -112,6 +122,7 @@ export default function MontageBuilder() {
     setExportProgress(0)
     setExportStage('')
     setPreviewMode('clip')
+    setSequenceAutoPlay(false)
   }, [project])
 
   useEffect(() => {
@@ -119,6 +130,7 @@ export default function MontageBuilder() {
     setExportProgress(0)
     setExportStage('')
     setPreviewMode(mode => mode === 'export' ? 'clip' : mode)
+    setSequenceAutoPlay(false)
   }, [exportInputSignature])
 
   const handlePublishMetaChange = (next: PublishMetadata) => {
@@ -145,18 +157,23 @@ export default function MontageBuilder() {
   useEffect(() => {
     if (previewMode === 'export') {
       setPreviewLoading(false)
-      setPreviewSrc(exportResult ? convertFileSrc(exportResult.outputPath) : null)
+      setPreviewMedia(exportResult ? {
+        key: `export:${exportResult.outputPath}`,
+        src: convertFileSrc(exportResult.outputPath),
+      } : null)
       setPreviewError(null)
       return
     }
     if (!selectedClip) {
       setPreviewLoading(false)
-      setPreviewSrc(null)
+      setPreviewMedia(null)
       setPreviewError(null)
       return
     }
 
     let cancelled = false
+    const mediaKey = `clip:${selectedClip.id}`
+    setPreviewMedia(current => current?.key === mediaKey ? current : null)
     setPreviewLoading(true)
     setPreviewError(null)
     ;(async () => {
@@ -171,10 +188,10 @@ export default function MontageBuilder() {
           path = vod.local_path
         }
         if (!path) throw new Error('The source video is not available on this PC.')
-        if (!cancelled) setPreviewSrc(convertFileSrc(path))
+        if (!cancelled) setPreviewMedia({ key: mediaKey, src: convertFileSrc(path) })
       } catch (error) {
         if (!cancelled) {
-          setPreviewSrc(null)
+          setPreviewMedia(null)
           setPreviewError(errorMessage(error, 'Could not load this clip preview'))
         }
       } finally {
@@ -232,8 +249,26 @@ export default function MontageBuilder() {
       endSeconds: clip.end_seconds,
       thumbnailPath: clip.thumbnail_path,
     })
-    setSelectedClipId(clip.id)
+    if (project.segments.length === 0) setSelectedClipId(clip.id)
+    setSequenceAutoPlay(false)
     setPreviewMode('clip')
+  }
+
+  const selectSequenceClip = (clipId: string) => {
+    setSequenceAutoPlay(false)
+    setSelectedClipId(clipId)
+    setPreviewMode('clip')
+  }
+
+  const handleSequenceEnded = () => {
+    const nextClipId = nextMontageClipId(segmentClipIds, selectedClipId)
+    if (nextClipId) {
+      setSequenceAutoPlay(true)
+      setSelectedClipId(nextClipId)
+      return
+    }
+    setSequenceAutoPlay(false)
+    setSelectedClipId(segmentClipIds[0] ?? null)
   }
 
   const handleCreateProject = () => {
@@ -274,6 +309,7 @@ export default function MontageBuilder() {
       setExportResult(result)
       setExportProgress(100)
       setExportStage('Montage ready')
+      setSequenceAutoPlay(false)
       setPreviewMode('export')
     } catch (error) {
       setExportError(errorMessage(error, 'Montage export failed'))
@@ -418,20 +454,31 @@ export default function MontageBuilder() {
         {/* ── Middle: Preview + Sequence + Timeline ── */}
         <div className="v4-montage-col">
           <div className="flex items-center justify-between gap-2">
-            <h4>{previewMode === 'export' ? 'Finished montage' : 'Selected clip'} · {fmt(totalDuration)} total</h4>
+            <h4>
+              {previewMode === 'export'
+                ? 'Finished montage'
+                : project.segments.length > 0
+                  ? `Montage preview · clip ${Math.max(1, activeSegmentIndex + 1)} of ${project.segments.length}`
+                  : 'Montage preview'}
+              {' '}· {fmt(totalDuration)} total
+            </h4>
             {exportResult && (
               <button
                 type="button"
                 className="text-[10px] text-violet-300 hover:text-white cursor-pointer mb-3"
-                onClick={() => setPreviewMode(mode => mode === 'export' ? 'clip' : 'export')}
+                onClick={() => {
+                  setSequenceAutoPlay(false)
+                  setPreviewMode(mode => mode === 'export' ? 'clip' : 'export')
+                }}
               >
-                {previewMode === 'export' ? 'Show selected clip' : 'Show finished montage'}
+                {previewMode === 'export' ? 'Show sequence preview' : 'Show finished montage'}
               </button>
             )}
           </div>
           <div className={`v4-montage-preview ${previewSrc ? 'has-media' : ''}`}>
             {previewSrc ? (
               <ClipPlayer
+                key={currentPreviewKey || 'montage-preview'}
                 src={previewSrc}
                 poster={previewPoster}
                 clipStart={previewStart}
@@ -441,10 +488,15 @@ export default function MontageBuilder() {
                 controlsOverlay
                 className="h-full w-full"
                 objectFit="contain"
+                autoPlay={previewMode === 'clip' && sequenceAutoPlay}
+                onPlayChange={playing => {
+                  if (playing && sequenceAutoPlay) setSequenceAutoPlay(false)
+                }}
+                onEnded={previewMode === 'clip' ? handleSequenceEnded : undefined}
               />
             ) : (
               <div className="relative z-[1] px-5 text-center text-xs text-slate-400">
-                {project.segments.length === 0 ? 'Add a clip to begin.' : 'Select a clip to preview it.'}
+                {project.segments.length === 0 ? 'Add a clip to begin.' : 'Preparing sequence preview.'}
               </div>
             )}
             {previewLoading && (
@@ -474,7 +526,7 @@ export default function MontageBuilder() {
                   key={seg.clipId}
                   className={`v4-tl-clip v4-clip-thumb ${['a','b','c','d','e','f','g','h'][i % 8]} ${selectedClipId === seg.clipId && previewMode === 'clip' ? 'selected' : ''}`}
                   title={seg.clipTitle}
-                  onClick={() => { setSelectedClipId(seg.clipId); setPreviewMode('clip') }}
+                  onClick={() => selectSequenceClip(seg.clipId)}
                 >
                   <span className="relative z-[1]">{String.fromCharCode(65 + (i % 26))} · {fmt((clipById.get(seg.clipId)?.end_seconds || seg.endSeconds) - (clipById.get(seg.clipId)?.start_seconds || seg.startSeconds))}</span>
                 </button>
@@ -489,7 +541,7 @@ export default function MontageBuilder() {
                 <div
                   key={seg.clipId}
                   className={`flex items-center gap-3 p-2 rounded-lg group cursor-pointer ${selectedClipId === seg.clipId && previewMode === 'clip' ? 'bg-violet-500/10' : 'hover:bg-surface-800/60'}`}
-                  onClick={() => { setSelectedClipId(seg.clipId); setPreviewMode('clip') }}
+                  onClick={() => selectSequenceClip(seg.clipId)}
                 >
                   <div className="flex flex-col gap-0.5 shrink-0">
                     <button onClick={event => { event.stopPropagation(); handleMoveUp(idx) }} disabled={exporting || idx === 0}

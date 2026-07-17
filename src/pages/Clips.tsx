@@ -270,7 +270,6 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, on
 
   const handleClick = () => {
     if (selectMode) onToggleSelect()
-    else ensureSrc()
   }
 
   const isViral = confidence !== null && confidence >= 0.9
@@ -283,7 +282,7 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, on
           ? '!border-violet-500 ring-1 ring-violet-500/30'
           : ''
       } ${reviewExpanded ? 'review-open !border-violet-500/60' : ''} ${selectMode ? 'cursor-pointer' : ''}`}
-      onClick={handleClick}
+      onClick={selectMode ? handleClick : undefined}
     >
       {selectMode && (
         <div className="absolute top-2 left-2 z-10">
@@ -304,6 +303,7 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, on
           mode="compact"
           className="w-full h-full"
           objectFit="contain"
+          onRequestSource={selectMode ? undefined : ensureSrc}
         />
         {preparingPreview && (
           <div className="absolute inset-0 z-10 flex items-center justify-center gap-2 bg-black/70 text-xs text-slate-200">

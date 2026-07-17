@@ -35,6 +35,12 @@ interface Props {
   overlay?: React.ReactNode
   /** Called when playback state changes */
   onPlayChange?: (playing: boolean) => void
+  /** Called before playback when the parent still needs to prepare a local media URL. */
+  onRequestSource?: () => void | Promise<void>
+  /** Called once when playback reaches the end of this clip window. */
+  onEnded?: () => void
+  /** Start playback after a newly supplied source has loaded. */
+  autoPlay?: boolean
   /** Called on each time update with the ABSOLUTE video time (not clip-relative) */
   onTimeUpdate?: (absoluteTime: number) => void
   /** Render controls overlaid on the video instead of below it */
@@ -61,7 +67,8 @@ interface Props {
 
 export default function ClipPlayer({
   src, poster, clipStart, clipEnd, mode = 'compact', className = '', overlay,
-  controlsOverlay = false, onPlayChange, onTimeUpdate, seekRef: externalSeekRef,
+  controlsOverlay = false, onPlayChange, onRequestSource, onEnded, autoPlay = false,
+  onTimeUpdate, seekRef: externalSeekRef,
   objectFit = 'cover', blurBackground = false, blackBackground = false, backgroundMedia = null,
   backgroundBlurStrength = 0.25, objectPositionY = 0.5, videoElementRef, fullFile = false,
 }: Props) {
@@ -78,11 +85,19 @@ export default function ClipPlayer({
   // listener on every parent render (the callback fires on every video frame)
   const onTimeUpdateRef = useRef(onTimeUpdate)
   const onPlayChangeRef = useRef(onPlayChange)
+  const onRequestSourceRef = useRef(onRequestSource)
+  const onEndedRef = useRef(onEnded)
+  const autoPlayRef = useRef(autoPlay)
+  const pendingPlayRef = useRef(false)
+  const completedRef = useRef(false)
 
   useEffect(() => {
     onTimeUpdateRef.current = onTimeUpdate
     onPlayChangeRef.current = onPlayChange
-  }, [onPlayChange, onTimeUpdate])
+    onRequestSourceRef.current = onRequestSource
+    onEndedRef.current = onEnded
+    autoPlayRef.current = autoPlay
+  }, [autoPlay, onEnded, onPlayChange, onRequestSource, onTimeUpdate])
 
   const [loaded, setLoaded] = useState(false)
   const [playing, setPlaying] = useState(false)
@@ -154,6 +169,7 @@ export default function ClipPlayer({
       setError('')
       setPlaying(false)
       setFileDuration(0)
+      completedRef.current = false
     }
     const onMeta = () => {
       if (fullFileRef.current) {
@@ -167,6 +183,13 @@ export default function ClipPlayer({
         setCurrentTime(clipStartRef.current)
       }
       setLoaded(true)
+      if (pendingPlayRef.current || autoPlayRef.current) {
+        pendingPlayRef.current = false
+        completedRef.current = false
+        video.play()
+          .then(() => setPlayingState(true))
+          .catch(() => setError(PLAYBACK_FAILED_MSG))
+      }
     }
     const onErr = () => {
       const mediaErr = video.error
@@ -195,7 +218,7 @@ export default function ClipPlayer({
       video.removeEventListener('loadedmetadata', onMeta)
       video.removeEventListener('error', onErr)
     }
-  }, [src])
+  }, [setPlayingState, src])
 
   // ── Time tracking + boundary enforcement ──
   useEffect(() => {
@@ -252,10 +275,13 @@ export default function ClipPlayer({
       drawBlurBackground()
       const time = video.currentTime
       if (time >= effClipEnd) {
+        if (completedRef.current) return
+        completedRef.current = true
         video.pause()
         video.currentTime = effClipStart
         reportTime(effClipStart, true)
         setPlayingState(false)
+        onEndedRef.current?.()
         return
       }
       reportTime(time, force)
@@ -287,13 +313,17 @@ export default function ClipPlayer({
       }
     }
 
-    const onPlay = () => scheduleFrame()
+    const onPlay = () => {
+      completedRef.current = false
+      scheduleFrame()
+    }
     const onPause = () => {
       cancelScheduledFrame()
       syncPlaybackTime(true)
     }
     const onTime = () => syncPlaybackTime()
     const onSeek = () => syncPlaybackTime(true)
+    const onEnded = () => syncPlaybackTime(true)
     const onLoadedData = () => drawBlurBackground()
     const resizeObserver = typeof ResizeObserver === 'undefined'
       ? null
@@ -304,6 +334,7 @@ export default function ClipPlayer({
     video.addEventListener('timeupdate', onTime)
     video.addEventListener('seeking', onSeek)
     video.addEventListener('seeked', onSeek)
+    video.addEventListener('ended', onEnded)
     video.addEventListener('loadeddata', onLoadedData)
     if (backgroundCanvasRef.current) resizeObserver?.observe(backgroundCanvasRef.current)
     drawBlurBackground()
@@ -317,6 +348,7 @@ export default function ClipPlayer({
       video.removeEventListener('timeupdate', onTime)
       video.removeEventListener('seeking', onSeek)
       video.removeEventListener('seeked', onSeek)
+      video.removeEventListener('ended', onEnded)
       video.removeEventListener('loadeddata', onLoadedData)
       resizeObserver?.disconnect()
     }
@@ -351,13 +383,15 @@ export default function ClipPlayer({
     if (!video) return
 
     if (!loaded) {
-      // First click — wait for metadata
-      const onReady = () => {
-        video.currentTime = effClipStart
-        video.play().then(() => setPlayingState(true)).catch(() => setError(PLAYBACK_FAILED_MSG))
+      pendingPlayRef.current = true
+      if (!src && onRequestSourceRef.current) {
+        try {
+          await onRequestSourceRef.current()
+        } catch {
+          pendingPlayRef.current = false
+          setError(PLAYBACK_FAILED_MSG)
+        }
       }
-      if (video.readyState >= 1) onReady()
-      else video.addEventListener('loadedmetadata', onReady, { once: true })
       return
     }
 
@@ -365,16 +399,18 @@ export default function ClipPlayer({
       video.pause()
       setPlayingState(false)
     } else {
+      completedRef.current = false
       if ((effClipEnd < Number.MAX_SAFE_INTEGER && video.currentTime >= effClipEnd - 0.5) || video.currentTime < effClipStart) {
         video.currentTime = effClipStart
       }
       video.play().then(() => setPlayingState(true)).catch(() => setError(PLAYBACK_FAILED_MSG))
     }
-  }, [loaded, playing, error, effClipStart, effClipEnd, setPlayingState])
+  }, [loaded, playing, error, effClipStart, effClipEnd, setPlayingState, src])
 
   const restart = () => {
     const video = videoRef.current
     if (!video || !loaded) return
+    completedRef.current = false
     video.currentTime = effClipStart
     setCurrentTime(effClipStart)
     video.play().then(() => setPlayingState(true)).catch(() => {})
@@ -561,9 +597,43 @@ export default function ClipPlayer({
               </div>
             </div>
           ) : (
-            <button onClick={toggleMute} className="shrink-0 p-0.5 rounded text-slate-500 hover:text-white transition-colors cursor-pointer" title={muted ? 'Unmute' : 'Mute'}>
-              {muted || volume === 0 ? <VolumeX className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
-            </button>
+            <div
+              className="relative shrink-0"
+              onMouseEnter={() => setShowVolume(true)}
+              onMouseLeave={() => { if (!draggingVol) setShowVolume(false) }}
+            >
+              <button
+                onClick={toggleMute}
+                className="p-0.5 rounded text-slate-500 hover:text-white transition-colors cursor-pointer"
+                title={`${muted ? 'Unmute' : 'Mute'} (hover to adjust volume)`}
+                aria-label={`${muted ? 'Unmute' : 'Mute'}; hover to adjust volume`}
+              >
+                {muted || volume === 0 ? <VolumeX className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
+              </button>
+              <div
+                className={`absolute bottom-full right-0 z-30 w-28 rounded-md border border-surface-600 bg-surface-900 px-2.5 py-2 shadow-xl transition-opacity ${showVolume || draggingVol ? 'visible opacity-100' : 'invisible opacity-0'}`}
+              >
+                <div className="flex items-center gap-2">
+                  <div
+                    ref={volRef}
+                    className="relative h-1.5 flex-1 cursor-pointer rounded-full bg-surface-600 group/vol"
+                    onMouseDown={onVolDown}
+                    role="slider"
+                    aria-label="Clip volume"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={Math.round((muted ? 0 : volume) * 100)}
+                  >
+                    <div className="relative h-full rounded-full bg-violet-400" style={{ width: `${(muted ? 0 : volume) * 100}%` }}>
+                      <div className="absolute right-0 top-1/2 h-2.5 w-2.5 -translate-y-1/2 rounded-full bg-white shadow opacity-0 transition-opacity group-hover/vol:opacity-100" />
+                    </div>
+                  </div>
+                  <span className="w-7 text-right text-[9px] tabular-nums text-slate-400">
+                    {Math.round((muted ? 0 : volume) * 100)}%
+                  </span>
+                </div>
+              </div>
+            </div>
           )}
         </div>
       )}

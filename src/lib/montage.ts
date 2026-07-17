@@ -26,3 +26,11 @@ export function filterAvailableMontageClips(
       || (clip.game || '').toLocaleLowerCase().includes(normalizedSearch)
   })
 }
+
+export function nextMontageClipId(clipIds: string[], currentClipId: string | null): string | null {
+  if (clipIds.length === 0) return null
+  const currentIndex = currentClipId ? clipIds.indexOf(currentClipId) : -1
+  return currentIndex >= 0 && currentIndex < clipIds.length - 1
+    ? clipIds[currentIndex + 1]
+    : null
+}

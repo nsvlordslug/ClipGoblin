@@ -252,7 +252,7 @@ export default function HelpGuide() {
             Medal imports use their game-folder label. Publishing copy can also infer known games from saved metadata, titles, tags, and transcript clues. Twitch does not provide reliable historical game data for every VOD, so click <b>Set game</b> on a VOD when it is missing or wrong; that correction applies to its clips.
           </FaqItem>}
           {matchesSearch('montage compilation combine clips export sequence') && <FaqItem q="How do I combine clips into a montage?">
-            Open Montage, create or select a project, then click clips in the library to add them. Use the arrows to set their order, choose YouTube 16:9 or Shorts 9:16, and click Export Montage. ClipGoblin applies each clip's saved editor settings before joining them and stores the finished MP4 in the export folder.
+            Open Montage, create or select a project, then click clips in the library to add them. The preview automatically continues through the ordered sequence. Use the arrows to reorder it, choose YouTube 16:9 or Shorts 9:16, and click Export Montage. ClipGoblin applies each clip's saved editor settings before joining them and stores the finished MP4 in the export folder.
           </FaqItem>}
           {matchesSearch('tiktok accepted private delayed missing lock tab processing') && <FaqItem q='TikTok says "Accepted," but where is my clip?'>
             Accepted means TikTok received the upload; it does not mean processing is finished. Private posts do not return a public link and may take several minutes to appear. Check Profile → Private (the lock tab) in the TikTok mobile app, and do not upload another copy while the app still shows Accepted.
@@ -344,7 +344,7 @@ export default function HelpGuide() {
               <HelpSection key="montage" icon="🎬" title="Build a montage" defaultOpen>
                 <p><span className="text-white font-medium">1. Save clip edits</span> — Finish each clip's trim, layout, branding, and captions in the Editor before adding it. Montage export uses the latest saved settings.</p>
                 <p><span className="text-white font-medium">2. Create a project</span> — Open Montage and use New when you want a separate compilation. Projects and their clip order are saved on this PC.</p>
-                <p><span className="text-white font-medium">3. Find clips</span> — Search by title or game and filter by Twitch, Medal, OBS, Meld, or Local. Click a clip to add it; click a timeline or sequence item to preview it.</p>
+                <p><span className="text-white font-medium">3. Find clips</span> — Search by title or game and filter by Twitch, Medal, OBS, Meld, or Local. Click a clip to add it. Playing the preview continues through every following clip; select a timeline or sequence item to start from that point.</p>
                 <p><span className="text-white font-medium">4. Set the sequence</span> — Use the up/down arrows to reorder clips. Edit opens the source clip without removing it from the project.</p>
                 <p><span className="text-white font-medium">5. Choose a format</span> — YouTube 16:9 creates a 1920×1080 compilation. Shorts 9:16 creates a 1080×1920 vertical compilation. Mixed source sizes are fitted safely instead of stretching.</p>
                 <p><span className="text-white font-medium">6. Export</span> — Click Export Montage and leave ClipGoblin open while it renders. The progress display advances clip by clip, then joins the sequence. When it finishes, replay the full output or open its folder.</p>

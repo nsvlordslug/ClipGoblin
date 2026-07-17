@@ -15,6 +15,7 @@ use crate::social::{
     validate_export_file, ConnectedAccount, PlatformAdapter, TikTokPublishMode, UploadMeta,
     UploadResult, UploadResultStatus,
 };
+use base64::Engine;
 use once_cell::sync::Lazy;
 use rusqlite::Connection;
 use serde::Deserialize;
@@ -51,6 +52,7 @@ pub(crate) fn video_stats_enabled() -> bool {
 }
 
 const AUTH_TIMEOUT_SECS: u64 = 120;
+const MAX_CREATOR_AVATAR_BYTES: usize = 512 * 1024;
 
 /// 5 MB per chunk for uploads.
 const UPLOAD_CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10 MB per chunk for large files
@@ -732,6 +734,82 @@ pub struct TikTokCreatorInfo {
     pub max_video_post_duration_sec: u64,
 }
 
+fn is_trusted_creator_avatar_url(raw_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(raw_url) else {
+        return false;
+    };
+    if url.scheme() != "https" {
+        return false;
+    }
+    let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    [
+        "tiktokcdn.com",
+        "tiktokcdn-us.com",
+        "tiktokcdn-eu.com",
+    ]
+    .iter()
+    .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+}
+
+async fn creator_avatar_data_url(raw_url: &str) -> Option<String> {
+    if !is_trusted_creator_avatar_url(raw_url) {
+        log::warn!("TikTok returned an untrusted creator avatar URL");
+        return None;
+    }
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let mut response = client.get(raw_url).send().await.ok()?;
+    if !response.status().is_success() {
+        log::warn!(
+            "TikTok creator avatar returned HTTP {}",
+            response.status()
+        );
+        return None;
+    }
+
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| {
+            matches!(
+                *value,
+                "image/jpeg" | "image/png" | "image/webp" | "image/gif" | "image/avif"
+            )
+        })?
+        .to_string();
+
+    if response.content_length().is_some_and(|size| size > MAX_CREATOR_AVATAR_BYTES as u64) {
+        log::warn!("TikTok creator avatar exceeded the size limit");
+        return None;
+    }
+
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if bytes.len() + chunk.len() > MAX_CREATOR_AVATAR_BYTES {
+            log::warn!("TikTok creator avatar exceeded the size limit");
+            return None;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "data:{content_type};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
 /// Fetch the full creator_info for the compliance panel. Unlike
 /// `query_creator_info` (upload path, only needs the privacy list and is
 /// non-fatal), this surfaces errors to the UI so the publish screen can tell
@@ -780,11 +858,19 @@ pub async fn fetch_creator_info(access_token: &str) -> Result<TikTokCreatorInfo,
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let remote_avatar_url = data["creator_avatar_url"].as_str().unwrap_or("").to_string();
+    let creator_avatar_url = if remote_avatar_url.is_empty() {
+        String::new()
+    } else {
+        creator_avatar_data_url(&remote_avatar_url)
+            .await
+            .unwrap_or(remote_avatar_url)
+    };
 
     Ok(TikTokCreatorInfo {
         creator_nickname: data["creator_nickname"].as_str().unwrap_or("").to_string(),
         creator_username: data["creator_username"].as_str().unwrap_or("").to_string(),
-        creator_avatar_url: data["creator_avatar_url"].as_str().unwrap_or("").to_string(),
+        creator_avatar_url,
         privacy_level_options,
         comment_disabled: data["comment_disabled"].as_bool().unwrap_or(false),
         duet_disabled: data["duet_disabled"].as_bool().unwrap_or(false),
@@ -1268,6 +1354,25 @@ mod error_message_tests {
     fn oauth_scopes_match_the_approved_live_app() {
         assert_eq!(SCOPES, "user.info.basic,video.publish,video.upload");
         assert!(!video_stats_enabled());
+    }
+
+    #[test]
+    fn creator_avatar_proxy_only_accepts_tiktok_https_cdn_urls() {
+        assert!(is_trusted_creator_avatar_url(
+            "https://p16-sign-va.tiktokcdn.com/avatar.jpeg?x-expires=123"
+        ));
+        assert!(is_trusted_creator_avatar_url(
+            "https://p16-sign.tiktokcdn-us.com/avatar.webp"
+        ));
+        assert!(!is_trusted_creator_avatar_url(
+            "http://p16-sign-va.tiktokcdn.com/avatar.jpeg"
+        ));
+        assert!(!is_trusted_creator_avatar_url(
+            "https://tiktokcdn.com.example.com/avatar.jpeg"
+        ));
+        assert!(!is_trusted_creator_avatar_url(
+            "https://127.0.0.1/avatar.jpeg"
+        ));
     }
 
     #[test]

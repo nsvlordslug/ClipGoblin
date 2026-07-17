@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { filterAvailableMontageClips, montageSourceGroup } from '../src/lib/montage.ts'
+import { filterAvailableMontageClips, montageSourceGroup, nextMontageClipId } from '../src/lib/montage.ts'
 import type { Clip } from '../src/types.ts'
 
 function clip(id: string, sourceKind: string, title: string, game: string | null = null): Clip {
@@ -60,4 +60,13 @@ test('montage filtering excludes selected clips and searches title or game', () 
     filterAvailableMontageClips(clips, [], 'all', 'dead by daylight').map(item => item.id),
     ['one', 'three'],
   )
+})
+
+test('montage preview advances in order and stops after the final clip', () => {
+  const sequence = ['one', 'two', 'three']
+  assert.equal(nextMontageClipId(sequence, 'one'), 'two')
+  assert.equal(nextMontageClipId(sequence, 'two'), 'three')
+  assert.equal(nextMontageClipId(sequence, 'three'), null)
+  assert.equal(nextMontageClipId(sequence, 'missing'), null)
+  assert.equal(nextMontageClipId([], null), null)
 })
