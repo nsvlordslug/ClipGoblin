@@ -61,6 +61,7 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [avatarFailed, setAvatarFailed] = useState(false)
+  const [avatarLoaded, setAvatarLoaded] = useState(false)
   const seededRef = useRef(false)
 
   // Fetch creator_info on mount (refreshes the token backend-side).
@@ -76,6 +77,7 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
 
   useEffect(() => {
     setAvatarFailed(false)
+    setAvatarLoaded(false)
   }, [info?.creator_avatar_url])
 
   // Once info loads, force the account's interaction restrictions into the value
@@ -145,17 +147,22 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
     <div className="space-y-3 border border-surface-600 rounded-lg p-3 bg-surface-900/40">
       {/* Posting as */}
       <div className="flex items-center gap-2">
-        {info.creator_avatar_url && !avatarFailed
-          ? <img
+        <div className="relative flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-surface-700 text-slate-400">
+          {!avatarLoaded && <UserRound className="h-3.5 w-3.5" aria-hidden="true" />}
+          {info.creator_avatar_url && !avatarFailed && (
+            <img
               src={info.creator_avatar_url}
               alt=""
               referrerPolicy="no-referrer"
-              onError={() => setAvatarFailed(true)}
-              className="w-6 h-6 rounded-full object-cover shrink-0"
+              onLoad={() => setAvatarLoaded(true)}
+              onError={() => {
+                setAvatarLoaded(false)
+                setAvatarFailed(true)
+              }}
+              className={`absolute inset-0 h-full w-full object-cover ${avatarLoaded ? 'block' : 'invisible'}`}
             />
-          : <div className="w-6 h-6 rounded-full bg-surface-700 text-slate-400 flex items-center justify-center shrink-0">
-              <UserRound className="w-3.5 h-3.5" aria-hidden="true" />
-            </div>}
+          )}
+        </div>
         <span className="text-xs text-slate-300">
           Posting to TikTok as{' '}
           <span className="font-semibold text-white">
