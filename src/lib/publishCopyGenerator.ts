@@ -1247,6 +1247,114 @@ const LOCAL_SIMILARITY_STOP_WORDS = new Set([
   'what', 'when', 'with', 'you', 'your',
 ])
 
+const GENERIC_LOCAL_ANCHOR = /^(?:this moment|this play|stream moment|gaming moment|something happened|a moment hit|check this out)$/i
+
+function cleanCaptionAnchor(value: string | undefined, maxChars = 150): string {
+  const cleaned = (value || '').replace(/\s+/g, ' ').trim().replace(/[.!?]+$/, '')
+  if (cleaned.length <= maxChars) return cleaned
+
+  const prefix = cleaned.slice(0, maxChars - 3)
+  const boundary = prefix.lastIndexOf(' ')
+  return `${(boundary > maxChars / 2 ? prefix.slice(0, boundary) : prefix).trim()}...`
+}
+
+function capitalizeCaption(value: string): string {
+  const index = value.search(/[a-z]/i)
+  if (index < 0) return value
+  return value.slice(0, index) + value.charAt(index).toUpperCase() + value.slice(index + 1)
+}
+
+function captionSentence(value: string): string {
+  const cleaned = capitalizeCaption(cleanCaptionAnchor(value))
+  if (!cleaned) return ''
+  return /[.!?]["')\]]?$/.test(cleaned) ? cleaned : `${cleaned}.`
+}
+
+function limitCaption(value: string, maxChars = 240): string {
+  const cleaned = value.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim()
+  if (cleaned.length <= maxChars) return cleaned
+
+  const prefix = cleaned.slice(0, maxChars - 3)
+  const boundary = prefix.lastIndexOf(' ')
+  return `${(boundary > maxChars / 2 ? prefix.slice(0, boundary) : prefix).trim()}...`
+}
+
+function groundedCaptionCandidates(
+  ctx: ClipContext,
+  tone: CopyTone,
+  action: string,
+  quote: string | null,
+): string[] {
+  const summary = cleanCaptionAnchor(ctx.eventSummary)
+  const title = cleanCaptionAnchor(ctx.title)
+  const actionAnchor = cleanCaptionAnchor(action)
+  const anchor = [summary, actionAnchor, title]
+    .find(candidate => candidate.length >= 5 && !GENERIC_LOCAL_ANCHOR.test(candidate))
+    || actionAnchor
+    || title
+    || 'Stream highlight'
+  const event = captionSentence(anchor)
+  const gameEvent = ctx.game && !anchor.toLowerCase().includes(ctx.game.toLowerCase())
+    ? captionSentence(`${anchor} in ${ctx.game}`)
+    : event
+  const spoken = quote ? `"${capitalizeCaption(cleanCaptionAnchor(quote, 80))}"` : ''
+
+  const candidates: string[] = []
+  const add = (caption: string) => {
+    const limited = limitCaption(caption)
+    if (limited && !candidates.includes(limited)) candidates.push(limited)
+  }
+
+  switch (tone) {
+    case 'funny':
+      add(`${event} I really thought that would go differently.`)
+      add(`${event} That confidence did not survive the outcome.`)
+      if (spoken) add(`${event} My last confident words were ${spoken}.`)
+      break
+    case 'hype':
+      add(gameEvent)
+      add(`${event} The payoff is the whole clip.`)
+      if (spoken) add(`${event} ${spoken} says the rest.`)
+      break
+    case 'search':
+      add(gameEvent)
+      add(ctx.game ? captionSentence(`${ctx.game}: ${anchor}`) : event)
+      break
+    case 'minimal':
+      add(event)
+      break
+    case 'direct_quote':
+      if (spoken) add(`${spoken}. ${event}`)
+      add(event)
+      break
+    case 'blame':
+      add(`${event} I am blaming ${ctx.game || 'the game'} for that one.`)
+      add(`${event} Somehow this is ${ctx.game || 'the game'}'s fault.`)
+      break
+    case 'internal_thought':
+      add(`${event} I am still replaying that decision.`)
+      add(`${event} I knew where this was going and still committed.`)
+      break
+    case 'observation':
+      add(event)
+      add(`${event} The setup makes the outcome even better.`)
+      break
+    case 'clean':
+      add(gameEvent)
+      add(event)
+      if (spoken) add(`${event} ${spoken}.`)
+      break
+    case 'punchy':
+    default:
+      add(event)
+      add(gameEvent)
+      if (spoken) add(`${event} ${spoken}.`)
+      break
+  }
+
+  return candidates
+}
+
 /**
  * Generate a standalone caption from the template pool.
  * Uses game, transcript, content type, and tone to produce a platform-ready caption.
@@ -1273,10 +1381,11 @@ export function generateStandaloneCaption(
   const activePool = pool && pool.length > 0 ? pool : CAPTION_POOLS.punchy
 
   const tctx = { game: ctx.game, quote: quote || undefined, action, ctype, title: ctx.title || undefined }
+  const localGrounded = groundedCaptionCandidates(ctx, tone, action, quote)
   const uniqueCandidates = [...new Set(
-    activePool
+    [...localGrounded, ...activePool
       .map(template => template(tctx).trim())
-      .filter(Boolean),
+      .filter(Boolean)],
   )]
 
   const normalizeCaption = (caption: string) => caption.trim().replace(/\s+/g, ' ').toLowerCase()
@@ -1301,8 +1410,9 @@ export function generateStandaloneCaption(
   const score = (candidate: string): number => {
     const lower = candidate.toLowerCase()
     let relevance = 0
-    if (quote && lower.includes(quote.toLowerCase())) relevance += 6
-    if (action.length >= 5 && lower.includes(action.toLowerCase())) relevance += 5
+    const actionIsSpecific = action.length >= 5 && !GENERIC_LOCAL_ANCHOR.test(action)
+    if (actionIsSpecific && lower.includes(action.toLowerCase())) relevance += 8
+    if (quote && lower.includes(quote.toLowerCase())) relevance += 5
     if (ctx.game && lower.includes(ctx.game.toLowerCase())) relevance += 1
     if (ctx.title && ctx.title.length >= 5 && lower.includes(ctx.title.toLowerCase())) relevance += 1
     return relevance
@@ -1311,8 +1421,10 @@ export function generateStandaloneCaption(
   const ranked = uniqueCandidates
     .map((caption, index) => ({ caption, index, relevance: score(caption) }))
     .sort((left, right) => right.relevance - left.relevance || left.index - right.index)
-  const grounded = ranked.filter(candidate => candidate.relevance >= 4)
-  const preferred = grounded.length > 0 ? grounded : ranked
+  const grounded = ranked.filter(candidate => candidate.relevance >= 5)
+  const preferred = grounded.length > 0
+    ? grounded
+    : localGrounded.map((caption, index) => ({ caption, index, relevance: 1 }))
   const fresh = preferred.filter(({ caption }) => !isTooClose(caption))
   const choices = fresh.length > 0 ? fresh : preferred
 

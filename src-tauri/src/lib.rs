@@ -78,6 +78,7 @@ use commands::clip::{
 };
 use commands::export::{export_clip, set_clip_thumbnail, generate_clip_captions};
 use commands::model::{check_model_status, download_model, delete_model};
+use commands::montage::export_montage;
 use commands::binaries::{check_binary_status, download_binaries, force_refresh_ytdlp};
 use commands::scheduled::{
     schedule_upload, list_scheduled_uploads, get_scheduled_uploads_for_clip,
@@ -285,6 +286,7 @@ pub fn run() {
             check_model_status,
             download_model,
             delete_model,
+            export_montage,
             check_binary_status,
             download_binaries,
             force_refresh_ytdlp,

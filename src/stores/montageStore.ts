@@ -1,4 +1,7 @@
 import { create } from 'zustand'
+import { createJSONStorage, persist } from 'zustand/middleware'
+
+export type MontageExportPreset = 'youtube' | 'shorts'
 
 export interface MontageSegment {
   clipId: string
@@ -12,7 +15,11 @@ export interface MontageProject {
   id: string
   title: string
   segments: MontageSegment[]
-  exportPreset: string   // export preset id
+  exportPreset: MontageExportPreset
+  publishTitle?: string
+  publishDescription?: string
+  publishHashtags?: string[]
+  visibility?: 'public' | 'unlisted' | 'private'
   createdAt: string
 }
 
@@ -31,7 +38,7 @@ interface MontageState {
   updateProject: (projectId: string, patch: Partial<MontageProject>) => void
 }
 
-export const useMontageStore = create<MontageState>((set, get) => ({
+export const useMontageStore = create<MontageState>()(persist((set, get) => ({
   projects: [],
   activeProjectId: null,
 
@@ -40,6 +47,7 @@ export const useMontageStore = create<MontageState>((set, get) => ({
     set(state => ({
       projects: [...state.projects, {
         id, title, segments: [], exportPreset: 'youtube',
+        publishTitle: '', publishDescription: '', publishHashtags: [], visibility: 'public',
         createdAt: new Date().toISOString(),
       }],
       activeProjectId: id,
@@ -98,4 +106,11 @@ export const useMontageStore = create<MontageState>((set, get) => ({
       projects: state.projects.map(p => p.id === projectId ? { ...p, ...patch } : p),
     }))
   },
+}), {
+  name: 'clipgoblin-montage-projects',
+  storage: createJSONStorage(() => localStorage),
+  partialize: state => ({
+    projects: state.projects,
+    activeProjectId: state.activeProjectId,
+  }),
 }))

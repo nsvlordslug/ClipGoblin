@@ -9,6 +9,7 @@ type DeepDiveTopic =
   | 'clip-sources'
   | 'personalization'
   | 'editor'
+  | 'montage'
   | 'ai-provider'
   | 'publishing'
 
@@ -46,6 +47,13 @@ const FEATURED_TOPICS: Array<{
     title: 'Editor, captions, and branding',
     desc: 'Use Context Fit, Split, PiP, timed subtitles, branding media, and safe positioning.',
     searchTerms: 'edit captions subtitles context fit blur black bars letterbox branding split picture in picture pip layout size',
+  },
+  {
+    id: 'montage',
+    icon: '🎬',
+    title: 'Build a montage',
+    desc: 'Arrange saved clips, preview source and finished video, then export long-form or vertical.',
+    searchTerms: 'montage compilation combine join clips sequence youtube shorts export',
   },
   {
     id: 'ai-provider',
@@ -183,6 +191,7 @@ export default function HelpGuide() {
             <li><b className="text-white">Try edge cases:</b> very short VODs (&lt; 30 min), very long VODs (3h+), VODs with little chat, VODs while you're offline.</li>
             <li><b className="text-white">Teach detection:</b> rate varied clips Good, Meh, and Boring, then mark timing issues such as Starts too late or Cuts off early.</li>
             <li><b className="text-white">Exercise imported media:</b> scan nested Medal game folders, save an OBS/Meld replay, generate subtitles, and try Context Fit with blur, black bars, or branding.</li>
+            <li><b className="text-white">Build a montage:</b> mix clips from more than one source, reorder them, export both formats, and replay the finished MP4.</li>
             <li><b className="text-white">When something breaks,</b> click <a onClick={() => navigate('/bug-report')} className="text-violet-300 underline cursor-pointer">Report a Bug</a> — the form attaches logs + system info automatically.</li>
           </ul>
           <div className="flex flex-wrap gap-2">
@@ -241,6 +250,9 @@ export default function HelpGuide() {
           </FaqItem>}
           {matchesSearch('game detect automatic set game twitch medal folder hashtags titles') && <FaqItem q="How is the game name detected?">
             Medal imports use their game-folder label. Publishing copy can also infer known games from saved metadata, titles, tags, and transcript clues. Twitch does not provide reliable historical game data for every VOD, so click <b>Set game</b> on a VOD when it is missing or wrong; that correction applies to its clips.
+          </FaqItem>}
+          {matchesSearch('montage compilation combine clips export sequence') && <FaqItem q="How do I combine clips into a montage?">
+            Open Montage, create or select a project, then click clips in the library to add them. Use the arrows to set their order, choose YouTube 16:9 or Shorts 9:16, and click Export Montage. ClipGoblin applies each clip's saved editor settings before joining them and stores the finished MP4 in the export folder.
           </FaqItem>}
           {matchesSearch('tiktok accepted private delayed missing lock tab processing') && <FaqItem q='TikTok says "Accepted," but where is my clip?'>
             Accepted means TikTok received the upload; it does not mean processing is finished. Private posts do not return a public link and may take several minutes to appear. Check Profile → Private (the lock tab) in the TikTok mobile app, and do not upload another copy while the app still shows Accepted.
@@ -326,6 +338,16 @@ export default function HelpGuide() {
                 <p><span className="text-white font-medium">Timing and placement</span> — Timed captions show words as they are spoken and leave real pauses blank. Drag captions on the preview or use Position and Offset. Safe-zone and facecam warnings appear before text is likely to be clipped or covered.</p>
                 <p><span className="text-white font-medium">Styles and size</span> — Pick a caption style and use the 75–125% Size slider. Very long words can shrink automatically to stay inside a vertical TikTok/Shorts frame.</p>
                 <p><span className="text-white font-medium">Publish tab</span> — Generate or edit platform copy, pick visibility and platform options, then save, download, schedule, or upload.</p>
+              </HelpSection>
+            )}
+            {deepDiveOpen === 'montage' && (
+              <HelpSection key="montage" icon="🎬" title="Build a montage" defaultOpen>
+                <p><span className="text-white font-medium">1. Save clip edits</span> — Finish each clip's trim, layout, branding, and captions in the Editor before adding it. Montage export uses the latest saved settings.</p>
+                <p><span className="text-white font-medium">2. Create a project</span> — Open Montage and use New when you want a separate compilation. Projects and their clip order are saved on this PC.</p>
+                <p><span className="text-white font-medium">3. Find clips</span> — Search by title or game and filter by Twitch, Medal, OBS, Meld, or Local. Click a clip to add it; click a timeline or sequence item to preview it.</p>
+                <p><span className="text-white font-medium">4. Set the sequence</span> — Use the up/down arrows to reorder clips. Edit opens the source clip without removing it from the project.</p>
+                <p><span className="text-white font-medium">5. Choose a format</span> — YouTube 16:9 creates a 1920×1080 compilation. Shorts 9:16 creates a 1080×1920 vertical compilation. Mixed source sizes are fitted safely instead of stretching.</p>
+                <p><span className="text-white font-medium">6. Export</span> — Click Export Montage and leave ClipGoblin open while it renders. The progress display advances clip by clip, then joins the sequence. When it finishes, replay the full output or open its folder.</p>
               </HelpSection>
             )}
             {deepDiveOpen === 'ai-provider' && (

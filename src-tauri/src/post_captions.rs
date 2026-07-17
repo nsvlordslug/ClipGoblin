@@ -493,7 +493,34 @@ pub fn generate_with_seed(clip: &CandidateClip, seed: u32) -> PostCaptions {
 pub fn generate_from_parts(
     tags: &[String],
     transcript: Option<&str>,
-    _title: &str,
+    title: &str,
+    start_time: f64,
+    audio_score: f64,
+    speech_score: f64,
+    scene_score: f64,
+    seed: u32,
+) -> PostCaptions {
+    generate_from_parts_with_summary(
+        tags,
+        transcript,
+        title,
+        None,
+        start_time,
+        audio_score,
+        speech_score,
+        scene_score,
+        seed,
+    )
+}
+
+/// Generate local captions while preserving the detector's strongest factual
+/// summary when one is available. The older wrapper remains for callers that
+/// only have tags and transcript evidence.
+pub fn generate_from_parts_with_summary(
+    tags: &[String],
+    transcript: Option<&str>,
+    title: &str,
+    detected_event_summary: Option<&str>,
     start_time: f64,
     audio_score: f64,
     speech_score: f64,
@@ -504,8 +531,10 @@ pub fn generate_from_parts(
     let tone = classify_tone(tags, transcript, audio_score, speech_score, scene_score);
     let s = mix_seed(start_time as usize, seed);
 
-    // Try transcript-enhanced summary, fall back to tag-based
-    let event_summary = transcript_action_summary(transcript, event, tags, tone)
+    let event_summary = detected_event_summary
+        .and_then(normalize_event_summary)
+        .or_else(|| transcript_action_summary(transcript, event, tags, tone))
+        .or_else(|| normalize_event_summary(title))
         .unwrap_or_else(|| synthesize_event(event, tone, tags, s));
 
     let ctx = CaptionCtx {
@@ -516,6 +545,15 @@ pub fn generate_from_parts(
     };
     let hashtags = build_hashtags(tags, ctx.game_type);
     build_variants(ctx, hashtags)
+}
+
+fn normalize_event_summary(summary: &str) -> Option<String> {
+    let cleaned = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cleaned = cleaned.trim().trim_end_matches(['.', '!', '?']).trim();
+    if cleaned.len() < 8 || is_generic(cleaned) {
+        return None;
+    }
+    Some(cleaned.to_string())
 }
 
 pub fn generate_all(clips: &mut [CandidateClip]) {
@@ -1520,12 +1558,15 @@ pub struct CaptionCandidate {
 /// Callers that want the new two-part structure should read the candidate
 /// directly; this is the adapter for code paths mid-migration.
 pub fn caption_candidate_to_variant(candidate: &CaptionCandidate, selected_mode: &str) -> CaptionVariant {
-    let hook = candidate.hook_line.trim();
-    let body = candidate.body.trim();
+    let hook = finish_caption_sentence(&normalize_caption_part(&candidate.hook_line, 50));
+    let body = capitalize_first_letter(&finish_caption_sentence(&normalize_caption_part(
+        &candidate.body,
+        230,
+    )));
     let text = match (hook.is_empty(), body.is_empty()) {
-        (false, false) => format!("{} {}", hook, body),
-        (false, true)  => hook.to_string(),
-        (true, false)  => body.to_string(),
+        (false, false) => truncate_caption(&format!("{}\n\n{}", hook, body), 280),
+        (false, true)  => hook,
+        (true, false)  => body,
         (true, true)   => String::new(),
     };
     CaptionVariant {
@@ -1533,6 +1574,74 @@ pub fn caption_candidate_to_variant(candidate: &CaptionCandidate, selected_mode:
         label: mode_label(selected_mode).to_string(),
         text,
     }
+}
+
+fn normalize_caption_part(part: &str, max_chars: usize) -> String {
+    let cleaned = part.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_caption(&cleaned, max_chars)
+}
+
+fn truncate_caption(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    if max_chars <= 3 {
+        return text.chars().take(max_chars).collect();
+    }
+
+    let prefix: String = text.chars().take(max_chars - 3).collect();
+    let trimmed = match prefix.rfind(char::is_whitespace) {
+        Some(space) if space >= max_chars / 2 => prefix[..space].trim_end(),
+        _ => prefix.trim_end(),
+    };
+    format!("{}...", trimmed)
+}
+
+fn finish_caption_sentence(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let closing = ['\"', '\'', '\u{2019}', '\u{201d}', ')', ']', '}'];
+    let insertion = trimmed
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !closing.contains(character))
+        .map(|(index, character)| (index + character.len_utf8(), character));
+
+    match insertion {
+        Some((_, character)) if ['.', '!', '?', ':', ';', '\u{2026}'].contains(&character) => {
+            trimmed.to_string()
+        }
+        Some((index, character)) if [',', '-', '\u{2014}'].contains(&character) => {
+            let mut finished = trimmed.to_string();
+            finished.replace_range(index..index + character.len_utf8(), ".");
+            finished
+        }
+        Some((index, _)) => {
+            let mut finished = trimmed.to_string();
+            finished.insert(index, '.');
+            finished
+        }
+        None => trimmed.to_string(),
+    }
+}
+
+fn capitalize_first_letter(text: &str) -> String {
+    let Some((index, character)) = text.char_indices().find(|(_, c)| c.is_alphabetic()) else {
+        return text.to_string();
+    };
+    if character.is_uppercase() {
+        return text.to_string();
+    }
+
+    let mut capitalized = text.to_string();
+    capitalized.replace_range(
+        index..index + character.len_utf8(),
+        &character.to_uppercase().collect::<String>(),
+    );
+    capitalized
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -2582,7 +2691,9 @@ required by REROLL FOCUS. Do not output this analysis.
 STRUCTURE - each candidate has two parts:
 - hook_line: first ~50 characters. Active voice. Emotional driver.
   Scroll-stopper. Must be complete on its own when read alone.
-- body: remainder (<230 chars). Specifics. Context. Reaction.
+- body: one complete sentence (<230 chars). Specifics. Context. Reaction.
+- Together, hook_line and body must read as one coherent caption of no more than
+  two sentences. The body must not grammatically finish a fragment begun by the hook.
 
 DIVERSITY (strict — your output will be rejected if violated):
 - All 3 candidates must follow REROLL FOCUS, but approach that focus through
@@ -2692,9 +2803,10 @@ OUTPUT - JSON only, no prose, no markdown fence:
         .into_iter()
         .map(|c| {
             let hook_truncated = truncate_hook(&c.hook_line, 50);
+            let normalized_body = normalize_caption_part(&c.body, 230);
             let hook_score = crate::detection::ranker::score_title(&hook_truncated, &ctx);
-            let body_score = score_caption_body(&c.body);
-            let combined_text = format!("{} {}", hook_truncated, c.body);
+            let body_score = score_caption_body(&normalized_body);
+            let combined_text = format!("{} {}", hook_truncated, normalized_body);
             let grounding_adjustment = caption_grounding_adjustment(
                 &combined_text,
                 &grounding_evidence,
@@ -2715,7 +2827,7 @@ OUTPUT - JSON only, no prose, no markdown fence:
             };
             CaptionCandidate {
                 hook_line: hook_truncated,
-                body: c.body,
+                body: normalized_body,
                 uses_money_quote: c.uses_money_quote,
                 score: hook_score
                     + body_score
@@ -3924,6 +4036,61 @@ mod tests {
     }
 
     // ── Wave 3a: CaptionsResponse JSON parsing ───────────────────
+
+    #[test]
+    fn w3a_caption_adapter_preserves_a_clear_sentence_boundary() {
+        let candidate = CaptionCandidate {
+            hook_line: "\"come here, let me heal you\"".into(),
+            body: "then she immediately stabs me instead".into(),
+            uses_money_quote: true,
+            score: 0.9,
+        };
+
+        let variant = caption_candidate_to_variant(&candidate, "punchy");
+
+        assert_eq!(
+            variant.text,
+            "\"come here, let me heal you.\"\n\nThen she immediately stabs me instead."
+        );
+    }
+
+    #[test]
+    fn w3a_caption_adapter_enforces_the_platform_limit() {
+        let candidate = CaptionCandidate {
+            hook_line: "a complete hook".into(),
+            body: "word ".repeat(100),
+            uses_money_quote: false,
+            score: 0.5,
+        };
+
+        let variant = caption_candidate_to_variant(&candidate, "clean");
+
+        assert!(variant.text.chars().count() <= 280);
+        assert!(variant.text.contains("\n\n"));
+    }
+
+    #[test]
+    fn local_generation_prefers_the_detected_event_summary() {
+        let generated = generate_from_parts_with_summary(
+            &["reaction".into()],
+            None,
+            "generic stream clip",
+            Some("Stacie offered to heal me and immediately stabbed me instead"),
+            12.0,
+            0.8,
+            0.7,
+            0.2,
+            3,
+        );
+        let observation = generated
+            .captions
+            .iter()
+            .find(|caption| caption.mode == "observation")
+            .expect("observation caption");
+
+        assert!(observation.text.to_lowercase().contains("stacie"));
+        assert!(observation.text.to_lowercase().contains("heal"));
+    }
 
     #[test]
     fn w3a_captions_response_parses_llm_shape() {

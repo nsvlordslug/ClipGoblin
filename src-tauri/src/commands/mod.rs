@@ -11,6 +11,7 @@ pub mod captions;
 pub mod clip;
 pub mod export;
 pub mod model;
+pub mod montage;
 pub mod scheduled;
 pub mod settings;
 pub mod social;

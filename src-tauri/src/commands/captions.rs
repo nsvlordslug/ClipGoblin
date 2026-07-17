@@ -892,7 +892,7 @@ pub async fn generate_post_captions(
         let tone =
             post_captions::classify_tone_pub(&tags, transcript.as_deref(), audio, visual, chat);
         let event = post_captions::primary_event_pub(&tags);
-        let event_summary = stored_event_summary.unwrap_or_else(|| {
+        let event_summary = stored_event_summary.clone().unwrap_or_else(|| {
             post_captions::synthesize_event_pub(event, tone, &tags, generation_seed as usize)
         });
         let tone_label = tone.label();
@@ -1072,10 +1072,11 @@ pub async fn generate_post_captions(
     }
 
     // ── Fallback: pattern-based generation ──
-    Ok(post_captions::generate_from_parts(
+    Ok(post_captions::generate_from_parts_with_summary(
         &tags,
         transcript.as_deref(),
         &title,
+        stored_event_summary.as_deref(),
         clip.start_seconds,
         audio,
         visual,
