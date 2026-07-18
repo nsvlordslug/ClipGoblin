@@ -609,18 +609,34 @@ const RUBIK_DIRT_FONT_BYTES: &[u8] =
 const COINY_FONT_BYTES: &[u8] = include_bytes!("../../../public/fonts/Coiny-Regular.ttf");
 const NOSIFER_FONT_BYTES: &[u8] = include_bytes!("../../../public/fonts/Nosifer-Regular.ttf");
 const BANGERS_FONT_BYTES: &[u8] = include_bytes!("../../../public/fonts/Bangers-Regular.ttf");
-const RUSSO_ONE_FONT_BYTES: &[u8] =
-    include_bytes!("../../../public/fonts/RussoOne-Regular.ttf");
-const TITAN_ONE_FONT_BYTES: &[u8] =
-    include_bytes!("../../../public/fonts/TitanOne-Regular.ttf");
-const ANTON_FONT_BYTES: &[u8] = include_bytes!("../../../public/fonts/Anton-Regular.ttf");
+const TAPE_RIOT_FONT_BYTES: &[u8] =
+    include_bytes!("../../../public/fonts/ClipGoblinTapeRiot-Regular.ttf");
+const TAPE_RIOT_SEAMS_FONT_BYTES: &[u8] =
+    include_bytes!("../../../public/fonts/ClipGoblinTapeRiotSeams-Regular.ttf");
+const TAPE_RIOT_PATCHES_FONT_BYTES: &[u8] =
+    include_bytes!("../../../public/fonts/ClipGoblinTapeRiotPatches-Regular.ttf");
+const PAPER_MISCHIEF_FONT_BYTES: &[u8] =
+    include_bytes!("../../../public/fonts/ClipGoblinPaperMischief-Regular.ttf");
+const PAPER_MISCHIEF_FIBER_FONT_BYTES: &[u8] =
+    include_bytes!("../../../public/fonts/ClipGoblinPaperMischiefFiber-Regular.ttf");
+const PAPER_MISCHIEF_TABS_FONT_BYTES: &[u8] =
+    include_bytes!("../../../public/fonts/ClipGoblinPaperMischiefTabs-Regular.ttf");
+const GOBLIN_BITE_FONT_BYTES: &[u8] =
+    include_bytes!("../../../public/fonts/ClipGoblinGoblinBite-Regular.ttf");
+const GOBLIN_BITE_DISTRESS_FONT_BYTES: &[u8] =
+    include_bytes!("../../../public/fonts/ClipGoblinGoblinBiteDistress-Regular.ttf");
 static RUBIK_DIRT_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
 static COINY_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
 static NOSIFER_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
 static BANGERS_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
-static RUSSO_ONE_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
-static TITAN_ONE_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
-static ANTON_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+static TAPE_RIOT_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+static TAPE_RIOT_SEAMS_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+static TAPE_RIOT_PATCHES_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+static PAPER_MISCHIEF_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+static PAPER_MISCHIEF_FIBER_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+static PAPER_MISCHIEF_TABS_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+static GOBLIN_BITE_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+static GOBLIN_BITE_DISTRESS_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
 
 fn stage_bundled_caption_font(
     cache: &'static OnceLock<Option<std::path::PathBuf>>,
@@ -673,21 +689,55 @@ fn bundled_caption_font(style_id: &str) -> Option<std::path::PathBuf> {
             "Bangers-Regular.ttf",
             BANGERS_FONT_BYTES,
         ),
-        "tape-riot" => stage_bundled_caption_font(
-            &RUSSO_ONE_FONT_PATH,
-            "RussoOne-Regular.ttf",
-            RUSSO_ONE_FONT_BYTES,
-        ),
-        "paper-mischief" => stage_bundled_caption_font(
-            &TITAN_ONE_FONT_PATH,
-            "TitanOne-Regular.ttf",
-            TITAN_ONE_FONT_BYTES,
-        ),
-        "goblin-bite" => stage_bundled_caption_font(
-            &ANTON_FONT_PATH,
-            "Anton-Regular.ttf",
-            ANTON_FONT_BYTES,
-        ),
+        "tape-riot" => {
+            let base = stage_bundled_caption_font(
+                &TAPE_RIOT_FONT_PATH,
+                "ClipGoblinTapeRiot-Regular.ttf",
+                TAPE_RIOT_FONT_BYTES,
+            );
+            let _ = stage_bundled_caption_font(
+                &TAPE_RIOT_SEAMS_FONT_PATH,
+                "ClipGoblinTapeRiotSeams-Regular.ttf",
+                TAPE_RIOT_SEAMS_FONT_BYTES,
+            );
+            let _ = stage_bundled_caption_font(
+                &TAPE_RIOT_PATCHES_FONT_PATH,
+                "ClipGoblinTapeRiotPatches-Regular.ttf",
+                TAPE_RIOT_PATCHES_FONT_BYTES,
+            );
+            base
+        }
+        "paper-mischief" => {
+            let base = stage_bundled_caption_font(
+                &PAPER_MISCHIEF_FONT_PATH,
+                "ClipGoblinPaperMischief-Regular.ttf",
+                PAPER_MISCHIEF_FONT_BYTES,
+            );
+            let _ = stage_bundled_caption_font(
+                &PAPER_MISCHIEF_FIBER_FONT_PATH,
+                "ClipGoblinPaperMischiefFiber-Regular.ttf",
+                PAPER_MISCHIEF_FIBER_FONT_BYTES,
+            );
+            let _ = stage_bundled_caption_font(
+                &PAPER_MISCHIEF_TABS_FONT_PATH,
+                "ClipGoblinPaperMischiefTabs-Regular.ttf",
+                PAPER_MISCHIEF_TABS_FONT_BYTES,
+            );
+            base
+        }
+        "goblin-bite" => {
+            let base = stage_bundled_caption_font(
+                &GOBLIN_BITE_FONT_PATH,
+                "ClipGoblinGoblinBite-Regular.ttf",
+                GOBLIN_BITE_FONT_BYTES,
+            );
+            let _ = stage_bundled_caption_font(
+                &GOBLIN_BITE_DISTRESS_FONT_PATH,
+                "ClipGoblinGoblinBiteDistress-Regular.ttf",
+                GOBLIN_BITE_DISTRESS_FONT_BYTES,
+            );
+            base
+        }
         _ => None,
     }
 }
@@ -800,9 +850,9 @@ mod caption_style_tests {
     use super::{
         build_caption_filter, bundled_caption_font, cardboard_ass_drawings,
         cardboard_uses_black_text, fitted_caption_font_size, get_sub_style,
-        tape_riot_ass_text, ANTON_FONT_BYTES, BANGERS_FONT_BYTES, COINY_FONT_BYTES,
-        NOSIFER_FONT_BYTES, RUBIK_DIRT_FONT_BYTES, RUSSO_ONE_FONT_BYTES,
-        TITAN_ONE_FONT_BYTES,
+        tape_riot_ass_text, BANGERS_FONT_BYTES, COINY_FONT_BYTES,
+        GOBLIN_BITE_FONT_BYTES, NOSIFER_FONT_BYTES, PAPER_MISCHIEF_FONT_BYTES,
+        RUBIK_DIRT_FONT_BYTES, TAPE_RIOT_FONT_BYTES,
     };
     use crate::db::ClipRow;
 
@@ -930,15 +980,19 @@ mod caption_style_tests {
             ("comic-pop", "Bangers-Regular.ttf", BANGERS_FONT_BYTES.len()),
             (
                 "tape-riot",
-                "RussoOne-Regular.ttf",
-                RUSSO_ONE_FONT_BYTES.len(),
+                "ClipGoblinTapeRiot-Regular.ttf",
+                TAPE_RIOT_FONT_BYTES.len(),
             ),
             (
                 "paper-mischief",
-                "TitanOne-Regular.ttf",
-                TITAN_ONE_FONT_BYTES.len(),
+                "ClipGoblinPaperMischief-Regular.ttf",
+                PAPER_MISCHIEF_FONT_BYTES.len(),
             ),
-            ("goblin-bite", "Anton-Regular.ttf", ANTON_FONT_BYTES.len()),
+            (
+                "goblin-bite",
+                "ClipGoblinGoblinBite-Regular.ttf",
+                GOBLIN_BITE_FONT_BYTES.len(),
+            ),
         ] {
             let font_path = bundled_caption_font(style).expect("bundled caption font");
             assert_eq!(
@@ -962,20 +1016,20 @@ mod caption_style_tests {
     }
 
     #[test]
-    fn original_layered_styles_render_depth_and_semantic_accent_layers() {
+    fn material_styles_render_custom_faces_depth_and_detail_layers() {
         let captions = "1\n00:00:00,000 --> 00:00:01,000\nwait\n";
         let styles = [
             (
-                "tape-riot", "Russo One", 60, "2CFFB8", "86FFE9", "2BD7F4", "E42F7C",
-                "3D1026", 2, 5, 5,
+                "tape-riot", "ClipGoblin Tape Riot", 60, "2CFFB8", "86FFE9", "2BD7F4",
+                "E42F7C", "3D1026", 2, 5, 5,
             ),
             (
-                "paper-mischief", "Titan One", 60, "E8F0F3", "FFFFFF", "60565C", "842A5E",
-                "2F1224", 5, 4, 3,
+                "paper-mischief", "ClipGoblin Paper Mischief", 60, "E8F0F3", "FFFFFF",
+                "60565C", "842A5E", "2F1224", 5, 4, 3,
             ),
             (
-                "goblin-bite", "Anton", 68, "2FFFD7", "75FFF4", "1F1118", "9B245C",
-                "371125", 2, 6, 4,
+                "goblin-bite", "ClipGoblin Goblin Bite", 68, "2FFFD7", "75FFF4",
+                "1F1118", "9B245C", "371125", 2, 6, 4,
             ),
         ];
         for (
@@ -1019,6 +1073,15 @@ mod caption_style_tests {
             assert_eq!(ass.matches("DepthDeep,,").count(), deep_count);
             assert_eq!(ass.matches("FaceHighlight,,").count(), 1);
             assert!(ass.contains("Dialogue: 4,"));
+            assert!(ass.contains("Style: MaterialDetail,ClipGoblin "));
+            assert!(ass.contains("Dialogue: 5,"));
+            if style_id == "goblin-bite" {
+                assert!(!ass.contains("Style: MaterialAccent,"));
+                assert!(!ass.contains("Dialogue: 6,"));
+            } else {
+                assert!(ass.contains("Style: MaterialAccent,ClipGoblin "));
+                assert!(ass.contains("Dialogue: 6,"));
+            }
             if style_id == "tape-riot" {
                 assert!(ass.contains("{\\1c&HE42F7C&}W{\\1c&H2CFFB8&}A"));
             } else {
@@ -1120,6 +1183,10 @@ struct CaptionDepthStyle {
     mid_colour: &'static str,
     deep_colour: &'static str,
     emphasis_colour: &'static str,
+    detail_font: &'static str,
+    detail_colour: &'static str,
+    accent_font: &'static str,
+    accent_colour: &'static str,
     edge_offset: i32,
     mid_offset: i32,
     deep_offset: i32,
@@ -1134,6 +1201,10 @@ fn get_caption_depth_style(id: &str) -> Option<CaptionDepthStyle> {
             mid_colour: "&HE42F7C",
             deep_colour: "&H3D1026",
             emphasis_colour: "&HF755A8",
+            detail_font: "ClipGoblin Tape Riot Seams",
+            detail_colour: "&H371228",
+            accent_font: "ClipGoblin Tape Riot Patches",
+            accent_colour: "&H26D3FF",
             edge_offset: 2,
             mid_offset: 7,
             deep_offset: 12,
@@ -1145,6 +1216,10 @@ fn get_caption_depth_style(id: &str) -> Option<CaptionDepthStyle> {
             mid_colour: "&H842A5E",
             deep_colour: "&H2F1224",
             emphasis_colour: "&H2CFFB8",
+            detail_font: "ClipGoblin Paper Mischief Fiber",
+            detail_colour: "&H52545B",
+            accent_font: "ClipGoblin Paper Mischief Tabs",
+            accent_colour: "&H24FFAF",
             edge_offset: 5,
             mid_offset: 9,
             deep_offset: 12,
@@ -1156,6 +1231,10 @@ fn get_caption_depth_style(id: &str) -> Option<CaptionDepthStyle> {
             mid_colour: "&H9B245C",
             deep_colour: "&H371125",
             emphasis_colour: "&HFFFFFF",
+            detail_font: "ClipGoblin Goblin Bite Distress",
+            detail_colour: "&H0C4630",
+            accent_font: "",
+            accent_colour: "",
             edge_offset: 2,
             mid_offset: 8,
             deep_offset: 12,
@@ -1262,30 +1341,30 @@ fn get_sub_style(id: &str) -> SubStyle {
             dt_shadowcolor: "#F05BD8", dt_shadow: 4,
         },
         "tape-riot" => SubStyle {
-            // Tape Riot: squared alternating faces over stacked tape layers.
-            font_name: "Russo One", font_size: 60, font_weight: 400,
+            // Tape Riot: custom torn tape face plus seam and patch companion fonts.
+            font_name: "ClipGoblin Tape Riot", font_size: 60, font_weight: 400,
             primary_colour: "&H2CFFB8", outline_colour: "&H1C1317",
-            back_colour: "&H002BD7F4", outline: 3, shadow: 2, border_style: 1,
+            back_colour: "&H002BD7F4", outline: 2, shadow: 0, border_style: 1,
             spacing: 0.6, glow_blur: 0, glow_colour: "", uppercase: true,
             dt_fontcolor: "#B8FF2C", dt_borderw: 3, dt_boxcolor: "",
             character_width_factor: 0.72, safe_width_ratio: 0.78,
             dt_shadowcolor: "#7C2FE4", dt_shadow: 6,
         },
         "paper-mischief" => SubStyle {
-            // Paper Mischief: playful paper face over paperboard and violet layers.
-            font_name: "Titan One", font_size: 60, font_weight: 400,
+            // Paper Mischief: custom torn face with fiber and tape-tab companions.
+            font_name: "ClipGoblin Paper Mischief", font_size: 60, font_weight: 400,
             primary_colour: "&HE8F0F3", outline_colour: "&H2D2227",
-            back_colour: "&H00C0B4B9", outline: 3, shadow: 2, border_style: 1,
+            back_colour: "&H00C0B4B9", outline: 2, shadow: 0, border_style: 1,
             spacing: 0.5, glow_blur: 0, glow_colour: "", uppercase: true,
             dt_fontcolor: "#F3F0E8", dt_borderw: 3, dt_boxcolor: "",
             character_width_factor: 0.76, safe_width_ratio: 0.77,
             dt_shadowcolor: "#5E2A84", dt_shadow: 6,
         },
         "goblin-bite" => SubStyle {
-            // Goblin Bite: tall condensed lime lettering with violet extrusion.
-            font_name: "Anton", font_size: 68, font_weight: 400,
+            // Goblin Bite: custom bitten silhouette with distressed face companion.
+            font_name: "ClipGoblin Goblin Bite", font_size: 68, font_weight: 400,
             primary_colour: "&H2FFFD7", outline_colour: "&H141011",
-            back_colour: "&H00FF3D8B", outline: 3, shadow: 2, border_style: 1,
+            back_colour: "&H00FF3D8B", outline: 2, shadow: 0, border_style: 1,
             spacing: 0.8, glow_blur: 0, glow_colour: "", uppercase: true,
             dt_fontcolor: "#D7FF2F", dt_borderw: 3, dt_boxcolor: "",
             character_width_factor: 0.58, safe_width_ratio: 0.76,
@@ -1486,6 +1565,26 @@ Style: FaceHighlight,{fn_},{fs},&H00{highlight},&H00{highlight},&H00{highlight},
                 an = caption_alignment,
                 mh = margin_h,
             ));
+            ass.push_str(&format!(
+                "Style: MaterialDetail,{font},{fs},&H00{colour},&H00{colour},&H00{colour},&H00000000,0,0,0,0,100,100,{sp:.1},0,1,0,0,{an},{mh},{mh},0,1\r\n",
+                font = depth.detail_font,
+                fs = default_font_size,
+                colour = &depth.detail_colour[2..],
+                sp = style.spacing,
+                an = caption_alignment,
+                mh = margin_h,
+            ));
+            if !depth.accent_font.is_empty() {
+                ass.push_str(&format!(
+                    "Style: MaterialAccent,{font},{fs},&H00{colour},&H00{colour},&H00{colour},&H00000000,0,0,0,0,100,100,{sp:.1},0,1,0,0,{an},{mh},{mh},0,1\r\n",
+                    font = depth.accent_font,
+                    fs = default_font_size,
+                    colour = &depth.accent_colour[2..],
+                    sp = style.spacing,
+                    an = caption_alignment,
+                    mh = margin_h,
+                ));
+            }
         }
 
         // Optional glow layer style: creates a luminous halo behind the crisp text.
@@ -1678,6 +1777,26 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
                         "Dialogue: {},{},{},Default,,0,0,0,,{{{pos}{wt}{size}{colour}}}{txt}\r\n",
                         foreground_layer, start_ass, end_ass, pos = caption_position_tag, wt = weight_tag, size = size_tag, colour = colour_tag, txt = foreground_text
                     ));
+                    if let Some(depth) = depth_style {
+                        ass.push_str(&format!(
+                            "Dialogue: 5,{},{},MaterialDetail,,0,0,0,,{{{pos}{size}}}{txt}\r\n",
+                            start_ass,
+                            end_ass,
+                            pos = caption_position_tag,
+                            size = size_tag,
+                            txt = sub_text,
+                        ));
+                        if !depth.accent_font.is_empty() {
+                            ass.push_str(&format!(
+                                "Dialogue: 6,{},{},MaterialAccent,,0,0,0,,{{{pos}{size}}}{txt}\r\n",
+                                start_ass,
+                                end_ass,
+                                pos = caption_position_tag,
+                                size = size_tag,
+                                txt = sub_text,
+                            ));
+                        }
+                    }
                 }
             }
         }

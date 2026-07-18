@@ -12,7 +12,7 @@ import type { LayoutMode, TextOverlay } from '../lib/editTypes'
 import type { Highlight } from '../types'
 import ClipPlayer from '../components/ClipPlayer'
 import TrimTimeline from '../components/TrimTimeline'
-import CaptionPreview from '../components/CaptionPreview'
+import CaptionPreview, { MaterialCaptionText } from '../components/CaptionPreview'
 import type { TimelineMarker } from '../components/TrimTimeline'
 import { analyzeEmphasis, getEmphasisSummary } from '../lib/captionEmphasis'
 import type { CaptionToken } from '../lib/captionEmphasis'
@@ -2657,9 +2657,9 @@ export default function Editor() {
                         minimal:     { bg: 'bg-surface-900', border: 'border-red-500/50', textShadow: '0 1px 0 #7a0000, 0 2px 3px #000' },
                         fire:        { bg: 'bg-surface-900', border: 'border-yellow-400/40', textShadow: '1px 0 0 #000, -1px 0 0 #000, 0 1px 0 #000, 0 -1px 0 #000' },
                         'comic-pop': { bg: 'bg-surface-900', border: 'border-cyan-400/50', textShadow: '1px 1px 0 #f05bd8, 2px 2px 0 #55206f' },
-                        'tape-riot': { bg: 'bg-surface-900', border: 'border-lime-400/50', textShadow: '1px 1px 0 #f4d72b, 2px 2px 0 #7c2fe4, 3px 3px 0 #7c2fe4, 4px 4px 0 #26103d, 5px 5px 0 #12071d' },
-                        'paper-mischief': { bg: 'bg-surface-900', border: 'border-violet-300/50', textShadow: '1px 1px 0 #d8d2ca, 2px 2px 0 #5c5660, 3px 3px 0 #6e3794, 4px 4px 0 #5e2a84, 5px 5px 0 #24122f' },
-                        'goblin-bite': { bg: 'bg-surface-900', border: 'border-lime-300/50', textShadow: '1px 1px 0 #18111f, 2px 2px 0 #8b3dff, 3px 3px 0 #6b2bc1, 4px 4px 0 #421a70, 5px 5px 0 #170a24' },
+                        'tape-riot': { bg: 'bg-surface-900', border: 'border-lime-400/50', textShadow: 'none' },
+                        'paper-mischief': { bg: 'bg-surface-900', border: 'border-violet-300/50', textShadow: 'none' },
+                        'goblin-bite': { bg: 'bg-surface-900', border: 'border-lime-300/50', textShadow: 'none' },
                       }
                       const hint = styleHints[s.id] || styleHints.clean
                       return (
@@ -2684,6 +2684,21 @@ export default function Editor() {
                               }}>
                                 <span style={{ color: '#15100C' }}>Card</span>
                                 <span style={{ color: s.fontColor }}>board</span>
+                              </span>
+                            ) : s.presentation === 'tape-riot'
+                              || s.presentation === 'paper-mischief'
+                              || s.presentation === 'goblin-bite' ? (
+                              <span style={{
+                                fontFamily: s.fontFamily,
+                                fontSize: '11px',
+                                lineHeight: 1.05,
+                                textTransform: 'uppercase',
+                              }}>
+                                <MaterialCaptionText
+                                  presentation={s.presentation}
+                                  text={s.name}
+                                  seed={s.id.length}
+                                />
                               </span>
                             ) : (
                               <span style={{

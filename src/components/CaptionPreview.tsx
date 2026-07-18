@@ -94,8 +94,9 @@ function renderTapeRiotGlyphs(text: string, emphasized: boolean, seed: number) {
         display: 'inline',
         color: purple ? '#7C2FE4' : '#B8FF2C',
         backgroundImage: purple
-          ? 'linear-gradient(180deg, #D7B3FF 0%, #8B3DFF 38%, #5E20B6 100%)'
-          : 'linear-gradient(180deg, #E9FF86 0%, #B8FF2C 38%, #7CCF18 100%)',
+          ? 'repeating-linear-gradient(0deg, rgba(255,255,255,0.13) 0 1px, transparent 1px 4px), linear-gradient(180deg, #B66BFF 0%, #8334F2 48%, #5E20B6 100%)'
+          : 'repeating-linear-gradient(0deg, rgba(255,255,255,0.17) 0 1px, rgba(66,88,16,0.10) 1px 3px, transparent 3px 5px), linear-gradient(180deg, #DBFF65 0%, #AFFF1F 48%, #79C916 100%)',
+        backgroundBlendMode: 'soft-light, normal',
         backgroundClip: 'text',
         WebkitBackgroundClip: 'text',
         WebkitTextFillColor: 'transparent',
@@ -104,6 +105,132 @@ function renderTapeRiotGlyphs(text: string, emphasized: boolean, seed: number) {
       </span>
     )
   })
+}
+
+type MaterialPresentation = 'tape-riot' | 'paper-mischief' | 'goblin-bite'
+
+interface MaterialCaptionTextProps {
+  presentation: MaterialPresentation
+  text: string
+  emphasized?: boolean
+  seed?: number
+}
+
+interface MaterialLayer {
+  x: number
+  y: number
+  color: string
+  stroke?: string
+}
+
+const MATERIAL_LAYERS: Record<MaterialPresentation, {
+  depth: MaterialLayer[]
+  rim: string
+  detailFamily: string
+  detailColor: string
+  accentFamily?: string
+  accentColor?: string
+}> = {
+  'tape-riot': {
+    depth: [
+      { x: 0.16, y: 0.18, color: '#09070C', stroke: '#030304' },
+      { x: 0.10, y: 0.12, color: '#351856', stroke: '#09070C' },
+      { x: 0.045, y: 0.055, color: '#151018', stroke: '#050506' },
+    ],
+    rim: '#08070A',
+    detailFamily: "'ClipGoblin Tape Riot Seams'",
+    detailColor: 'rgba(24, 12, 31, 0.72)',
+    accentFamily: "'ClipGoblin Tape Riot Patches'",
+    accentColor: '#FFD326',
+  },
+  'paper-mischief': {
+    depth: [
+      { x: 0.17, y: 0.18, color: '#170A21', stroke: '#060408' },
+      { x: 0.105, y: 0.115, color: '#6A2F91', stroke: '#1F0E2C' },
+      { x: 0.055, y: 0.06, color: '#5F5A61', stroke: '#242127' },
+    ],
+    rim: '#211E23',
+    detailFamily: "'ClipGoblin Paper Mischief Fiber'",
+    detailColor: 'rgba(91, 84, 82, 0.56)',
+    accentFamily: "'ClipGoblin Paper Mischief Tabs'",
+    accentColor: '#AFFF24',
+  },
+  'goblin-bite': {
+    depth: [
+      { x: 0.16, y: 0.18, color: '#100719', stroke: '#030304' },
+      { x: 0.10, y: 0.12, color: '#67229A', stroke: '#160A21' },
+      { x: 0.045, y: 0.055, color: '#171119', stroke: '#050506' },
+    ],
+    rim: '#0B090D',
+    detailFamily: "'ClipGoblin Goblin Bite Distress'",
+    detailColor: 'rgba(48, 70, 12, 0.72)',
+  },
+}
+
+export function MaterialCaptionText({
+  presentation,
+  text,
+  emphasized = false,
+  seed = 0,
+}: MaterialCaptionTextProps) {
+  const material = MATERIAL_LAYERS[presentation]
+  const faceStyle = layeredFaceStyle(presentation, emphasized)
+  const face = presentation === 'tape-riot'
+    ? renderTapeRiotGlyphs(text, emphasized, seed)
+    : text
+  const layerStyle: React.CSSProperties = {
+    position: 'absolute',
+    inset: 0,
+    whiteSpace: 'inherit',
+    pointerEvents: 'none',
+    WebkitTextStroke: '0',
+  }
+
+  return (
+    <span style={{ position: 'relative', display: 'inline-block', isolation: 'isolate' }}>
+      {material.depth.map((layer, index) => (
+        <span key={`depth-${index}`} aria-hidden="true" style={{
+          ...layerStyle,
+          zIndex: index,
+          color: layer.color,
+          transform: `translate(${layer.x}em, ${layer.y}em)`,
+          WebkitTextStroke: layer.stroke ? `0.03em ${layer.stroke}` : '0',
+          paintOrder: 'stroke fill',
+        }}>{text}</span>
+      ))}
+      <span aria-hidden="true" style={{
+        ...layerStyle,
+        zIndex: 3,
+        color: material.rim,
+        transform: 'translate(0.018em, 0.022em)',
+        WebkitTextStroke: `0.045em ${material.rim}`,
+        paintOrder: 'stroke fill',
+      }}>{text}</span>
+      <span style={{
+        position: 'relative',
+        zIndex: 4,
+        display: 'inline',
+        WebkitTextStroke: `0.018em ${material.rim}`,
+        paintOrder: 'stroke fill',
+        ...faceStyle,
+      }}>{face}</span>
+      <span aria-hidden="true" style={{
+        ...layerStyle,
+        zIndex: 5,
+        fontFamily: material.detailFamily,
+        color: material.detailColor,
+      }}>{text}</span>
+      {material.accentFamily && (
+        <span aria-hidden="true" style={{
+          ...layerStyle,
+          zIndex: 6,
+          fontFamily: material.accentFamily,
+          color: material.accentColor,
+          WebkitTextStroke: '0.008em rgba(45, 30, 5, 0.45)',
+        }}>{text}</span>
+      )}
+    </span>
+  )
 }
 
 // ── Layer 2: Emphasis grouper (style-agnostic) ──
@@ -352,7 +479,6 @@ export default function CaptionPreview({
                   {group.tokens.map((tok, ti) => {
                     const { leading, bare, trailing } = splitToken(tok)
                     const tokenText = `${leading}${bare}${trailing}`
-                    const faceStyle = layeredFaceStyle(cs.presentation, isEmph)
                     return (
                       <React.Fragment key={ti}>
                         <span style={{
@@ -365,11 +491,15 @@ export default function CaptionPreview({
                           textShadow: isEmph && emphasisStyle.shadow && !keepsLayeredDepth
                             ? emphasisStyle.shadow
                             : undefined,
-                          ...faceStyle,
                         }}>
-                          {cs.presentation === 'tape-riot'
-                            ? renderTapeRiotGlyphs(tokenText, isEmph, gi + ti)
-                            : tokenText}
+                          {keepsLayeredDepth ? (
+                            <MaterialCaptionText
+                              presentation={cs.presentation as MaterialPresentation}
+                              text={tokenText}
+                              emphasized={isEmph}
+                              seed={gi + ti}
+                            />
+                          ) : tokenText}
                         </span>
                         {ti < group.tokens.length - 1 && ' '}
                       </React.Fragment>

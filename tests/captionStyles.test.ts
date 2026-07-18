@@ -55,22 +55,36 @@ test('Frosted, Drip, and Comic Pop replace the plain presets with bundled OFL fo
   assert.equal(EMPHASIS_STYLES.boxed.color, '#FF8FD8')
 })
 
-test('Tape Riot, Paper Mischief, and Goblin Bite ship as distinct layered styles', () => {
+test('Tape Riot, Paper Mischief, and Goblin Bite ship custom faces and material fonts', () => {
   const expected = [
     {
       id: 'tape-riot', name: 'Tape Riot', presentation: 'tape-riot',
-      family: 'Russo One', file: 'RussoOne-Regular.ttf', license: 'OFL-RussoOne.txt',
-      face: '#B8FF2C', emphasis: '#A855F7', shadow: '#7C2FE4',
+      family: 'ClipGoblin Tape Riot', license: 'OFL-RussoOne.txt',
+      files: [
+        'ClipGoblinTapeRiot-Regular.ttf',
+        'ClipGoblinTapeRiotSeams-Regular.ttf',
+        'ClipGoblinTapeRiotPatches-Regular.ttf',
+      ],
+      face: '#B8FF2C', emphasis: '#A855F7',
     },
     {
       id: 'paper-mischief', name: 'Paper Mischief', presentation: 'paper-mischief',
-      family: 'Titan One', file: 'TitanOne-Regular.ttf', license: 'OFL-TitanOne.txt',
-      face: '#F3F0E8', emphasis: '#B8FF2C', shadow: '#5E2A84',
+      family: 'ClipGoblin Paper Mischief', license: 'OFL-TitanOne.txt',
+      files: [
+        'ClipGoblinPaperMischief-Regular.ttf',
+        'ClipGoblinPaperMischiefFiber-Regular.ttf',
+        'ClipGoblinPaperMischiefTabs-Regular.ttf',
+      ],
+      face: '#F3F0E8', emphasis: '#B8FF2C',
     },
     {
       id: 'goblin-bite', name: 'Goblin Bite', presentation: 'goblin-bite',
-      family: 'Anton', file: 'Anton-Regular.ttf', license: 'OFL-Anton.txt',
-      face: '#D7FF2F', emphasis: '#FFFFFF', shadow: '#5C249B',
+      family: 'ClipGoblin Goblin Bite', license: 'OFL-Anton.txt',
+      files: [
+        'ClipGoblinGoblinBite-Regular.ttf',
+        'ClipGoblinGoblinBiteDistress-Regular.ttf',
+      ],
+      face: '#D7FF2F', emphasis: '#FFFFFF',
     },
   ]
 
@@ -80,15 +94,21 @@ test('Tape Riot, Paper Mischief, and Goblin Bite ship as distinct layered styles
     assert.equal(style?.presentation, item.presentation)
     assert.match(style?.fontFamily || '', new RegExp(item.family))
     assert.equal(style?.fontColor, item.face)
-    assert.match(style?.shadow || '', new RegExp(item.shadow, 'i'))
-    assert.ok(((style?.shadow || '').match(/px/g) || []).length >= 14)
+    assert.equal(style?.shadow, 'none')
     assert.equal(style?.uppercase, true)
     assert.ok((style?.safeWidthRatio || 1) <= 0.8)
     assert.equal(EMPHASIS_STYLES[item.id].color, item.emphasis)
-    assert.equal(existsSync(new URL(`../public/fonts/${item.file}`, import.meta.url)), true)
+    for (const file of item.files) {
+      assert.equal(existsSync(new URL(`../public/fonts/${file}`, import.meta.url)), true)
+    }
     const license = readFileSync(new URL(`../public/fonts/${item.license}`, import.meta.url), 'utf8')
     assert.match(license, /SIL OPEN FONT LICENSE Version 1\.1/)
   }
+
+  const generator = readFileSync(new URL('../tools/generate_caption_fonts.py', import.meta.url), 'utf8')
+  assert.match(generator, /tape_cutouts/)
+  assert.match(generator, /paper_cutouts/)
+  assert.match(generator, /goblin_cutouts/)
 
   assert.equal(new Set(expected.map(item => item.face)).size, expected.length)
   assert.equal(new Set(expected.map(item => item.emphasis)).size, expected.length)

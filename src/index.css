@@ -33,24 +33,64 @@
 }
 
 @font-face {
-  font-family: 'Russo One';
-  src: url('/fonts/RussoOne-Regular.ttf') format('truetype');
+  font-family: 'ClipGoblin Tape Riot';
+  src: url('/fonts/ClipGoblinTapeRiot-Regular.ttf') format('truetype');
   font-style: normal;
   font-weight: 400;
   font-display: swap;
 }
 
 @font-face {
-  font-family: 'Titan One';
-  src: url('/fonts/TitanOne-Regular.ttf') format('truetype');
+  font-family: 'ClipGoblin Tape Riot Seams';
+  src: url('/fonts/ClipGoblinTapeRiotSeams-Regular.ttf') format('truetype');
   font-style: normal;
   font-weight: 400;
   font-display: swap;
 }
 
 @font-face {
-  font-family: 'Anton';
-  src: url('/fonts/Anton-Regular.ttf') format('truetype');
+  font-family: 'ClipGoblin Tape Riot Patches';
+  src: url('/fonts/ClipGoblinTapeRiotPatches-Regular.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'ClipGoblin Paper Mischief';
+  src: url('/fonts/ClipGoblinPaperMischief-Regular.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'ClipGoblin Paper Mischief Fiber';
+  src: url('/fonts/ClipGoblinPaperMischiefFiber-Regular.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'ClipGoblin Paper Mischief Tabs';
+  src: url('/fonts/ClipGoblinPaperMischiefTabs-Regular.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'ClipGoblin Goblin Bite';
+  src: url('/fonts/ClipGoblinGoblinBite-Regular.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'ClipGoblin Goblin Bite Distress';
+  src: url('/fonts/ClipGoblinGoblinBiteDistress-Regular.ttf') format('truetype');
   font-style: normal;
   font-weight: 400;
   font-display: swap;
