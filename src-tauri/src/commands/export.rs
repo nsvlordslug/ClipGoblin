@@ -652,8 +652,8 @@ fn stage_bundled_caption_font(
             }
 
             let font_path = font_dir.join(filename);
-            let already_current = std::fs::metadata(&font_path)
-                .map(|metadata| metadata.len() == bytes.len() as u64)
+            let already_current = std::fs::read(&font_path)
+                .map(|current| current == bytes)
                 .unwrap_or(false);
             if !already_current {
                 if let Err(error) = std::fs::write(&font_path, bytes) {
@@ -1025,7 +1025,7 @@ mod caption_style_tests {
             ),
             (
                 "paper-mischief", "ClipGoblin Paper Mischief", 60, "E8F0F3", "FFFFFF",
-                "6E686D", "A2397A", "3B112A", 3, 3, 3,
+                "787477", "2C232A", "81215A", 3, 2, 13,
             ),
             (
                 "goblin-bite", "ClipGoblin Goblin Bite", 68, "20FFDF", "75FFF4",
@@ -1072,6 +1072,14 @@ mod caption_style_tests {
             assert_eq!(ass.matches("DepthMid,,").count(), mid_count);
             assert_eq!(ass.matches("DepthDeep,,").count(), deep_count);
             assert_eq!(ass.matches("FaceHighlight,,").count(), 1);
+            if style_id == "paper-mischief" {
+                assert!(ass.contains("Style: DepthContact,ClipGoblin Paper Mischief,60,&H00000000"));
+                assert_eq!(ass.matches("DepthContact,,").count(), 1);
+                assert!(ass.contains("\\pos(557,1884)\\b400\\fs60\\alpha&H58&\\blur4"));
+            } else {
+                assert!(!ass.contains("Style: DepthContact,"));
+                assert!(!ass.contains("DepthContact,,"));
+            }
             assert!(ass.contains("Dialogue: 4,"));
             assert!(ass.contains("Style: MaterialDetail,ClipGoblin "));
             assert!(ass.contains("Dialogue: 5,"));
@@ -1182,6 +1190,7 @@ struct CaptionDepthStyle {
     edge_colour: &'static str,
     mid_colour: &'static str,
     deep_colour: &'static str,
+    contact_colour: &'static str,
     emphasis_colour: &'static str,
     detail_font: &'static str,
     detail_colour: &'static str,
@@ -1190,6 +1199,9 @@ struct CaptionDepthStyle {
     edge_offset: i32,
     mid_offset: i32,
     deep_offset: i32,
+    contact_offset: i32,
+    contact_blur: i32,
+    horizontal_scale_percent: i32,
 }
 
 fn get_caption_depth_style(id: &str) -> Option<CaptionDepthStyle> {
@@ -1200,6 +1212,7 @@ fn get_caption_depth_style(id: &str) -> Option<CaptionDepthStyle> {
             edge_colour: "&H2BD7F4",
             mid_colour: "&HE42F7C",
             deep_colour: "&H3D1026",
+            contact_colour: "",
             emphasis_colour: "&HF755A8",
             detail_font: "ClipGoblin Tape Riot Seams",
             detail_colour: "&H371228",
@@ -1208,21 +1221,28 @@ fn get_caption_depth_style(id: &str) -> Option<CaptionDepthStyle> {
             edge_offset: 2,
             mid_offset: 7,
             deep_offset: 12,
+            contact_offset: 0,
+            contact_blur: 0,
+            horizontal_scale_percent: 100,
         }),
         "paper-mischief" => Some(CaptionDepthStyle {
-            // Gray paperboard layers separate the pale face from the violet base.
+            // A continuous gray/charcoal/violet stack makes the paper face project off-screen.
             highlight_colour: "&HFFFFFF",
-            edge_colour: "&H6E686D",
-            mid_colour: "&HA2397A",
-            deep_colour: "&H3B112A",
+            edge_colour: "&H787477",
+            mid_colour: "&H2C232A",
+            deep_colour: "&H81215A",
+            contact_colour: "&H000000",
             emphasis_colour: "&H2CFFB8",
             detail_font: "ClipGoblin Paper Mischief Fiber",
-            detail_colour: "&H52545B",
+            detail_colour: "&HB8B5B2",
             accent_font: "ClipGoblin Paper Mischief Tabs",
             accent_colour: "&H24FFAF",
             edge_offset: 3,
-            mid_offset: 6,
-            deep_offset: 9,
+            mid_offset: 5,
+            deep_offset: 18,
+            contact_offset: 22,
+            contact_blur: 4,
+            horizontal_scale_percent: 78,
         }),
         "goblin-bite" => Some(CaptionDepthStyle {
             // A black separator and long violet extrusion create the horror-poster stack.
@@ -1230,6 +1250,7 @@ fn get_caption_depth_style(id: &str) -> Option<CaptionDepthStyle> {
             edge_colour: "&H1E151B",
             mid_colour: "&HB1287A",
             deep_colour: "&H320C22",
+            contact_colour: "",
             emphasis_colour: "&HFFFFFF",
             detail_font: "ClipGoblin Goblin Bite Distress",
             detail_colour: "&H0C4630",
@@ -1238,6 +1259,9 @@ fn get_caption_depth_style(id: &str) -> Option<CaptionDepthStyle> {
             edge_offset: 2,
             mid_offset: 5,
             deep_offset: 9,
+            contact_offset: 0,
+            contact_blur: 0,
+            horizontal_scale_percent: 100,
         }),
         _ => None,
     }
@@ -1565,6 +1589,18 @@ Style: FaceHighlight,{fn_},{fs},&H00{highlight},&H00{highlight},&H00{highlight},
                 an = caption_alignment,
                 mh = margin_h,
             ));
+            if depth.contact_offset > 0 {
+                ass.push_str(&format!(
+                    "Style: DepthContact,{fn_},{fs},&H00{colour},&H00{colour},&H00{colour},&H00000000,{bold},0,0,0,100,100,{sp:.1},0,1,2,0,{an},{mh},{mh},0,1\r\n",
+                    fn_ = style.font_name,
+                    fs = default_font_size,
+                    colour = &depth.contact_colour[2..],
+                    bold = bold_flag,
+                    sp = style.spacing,
+                    an = caption_alignment,
+                    mh = margin_h,
+                ));
+            }
             ass.push_str(&format!(
                 "Style: MaterialDetail,{font},{fs},&H00{colour},&H00{colour},&H00{colour},&H00000000,0,0,0,0,100,100,{sp:.1},0,1,0,0,{an},{mh},{mh},0,1\r\n",
                 font = depth.detail_font,
@@ -1711,13 +1747,31 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
                     }
 
                     if let Some(depth) = depth_style {
+                        let depth_x = |offset: i32| {
+                            target_width / 2
+                                + (offset * depth.horizontal_scale_percent + 50) / 100
+                        };
+                        if depth.contact_offset > 0 {
+                            ass.push_str(&format!(
+                                "Dialogue: 0,{},{},DepthContact,,0,0,0,,{{\\an{}\\pos({},{}){wt}{size}\\alpha&H58&\\blur{blur}}}{txt}\r\n",
+                                start_ass,
+                                end_ass,
+                                caption_alignment,
+                                depth_x(depth.contact_offset),
+                                caption_anchor_y + depth.contact_offset,
+                                wt = weight_tag,
+                                size = size_tag,
+                                blur = depth.contact_blur,
+                                txt = sub_text,
+                            ));
+                        }
                         for offset in ((depth.mid_offset + 1)..=depth.deep_offset).rev() {
                             ass.push_str(&format!(
                                 "Dialogue: 0,{},{},DepthDeep,,0,0,0,,{{\\an{}\\pos({},{}){wt}{size}}}{txt}\r\n",
                                 start_ass,
                                 end_ass,
                                 caption_alignment,
-                                target_width / 2 + offset,
+                                depth_x(offset),
                                 caption_anchor_y + offset,
                                 wt = weight_tag,
                                 size = size_tag,
@@ -1730,7 +1784,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
                                 start_ass,
                                 end_ass,
                                 caption_alignment,
-                                target_width / 2 + offset,
+                                depth_x(offset),
                                 caption_anchor_y + offset,
                                 wt = weight_tag,
                                 size = size_tag,
@@ -1743,7 +1797,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
                                 start_ass,
                                 end_ass,
                                 caption_alignment,
-                                target_width / 2 + offset,
+                                depth_x(offset),
                                 caption_anchor_y + offset,
                                 wt = weight_tag,
                                 size = size_tag,

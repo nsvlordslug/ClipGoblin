@@ -109,6 +109,41 @@ interface MaterialLayer {
   stroke?: string
 }
 
+interface MaterialContactShadow {
+  x: number
+  y: number
+  blur: number
+  color: string
+  stroke: string
+}
+
+interface MaterialFaceHighlight {
+  x: number
+  y: number
+  color: string
+  stroke: string
+}
+
+function buildPaperMischiefDepth(): MaterialLayer[] {
+  const layers: MaterialLayer[] = []
+  for (let step = 18; step >= 1; step -= 1) {
+    const color = step <= 3
+      ? '#777478'
+      : step <= 5
+        ? '#2A232C'
+        : step <= 14
+          ? '#5A2181'
+          : '#35104F'
+    layers.push({
+      x: step * 0.0125,
+      y: step * 0.016,
+      color,
+      stroke: step === 18 ? '#09060D' : undefined,
+    })
+  }
+  return layers
+}
+
 const MATERIAL_LAYERS: Record<MaterialPresentation, {
   depth: MaterialLayer[]
   rim: string
@@ -116,6 +151,8 @@ const MATERIAL_LAYERS: Record<MaterialPresentation, {
   detailColor: string
   accentFamily?: string
   accentColor?: string
+  contactShadow?: MaterialContactShadow
+  faceHighlight?: MaterialFaceHighlight
 }> = {
   'tape-riot': {
     depth: [
@@ -130,16 +167,25 @@ const MATERIAL_LAYERS: Record<MaterialPresentation, {
     accentColor: '#FFD326',
   },
   'paper-mischief': {
-    depth: [
-      { x: 0.12, y: 0.13, color: '#2A113B', stroke: '#0B070E' },
-      { x: 0.075, y: 0.082, color: '#7A39A2', stroke: '#261132' },
-      { x: 0.035, y: 0.04, color: '#6D686E', stroke: '#2E2A30' },
-    ],
-    rim: '#2B272D',
+    depth: buildPaperMischiefDepth(),
+    rim: '#242027',
     detailFamily: "'ClipGoblin Paper Mischief Fiber'",
-    detailColor: 'rgba(91, 84, 82, 0.56)',
+    detailColor: 'rgba(109, 104, 101, 0.34)',
     accentFamily: "'ClipGoblin Paper Mischief Tabs'",
     accentColor: '#AFFF24',
+    contactShadow: {
+      x: 0.30,
+      y: 0.36,
+      blur: 0.045,
+      color: 'rgba(0, 0, 0, 0.68)',
+      stroke: 'rgba(0, 0, 0, 0.76)',
+    },
+    faceHighlight: {
+      x: -0.012,
+      y: -0.016,
+      color: '#FFFFFF',
+      stroke: '#FFFFFF',
+    },
   },
   'goblin-bite': {
     depth: [
@@ -164,6 +210,9 @@ export function MaterialCaptionText({
   const face = presentation === 'tape-riot'
     ? renderTapeRiotGlyphs(text, emphasized, seed)
     : text
+  const rimLayer = material.depth.length + 1
+  const highlightLayer = rimLayer + 1
+  const faceLayer = highlightLayer + (material.faceHighlight ? 1 : 0)
   const layerStyle: React.CSSProperties = {
     position: 'absolute',
     inset: 0,
@@ -174,10 +223,21 @@ export function MaterialCaptionText({
 
   return (
     <span style={{ position: 'relative', display: 'inline-block', isolation: 'isolate' }}>
+      {material.contactShadow && (
+        <span aria-hidden="true" style={{
+          ...layerStyle,
+          zIndex: 0,
+          color: material.contactShadow.color,
+          transform: `translate(${material.contactShadow.x}em, ${material.contactShadow.y}em)`,
+          WebkitTextStroke: `0.05em ${material.contactShadow.stroke}`,
+          filter: `blur(${material.contactShadow.blur}em)`,
+          paintOrder: 'stroke fill',
+        }}>{text}</span>
+      )}
       {material.depth.map((layer, index) => (
         <span key={`depth-${index}`} aria-hidden="true" style={{
           ...layerStyle,
-          zIndex: index,
+          zIndex: index + 1,
           color: layer.color,
           transform: `translate(${layer.x}em, ${layer.y}em)`,
           WebkitTextStroke: layer.stroke ? `0.03em ${layer.stroke}` : '0',
@@ -186,15 +246,25 @@ export function MaterialCaptionText({
       ))}
       <span aria-hidden="true" style={{
         ...layerStyle,
-        zIndex: 3,
+        zIndex: rimLayer,
         color: material.rim,
         transform: 'translate(0.018em, 0.022em)',
         WebkitTextStroke: `0.045em ${material.rim}`,
         paintOrder: 'stroke fill',
       }}>{text}</span>
+      {material.faceHighlight && (
+        <span aria-hidden="true" style={{
+          ...layerStyle,
+          zIndex: highlightLayer,
+          color: material.faceHighlight.color,
+          transform: `translate(${material.faceHighlight.x}em, ${material.faceHighlight.y}em)`,
+          WebkitTextStroke: `0.025em ${material.faceHighlight.stroke}`,
+          paintOrder: 'stroke fill',
+        }}>{text}</span>
+      )}
       <span style={{
         position: 'relative',
-        zIndex: 4,
+        zIndex: faceLayer,
         display: 'inline',
         WebkitTextStroke: `0.018em ${material.rim}`,
         paintOrder: 'stroke fill',
@@ -202,14 +272,14 @@ export function MaterialCaptionText({
       }}>{face}</span>
       <span aria-hidden="true" style={{
         ...layerStyle,
-        zIndex: 5,
+        zIndex: faceLayer + 1,
         fontFamily: material.detailFamily,
         color: material.detailColor,
       }}>{text}</span>
       {material.accentFamily && (
         <span aria-hidden="true" style={{
           ...layerStyle,
-          zIndex: 6,
+          zIndex: faceLayer + 2,
           fontFamily: material.accentFamily,
           color: material.accentColor,
           WebkitTextStroke: '0.008em rgba(45, 30, 5, 0.45)',
@@ -402,7 +472,7 @@ export default function CaptionPreview({
     maxWidth: `${maxTextWidth}px`,
     maxHeight: `${Math.round(frameHeight * 0.35)}px`,
     width: `${maxTextWidth}px`,
-    overflow: 'hidden',
+    overflow: cs.presentation === 'paper-mischief' ? 'visible' : 'hidden',
     textAlign: 'center',
     background: cs.bgColor || undefined,
     padding: cs.bgPadding > 0

@@ -319,20 +319,31 @@ def paper_fibers(bounds: tuple[float, float, float, float], seed: int) -> pathop
     width = right - left
     height = top - bottom
     details = pathops.Path()
-    count = max(12, min(32, int(width * height / 18000)))
+    count = max(18, min(42, int(width * height / 13000)))
     for index in range(count):
         local = stable_int(f"paper-fiber:{seed}:{index}")
         x = left + width * (((local >> 4) & 0xFFF) / 4095.0)
         y = bottom + height * (((local >> 16) & 0xFFF) / 4095.0)
-        rx = max(2.2, width * (0.004 + ((local >> 28) & 0x7) / 1300.0))
-        ry = max(1.6, height * (0.002 + ((local >> 32) & 0x7) / 1800.0))
-        ellipse(details, x, y, rx, ry)
+        if index % 4 == 0:
+            fiber_width = max(2.0, width * 0.006)
+            fiber_height = max(10.0, height * (0.018 + ((local >> 28) & 0x7) / 700.0))
+            lean = fiber_height * (0.22 if local % 2 else -0.18)
+            polygon(details, [
+                (x, y),
+                (x + fiber_width, y),
+                (x + fiber_width + lean, y + fiber_height),
+                (x + lean, y + fiber_height),
+            ])
+        else:
+            rx = max(2.2, width * (0.004 + ((local >> 28) & 0x7) / 1300.0))
+            ry = max(1.6, height * (0.002 + ((local >> 32) & 0x7) / 1800.0))
+            ellipse(details, x, y, rx, ry)
     return details
 
 
 def paper_tabs(bounds: tuple[float, float, float, float], seed: int) -> pathops.Path:
     details = pathops.Path()
-    if seed % 4 not in (0, 1):
+    if seed % 4 != 0:
         return details
     left, bottom, right, top = bounds
     width = right - left

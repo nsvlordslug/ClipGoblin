@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,7 +66,7 @@ def draw_tape_faces(
 
 def render(output: Path) -> None:
     width, row_height = 1680, 360
-    image = Image.new("RGB", (width, row_height * 3), "#09090c")
+    image = Image.new("RGBA", (width, row_height * 3), "#09090cff")
     draw = ImageDraw.Draw(image)
     rows = [
         {
@@ -88,7 +88,7 @@ def render(output: Path) -> None:
                 ("ClipGoblinPaperMischiefFiber-Regular.ttf", "#817b78"),
                 ("ClipGoblinPaperMischiefTabs-Regular.ttf", "#aaff24"),
             ],
-            "depth": ("#2a113b", "#7a39a2", "#6d686e"),
+            "depth": ("#35104f", "#2a232c", "#777478"),
             "face": "#f1eee7",
         },
         {
@@ -109,9 +109,27 @@ def render(output: Path) -> None:
         x = center_x(draw, text, font, width)
         y = row_top + 90
         deep, middle, edge = row["depth"]
-        draw_text_layer(draw, (x + 22, y + 24), text, font, deep, "#050507", 5)
-        draw_text_layer(draw, (x + 14, y + 15), text, font, middle, "#12081d", 4)
-        draw_text_layer(draw, (x + 6, y + 7), text, font, edge, "#050507", 4)
+        if row["label"] == "PAPER MISCHIEF":
+            shadow = Image.new("RGBA", image.size, (0, 0, 0, 0))
+            shadow_draw = ImageDraw.Draw(shadow)
+            draw_text_layer(shadow_draw, (x + 48, y + 58), text, font, "#000000b8", "#000000d0", 8)
+            image.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(7)))
+            for step in range(18, 0, -1):
+                colour = edge if step <= 3 else middle if step <= 5 else "#5a2181" if step <= 14 else deep
+                draw_text_layer(
+                    draw,
+                    (x + round(step * 2.15), y + round(step * 2.75)),
+                    text,
+                    font,
+                    colour,
+                    "#09060d" if step == 18 else None,
+                    4 if step == 18 else 0,
+                )
+            draw_text_layer(draw, (x - 2, y - 3), text, font, "#ffffff", "#ffffff", 3)
+        else:
+            draw_text_layer(draw, (x + 22, y + 24), text, font, deep, "#050507", 5)
+            draw_text_layer(draw, (x + 14, y + 15), text, font, middle, "#12081d", 4)
+            draw_text_layer(draw, (x + 6, y + 7), text, font, edge, "#050507", 4)
         if row["face"] == "tape":
             draw_tape_faces(draw, (x, y), text, font)
         else:
