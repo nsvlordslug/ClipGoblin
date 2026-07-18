@@ -156,7 +156,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     presentation: 'goblin-bite',
     fontFamily: "'ClipGoblin Goblin Bite', Impact, 'Arial Narrow', sans-serif",
     fontSize: 68, fontWeight: 400,
-    fontColor: '#D7FF2F',
+    fontColor: '#DFFF20',
     strokeColor: '#111014', strokeWidth: 3,
     bgColor: '', bgPadding: 0, bgRadius: 0,
     uppercase: true,

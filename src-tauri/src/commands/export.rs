@@ -1025,11 +1025,11 @@ mod caption_style_tests {
             ),
             (
                 "paper-mischief", "ClipGoblin Paper Mischief", 60, "E8F0F3", "FFFFFF",
-                "60565C", "842A5E", "2F1224", 5, 4, 3,
+                "6E686D", "A2397A", "3B112A", 3, 3, 3,
             ),
             (
-                "goblin-bite", "ClipGoblin Goblin Bite", 68, "2FFFD7", "75FFF4",
-                "1F1118", "9B245C", "371125", 2, 6, 4,
+                "goblin-bite", "ClipGoblin Goblin Bite", 68, "20FFDF", "75FFF4",
+                "1E151B", "B1287A", "320C22", 2, 3, 4,
             ),
         ];
         for (
@@ -1212,32 +1212,32 @@ fn get_caption_depth_style(id: &str) -> Option<CaptionDepthStyle> {
         "paper-mischief" => Some(CaptionDepthStyle {
             // Gray paperboard layers separate the pale face from the violet base.
             highlight_colour: "&HFFFFFF",
-            edge_colour: "&H60565C",
-            mid_colour: "&H842A5E",
-            deep_colour: "&H2F1224",
+            edge_colour: "&H6E686D",
+            mid_colour: "&HA2397A",
+            deep_colour: "&H3B112A",
             emphasis_colour: "&H2CFFB8",
             detail_font: "ClipGoblin Paper Mischief Fiber",
             detail_colour: "&H52545B",
             accent_font: "ClipGoblin Paper Mischief Tabs",
             accent_colour: "&H24FFAF",
-            edge_offset: 5,
-            mid_offset: 9,
-            deep_offset: 12,
+            edge_offset: 3,
+            mid_offset: 6,
+            deep_offset: 9,
         }),
         "goblin-bite" => Some(CaptionDepthStyle {
             // A black separator and long violet extrusion create the horror-poster stack.
             highlight_colour: "&H75FFF4",
-            edge_colour: "&H1F1118",
-            mid_colour: "&H9B245C",
-            deep_colour: "&H371125",
+            edge_colour: "&H1E151B",
+            mid_colour: "&HB1287A",
+            deep_colour: "&H320C22",
             emphasis_colour: "&HFFFFFF",
             detail_font: "ClipGoblin Goblin Bite Distress",
             detail_colour: "&H0C4630",
             accent_font: "",
             accent_colour: "",
             edge_offset: 2,
-            mid_offset: 8,
-            deep_offset: 12,
+            mid_offset: 5,
+            deep_offset: 9,
         }),
         _ => None,
     }
@@ -1363,10 +1363,10 @@ fn get_sub_style(id: &str) -> SubStyle {
         "goblin-bite" => SubStyle {
             // Goblin Bite: custom bitten silhouette with distressed face companion.
             font_name: "ClipGoblin Goblin Bite", font_size: 68, font_weight: 400,
-            primary_colour: "&H2FFFD7", outline_colour: "&H141011",
+            primary_colour: "&H20FFDF", outline_colour: "&H191117",
             back_colour: "&H00FF3D8B", outline: 2, shadow: 0, border_style: 1,
             spacing: 0.8, glow_blur: 0, glow_colour: "", uppercase: true,
-            dt_fontcolor: "#D7FF2F", dt_borderw: 3, dt_boxcolor: "",
+            dt_fontcolor: "#DFFF20", dt_borderw: 3, dt_boxcolor: "",
             character_width_factor: 0.58, safe_width_ratio: 0.76,
             dt_shadowcolor: "#5C249B", dt_shadow: 6,
         },

@@ -53,31 +53,17 @@ function layeredFaceStyle(
   presentation: CaptionStyle['presentation'],
   emphasized: boolean,
 ): React.CSSProperties {
-  const shared: React.CSSProperties = {
-    backgroundClip: 'text',
-    WebkitBackgroundClip: 'text',
-    WebkitTextFillColor: 'transparent',
-  }
-
   if (presentation === 'paper-mischief') {
     return {
-      ...shared,
       color: emphasized ? '#B8FF2C' : '#F3F0E8',
-      backgroundImage: emphasized
-        ? 'linear-gradient(180deg, #F0FF9B 0%, #B8FF2C 48%, #7FCB19 100%)'
-        : 'repeating-linear-gradient(176deg, rgba(255,255,255,0.14) 0 1px, rgba(83,73,87,0.10) 1px 2px, transparent 2px 5px), linear-gradient(180deg, #FFFFFF 0%, #F3F0E8 45%, #C9C2BA 100%)',
-      backgroundBlendMode: 'multiply',
+      WebkitTextFillColor: emphasized ? '#B8FF2C' : '#F3F0E8',
     }
   }
 
   if (presentation === 'goblin-bite') {
     return {
-      ...shared,
-      color: emphasized ? '#FFFFFF' : '#D7FF2F',
-      backgroundImage: emphasized
-        ? 'linear-gradient(180deg, #FFFFFF 0%, #E8E2F4 55%, #BFB1D0 100%)'
-        : 'repeating-linear-gradient(112deg, transparent 0 11px, rgba(39,26,48,0.42) 11px 13px, transparent 13px 19px), linear-gradient(180deg, #F4FF75 0%, #D7FF2F 47%, #8ACF16 100%)',
-      backgroundBlendMode: 'multiply',
+      color: emphasized ? '#FFFFFF' : '#DFFF20',
+      WebkitTextFillColor: emphasized ? '#FFFFFF' : '#DFFF20',
     }
   }
 
@@ -145,11 +131,11 @@ const MATERIAL_LAYERS: Record<MaterialPresentation, {
   },
   'paper-mischief': {
     depth: [
-      { x: 0.17, y: 0.18, color: '#170A21', stroke: '#060408' },
-      { x: 0.105, y: 0.115, color: '#6A2F91', stroke: '#1F0E2C' },
-      { x: 0.055, y: 0.06, color: '#5F5A61', stroke: '#242127' },
+      { x: 0.12, y: 0.13, color: '#2A113B', stroke: '#0B070E' },
+      { x: 0.075, y: 0.082, color: '#7A39A2', stroke: '#261132' },
+      { x: 0.035, y: 0.04, color: '#6D686E', stroke: '#2E2A30' },
     ],
-    rim: '#211E23',
+    rim: '#2B272D',
     detailFamily: "'ClipGoblin Paper Mischief Fiber'",
     detailColor: 'rgba(91, 84, 82, 0.56)',
     accentFamily: "'ClipGoblin Paper Mischief Tabs'",
@@ -157,11 +143,11 @@ const MATERIAL_LAYERS: Record<MaterialPresentation, {
   },
   'goblin-bite': {
     depth: [
-      { x: 0.16, y: 0.18, color: '#100719', stroke: '#030304' },
-      { x: 0.10, y: 0.12, color: '#67229A', stroke: '#160A21' },
-      { x: 0.045, y: 0.055, color: '#171119', stroke: '#050506' },
+      { x: 0.12, y: 0.135, color: '#220C32', stroke: '#07040A' },
+      { x: 0.072, y: 0.085, color: '#7A28B1', stroke: '#210D30' },
+      { x: 0.03, y: 0.038, color: '#1B151E', stroke: '#080609' },
     ],
-    rim: '#0B090D',
+    rim: '#171119',
     detailFamily: "'ClipGoblin Goblin Bite Distress'",
     detailColor: 'rgba(48, 70, 12, 0.72)',
   },

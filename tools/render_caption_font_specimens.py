@@ -88,7 +88,7 @@ def render(output: Path) -> None:
                 ("ClipGoblinPaperMischiefFiber-Regular.ttf", "#817b78"),
                 ("ClipGoblinPaperMischiefTabs-Regular.ttf", "#aaff24"),
             ],
-            "depth": ("#32124f", "#625c61", "#13091b"),
+            "depth": ("#2a113b", "#7a39a2", "#6d686e"),
             "face": "#f1eee7",
         },
         {
@@ -96,8 +96,8 @@ def render(output: Path) -> None:
             "text": "IT HEARD ME BREATHE",
             "base": "ClipGoblinGoblinBite-Regular.ttf",
             "details": [("ClipGoblinGoblinBiteDistress-Regular.ttf", "#4c6912")],
-            "depth": ("#2a0c43", "#7021a2", "#0a0610"),
-            "face": "#d8ff24",
+            "depth": ("#220c32", "#7a28b1", "#1b151e"),
+            "face": "#dfff20",
         },
     ]
 

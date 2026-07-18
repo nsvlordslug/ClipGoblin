@@ -84,7 +84,7 @@ test('Tape Riot, Paper Mischief, and Goblin Bite ship custom faces and material 
         'ClipGoblinGoblinBite-Regular.ttf',
         'ClipGoblinGoblinBiteDistress-Regular.ttf',
       ],
-      face: '#D7FF2F', emphasis: '#FFFFFF',
+      face: '#DFFF20', emphasis: '#FFFFFF',
     },
   ]
 

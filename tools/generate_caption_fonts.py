@@ -164,7 +164,7 @@ def paper_cutouts(bounds: tuple[float, float, float, float], seed: int) -> patho
     width = right - left
     height = top - bottom
     cuts = pathops.Path()
-    radius = max(16.0, min(30.0, min(width, height) * 0.045))
+    radius = max(20.0, min(36.0, min(width, height) * 0.055))
     count = max(8, min(20, int((width + height) / 100)))
 
     # Many tiny, shallow scallops give the silhouette a torn-paper edge while
@@ -189,7 +189,7 @@ def goblin_cutouts(bounds: tuple[float, float, float, float], seed: int) -> path
     width = right - left
     height = top - bottom
     cuts = pathops.Path()
-    radius = max(34.0, min(76.0, width * 0.18))
+    radius = max(48.0, min(108.0, width * 0.26))
     bite_count = 2 + seed % 2
 
     # Deliberate clusters of three overlapping circles read as teeth marks,
@@ -198,17 +198,15 @@ def goblin_cutouts(bounds: tuple[float, float, float, float], seed: int) -> path
         side_right = (seed + bite) % 3 != 0
         y = bottom + height * (0.23 + 0.52 * ((bite + 1) / (bite_count + 1)))
         y += (((seed >> (bite * 5)) & 0x1F) / 31.0 - 0.5) * height * 0.12
-        edge_x = right + radius * 0.05 if side_right else left - radius * 0.05
+        edge_x = right - radius * 0.08 if side_right else left + radius * 0.08
         for tooth_index, y_offset in enumerate((-0.72, 0.0, 0.72)):
             tooth_radius = radius * (0.58 if tooth_index == 1 else 0.48)
             ellipse(cuts, edge_x, y + y_offset * radius, tooth_radius, tooth_radius)
 
     # A chipped corner reinforces the hand-cut horror-poster silhouette.
-    chip = max(15.0, radius * 0.7)
-    if seed % 2:
-        polygon(cuts, [(right - chip, top + 2), (right + 2, top + 2), (right + 2, top - chip * 0.7)])
-    else:
-        polygon(cuts, [(left - 2, bottom - 2), (left + chip, bottom - 2), (left - 2, bottom + chip * 0.7)])
+    chip = max(18.0, radius * 0.55)
+    polygon(cuts, [(right - chip, top + 2), (right + 2, top + 2), (right + 2, top - chip * 0.62)])
+    polygon(cuts, [(left - 2, bottom - 2), (left + chip * 0.8, bottom - 2), (left - 2, bottom + chip * 0.55)])
     return cuts
 
 
@@ -339,8 +337,8 @@ def paper_tabs(bounds: tuple[float, float, float, float], seed: int) -> pathops.
     left, bottom, right, top = bounds
     width = right - left
     height = top - bottom
-    tab_width = min(width * 0.25, height * 0.15)
-    tab_height = tab_width * 0.48
+    tab_width = min(width * 0.32, height * 0.19)
+    tab_height = tab_width * 0.56
     x = left + width * (0.10 if seed % 2 else 0.63)
     y = bottom + height * (0.69 if (seed >> 4) % 2 else 0.18)
     rectangle(details, x, y, x + tab_width, y + tab_height, skew=tab_width * 0.06)
