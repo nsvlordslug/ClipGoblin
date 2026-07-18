@@ -153,6 +153,7 @@ const MATERIAL_LAYERS: Record<MaterialPresentation, {
   accentColor?: string
   contactShadow?: MaterialContactShadow
   faceHighlight?: MaterialFaceHighlight
+  faceStroke?: number
 }> = {
   'tape-riot': {
     depth: [
@@ -168,7 +169,7 @@ const MATERIAL_LAYERS: Record<MaterialPresentation, {
   },
   'paper-mischief': {
     depth: buildPaperMischiefDepth(),
-    rim: '#242027',
+    rim: '#141116',
     detailFamily: "'ClipGoblin Paper Mischief Fiber'",
     detailColor: 'rgba(109, 104, 101, 0.34)',
     accentFamily: "'ClipGoblin Paper Mischief Tabs'",
@@ -186,6 +187,7 @@ const MATERIAL_LAYERS: Record<MaterialPresentation, {
       color: '#FFFFFF',
       stroke: '#FFFFFF',
     },
+    faceStroke: 0.04,
   },
   'goblin-bite': {
     depth: [
@@ -266,7 +268,7 @@ export function MaterialCaptionText({
         position: 'relative',
         zIndex: faceLayer,
         display: 'inline',
-        WebkitTextStroke: `0.018em ${material.rim}`,
+        WebkitTextStroke: `${material.faceStroke ?? 0.018}em ${material.rim}`,
         paintOrder: 'stroke fill',
         ...faceStyle,
       }}>{face}</span>

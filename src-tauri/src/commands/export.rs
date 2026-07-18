@@ -1073,6 +1073,9 @@ mod caption_style_tests {
             assert_eq!(ass.matches("DepthDeep,,").count(), deep_count);
             assert_eq!(ass.matches("FaceHighlight,,").count(), 1);
             if style_id == "paper-mischief" {
+                let paper_style = get_sub_style(style_id);
+                assert_eq!(paper_style.outline_colour, "&H191417");
+                assert_eq!(paper_style.outline, 3);
                 assert!(ass.contains("Style: DepthContact,ClipGoblin Paper Mischief,60,&H00000000"));
                 assert_eq!(ass.matches("DepthContact,,").count(), 1);
                 assert!(ass.contains("\\pos(557,1884)\\b400\\fs60\\alpha&H58&\\blur4"));
@@ -1377,10 +1380,10 @@ fn get_sub_style(id: &str) -> SubStyle {
         "paper-mischief" => SubStyle {
             // Paper Mischief: custom torn face with fiber and tape-tab companions.
             font_name: "ClipGoblin Paper Mischief", font_size: 60, font_weight: 400,
-            primary_colour: "&HE8F0F3", outline_colour: "&H2D2227",
-            back_colour: "&H00C0B4B9", outline: 2, shadow: 0, border_style: 1,
+            primary_colour: "&HE8F0F3", outline_colour: "&H191417",
+            back_colour: "&H00C0B4B9", outline: 3, shadow: 0, border_style: 1,
             spacing: 0.5, glow_blur: 0, glow_colour: "", uppercase: true,
-            dt_fontcolor: "#F3F0E8", dt_borderw: 3, dt_boxcolor: "",
+            dt_fontcolor: "#F3F0E8", dt_borderw: 4, dt_boxcolor: "",
             character_width_factor: 0.76, safe_width_ratio: 0.77,
             dt_shadowcolor: "#5E2A84", dt_shadow: 6,
         },
