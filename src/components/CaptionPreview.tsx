@@ -49,6 +49,63 @@ function splitToken(token: string): { leading: string; bare: string; trailing: s
   return { leading: m[1], bare: m[2], trailing: m[3] }
 }
 
+function layeredFaceStyle(
+  presentation: CaptionStyle['presentation'],
+  emphasized: boolean,
+): React.CSSProperties {
+  const shared: React.CSSProperties = {
+    backgroundClip: 'text',
+    WebkitBackgroundClip: 'text',
+    WebkitTextFillColor: 'transparent',
+  }
+
+  if (presentation === 'paper-mischief') {
+    return {
+      ...shared,
+      color: emphasized ? '#B8FF2C' : '#F3F0E8',
+      backgroundImage: emphasized
+        ? 'linear-gradient(180deg, #F0FF9B 0%, #B8FF2C 48%, #7FCB19 100%)'
+        : 'repeating-linear-gradient(176deg, rgba(255,255,255,0.14) 0 1px, rgba(83,73,87,0.10) 1px 2px, transparent 2px 5px), linear-gradient(180deg, #FFFFFF 0%, #F3F0E8 45%, #C9C2BA 100%)',
+      backgroundBlendMode: 'multiply',
+    }
+  }
+
+  if (presentation === 'goblin-bite') {
+    return {
+      ...shared,
+      color: emphasized ? '#FFFFFF' : '#D7FF2F',
+      backgroundImage: emphasized
+        ? 'linear-gradient(180deg, #FFFFFF 0%, #E8E2F4 55%, #BFB1D0 100%)'
+        : 'repeating-linear-gradient(112deg, transparent 0 11px, rgba(39,26,48,0.42) 11px 13px, transparent 13px 19px), linear-gradient(180deg, #F4FF75 0%, #D7FF2F 47%, #8ACF16 100%)',
+      backgroundBlendMode: 'multiply',
+    }
+  }
+
+  return {}
+}
+
+function renderTapeRiotGlyphs(text: string, emphasized: boolean, seed: number) {
+  let faceIndex = seed + (emphasized ? 1 : 0)
+  return Array.from(text).map((glyph, index) => {
+    if (!/[a-z0-9]/i.test(glyph)) return glyph
+    const purple = faceIndex++ % 2 === 1
+    return (
+      <span key={`${index}-${glyph}`} style={{
+        display: 'inline',
+        color: purple ? '#7C2FE4' : '#B8FF2C',
+        backgroundImage: purple
+          ? 'linear-gradient(180deg, #D7B3FF 0%, #8B3DFF 38%, #5E20B6 100%)'
+          : 'linear-gradient(180deg, #E9FF86 0%, #B8FF2C 38%, #7CCF18 100%)',
+        backgroundClip: 'text',
+        WebkitBackgroundClip: 'text',
+        WebkitTextFillColor: 'transparent',
+      }}>
+        {glyph}
+      </span>
+    )
+  })
+}
+
 // ── Layer 2: Emphasis grouper (style-agnostic) ──
 interface TokenGroup {
   emphasized: boolean
@@ -170,6 +227,9 @@ export default function CaptionPreview({
     : cs.shadow.replace(/(\d+)px/g, (_, n) => `${Math.max(1, Math.round(parseInt(n) * Math.min(scale * safeFontScale, 0.5)))}px`)
 
   const emphasisStyle = EMPHASIS_STYLES[cs.id] || EMPHASIS_STYLES.clean
+  const keepsLayeredDepth = cs.presentation === 'tape-riot'
+    || cs.presentation === 'paper-mischief'
+    || cs.presentation === 'goblin-bite'
 
   // ── Layer 1: tokenize (style-agnostic, runs once per segment) ──
   const tokens = useMemo(
@@ -291,6 +351,8 @@ export default function CaptionPreview({
                 }}>
                   {group.tokens.map((tok, ti) => {
                     const { leading, bare, trailing } = splitToken(tok)
+                    const tokenText = `${leading}${bare}${trailing}`
+                    const faceStyle = layeredFaceStyle(cs.presentation, isEmph)
                     return (
                       <React.Fragment key={ti}>
                         <span style={{
@@ -300,9 +362,14 @@ export default function CaptionPreview({
                           textTransform: (isEmph && emphasisStyle.uppercase) || cs.uppercase ? 'uppercase' : 'none',
                           transition: 'font-size 0.12s ease, color 0.12s ease',
                           display: 'inline',
-                          textShadow: isEmph && emphasisStyle.shadow ? emphasisStyle.shadow : undefined,
+                          textShadow: isEmph && emphasisStyle.shadow && !keepsLayeredDepth
+                            ? emphasisStyle.shadow
+                            : undefined,
+                          ...faceStyle,
                         }}>
-                          {leading}{bare}{trailing}
+                          {cs.presentation === 'tape-riot'
+                            ? renderTapeRiotGlyphs(tokenText, isEmph, gi + ti)
+                            : tokenText}
                         </span>
                         {ti < group.tokens.length - 1 && ' '}
                       </React.Fragment>

@@ -32,6 +32,30 @@
   font-display: swap;
 }
 
+@font-face {
+  font-family: 'Russo One';
+  src: url('/fonts/RussoOne-Regular.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Titan One';
+  src: url('/fonts/TitanOne-Regular.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Anton';
+  src: url('/fonts/Anton-Regular.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
 @theme {
   --color-brand-50: oklch(0.97 0.02 285);
   --color-brand-100: oklch(0.93 0.04 285);

@@ -59,15 +59,18 @@ test('Tape Riot, Paper Mischief, and Goblin Bite ship as distinct layered styles
   const expected = [
     {
       id: 'tape-riot', name: 'Tape Riot', presentation: 'tape-riot',
-      family: 'Bangers', face: '#B8FF2C', emphasis: '#A855F7', shadow: '#7C2FE4',
+      family: 'Russo One', file: 'RussoOne-Regular.ttf', license: 'OFL-RussoOne.txt',
+      face: '#B8FF2C', emphasis: '#A855F7', shadow: '#7C2FE4',
     },
     {
       id: 'paper-mischief', name: 'Paper Mischief', presentation: 'paper-mischief',
-      family: 'Coiny', face: '#F3F0E8', emphasis: '#B8FF2C', shadow: '#5E2A84',
+      family: 'Titan One', file: 'TitanOne-Regular.ttf', license: 'OFL-TitanOne.txt',
+      face: '#F3F0E8', emphasis: '#B8FF2C', shadow: '#5E2A84',
     },
     {
       id: 'goblin-bite', name: 'Goblin Bite', presentation: 'goblin-bite',
-      family: 'Nosifer', face: '#D7FF2F', emphasis: '#FFFFFF', shadow: '#5C249B',
+      family: 'Anton', file: 'Anton-Regular.ttf', license: 'OFL-Anton.txt',
+      face: '#D7FF2F', emphasis: '#FFFFFF', shadow: '#5C249B',
     },
   ]
 
@@ -78,13 +81,29 @@ test('Tape Riot, Paper Mischief, and Goblin Bite ship as distinct layered styles
     assert.match(style?.fontFamily || '', new RegExp(item.family))
     assert.equal(style?.fontColor, item.face)
     assert.match(style?.shadow || '', new RegExp(item.shadow, 'i'))
+    assert.ok(((style?.shadow || '').match(/px/g) || []).length >= 14)
     assert.equal(style?.uppercase, true)
     assert.ok((style?.safeWidthRatio || 1) <= 0.8)
     assert.equal(EMPHASIS_STYLES[item.id].color, item.emphasis)
+    assert.equal(existsSync(new URL(`../public/fonts/${item.file}`, import.meta.url)), true)
+    const license = readFileSync(new URL(`../public/fonts/${item.license}`, import.meta.url), 'utf8')
+    assert.match(license, /SIL OPEN FONT LICENSE Version 1\.1/)
   }
 
   assert.equal(new Set(expected.map(item => item.face)).size, expected.length)
   assert.equal(new Set(expected.map(item => item.emphasis)).size, expected.length)
+  assert.notEqual(
+    CAPTION_STYLES.find(style => style.id === 'tape-riot')?.fontFamily,
+    CAPTION_STYLES.find(style => style.id === 'comic-pop')?.fontFamily,
+  )
+  assert.notEqual(
+    CAPTION_STYLES.find(style => style.id === 'paper-mischief')?.fontFamily,
+    CAPTION_STYLES.find(style => style.id === 'boxed')?.fontFamily,
+  )
+  assert.notEqual(
+    CAPTION_STYLES.find(style => style.id === 'goblin-bite')?.fontFamily,
+    CAPTION_STYLES.find(style => style.id === 'minimal')?.fontFamily,
+  )
 })
 
 test('caption sizing clamps user scale and shrinks long words into a vertical safe area', () => {

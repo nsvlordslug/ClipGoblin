@@ -609,10 +609,18 @@ const RUBIK_DIRT_FONT_BYTES: &[u8] =
 const COINY_FONT_BYTES: &[u8] = include_bytes!("../../../public/fonts/Coiny-Regular.ttf");
 const NOSIFER_FONT_BYTES: &[u8] = include_bytes!("../../../public/fonts/Nosifer-Regular.ttf");
 const BANGERS_FONT_BYTES: &[u8] = include_bytes!("../../../public/fonts/Bangers-Regular.ttf");
+const RUSSO_ONE_FONT_BYTES: &[u8] =
+    include_bytes!("../../../public/fonts/RussoOne-Regular.ttf");
+const TITAN_ONE_FONT_BYTES: &[u8] =
+    include_bytes!("../../../public/fonts/TitanOne-Regular.ttf");
+const ANTON_FONT_BYTES: &[u8] = include_bytes!("../../../public/fonts/Anton-Regular.ttf");
 static RUBIK_DIRT_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
 static COINY_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
 static NOSIFER_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
 static BANGERS_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+static RUSSO_ONE_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+static TITAN_ONE_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+static ANTON_FONT_PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
 
 fn stage_bundled_caption_font(
     cache: &'static OnceLock<Option<std::path::PathBuf>>,
@@ -650,20 +658,35 @@ fn bundled_caption_font(style_id: &str) -> Option<std::path::PathBuf> {
             "RubikDirt-Regular.ttf",
             RUBIK_DIRT_FONT_BYTES,
         ),
-        "boxed" | "paper-mischief" => stage_bundled_caption_font(
+        "boxed" => stage_bundled_caption_font(
             &COINY_FONT_PATH,
             "Coiny-Regular.ttf",
             COINY_FONT_BYTES,
         ),
-        "minimal" | "goblin-bite" => stage_bundled_caption_font(
+        "minimal" => stage_bundled_caption_font(
             &NOSIFER_FONT_PATH,
             "Nosifer-Regular.ttf",
             NOSIFER_FONT_BYTES,
         ),
-        "comic-pop" | "tape-riot" => stage_bundled_caption_font(
+        "comic-pop" => stage_bundled_caption_font(
             &BANGERS_FONT_PATH,
             "Bangers-Regular.ttf",
             BANGERS_FONT_BYTES,
+        ),
+        "tape-riot" => stage_bundled_caption_font(
+            &RUSSO_ONE_FONT_PATH,
+            "RussoOne-Regular.ttf",
+            RUSSO_ONE_FONT_BYTES,
+        ),
+        "paper-mischief" => stage_bundled_caption_font(
+            &TITAN_ONE_FONT_PATH,
+            "TitanOne-Regular.ttf",
+            TITAN_ONE_FONT_BYTES,
+        ),
+        "goblin-bite" => stage_bundled_caption_font(
+            &ANTON_FONT_PATH,
+            "Anton-Regular.ttf",
+            ANTON_FONT_BYTES,
         ),
         _ => None,
     }
@@ -777,8 +800,9 @@ mod caption_style_tests {
     use super::{
         build_caption_filter, bundled_caption_font, cardboard_ass_drawings,
         cardboard_uses_black_text, fitted_caption_font_size, get_sub_style,
-        BANGERS_FONT_BYTES, COINY_FONT_BYTES, NOSIFER_FONT_BYTES,
-        RUBIK_DIRT_FONT_BYTES,
+        tape_riot_ass_text, ANTON_FONT_BYTES, BANGERS_FONT_BYTES, COINY_FONT_BYTES,
+        NOSIFER_FONT_BYTES, RUBIK_DIRT_FONT_BYTES, RUSSO_ONE_FONT_BYTES,
+        TITAN_ONE_FONT_BYTES,
     };
     use crate::db::ClipRow;
 
@@ -904,9 +928,17 @@ mod caption_style_tests {
             ("boxed", "Coiny-Regular.ttf", COINY_FONT_BYTES.len()),
             ("minimal", "Nosifer-Regular.ttf", NOSIFER_FONT_BYTES.len()),
             ("comic-pop", "Bangers-Regular.ttf", BANGERS_FONT_BYTES.len()),
-            ("tape-riot", "Bangers-Regular.ttf", BANGERS_FONT_BYTES.len()),
-            ("paper-mischief", "Coiny-Regular.ttf", COINY_FONT_BYTES.len()),
-            ("goblin-bite", "Nosifer-Regular.ttf", NOSIFER_FONT_BYTES.len()),
+            (
+                "tape-riot",
+                "RussoOne-Regular.ttf",
+                RUSSO_ONE_FONT_BYTES.len(),
+            ),
+            (
+                "paper-mischief",
+                "TitanOne-Regular.ttf",
+                TITAN_ONE_FONT_BYTES.len(),
+            ),
+            ("goblin-bite", "Anton-Regular.ttf", ANTON_FONT_BYTES.len()),
         ] {
             let font_path = bundled_caption_font(style).expect("bundled caption font");
             assert_eq!(
@@ -932,11 +964,34 @@ mod caption_style_tests {
     #[test]
     fn original_layered_styles_render_depth_and_semantic_accent_layers() {
         let captions = "1\n00:00:00,000 --> 00:00:01,000\nwait\n";
-        for (style_id, font_name, font_size, face, mid, deep, emphasis) in [
-            ("tape-riot", "Bangers", 62, "2CFFB8", "E42F7C", "3D1026", "F755A8"),
-            ("paper-mischief", "Coiny", 58, "E8F0F3", "842A5E", "2F1224", "2CFFB8"),
-            ("goblin-bite", "Nosifer", 52, "2FFFD7", "9B245C", "371125", "FFFFFF"),
-        ] {
+        let styles = [
+            (
+                "tape-riot", "Russo One", 60, "2CFFB8", "86FFE9", "2BD7F4", "E42F7C",
+                "3D1026", 2, 5, 5,
+            ),
+            (
+                "paper-mischief", "Titan One", 60, "E8F0F3", "FFFFFF", "60565C", "842A5E",
+                "2F1224", 5, 4, 3,
+            ),
+            (
+                "goblin-bite", "Anton", 68, "2FFFD7", "75FFF4", "1F1118", "9B245C",
+                "371125", 2, 6, 4,
+            ),
+        ];
+        for (
+            style_id,
+            font_name,
+            font_size,
+            face,
+            highlight,
+            edge,
+            mid,
+            deep,
+            edge_count,
+            mid_count,
+            deep_count,
+        ) in styles
+        {
             let clip = clip_with_style(style_id, captions);
             let filter = build_caption_filter(&clip, 1080, 1920, 0.0, 2.0)
                 .expect("layered caption filter");
@@ -951,13 +1006,39 @@ mod caption_style_tests {
                 "Style: DepthMid,{font_name},{font_size},&H00{mid}",
             )));
             assert!(ass.contains(&format!(
+                "Style: DepthEdge,{font_name},{font_size},&H00{edge}",
+            )));
+            assert!(ass.contains(&format!(
                 "Style: DepthDeep,{font_name},{font_size},&H00{deep}",
             )));
-            assert_eq!(ass.matches("DepthMid,,").count(), 1);
-            assert_eq!(ass.matches("DepthDeep,,").count(), 1);
-            assert!(ass.contains(&format!("\\1c&H{emphasis}&}}WAIT")));
+            assert!(ass.contains(&format!(
+                "Style: FaceHighlight,{font_name},{font_size},&H00{highlight}",
+            )));
+            assert_eq!(ass.matches("DepthEdge,,").count(), edge_count);
+            assert_eq!(ass.matches("DepthMid,,").count(), mid_count);
+            assert_eq!(ass.matches("DepthDeep,,").count(), deep_count);
+            assert_eq!(ass.matches("FaceHighlight,,").count(), 1);
+            assert!(ass.contains("Dialogue: 4,"));
+            if style_id == "tape-riot" {
+                assert!(ass.contains("{\\1c&HE42F7C&}W{\\1c&H2CFFB8&}A"));
+            } else {
+                let emphasis = if style_id == "paper-mischief" {
+                    "2CFFB8"
+                } else {
+                    "FFFFFF"
+                };
+                assert!(ass.contains(&format!("\\1c&H{emphasis}&}}WAIT")));
+            }
             let _ = std::fs::remove_file(ass_path);
         }
+    }
+
+    #[test]
+    fn tape_riot_alternates_letter_faces_without_corrupting_line_breaks() {
+        assert_eq!(
+            tape_riot_ass_text("GO\\NNOW", false),
+            "{\\1c&H2CFFB8&}G{\\1c&HE42F7C&}O\\N{\\1c&H2CFFB8&}N{\\1c&HE42F7C&}O{\\1c&H2CFFB8&}W",
+        );
     }
 
     #[test]
@@ -1034,9 +1115,12 @@ struct SubStyle {
 
 #[derive(Clone, Copy)]
 struct CaptionDepthStyle {
+    highlight_colour: &'static str,
+    edge_colour: &'static str,
     mid_colour: &'static str,
     deep_colour: &'static str,
     emphasis_colour: &'static str,
+    edge_offset: i32,
     mid_offset: i32,
     deep_offset: i32,
 }
@@ -1044,31 +1128,64 @@ struct CaptionDepthStyle {
 fn get_caption_depth_style(id: &str) -> Option<CaptionDepthStyle> {
     match id {
         "tape-riot" => Some(CaptionDepthStyle {
-            // Purple tape stack behind the acid-green face.
+            // Yellow tape edge, purple tape stack, and a dark rear layer.
+            highlight_colour: "&H86FFE9",
+            edge_colour: "&H2BD7F4",
             mid_colour: "&HE42F7C",
             deep_colour: "&H3D1026",
             emphasis_colour: "&HF755A8",
-            mid_offset: 5,
-            deep_offset: 8,
+            edge_offset: 2,
+            mid_offset: 7,
+            deep_offset: 12,
         }),
         "paper-mischief" => Some(CaptionDepthStyle {
-            // Purple paper layers beneath the pale paper face.
+            // Gray paperboard layers separate the pale face from the violet base.
+            highlight_colour: "&HFFFFFF",
+            edge_colour: "&H60565C",
             mid_colour: "&H842A5E",
             deep_colour: "&H2F1224",
             emphasis_colour: "&H2CFFB8",
-            mid_offset: 5,
-            deep_offset: 8,
+            edge_offset: 5,
+            mid_offset: 9,
+            deep_offset: 12,
         }),
         "goblin-bite" => Some(CaptionDepthStyle {
-            // Violet extrusion gives the distressed lime face its horror-poster depth.
+            // A black separator and long violet extrusion create the horror-poster stack.
+            highlight_colour: "&H75FFF4",
+            edge_colour: "&H1F1118",
             mid_colour: "&H9B245C",
             deep_colour: "&H371125",
             emphasis_colour: "&HFFFFFF",
-            mid_offset: 5,
-            deep_offset: 8,
+            edge_offset: 2,
+            mid_offset: 8,
+            deep_offset: 12,
         }),
         _ => None,
     }
+}
+
+fn tape_riot_ass_text(text: &str, start_with_purple: bool) -> String {
+    let mut output = String::with_capacity(text.len() * 8);
+    let mut purple = start_with_purple;
+    let mut lines = text.split("\\N").peekable();
+
+    while let Some(line) = lines.next() {
+        for glyph in line.chars() {
+            if glyph.is_alphanumeric() {
+                let colour = if purple { "&HE42F7C" } else { "&H2CFFB8" };
+                output.push_str("{\\1c");
+                output.push_str(colour);
+                output.push_str("&}");
+                purple = !purple;
+            }
+            output.push(glyph);
+        }
+        if lines.peek().is_some() {
+            output.push_str("\\N");
+        }
+    }
+
+    output
 }
 
 fn get_sub_style(id: &str) -> SubStyle {
@@ -1145,33 +1262,33 @@ fn get_sub_style(id: &str) -> SubStyle {
             dt_shadowcolor: "#F05BD8", dt_shadow: 4,
         },
         "tape-riot" => SubStyle {
-            // Tape Riot: acid-green face, yellow edge, and stacked purple tape depth.
-            font_name: "Bangers", font_size: 62, font_weight: 400,
+            // Tape Riot: squared alternating faces over stacked tape layers.
+            font_name: "Russo One", font_size: 60, font_weight: 400,
             primary_colour: "&H2CFFB8", outline_colour: "&H1C1317",
             back_colour: "&H002BD7F4", outline: 3, shadow: 2, border_style: 1,
-            spacing: 0.8, glow_blur: 0, glow_colour: "", uppercase: true,
+            spacing: 0.6, glow_blur: 0, glow_colour: "", uppercase: true,
             dt_fontcolor: "#B8FF2C", dt_borderw: 3, dt_boxcolor: "",
-            character_width_factor: 0.70, safe_width_ratio: 0.80,
+            character_width_factor: 0.72, safe_width_ratio: 0.78,
             dt_shadowcolor: "#7C2FE4", dt_shadow: 6,
         },
         "paper-mischief" => SubStyle {
-            // Paper Mischief: cool-white paper face with charcoal and violet layers.
-            font_name: "Coiny", font_size: 58, font_weight: 400,
+            // Paper Mischief: playful paper face over paperboard and violet layers.
+            font_name: "Titan One", font_size: 60, font_weight: 400,
             primary_colour: "&HE8F0F3", outline_colour: "&H2D2227",
             back_colour: "&H00C0B4B9", outline: 3, shadow: 2, border_style: 1,
             spacing: 0.5, glow_blur: 0, glow_colour: "", uppercase: true,
             dt_fontcolor: "#F3F0E8", dt_borderw: 3, dt_boxcolor: "",
-            character_width_factor: 0.74, safe_width_ratio: 0.79,
+            character_width_factor: 0.76, safe_width_ratio: 0.77,
             dt_shadowcolor: "#5E2A84", dt_shadow: 6,
         },
         "goblin-bite" => SubStyle {
-            // Goblin Bite: distressed lime horror lettering with violet extrusion.
-            font_name: "Nosifer", font_size: 52, font_weight: 400,
+            // Goblin Bite: tall condensed lime lettering with violet extrusion.
+            font_name: "Anton", font_size: 68, font_weight: 400,
             primary_colour: "&H2FFFD7", outline_colour: "&H141011",
             back_colour: "&H00FF3D8B", outline: 3, shadow: 2, border_style: 1,
-            spacing: 0.4, glow_blur: 0, glow_colour: "", uppercase: true,
+            spacing: 0.8, glow_blur: 0, glow_colour: "", uppercase: true,
             dt_fontcolor: "#D7FF2F", dt_borderw: 3, dt_boxcolor: "",
-            character_width_factor: 0.82, safe_width_ratio: 0.78,
+            character_width_factor: 0.58, safe_width_ratio: 0.76,
             dt_shadowcolor: "#5C249B", dt_shadow: 6,
         },
         // "clean" and any unknown style
@@ -1318,23 +1435,6 @@ pub(crate) fn build_caption_filter(
                 &clip.captions_position,
             )
         });
-        let depth_positions = depth_style.map(|depth| {
-            (
-                format!(
-                    "\\an{}\\pos({},{})",
-                    caption_alignment,
-                    target_width / 2 + depth.deep_offset,
-                    caption_anchor_y + depth.deep_offset,
-                ),
-                format!(
-                    "\\an{}\\pos({},{})",
-                    caption_alignment,
-                    target_width / 2 + depth.mid_offset,
-                    caption_anchor_y + depth.mid_offset,
-                ),
-            )
-        });
-
         // ASS header — PlayRes matches export resolution so FontSize = pixels
         let mut ass = format!("\
 [Script Info]\r\n\
@@ -1372,11 +1472,15 @@ Style: CardboardTexture,Arial,20,&H902B4C7A,&H902B4C7A,&H902B4C7A,&H00000000,0,0
         if let Some(depth) = depth_style {
             ass.push_str(&format!("\
 Style: DepthDeep,{fn_},{fs},&H00{deep},&H00{deep},&H00{deep},&H00000000,{bold},0,0,0,100,100,{sp:.1},0,1,1,0,{an},{mh},{mh},0,1\r\n\
-Style: DepthMid,{fn_},{fs},&H00{mid},&H00{mid},&H00{mid},&H00000000,{bold},0,0,0,100,100,{sp:.1},0,1,1,0,{an},{mh},{mh},0,1\r\n",
+Style: DepthMid,{fn_},{fs},&H00{mid},&H00{mid},&H00{mid},&H00000000,{bold},0,0,0,100,100,{sp:.1},0,1,1,0,{an},{mh},{mh},0,1\r\n\
+Style: DepthEdge,{fn_},{fs},&H00{edge},&H00{edge},&H00{edge},&H00000000,{bold},0,0,0,100,100,{sp:.1},0,1,1,0,{an},{mh},{mh},0,1\r\n\
+Style: FaceHighlight,{fn_},{fs},&H00{highlight},&H00{highlight},&H00{highlight},&H00000000,{bold},0,0,0,100,100,{sp:.1},0,1,1,0,{an},{mh},{mh},0,1\r\n",
                 fn_ = style.font_name,
                 fs = default_font_size,
                 deep = &depth.deep_colour[2..],
                 mid = &depth.mid_colour[2..],
+                edge = &depth.edge_colour[2..],
+                highlight = &depth.highlight_colour[2..],
                 bold = bold_flag,
                 sp = style.spacing,
                 an = caption_alignment,
@@ -1469,15 +1573,21 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
                     let semantic_emphasis = cardboard_uses_black_text(&sub_text);
                     let cardboard_black = is_cardboard
                         && (cardboard_sentence_start || semantic_emphasis);
+                    let is_tape_riot = clip.caption_style == "tape-riot";
                     let colour_tag = if cardboard_black {
                         // #15100C -> ASS BGR &H0C1015
                         "\\1c&H0C1015&".to_string()
-                    } else if semantic_emphasis {
+                    } else if semantic_emphasis && !is_tape_riot {
                         depth_style
                             .map(|depth| format!("\\1c{}&", depth.emphasis_colour))
                             .unwrap_or_default()
                     } else {
                         String::new()
+                    };
+                    let foreground_text = if is_tape_riot {
+                        tape_riot_ass_text(&sub_text, semantic_emphasis)
+                    } else {
+                        sub_text.clone()
                     };
                     if is_cardboard {
                         let sentence_tail = sub_text.trim_end_matches(|character: char| {
@@ -1501,16 +1611,56 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
                         ));
                     }
 
-                    if let Some((deep_position, mid_position)) = &depth_positions {
+                    if let Some(depth) = depth_style {
+                        for offset in ((depth.mid_offset + 1)..=depth.deep_offset).rev() {
+                            ass.push_str(&format!(
+                                "Dialogue: 0,{},{},DepthDeep,,0,0,0,,{{\\an{}\\pos({},{}){wt}{size}}}{txt}\r\n",
+                                start_ass,
+                                end_ass,
+                                caption_alignment,
+                                target_width / 2 + offset,
+                                caption_anchor_y + offset,
+                                wt = weight_tag,
+                                size = size_tag,
+                                txt = sub_text,
+                            ));
+                        }
+                        for offset in ((depth.edge_offset + 1)..=depth.mid_offset).rev() {
+                            ass.push_str(&format!(
+                                "Dialogue: 1,{},{},DepthMid,,0,0,0,,{{\\an{}\\pos({},{}){wt}{size}}}{txt}\r\n",
+                                start_ass,
+                                end_ass,
+                                caption_alignment,
+                                target_width / 2 + offset,
+                                caption_anchor_y + offset,
+                                wt = weight_tag,
+                                size = size_tag,
+                                txt = sub_text,
+                            ));
+                        }
+                        for offset in (1..=depth.edge_offset).rev() {
+                            ass.push_str(&format!(
+                                "Dialogue: 2,{},{},DepthEdge,,0,0,0,,{{\\an{}\\pos({},{}){wt}{size}}}{txt}\r\n",
+                                start_ass,
+                                end_ass,
+                                caption_alignment,
+                                target_width / 2 + offset,
+                                caption_anchor_y + offset,
+                                wt = weight_tag,
+                                size = size_tag,
+                                txt = sub_text,
+                            ));
+                        }
                         ass.push_str(&format!(
-                            "Dialogue: 0,{},{},DepthDeep,,0,0,0,,{{{pos}{wt}{size}}}{txt}\r\n",
-                            start_ass, end_ass,
-                            pos = deep_position, wt = weight_tag, size = size_tag, txt = sub_text,
-                        ));
-                        ass.push_str(&format!(
-                            "Dialogue: 1,{},{},DepthMid,,0,0,0,,{{{pos}{wt}{size}}}{txt}\r\n",
-                            start_ass, end_ass,
-                            pos = mid_position, wt = weight_tag, size = size_tag, txt = sub_text,
+                            "Dialogue: 3,{},{},FaceHighlight,,0,0,0,,{{\\an{}\\pos({},{}){wt}{size}}}{txt}\r\n",
+                            start_ass,
+                            end_ass,
+                            caption_alignment,
+                            target_width / 2 - 1,
+                            caption_anchor_y - 1,
+                            wt = weight_tag,
+                            size = size_tag,
+                            txt = sub_text,
                         ));
                     }
 
@@ -1522,10 +1672,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
                             pos = caption_position_tag, wt = weight_tag, size = size_tag, blur = style.glow_blur, txt = sub_text
                         ));
                     }
-                    // Crisp foreground text on Layer 2 (above glow/cardboard/depth layers).
+                    // Crisp foreground text above glow/cardboard/depth layers.
+                    let foreground_layer = if depth_style.is_some() { 4 } else { 2 };
                     ass.push_str(&format!(
-                        "Dialogue: 2,{},{},Default,,0,0,0,,{{{pos}{wt}{size}{colour}}}{txt}\r\n",
-                        start_ass, end_ass, pos = caption_position_tag, wt = weight_tag, size = size_tag, colour = colour_tag, txt = sub_text
+                        "Dialogue: {},{},{},Default,,0,0,0,,{{{pos}{wt}{size}{colour}}}{txt}\r\n",
+                        foreground_layer, start_ass, end_ass, pos = caption_position_tag, wt = weight_tag, size = size_tag, colour = colour_tag, txt = foreground_text
                     ));
                 }
             }
