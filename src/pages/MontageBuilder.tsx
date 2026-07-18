@@ -2,16 +2,16 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { ArrowLeft, Trash2, Download, Film, Clock, Plus, FolderOpen, Loader2, Search, CheckCircle2, AlertCircle } from 'lucide-react'
+import { ArrowLeft, Trash2, Download, Film, Clock, Plus, FolderOpen, Loader2, Search, CheckCircle2, AlertCircle, Scissors, Blend } from 'lucide-react'
 import { useMontageStore } from '../stores/montageStore'
-import type { MontageExportPreset } from '../stores/montageStore'
+import type { MontageExportPreset, MontageTransition } from '../stores/montageStore'
 import { useAppStore } from '../stores/appStore'
 import type { Clip, Vod } from '../types'
 import PublishComposer from '../components/PublishComposer'
 import type { PublishMetadata } from '../components/PublishComposer'
 import ClipPlayer from '../components/ClipPlayer'
 import { errorMessage } from '../lib/errors'
-import { filterAvailableMontageClips, montageSourceGroup, nextMontageClipId } from '../lib/montage'
+import { filterAvailableMontageClips, montageDuration, montageSourceGroup, nextMontageClipId } from '../lib/montage'
 import type { MontageSourceFilter } from '../lib/montage'
 
 function fmt(s: number) {
@@ -54,9 +54,16 @@ export default function MontageBuilder() {
   const [exportResult, setExportResult] = useState<MontageExportResult | null>(null)
   const [previewMode, setPreviewMode] = useState<'clip' | 'export'>('clip')
   const [sequenceAutoPlay, setSequenceAutoPlay] = useState(false)
+  const [previewTransitioning, setPreviewTransitioning] = useState(false)
   const loadedProjectIdRef = useRef<string | null>(null)
+  const transitionTimerRef = useRef<number | null>(null)
+  const transitionTargetRef = useRef<string | null>(null)
 
   useEffect(() => { fetchClips(); fetchHighlights() }, [fetchClips, fetchHighlights])
+
+  useEffect(() => () => {
+    if (transitionTimerRef.current !== null) window.clearTimeout(transitionTimerRef.current)
+  }, [])
 
   // Auto-create a project if none exists
   useEffect(() => {
@@ -70,12 +77,14 @@ export default function MontageBuilder() {
   const project = projects.find(p => p.id === activeProjectId)
 
   const clipById = useMemo(() => new Map(clips.map(clip => [clip.id, clip])), [clips])
-  const totalDuration = project?.segments.reduce((sum, segment) => {
+  const transition = project?.transition ?? 'cut'
+  const segmentDurations = project?.segments.map(segment => {
     const clip = clipById.get(segment.clipId)
-    return sum + Math.max(0, clip
+    return Math.max(0, clip
       ? clip.end_seconds - clip.start_seconds
       : segment.endSeconds - segment.startSeconds)
-  }, 0) || 0
+  }) ?? []
+  const totalDuration = montageDuration(segmentDurations, transition)
   const selectedClip = selectedClipId ? clipById.get(selectedClipId) ?? null : null
   const segmentClipIds = project?.segments.map(segment => segment.clipId) ?? []
   const activeSegmentIndex = selectedClipId ? segmentClipIds.indexOf(selectedClipId) : -1
@@ -86,7 +95,7 @@ export default function MontageBuilder() {
     ? previewMedia.src
     : null
   const exportInputSignature = project
-    ? `${project.id}|${project.exportPreset}|${project.title}|${project.segments.map(segment => {
+    ? `${project.id}|${project.exportPreset}|${transition}|${project.title}|${project.segments.map(segment => {
         const clip = clipById.get(segment.clipId)
         return `${segment.clipId}:${clip?.render_status || 'missing'}:${clip?.start_seconds || segment.startSeconds}:${clip?.end_seconds || segment.endSeconds}`
       }).join('|')}`
@@ -98,6 +107,8 @@ export default function MontageBuilder() {
       setSelectedClipId(null)
       setPreviewMedia(null)
       setSequenceAutoPlay(false)
+      setPreviewTransitioning(false)
+      transitionTargetRef.current = null
       return
     }
     if (!project.segments.some(segment => segment.clipId === selectedClipId)) {
@@ -109,6 +120,10 @@ export default function MontageBuilder() {
   useEffect(() => {
     if (!project || loadedProjectIdRef.current === project.id) return
     loadedProjectIdRef.current = project.id
+    if (transitionTimerRef.current !== null) {
+      window.clearTimeout(transitionTimerRef.current)
+      transitionTimerRef.current = null
+    }
     if (project) {
       setPublishMeta({
         title: project.publishTitle || '',
@@ -123,15 +138,33 @@ export default function MontageBuilder() {
     setExportStage('')
     setPreviewMode('clip')
     setSequenceAutoPlay(false)
+    setPreviewTransitioning(false)
+    transitionTargetRef.current = null
   }, [project])
 
   useEffect(() => {
+    if (transitionTimerRef.current !== null) {
+      window.clearTimeout(transitionTimerRef.current)
+      transitionTimerRef.current = null
+    }
     setExportResult(null)
     setExportProgress(0)
     setExportStage('')
     setPreviewMode(mode => mode === 'export' ? 'clip' : mode)
     setSequenceAutoPlay(false)
+    setPreviewTransitioning(false)
+    transitionTargetRef.current = null
   }, [exportInputSignature])
+
+  useEffect(() => {
+    if (transition !== 'cut') return
+    if (transitionTimerRef.current !== null) {
+      window.clearTimeout(transitionTimerRef.current)
+      transitionTimerRef.current = null
+    }
+    transitionTargetRef.current = null
+    setPreviewTransitioning(false)
+  }, [transition])
 
   const handlePublishMetaChange = (next: PublishMetadata) => {
     setPublishMeta(next)
@@ -201,6 +234,20 @@ export default function MontageBuilder() {
     return () => { cancelled = true }
   }, [exportResult, previewMode, selectedClip])
 
+  useEffect(() => {
+    if (
+      !previewTransitioning
+      || !previewSrc
+      || !selectedClipId
+      || transitionTargetRef.current !== selectedClipId
+    ) return
+    const timer = window.setTimeout(() => {
+      setPreviewTransitioning(false)
+      transitionTargetRef.current = null
+    }, 60)
+    return () => window.clearTimeout(timer)
+  }, [previewSrc, previewTransitioning, selectedClipId])
+
   // Aggregate context from all clips in the montage for metadata generation
   const montageContext = (() => {
     if (!project) return { eventTags: [] as string[], emotionTags: [] as string[], clipTitles: [] as string[], game: undefined as string | undefined }
@@ -255,6 +302,12 @@ export default function MontageBuilder() {
   }
 
   const selectSequenceClip = (clipId: string) => {
+    if (transitionTimerRef.current !== null) {
+      window.clearTimeout(transitionTimerRef.current)
+      transitionTimerRef.current = null
+    }
+    transitionTargetRef.current = null
+    setPreviewTransitioning(false)
     setSequenceAutoPlay(false)
     setSelectedClipId(clipId)
     setPreviewMode('clip')
@@ -263,11 +316,23 @@ export default function MontageBuilder() {
   const handleSequenceEnded = () => {
     const nextClipId = nextMontageClipId(segmentClipIds, selectedClipId)
     if (nextClipId) {
+      if (transition === 'crossfade') {
+        transitionTargetRef.current = nextClipId
+        setPreviewTransitioning(true)
+        transitionTimerRef.current = window.setTimeout(() => {
+          transitionTimerRef.current = null
+          setSequenceAutoPlay(true)
+          setSelectedClipId(nextClipId)
+        }, 180)
+        return
+      }
       setSequenceAutoPlay(true)
       setSelectedClipId(nextClipId)
       return
     }
     setSequenceAutoPlay(false)
+    setPreviewTransitioning(false)
+    transitionTargetRef.current = null
     setSelectedClipId(segmentClipIds[0] ?? null)
   }
 
@@ -294,6 +359,12 @@ export default function MontageBuilder() {
 
   const handleExport = async () => {
     if (!project || project.segments.length === 0) return
+    if (transitionTimerRef.current !== null) {
+      window.clearTimeout(transitionTimerRef.current)
+      transitionTimerRef.current = null
+    }
+    setPreviewTransitioning(false)
+    transitionTargetRef.current = null
     setExporting(true)
     setExportError(null)
     setExportResult(null)
@@ -305,11 +376,14 @@ export default function MontageBuilder() {
         title: publishMeta.title.trim() || project.title.trim() || 'ClipGoblin Montage',
         clipIds: project.segments.map(segment => segment.clipId),
         preset: project.exportPreset,
+        transition,
       })
       setExportResult(result)
       setExportProgress(100)
       setExportStage('Montage ready')
       setSequenceAutoPlay(false)
+      setPreviewTransitioning(false)
+      transitionTargetRef.current = null
       setPreviewMode('export')
     } catch (error) {
       setExportError(errorMessage(error, 'Montage export failed'))
@@ -467,7 +541,13 @@ export default function MontageBuilder() {
                 type="button"
                 className="text-[10px] text-violet-300 hover:text-white cursor-pointer mb-3"
                 onClick={() => {
+                  if (transitionTimerRef.current !== null) {
+                    window.clearTimeout(transitionTimerRef.current)
+                    transitionTimerRef.current = null
+                  }
                   setSequenceAutoPlay(false)
+                  setPreviewTransitioning(false)
+                  transitionTargetRef.current = null
                   setPreviewMode(mode => mode === 'export' ? 'clip' : 'export')
                 }}
               >
@@ -499,6 +579,10 @@ export default function MontageBuilder() {
                 {project.segments.length === 0 ? 'Add a clip to begin.' : 'Preparing sequence preview.'}
               </div>
             )}
+            <div
+              className={`pointer-events-none absolute inset-0 z-[18] bg-black transition-opacity duration-200 ${previewTransitioning ? 'opacity-100' : 'opacity-0'}`}
+              aria-hidden="true"
+            />
             {previewLoading && (
               <div className="absolute inset-0 z-20 flex items-center justify-center gap-2 bg-black/70 text-xs text-slate-200">
                 <Loader2 className="h-4 w-4 animate-spin" /> Preparing preview
@@ -591,6 +675,26 @@ export default function MontageBuilder() {
                 aria-pressed={project.exportPreset === preset}
               >
                 {label}
+              </button>
+            ))}
+          </div>
+
+          <h4>Clip transitions</h4>
+          <div className="grid grid-cols-2 gap-1 rounded-lg border border-surface-700 bg-surface-900 p-1 mb-4" role="group" aria-label="Montage clip transitions">
+            {([
+              ['cut', 'Straight cut', Scissors],
+              ['crossfade', 'Cross dissolve', Blend],
+            ] as Array<[MontageTransition, string, typeof Scissors]>).map(([mode, label, Icon]) => (
+              <button
+                type="button"
+                key={mode}
+                disabled={exporting}
+                className={`flex items-center justify-center gap-1.5 rounded-md px-2 py-2 text-[11px] font-medium cursor-pointer transition-colors ${transition === mode ? 'bg-violet-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                onClick={() => updateProject(project.id, { transition: mode })}
+                aria-pressed={transition === mode}
+                title={mode === 'crossfade' ? 'Blend picture and sound between clips' : 'Play clips back to back'}
+              >
+                <Icon className="h-3.5 w-3.5" /> {label}
               </button>
             ))}
           </div>

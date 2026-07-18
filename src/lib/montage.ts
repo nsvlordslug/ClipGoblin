@@ -1,6 +1,22 @@
 import type { Clip } from '../types'
 
 export type MontageSourceFilter = 'all' | 'twitch' | 'medal' | 'obs' | 'meld' | 'local'
+export type MontageTransitionMode = 'cut' | 'crossfade'
+
+export const MONTAGE_CROSSFADE_SECONDS = 0.5
+
+export function montageDuration(
+  segmentDurations: number[],
+  transition: MontageTransitionMode,
+): number {
+  const durations = segmentDurations.map(duration => Math.max(0, duration))
+  const total = durations.reduce((sum, duration) => sum + duration, 0)
+  if (transition !== 'crossfade' || durations.length < 2) return total
+
+  const shortest = Math.min(...durations)
+  const overlap = Math.min(MONTAGE_CROSSFADE_SECONDS, shortest / 2)
+  return Math.max(0, total - overlap * (durations.length - 1))
+}
 
 export function montageSourceGroup(clip: Pick<Clip, 'source_kind'>): Exclude<MontageSourceFilter, 'all'> {
   if (clip.source_kind === 'medal') return 'medal'

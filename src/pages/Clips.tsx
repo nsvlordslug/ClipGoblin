@@ -327,18 +327,22 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, on
         {confidence !== null && (
           <span className="v4-lib-score">{Math.round(confidence * 100)}%</span>
         )}
-        {clip.render_status === 'completed' && clip.output_path && (
-          <div className="absolute bottom-1 left-1 z-10 bg-green-600/80 backdrop-blur-sm text-white text-[10px] px-1.5 py-0.5 rounded font-medium">
-            ✓ Exported
+        {!selectMode && (
+          <div className="absolute top-1 left-1 z-10 flex flex-col items-start gap-1">
+            {clip.render_status === 'completed' && clip.output_path && (
+              <span className="rounded bg-green-600/80 px-1.5 py-0.5 text-[10px] font-medium text-white backdrop-blur-sm">
+                ✓ Exported
+              </span>
+            )}
+            {showReviewTools && highlight?.review_rating && (
+              <span
+                className={`rounded border px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${REVIEW_RATING_COLORS[highlight.review_rating as ClipReviewRating]}`}
+                title={highlight.review_note ?? undefined}
+              >
+                {highlight.review_rating}
+              </span>
+            )}
           </div>
-        )}
-        {showReviewTools && highlight?.review_rating && (
-          <span
-            className={`absolute top-1 left-1 z-10 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide border ${REVIEW_RATING_COLORS[highlight.review_rating as ClipReviewRating]}`}
-            title={highlight.review_note ?? undefined}
-          >
-            {highlight.review_rating}
-          </span>
         )}
       </div>
 

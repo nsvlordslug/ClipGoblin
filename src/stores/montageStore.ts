@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { createJSONStorage, persist } from 'zustand/middleware'
 
 export type MontageExportPreset = 'youtube' | 'shorts'
+export type MontageTransition = 'cut' | 'crossfade'
 
 export interface MontageSegment {
   clipId: string
@@ -16,6 +17,7 @@ export interface MontageProject {
   title: string
   segments: MontageSegment[]
   exportPreset: MontageExportPreset
+  transition?: MontageTransition
   publishTitle?: string
   publishDescription?: string
   publishHashtags?: string[]
@@ -46,7 +48,7 @@ export const useMontageStore = create<MontageState>()(persist((set, get) => ({
     const id = crypto.randomUUID()
     set(state => ({
       projects: [...state.projects, {
-        id, title, segments: [], exportPreset: 'youtube',
+        id, title, segments: [], exportPreset: 'youtube', transition: 'cut',
         publishTitle: '', publishDescription: '', publishHashtags: [], visibility: 'public',
         createdAt: new Date().toISOString(),
       }],

@@ -559,9 +559,25 @@ export default function ClipPlayer({
               </div>
             </div>
             <span className="text-[10px] text-white/70 font-mono shrink-0 tabular-nums">{loaded ? fmt(elapsed) : '0:00'}/{fmt(clipDuration)}</span>
-            <button onClick={toggleMute} className="shrink-0 p-1 rounded text-white/80 hover:text-white cursor-pointer" title={muted ? 'Unmute' : 'Mute'}>
-              {muted || volume === 0 ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
-            </button>
+            <div className="flex w-24 shrink-0 items-center gap-1.5">
+              <button onClick={toggleMute} className="shrink-0 p-1 rounded text-white/80 hover:text-white cursor-pointer" title={muted ? 'Unmute' : 'Mute'}>
+                {muted || volume === 0 ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+              </button>
+              <div
+                ref={volRef}
+                className="group/vol relative h-1.5 flex-1 cursor-pointer rounded-full bg-white/20"
+                onMouseDown={onVolDown}
+                role="slider"
+                aria-label="Preview volume"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round((muted ? 0 : volume) * 100)}
+              >
+                <div className="relative h-full rounded-full bg-white" style={{ width: `${(muted ? 0 : volume) * 100}%` }}>
+                  <div className="absolute right-0 top-1/2 h-2.5 w-2.5 -translate-y-1/2 rounded-full bg-white shadow opacity-0 transition-opacity group-hover/vol:opacity-100" />
+                </div>
+              </div>
+            </div>
           </div>
         )}
       </div>
