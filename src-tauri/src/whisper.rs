@@ -6,12 +6,17 @@
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use whisper_rs::{
     DtwMode, DtwModelPreset, FullParams, SamplingStrategy, WhisperContext,
-    WhisperContextParameters, WhisperSegment,
+    WhisperContextParameters, WhisperSegment, WhisperVadContext,
+    WhisperVadContextParams, WhisperVadParams,
 };
+
+const SILERO_VAD_MODEL_BYTES: &[u8] =
+    include_bytes!("../resources/models/ggml-silero-v6.2.0.bin");
+static SILERO_VAD_MODEL_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 // ── Model definitions ──
 
@@ -303,6 +308,91 @@ fn detect_speech_windows(
         return Some(vec![(0.0, duration)]);
     }
     Some(windows)
+}
+
+fn staged_silero_vad_model_path() -> Option<PathBuf> {
+    SILERO_VAD_MODEL_PATH
+        .get_or_init(|| {
+            let model_dir = std::env::temp_dir().join("clipgoblin-vad");
+            if let Err(error) = std::fs::create_dir_all(&model_dir) {
+                log::warn!("[Whisper] Could not create the VAD model directory: {error}");
+                return None;
+            }
+
+            let model_path = model_dir.join("ggml-silero-v6.2.0.bin");
+            let model_is_current = std::fs::metadata(&model_path)
+                .map(|metadata| metadata.len() == SILERO_VAD_MODEL_BYTES.len() as u64)
+                .unwrap_or(false);
+            if !model_is_current {
+                if let Err(error) = std::fs::write(&model_path, SILERO_VAD_MODEL_BYTES) {
+                    log::warn!("[Whisper] Could not stage the bundled VAD model: {error}");
+                    return None;
+                }
+            }
+            Some(model_path)
+        })
+        .clone()
+}
+
+fn detect_vad_speech_windows(samples: &[f32]) -> Option<Vec<(f64, f64)>> {
+    if samples.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let model_path = staged_silero_vad_model_path()?;
+    let model_path = model_path.to_str()?;
+    let mut context_params = WhisperVadContextParams::default();
+    context_params.set_n_threads(optimal_thread_count().clamp(1, 4));
+    context_params.set_use_gpu(false);
+    let mut context = match WhisperVadContext::new(model_path, context_params) {
+        Ok(context) => context,
+        Err(error) => {
+            log::warn!("[Whisper] Bundled Silero VAD could not be loaded: {error}");
+            return None;
+        }
+    };
+
+    let mut params = WhisperVadParams::default();
+    params.set_threshold(0.45);
+    params.set_min_speech_duration(80);
+    params.set_min_silence_duration(160);
+    params.set_max_speech_duration(18.0);
+    params.set_speech_pad(20);
+    params.set_samples_overlap(0.0);
+
+    let segments = match context.segments_from_samples(params, samples) {
+        Ok(segments) => segments,
+        Err(error) => {
+            log::warn!("[Whisper] Silero VAD failed; using amplitude fallback: {error}");
+            return None;
+        }
+    };
+    let duration = samples.len() as f64 / 16_000.0;
+    let mut windows: Vec<(f64, f64)> = Vec::new();
+    for segment in segments {
+        let start = (segment.start as f64 / 100.0).clamp(0.0, duration);
+        let end = (segment.end as f64 / 100.0).clamp(start, duration);
+        if end - start < 0.08 {
+            continue;
+        }
+        if let Some(previous) = windows.last_mut() {
+            if start - previous.1 <= 0.08 {
+                previous.1 = previous.1.max(end);
+                continue;
+            }
+        }
+        windows.push((start, end));
+    }
+
+    if windows.len() > 120 {
+        log::warn!(
+            "[Whisper] Silero VAD returned {} windows; using amplitude fallback",
+            windows.len()
+        );
+        None
+    } else {
+        Some(windows)
+    }
 }
 
 fn merge_token_pieces(pieces: Vec<TimedTokenPiece>) -> Vec<TranscriptWord> {
@@ -959,11 +1049,36 @@ where
 
     let samples = extract_pcm_audio(audio_path, &ffmpeg)?;
     let total_duration = samples.len() as f64 / 16000.0;
+    let vad_windows = if align_word_timestamps {
+        detect_vad_speech_windows(&samples)
+    } else {
+        None
+    };
+    let active_windows = vad_windows.as_deref().unwrap_or(windows);
+    if align_word_timestamps {
+        if vad_windows.is_some() {
+            log::info!(
+                "[Whisper] Silero VAD found {} speech window(s) across {:.1}s",
+                active_windows.len(),
+                total_duration
+            );
+        } else {
+            log::info!("[Whisper] Using amplitude-based speech windows as a fallback");
+        }
+    }
+    if active_windows.is_empty() {
+        progress_fn(100);
+        return Ok(TranscriptResult {
+            segments: Vec::new(),
+            language: "en".to_string(),
+            duration: total_duration,
+        });
+    }
 
     // Compute total samples we'll actually transcribe (sum of window sizes,
     // clipped to actual sample count). This is what we use for the speedup
     // log and as the denominator for progress mapping.
-    let total_window_samples: usize = windows
+    let total_window_samples: usize = active_windows
         .iter()
         .map(|&(s, e)| {
             let start_idx = (s * 16000.0).max(0.0) as usize;
@@ -1015,14 +1130,14 @@ where
     let mut all_segments: Vec<TranscriptSegment> = Vec::new();
     let mut samples_processed: usize = 0;
 
-    for (i, &(window_start_secs, window_end_secs)) in windows.iter().enumerate() {
+    for (i, &(window_start_secs, window_end_secs)) in active_windows.iter().enumerate() {
         let start_idx = (window_start_secs * 16000.0).max(0.0) as usize;
         let end_idx = ((window_end_secs * 16000.0) as usize).min(samples.len());
         if start_idx >= end_idx {
             log::warn!(
                 "[Whisper] Window {}/{} ({:.1}-{:.1}s) is empty after sample mapping, skipping",
                 i + 1,
-                windows.len(),
+                active_windows.len(),
                 window_start_secs,
                 window_end_secs
             );
@@ -1033,7 +1148,7 @@ where
         log::debug!(
             "[Whisper] Window {}/{}: {:.1}-{:.1}s ({} samples)",
             i + 1,
-            windows.len(),
+            active_windows.len(),
             window_start_secs,
             window_end_secs,
             slice.len()
@@ -1098,7 +1213,7 @@ where
     log::info!(
         "[Whisper] Two-pass transcription complete: {} segments across {} windows ({:.1}s of audio)",
         all_segments.len(),
-        windows.len(),
+        active_windows.len(),
         total_window_samples as f64 / 16000.0,
     );
 
@@ -1208,6 +1323,14 @@ mod tests {
             vec![(0.0, 5.0)]
         );
         assert!(speech_windows_from_silence_log("silence_start: 0.0", 5.0).is_empty());
+    }
+
+    #[test]
+    fn bundled_vad_model_loads_and_rejects_silence() {
+        assert_eq!(SILERO_VAD_MODEL_BYTES.len(), 885_098);
+        let windows = detect_vad_speech_windows(&vec![0.0; 16_000])
+            .expect("bundled Silero VAD should load");
+        assert!(windows.is_empty());
     }
 
     #[test]

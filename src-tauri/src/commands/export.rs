@@ -11,7 +11,7 @@ use crate::report_error;
 use crate::vertical_crop;
 use crate::commands::vod::{
     find_ffmpeg, generate_srt_for_clip, generate_thumbnail,
-    run_clip_transcription_native, TranscriptResult,
+    run_clip_transcription_native,
 };
 
 /// Generate captions for a clip by transcribing its audio segment.
@@ -65,69 +65,26 @@ pub async fn generate_clip_captions(
         clip.end_seconds
     };
 
-    // Check for cached transcript first
-    let transcript_dir = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("clipviral")
-        .join("transcripts");
-    std::fs::create_dir_all(&transcript_dir).ok();
-    let transcript_owner = vod.as_ref().map(|vod| vod.id.as_str()).unwrap_or(&clip.id);
-    let transcript_path = transcript_dir.join(format!("{}.json", transcript_owner));
-
-    let cached_transcript: Option<TranscriptResult> = if standalone_source.is_none() && transcript_path.exists() {
-        match std::fs::read_to_string(&transcript_path)
-            .ok()
-            .and_then(|json| serde_json::from_str(&json).ok())
-        {
-            Some(transcript) => Some(transcript),
-            None => {
-                log::warn!(
-                    "[Captions] Cached transcript for VOD {} could not be read; regenerating this clip",
-                    transcript_owner
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    let cache_has_word_timing = cached_transcript.as_ref().map_or(false, |transcript| {
-        transcript.segments.iter().any(|segment| {
-            segment.end > transcript_clip_start
-                && segment.start < transcript_clip_end
-                && !segment.words.is_empty()
-        })
-    });
-
-    let (transcript, transcript_start, transcript_end) = if cache_has_word_timing {
-        (
-            cached_transcript.ok_or_else(|| "Cached transcript became unavailable".to_string())?,
-            transcript_clip_start,
-            transcript_clip_end,
-        )
-    } else {
-        if cached_transcript.is_some() {
-            log::info!(
-                "[Captions] Legacy transcript has no word timing; transcribing only clip {}",
-                clip.id
-            );
-        }
-        let media_path_for_task = media_path.clone();
-        let clip_start = transcript_clip_start;
-        let clip_end = transcript_clip_end;
-        let transcript = tokio::task::spawn_blocking(move || {
-            run_clip_transcription_native(&media_path_for_task, clip_start, clip_end)
-        })
-        .await
-        .map_err(|error| format!("Caption transcription task failed: {error}"))?
-        .map_err(|error| error.to_string())?;
-        (
-            transcript,
-            0.0,
-            (transcript_clip_end - transcript_clip_start).max(0.0),
-        )
-    };
+    // Subtitle regeneration always uses the short clip-specific DTW/VAD path.
+    // Whole-VOD transcripts are optimized for detection throughput and their
+    // token timestamps are not precise enough for word-by-word captions.
+    log::info!(
+        "[Captions] Generating speech-aligned timing for clip {} ({:.2}-{:.2}s)",
+        clip.id,
+        transcript_clip_start,
+        transcript_clip_end
+    );
+    let media_path_for_task = media_path.clone();
+    let clip_start = transcript_clip_start;
+    let clip_end = transcript_clip_end;
+    let transcript = tokio::task::spawn_blocking(move || {
+        run_clip_transcription_native(&media_path_for_task, clip_start, clip_end)
+    })
+    .await
+    .map_err(|error| format!("Caption transcription task failed: {error}"))?
+    .map_err(|error| error.to_string())?;
+    let transcript_start = 0.0;
+    let transcript_end = (transcript_clip_end - transcript_clip_start).max(0.0);
 
     // Generate SRT for this clip's time range
     let captions_dir = dirs::data_dir()

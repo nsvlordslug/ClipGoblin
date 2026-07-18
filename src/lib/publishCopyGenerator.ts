@@ -595,7 +595,7 @@ function describeAction(ctype: ContentType, ctx: ClipContext): string {
     storedSummary
     && storedSummary.length >= 8
     && storedSummary.length <= 140
-    && !/^(something happened|a moment hit|this moment)$/i.test(storedSummary)
+    && localCaptionAnchorScore(storedSummary) >= 12
   ) {
     return storedSummary
   }
@@ -1249,6 +1249,31 @@ const LOCAL_SIMILARITY_STOP_WORDS = new Set([
 
 const GENERIC_LOCAL_ANCHOR = /^(?:this moment|this play|stream moment|gaming moment|something happened|a moment hit|check this out)$/i
 
+function localCaptionAnchorScore(value: string | undefined): number {
+  const cleaned = (value || '').replace(/\s+/g, ' ').trim().replace(/[.!?]+$/, '')
+  if (!cleaned || GENERIC_LOCAL_ANCHOR.test(cleaned)) return Number.NEGATIVE_INFINITY
+
+  const words = cleaned.split(/\s+/).filter(Boolean)
+  if (words.length < 2 || words.length > 18) return Number.NEGATIVE_INFINITY
+
+  let score = 30
+  if (words.length >= 12 && !/[,:;.!?]/.test(cleaned)) score -= 12
+  const fillerCount = words.filter(word => /^(?:ah|alright|anyway|like|okay|oh|thanks|uh|um)$/i.test(word.replace(/[^a-z']/gi, ''))).length
+  score -= fillerCount * 6
+
+  const pronounCount = words.filter(word => /^(?:i|i'm|im|me|my|we|we're|you|you're|your)$/i.test(word.replace(/[^a-z']/gi, ''))).length
+  if (pronounCount >= 3 && !/[,:;.!?]/.test(cleaned)) score -= 12
+
+  const connectorCount = words.filter(word => /^(?:and|because|but|so|then|while)$/i.test(word.replace(/[^a-z']/gi, ''))).length
+  if (connectorCount >= 3) score -= 10
+
+  const normalizedWords = words.map(word => word.toLowerCase().replace(/[^a-z0-9']/g, '')).filter(Boolean)
+  const uniqueRatio = new Set(normalizedWords).size / Math.max(1, normalizedWords.length)
+  if (uniqueRatio < 0.7) score -= 10
+
+  return score
+}
+
 function cleanCaptionAnchor(value: string | undefined, maxChars = 150): string {
   const cleaned = (value || '').replace(/\s+/g, ' ').trim().replace(/[.!?]+$/, '')
   if (cleaned.length <= maxChars) return cleaned
@@ -1288,8 +1313,13 @@ function groundedCaptionCandidates(
   const summary = cleanCaptionAnchor(ctx.eventSummary)
   const title = cleanCaptionAnchor(ctx.title)
   const actionAnchor = cleanCaptionAnchor(action)
-  const anchor = [summary, actionAnchor, title]
-    .find(candidate => candidate.length >= 5 && !GENERIC_LOCAL_ANCHOR.test(candidate))
+  const anchor = [
+    { value: summary, score: localCaptionAnchorScore(summary) + 4 },
+    { value: title, score: localCaptionAnchorScore(title) + 2 },
+    { value: actionAnchor, score: localCaptionAnchorScore(actionAnchor) },
+  ]
+    .filter(candidate => candidate.value.length >= 5 && Number.isFinite(candidate.score))
+    .sort((left, right) => right.score - left.score)[0]?.value
     || actionAnchor
     || title
     || 'Stream highlight'
@@ -1410,6 +1440,7 @@ export function generateStandaloneCaption(
   const score = (candidate: string): number => {
     const lower = candidate.toLowerCase()
     let relevance = 0
+    if (localGrounded.includes(candidate)) relevance += 10
     const actionIsSpecific = action.length >= 5 && !GENERIC_LOCAL_ANCHOR.test(action)
     if (actionIsSpecific && lower.includes(action.toLowerCase())) relevance += 8
     if (quote && lower.includes(quote.toLowerCase())) relevance += 5
@@ -1421,7 +1452,10 @@ export function generateStandaloneCaption(
   const ranked = uniqueCandidates
     .map((caption, index) => ({ caption, index, relevance: score(caption) }))
     .sort((left, right) => right.relevance - left.relevance || left.index - right.index)
-  const grounded = ranked.filter(candidate => candidate.relevance >= 5)
+  const bestRelevance = ranked[0]?.relevance || 0
+  const grounded = ranked.filter(candidate => (
+    candidate.relevance >= 5 && candidate.relevance >= bestRelevance - 2
+  ))
   const preferred = grounded.length > 0
     ? grounded
     : localGrounded.map((caption, index) => ({ caption, index, relevance: 1 }))

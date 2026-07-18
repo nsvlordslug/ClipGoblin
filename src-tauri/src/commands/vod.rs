@@ -1376,11 +1376,16 @@ pub(crate) fn generate_srt_for_clip(
             seg.words.iter().collect()
         };
 
-        for (word_index, word) in words.iter().enumerate() {
+        let spoken_words: Vec<&TranscriptWord> = words
+            .into_iter()
+            .filter(|word| is_spoken_caption_token(&word.word))
+            .collect();
+
+        for (word_index, word) in spoken_words.iter().enumerate() {
             if word.end <= clip_start || word.start >= clip_end {
                 continue;
             }
-            let next_word_start = words.get(word_index + 1).map(|next| next.start);
+            let next_word_start = spoken_words.get(word_index + 1).map(|next| next.start);
             append_srt_word(
                 &mut srt,
                 &mut index,
@@ -1434,6 +1439,29 @@ fn word_visible_duration(word: &str) -> f64 {
     (0.4 + character_count * 0.075).clamp(0.475, 1.2)
 }
 
+fn is_spoken_caption_token(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || !trimmed.chars().any(char::is_alphanumeric) {
+        return false;
+    }
+
+    let bracketed = (trimmed.starts_with('[') && trimmed.ends_with(']'))
+        || (trimmed.starts_with('*') && trimmed.ends_with('*'));
+    if bracketed {
+        return false;
+    }
+
+    let marker: String = trimmed
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    !matches!(
+        marker.as_str(),
+        "blankaudio" | "music" | "applause" | "laughter" | "laughing" | "cough" | "crying" | "silence"
+    ) || !(trimmed.starts_with('(') && trimmed.ends_with(')'))
+}
+
 fn append_srt_word(
     srt: &mut String,
     index: &mut usize,
@@ -1452,6 +1480,7 @@ fn append_srt_word(
     // Cap that hold so silence is rendered as silence instead of sticky text.
     let absolute_end = word
         .end
+        .max(word.start + 0.22)
         .min(word.start + word_visible_duration(text))
         .min(next_word_start.unwrap_or(f64::INFINITY))
         .min(clip_end);
@@ -4259,6 +4288,68 @@ mod tests {
 
         assert!(srt.contains("00:00:00,000 --> 00:00:00,700\nwait"));
         assert!(srt.contains("00:00:02,000 --> 00:00:02,400\nnow"));
+    }
+
+    #[test]
+    fn srt_generation_drops_non_dialogue_whisper_artifacts() {
+        let transcript = TranscriptResult {
+            segments: vec![TranscriptSegment {
+                start: 0.0,
+                end: 1.5,
+                text: "- [BLANK_AUDIO] *cough* hello".to_string(),
+                words: vec![
+                    TranscriptWord { word: "-".to_string(), start: 0.0, end: 0.1 },
+                    TranscriptWord { word: "[BLANK_AUDIO]".to_string(), start: 0.2, end: 0.4 },
+                    TranscriptWord { word: "*cough*".to_string(), start: 0.5, end: 0.8 },
+                    TranscriptWord { word: "hello".to_string(), start: 1.0, end: 1.3 },
+                ],
+            }],
+            full_text: String::new(),
+            language: "en".to_string(),
+            keywords_found: Vec::new(),
+        };
+        let path = std::env::temp_dir().join(format!(
+            "clipviral-srt-artifact-test-{}.srt",
+            uuid::Uuid::new_v4()
+        ));
+
+        generate_srt_for_clip(&transcript, 0.0, 2.0, &path).unwrap();
+        let srt = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(path);
+
+        assert!(srt.contains("\nhello\n"));
+        assert!(!srt.contains("BLANK_AUDIO"));
+        assert!(!srt.contains("cough"));
+        assert_eq!(srt.matches(" --> ").count(), 1);
+    }
+
+    #[test]
+    fn srt_generation_keeps_tiny_whisper_tokens_readable_until_the_next_word() {
+        let transcript = TranscriptResult {
+            segments: vec![TranscriptSegment {
+                start: 10.0,
+                end: 10.9,
+                text: "my turn".to_string(),
+                words: vec![
+                    TranscriptWord { word: "my".to_string(), start: 10.0, end: 10.04 },
+                    TranscriptWord { word: "turn".to_string(), start: 10.5, end: 10.9 },
+                ],
+            }],
+            full_text: String::new(),
+            language: "en".to_string(),
+            keywords_found: Vec::new(),
+        };
+        let path = std::env::temp_dir().join(format!(
+            "clipviral-srt-short-word-test-{}.srt",
+            uuid::Uuid::new_v4()
+        ));
+
+        generate_srt_for_clip(&transcript, 10.0, 11.0, &path).unwrap();
+        let srt = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(path);
+
+        assert!(srt.contains("00:00:00,000 --> 00:00:00,220\nmy"));
+        assert!(srt.contains("00:00:00,500 --> 00:00:00,900\nturn"));
     }
 
     #[test]

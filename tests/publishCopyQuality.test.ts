@@ -45,3 +45,31 @@ test('local generation avoids a previous caption without losing the event', () =
   assert.match(rerolled.toLowerCase(), /stacie/)
   assert.match(rerolled.toLowerCase(), /heal/)
 })
+
+test('local generation rejects transcript-like word vomit as its caption anchor', () => {
+  const noisyContext: ClipContext = {
+    ...groundedContext,
+    title: "Stacie's fake heal",
+    eventSummary: 'come here let me heal you oh thanks immediately stabs me',
+  }
+
+  const caption = generateStandaloneCaption(noisyContext, 'punchy', 0)
+
+  assert.match(caption.toLowerCase(), /stacie/)
+  assert.match(caption.toLowerCase(), /fake heal/)
+  assert.doesNotMatch(caption.toLowerCase(), /come here let me heal you/)
+})
+
+test('local generation rejects long unpunctuated dialogue as an event summary', () => {
+  const noisyContext: ClipContext = {
+    ...groundedContext,
+    title: "Stacie's fake heal",
+    eventSummary: "not Stacie stabbing me taking more damage from Stasian than the killer I'm sorry that was funny",
+  }
+
+  const caption = generateStandaloneCaption(noisyContext, 'punchy', 0)
+
+  assert.match(caption.toLowerCase(), /stacie/)
+  assert.match(caption.toLowerCase(), /fake heal/)
+  assert.doesNotMatch(caption.toLowerCase(), /more damage from stasian/)
+})

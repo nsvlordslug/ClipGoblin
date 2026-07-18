@@ -2791,11 +2791,10 @@ OUTPUT - JSON only, no prose, no markdown fence:
         has_money_quote: money_quote.is_some(),
     };
     let grounding_evidence = format!(
-        "{} {} {} {}",
+        "{} {} {}",
         event_summary,
         full_transcript.unwrap_or_default(),
         transcript_quote.unwrap_or_default(),
-        tags.join(" "),
     );
 
     let mut scored: Vec<CaptionCandidate> = parsed
@@ -2811,6 +2810,8 @@ OUTPUT - JSON only, no prose, no markdown fence:
                 &combined_text,
                 &grounding_evidence,
             );
+            let quality_adjustment =
+                caption_quality_adjustment(&hook_truncated, &normalized_body);
             let novelty_adjustment = caption_novelty_adjustment(
                 &combined_text,
                 avoid_captions,
@@ -2832,6 +2833,7 @@ OUTPUT - JSON only, no prose, no markdown fence:
                 score: hook_score
                     + body_score
                     + grounding_adjustment
+                    + quality_adjustment
                     + novelty_adjustment
                     - money_quote_penalty,
             }
@@ -2905,13 +2907,104 @@ fn caption_grounding_adjustment(caption: &str, evidence: &str) -> f32 {
         return 0.0;
     }
     let caption_tokens = caption_content_tokens(caption);
+    if caption_tokens.is_empty() {
+        return -0.30;
+    }
     let evidence_tokens = caption_content_tokens(evidence);
     let shared = caption_tokens.intersection(&evidence_tokens).count();
-    if shared == 0 {
-        -0.30
-    } else {
-        (shared.min(5) as f32) * 0.05
+    match shared {
+        0 => -0.45,
+        1 if caption_tokens.len() <= 2 => 0.02,
+        1 => -0.08,
+        _ => {
+            let coverage = shared as f32 / caption_tokens.len() as f32;
+            ((shared.min(5) as f32) * 0.045 + coverage * 0.12).min(0.32)
+        }
     }
+}
+
+fn caption_quality_adjustment(hook: &str, body: &str) -> f32 {
+    const DANGLING_WORDS: &[&str] = &[
+        "a", "an", "and", "as", "because", "but", "for", "if", "of", "or", "the",
+        "then", "to", "when", "while", "with", "without",
+    ];
+    const CLAUSE_CONNECTORS: &[&str] = &[
+        "and", "because", "but", "so", "then", "when", "while",
+    ];
+
+    let hook = hook.trim();
+    let body = body.trim();
+    if hook.is_empty() && body.is_empty() {
+        return -0.55;
+    }
+
+    let hook_words: Vec<&str> = hook.split_whitespace().collect();
+    let body_words: Vec<&str> = body.split_whitespace().collect();
+    let mut score = 0.0_f32;
+
+    if hook_words.is_empty() {
+        score -= 0.25;
+    } else if (3..=10).contains(&hook_words.len()) {
+        score += 0.05;
+    } else if hook_words.len() > 13 {
+        score -= 0.14;
+    }
+
+    match body_words.len() {
+        0..=3 => score -= 0.18,
+        4..=24 => score += 0.10,
+        25..=32 => score -= 0.05,
+        _ => score -= 0.24,
+    }
+    if body.chars().count() > 185 {
+        score -= 0.12;
+    }
+
+    let last_word = |text: &str| {
+        text.split_whitespace()
+            .last()
+            .unwrap_or_default()
+            .trim_matches(|character: char| !character.is_alphanumeric())
+            .to_ascii_lowercase()
+    };
+    if DANGLING_WORDS.contains(&last_word(hook).as_str()) {
+        score -= 0.22;
+    }
+    if DANGLING_WORDS.contains(&last_word(body).as_str()) {
+        score -= 0.22;
+    }
+
+    let hook_tokens = caption_content_tokens(hook);
+    let body_tokens = caption_content_tokens(body);
+    if !hook_tokens.is_empty() && !body_tokens.is_empty() {
+        let shared = hook_tokens.intersection(&body_tokens).count() as f32;
+        let overlap = shared / hook_tokens.len().min(body_tokens.len()) as f32;
+        if overlap >= 0.70 {
+            score -= 0.24;
+        } else if overlap >= 0.45 {
+            score -= 0.10;
+        }
+    }
+
+    let connector_count = body
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| CLAUSE_CONNECTORS.contains(&word.to_ascii_lowercase().as_str()))
+        .count();
+    if connector_count >= 4 {
+        score -= 0.18;
+    }
+
+    let short_fragments = body
+        .split(['.', '!', '?'])
+        .map(str::trim)
+        .filter(|fragment| !fragment.is_empty())
+        .filter(|fragment| fragment.split_whitespace().count() <= 3)
+        .count();
+    if short_fragments >= 3 {
+        score -= 0.20;
+    }
+
+    score.clamp(-0.55, 0.18)
 }
 
 fn caption_novelty_adjustment(caption: &str, previous_captions: &[String]) -> f32 {
@@ -3192,6 +3285,46 @@ mod tests {
             caption_novelty_adjustment("the scream at the end says everything", &previous)
                 > caption_novelty_adjustment("escaped the killer through the window", &previous)
         );
+    }
+
+    #[test]
+    fn caption_quality_prefers_a_complete_caption_over_word_vomit() {
+        let coherent = caption_quality_adjustment(
+            "Stacie offered a heal",
+            "She stabbed me the second I accepted it.",
+        );
+        let rambling = caption_quality_adjustment(
+            "Stacie offered a heal and then",
+            "I accepted and then she stabbed me and then I panicked and then I ran and everything kept happening because nobody knew what was going on with the whole situation.",
+        );
+
+        assert!(coherent > rambling);
+    }
+
+    #[test]
+    fn caption_quality_penalizes_hook_body_repetition_and_fragment_stacks() {
+        let clean = caption_quality_adjustment(
+            "The fake heal worked",
+            "Stacie waited until I trusted her before the stab.",
+        );
+        let repeated = caption_quality_adjustment(
+            "Stacie faked the heal",
+            "Stacie faked the heal and the fake heal was fake.",
+        );
+        let fragments = caption_quality_adjustment(
+            "The betrayal landed",
+            "No warning. No chance. No recovery.",
+        );
+
+        assert!(clean > repeated);
+        assert!(clean > fragments);
+    }
+
+    #[test]
+    fn one_generic_overlap_does_not_count_as_strong_grounding() {
+        let evidence = "Stacie offered to heal me and immediately stabbed me";
+        assert!(caption_grounding_adjustment("Stacie offered a heal", evidence) > 0.0);
+        assert!(caption_grounding_adjustment("Stacie made the rocket explode", evidence) < 0.0);
     }
     use crate::pipeline::{ClipScoreBreakdown, SignalType};
 
