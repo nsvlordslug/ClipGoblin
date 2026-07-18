@@ -55,6 +55,38 @@ test('Frosted, Drip, and Comic Pop replace the plain presets with bundled OFL fo
   assert.equal(EMPHASIS_STYLES.boxed.color, '#FF8FD8')
 })
 
+test('Tape Riot, Paper Mischief, and Goblin Bite ship as distinct layered styles', () => {
+  const expected = [
+    {
+      id: 'tape-riot', name: 'Tape Riot', presentation: 'tape-riot',
+      family: 'Bangers', face: '#B8FF2C', emphasis: '#A855F7', shadow: '#7C2FE4',
+    },
+    {
+      id: 'paper-mischief', name: 'Paper Mischief', presentation: 'paper-mischief',
+      family: 'Coiny', face: '#F3F0E8', emphasis: '#B8FF2C', shadow: '#5E2A84',
+    },
+    {
+      id: 'goblin-bite', name: 'Goblin Bite', presentation: 'goblin-bite',
+      family: 'Nosifer', face: '#D7FF2F', emphasis: '#FFFFFF', shadow: '#5C249B',
+    },
+  ]
+
+  for (const item of expected) {
+    const style = CAPTION_STYLES.find(candidate => candidate.id === item.id)
+    assert.equal(style?.name, item.name)
+    assert.equal(style?.presentation, item.presentation)
+    assert.match(style?.fontFamily || '', new RegExp(item.family))
+    assert.equal(style?.fontColor, item.face)
+    assert.match(style?.shadow || '', new RegExp(item.shadow, 'i'))
+    assert.equal(style?.uppercase, true)
+    assert.ok((style?.safeWidthRatio || 1) <= 0.8)
+    assert.equal(EMPHASIS_STYLES[item.id].color, item.emphasis)
+  }
+
+  assert.equal(new Set(expected.map(item => item.face)).size, expected.length)
+  assert.equal(new Set(expected.map(item => item.emphasis)).size, expected.length)
+})
+
 test('caption sizing clamps user scale and shrinks long words into a vertical safe area', () => {
   assert.equal(clampCaptionFontScale(0.2), 0.75)
   assert.equal(clampCaptionFontScale(4), 1.25)

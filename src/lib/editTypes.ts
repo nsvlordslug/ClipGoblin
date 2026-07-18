@@ -7,7 +7,7 @@ export interface CaptionStyle {
   id: string
   name: string
   /** Optional renderer treatment beyond the base typography fields. */
-  presentation?: 'cardboard'
+  presentation?: 'cardboard' | 'tape-riot' | 'paper-mischief' | 'goblin-bite'
   fontFamily: string
   fontSize: number       // px at 1080p export resolution
   fontWeight: number     // 400–900
@@ -119,6 +119,51 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     letterSpacing: 0.02, lineHeight: 1.05,
     shadow: '2px 2px 0 #F05BD8, 4px 4px 0 #55206F, 0 7px 10px rgba(0,0,0,0.75)',
     characterWidthFactor: 0.68,
+  },
+  {
+    id: 'tape-riot',
+    name: 'Tape Riot',
+    presentation: 'tape-riot',
+    fontFamily: "'Bangers', 'Arial Black', Arial, sans-serif",
+    fontSize: 62, fontWeight: 400,
+    fontColor: '#B8FF2C',
+    strokeColor: '#17131C', strokeWidth: 3,
+    bgColor: '', bgPadding: 0, bgRadius: 0,
+    uppercase: true,
+    letterSpacing: 0.02, lineHeight: 1.04,
+    shadow: '2px 2px 0 #F4D72B, 5px 5px 0 #7C2FE4, 8px 8px 0 #26103D, 0 11px 12px rgba(0,0,0,0.72)',
+    characterWidthFactor: 0.7,
+    safeWidthRatio: 0.8,
+  },
+  {
+    id: 'paper-mischief',
+    name: 'Paper Mischief',
+    presentation: 'paper-mischief',
+    fontFamily: "'Coiny', 'Arial Black', Arial, sans-serif",
+    fontSize: 58, fontWeight: 400,
+    fontColor: '#F3F0E8',
+    strokeColor: '#27222D', strokeWidth: 3,
+    bgColor: '', bgPadding: 0, bgRadius: 0,
+    uppercase: true,
+    letterSpacing: 0.01, lineHeight: 1.06,
+    shadow: '2px 2px 0 #B9B4C0, 5px 5px 0 #5E2A84, 8px 8px 0 #24122F, 0 11px 12px rgba(0,0,0,0.7)',
+    characterWidthFactor: 0.74,
+    safeWidthRatio: 0.79,
+  },
+  {
+    id: 'goblin-bite',
+    name: 'Goblin Bite',
+    presentation: 'goblin-bite',
+    fontFamily: "'Nosifer', 'Arial Black', Arial, sans-serif",
+    fontSize: 52, fontWeight: 400,
+    fontColor: '#D7FF2F',
+    strokeColor: '#111014', strokeWidth: 3,
+    bgColor: '', bgPadding: 0, bgRadius: 0,
+    uppercase: true,
+    letterSpacing: 0.01, lineHeight: 1.08,
+    shadow: '2px 2px 0 #8B3DFF, 5px 5px 0 #5C249B, 8px 8px 0 #251137, 0 11px 13px rgba(0,0,0,0.78)',
+    characterWidthFactor: 0.82,
+    safeWidthRatio: 0.78,
   },
 ]
 

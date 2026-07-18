@@ -31,6 +31,9 @@ export const EMPHASIS_STYLES: Record<string, EmphasisStyle> = {
   minimal:     { color: '#FFE45E', scale: 1.08, bold: true, uppercase: true, shadow: '0 2px 0 #7A0000, 0 4px 7px rgba(0,0,0,0.9)' },
   fire:        { color: '#FFFFFF', scale: 1.12, bold: true, uppercase: true, shadow: '2px 0 0 #000, -2px 0 0 #000, 0 2px 0 #000, 0 -2px 0 #000' },
   'comic-pop': { color: '#FF76D6', scale: 1.14, bold: true, uppercase: true, shadow: '2px 2px 0 #67E8E6, 4px 4px 0 #55206F' },
+  'tape-riot': { color: '#A855F7', scale: 1.14, bold: true, uppercase: true, shadow: '2px 2px 0 #F4D72B, 5px 5px 0 #26103D' },
+  'paper-mischief': { color: '#B8FF2C', scale: 1.12, bold: true, uppercase: true, shadow: '2px 2px 0 #27222D, 5px 5px 0 #5E2A84' },
+  'goblin-bite': { color: '#FFFFFF', scale: 1.1, bold: true, uppercase: true, shadow: '2px 2px 0 #8B3DFF, 5px 5px 0 #251137' },
 }
 
 // ── Detection dictionaries ──
