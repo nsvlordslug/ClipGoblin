@@ -346,8 +346,8 @@ export default function HelpGuide() {
                 <p><span className="text-white font-medium">2. Create a project</span> — Open Montage and use New when you want a separate compilation. Projects and their clip order are saved on this PC.</p>
                 <p><span className="text-white font-medium">3. Find clips</span> — Search by title or game and filter by Twitch, Medal, OBS, Meld, or Local. Click a clip to add it. Playing the preview continues through every following clip; select a timeline or sequence item to start from that point.</p>
                 <p><span className="text-white font-medium">4. Set the sequence</span> — Use the up/down arrows to reorder clips. Edit opens the source clip without removing it from the project.</p>
-                <p><span className="text-white font-medium">5. Choose a format</span> — YouTube 16:9 creates a 1920×1080 compilation. Shorts 9:16 creates a 1080×1920 vertical compilation. Mixed source sizes are fitted safely instead of stretching.</p>
-                <p><span className="text-white font-medium">6. Choose transitions</span> — Straight cut keeps clips back to back. Cross dissolve blends both picture and sound between clips. The choice is saved with the project.</p>
+                <p><span className="text-white font-medium">5. Choose a format</span> — YouTube 16:9 creates a 1920×1080 compilation. Shorts 9:16 switches the preview to a vertical canvas and creates a 1080×1920 export capped at YouTube's three-minute Shorts limit. Mixed source sizes are fitted safely instead of stretching.</p>
+                <p><span className="text-white font-medium">6. Choose transitions</span> — Straight cut keeps clips back to back. Cross dissolve overlaps the outgoing and incoming clips while blending both picture and sound. The choice is saved with the project.</p>
                 <p><span className="text-white font-medium">7. Export</span> — Click Export Montage and leave ClipGoblin open while it renders. The progress display advances clip by clip, then joins the sequence. When it finishes, replay the full output or open its folder.</p>
               </HelpSection>
             )}

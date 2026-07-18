@@ -11,7 +11,16 @@ import PublishComposer from '../components/PublishComposer'
 import type { PublishMetadata } from '../components/PublishComposer'
 import ClipPlayer from '../components/ClipPlayer'
 import { errorMessage } from '../lib/errors'
-import { filterAvailableMontageClips, montageDuration, montageSourceGroup, nextMontageClipId } from '../lib/montage'
+import {
+  exceedsYouTubeShortsLimit,
+  filterAvailableMontageClips,
+  montageCrossfadeDuration,
+  montageCrossfadeProgress,
+  montageDuration,
+  montageSourceGroup,
+  nextMontageClipId,
+  YOUTUBE_SHORTS_MAX_SECONDS,
+} from '../lib/montage'
 import type { MontageSourceFilter } from '../lib/montage'
 
 function fmt(s: number) {
@@ -34,6 +43,20 @@ interface MontageExportResult {
   durationSeconds: number
 }
 
+async function resolveClipPreviewSource(clip: Clip): Promise<string> {
+  let path: string | null = null
+  if (clip.source_media_path) {
+    path = await invoke<string>('prepare_clip_preview_source', { clipId: clip.id })
+  } else if (clip.community_clip_mp4_path) {
+    path = clip.community_clip_mp4_path
+  } else {
+    const vod = await invoke<Vod>('get_vod_detail', { vodId: clip.vod_id })
+    path = vod.local_path
+  }
+  if (!path) throw new Error('The source video is not available on this PC.')
+  return convertFileSrc(path)
+}
+
 export default function MontageBuilder() {
   const navigate = useNavigate()
   const { projects, activeProjectId, createProject, deleteProject, setActive, addClip, removeClip, reorderClips, updateProject } = useMontageStore()
@@ -43,6 +66,8 @@ export default function MontageBuilder() {
   })
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null)
   const [previewMedia, setPreviewMedia] = useState<{ key: string; src: string } | null>(null)
+  const [clipPreviewSources, setClipPreviewSources] = useState<Record<string, string>>({})
+  const [readyPreviewClipIds, setReadyPreviewClipIds] = useState<string[]>([])
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [clipSearch, setClipSearch] = useState('')
@@ -55,15 +80,12 @@ export default function MontageBuilder() {
   const [previewMode, setPreviewMode] = useState<'clip' | 'export'>('clip')
   const [sequenceAutoPlay, setSequenceAutoPlay] = useState(false)
   const [previewTransitioning, setPreviewTransitioning] = useState(false)
+  const [crossfadeProgress, setCrossfadeProgress] = useState(0)
   const loadedProjectIdRef = useRef<string | null>(null)
-  const transitionTimerRef = useRef<number | null>(null)
+  const clipPreviewSourcesRef = useRef<Record<string, string>>({})
   const transitionTargetRef = useRef<string | null>(null)
 
   useEffect(() => { fetchClips(); fetchHighlights() }, [fetchClips, fetchHighlights])
-
-  useEffect(() => () => {
-    if (transitionTimerRef.current !== null) window.clearTimeout(transitionTimerRef.current)
-  }, [])
 
   // Auto-create a project if none exists
   useEffect(() => {
@@ -86,14 +108,29 @@ export default function MontageBuilder() {
   }) ?? []
   const totalDuration = montageDuration(segmentDurations, transition)
   const selectedClip = selectedClipId ? clipById.get(selectedClipId) ?? null : null
+  const selectedClipFullFile = !!selectedClip?.community_clip_mp4_path
+  const selectedPreviewStart = selectedClipFullFile ? 0 : selectedClip?.start_seconds ?? 0
+  const selectedPreviewEnd = selectedClipFullFile
+    ? Math.max(0, (selectedClip?.end_seconds ?? 0) - (selectedClip?.start_seconds ?? 0))
+    : selectedClip?.end_seconds ?? 0
   const segmentClipIds = project?.segments.map(segment => segment.clipId) ?? []
   const activeSegmentIndex = selectedClipId ? segmentClipIds.indexOf(selectedClipId) : -1
+  const nextClipId = nextMontageClipId(segmentClipIds, selectedClipId)
+  const nextClip = nextClipId ? clipById.get(nextClipId) ?? null : null
+  const nextClipFullFile = !!nextClip?.community_clip_mp4_path
+  const nextPreviewStart = nextClipFullFile ? 0 : nextClip?.start_seconds ?? 0
+  const nextPreviewEnd = nextClipFullFile
+    ? Math.max(0, (nextClip?.end_seconds ?? 0) - (nextClip?.start_seconds ?? 0))
+    : nextClip?.end_seconds ?? 0
+  const crossfadeDuration = montageCrossfadeDuration(segmentDurations)
   const currentPreviewKey = previewMode === 'export'
     ? exportResult ? `export:${exportResult.outputPath}` : null
     : selectedClip ? `clip:${selectedClip.id}` : null
-  const previewSrc = currentPreviewKey && previewMedia?.key === currentPreviewKey
-    ? previewMedia.src
-    : null
+  const previewSrc = previewMode === 'export'
+    ? currentPreviewKey && previewMedia?.key === currentPreviewKey ? previewMedia.src : null
+    : selectedClipId ? clipPreviewSources[selectedClipId] ?? null : null
+  const nextPreviewSrc = nextClipId ? clipPreviewSources[nextClipId] ?? null : null
+  const shortsOverLimit = project?.exportPreset === 'shorts' && exceedsYouTubeShortsLimit(totalDuration)
   const exportInputSignature = project
     ? `${project.id}|${project.exportPreset}|${transition}|${project.title}|${project.segments.map(segment => {
         const clip = clipById.get(segment.clipId)
@@ -108,6 +145,7 @@ export default function MontageBuilder() {
       setPreviewMedia(null)
       setSequenceAutoPlay(false)
       setPreviewTransitioning(false)
+      setCrossfadeProgress(0)
       transitionTargetRef.current = null
       return
     }
@@ -120,10 +158,6 @@ export default function MontageBuilder() {
   useEffect(() => {
     if (!project || loadedProjectIdRef.current === project.id) return
     loadedProjectIdRef.current = project.id
-    if (transitionTimerRef.current !== null) {
-      window.clearTimeout(transitionTimerRef.current)
-      transitionTimerRef.current = null
-    }
     if (project) {
       setPublishMeta({
         title: project.publishTitle || '',
@@ -139,31 +173,26 @@ export default function MontageBuilder() {
     setPreviewMode('clip')
     setSequenceAutoPlay(false)
     setPreviewTransitioning(false)
+    setCrossfadeProgress(0)
     transitionTargetRef.current = null
   }, [project])
 
   useEffect(() => {
-    if (transitionTimerRef.current !== null) {
-      window.clearTimeout(transitionTimerRef.current)
-      transitionTimerRef.current = null
-    }
     setExportResult(null)
     setExportProgress(0)
     setExportStage('')
     setPreviewMode(mode => mode === 'export' ? 'clip' : mode)
     setSequenceAutoPlay(false)
     setPreviewTransitioning(false)
+    setCrossfadeProgress(0)
     transitionTargetRef.current = null
   }, [exportInputSignature])
 
   useEffect(() => {
     if (transition !== 'cut') return
-    if (transitionTimerRef.current !== null) {
-      window.clearTimeout(transitionTimerRef.current)
-      transitionTimerRef.current = null
-    }
     transitionTargetRef.current = null
     setPreviewTransitioning(false)
+    setCrossfadeProgress(0)
   }, [transition])
 
   const handlePublishMetaChange = (next: PublishMetadata) => {
@@ -205,48 +234,32 @@ export default function MontageBuilder() {
     }
 
     let cancelled = false
-    const mediaKey = `clip:${selectedClip.id}`
-    setPreviewMedia(current => current?.key === mediaKey ? current : null)
-    setPreviewLoading(true)
+    const candidates = [selectedClip, nextClip].filter((clip): clip is Clip => !!clip)
+    const missing = candidates.filter(clip => !clipPreviewSourcesRef.current[clip.id])
+    setPreviewLoading(!clipPreviewSourcesRef.current[selectedClip.id])
     setPreviewError(null)
     ;(async () => {
+      const additions: Record<string, string> = {}
       try {
-        let path: string | null = null
-        if (selectedClip.source_media_path) {
-          path = await invoke<string>('prepare_clip_preview_source', { clipId: selectedClip.id })
-        } else if (selectedClip.community_clip_mp4_path) {
-          path = selectedClip.community_clip_mp4_path
-        } else {
-          const vod = await invoke<Vod>('get_vod_detail', { vodId: selectedClip.vod_id })
-          path = vod.local_path
-        }
-        if (!path) throw new Error('The source video is not available on this PC.')
-        if (!cancelled) setPreviewMedia({ key: mediaKey, src: convertFileSrc(path) })
-      } catch (error) {
-        if (!cancelled) {
-          setPreviewMedia(null)
-          setPreviewError(errorMessage(error, 'Could not load this clip preview'))
+        for (const clip of missing) {
+          try {
+            additions[clip.id] = await resolveClipPreviewSource(clip)
+          } catch (error) {
+            if (clip.id === selectedClip.id && !cancelled) {
+              setPreviewError(errorMessage(error, 'Could not load this clip preview'))
+            }
+          }
         }
       } finally {
-        if (!cancelled) setPreviewLoading(false)
+        if (!cancelled && Object.keys(additions).length > 0) {
+          clipPreviewSourcesRef.current = { ...clipPreviewSourcesRef.current, ...additions }
+          setClipPreviewSources(clipPreviewSourcesRef.current)
+        }
       }
+      if (!cancelled) setPreviewLoading(false)
     })()
     return () => { cancelled = true }
-  }, [exportResult, previewMode, selectedClip])
-
-  useEffect(() => {
-    if (
-      !previewTransitioning
-      || !previewSrc
-      || !selectedClipId
-      || transitionTargetRef.current !== selectedClipId
-    ) return
-    const timer = window.setTimeout(() => {
-      setPreviewTransitioning(false)
-      transitionTargetRef.current = null
-    }, 60)
-    return () => window.clearTimeout(timer)
-  }, [previewSrc, previewTransitioning, selectedClipId])
+  }, [exportResult, nextClip, previewMode, selectedClip])
 
   // Aggregate context from all clips in the montage for metadata generation
   const montageContext = (() => {
@@ -302,28 +315,45 @@ export default function MontageBuilder() {
   }
 
   const selectSequenceClip = (clipId: string) => {
-    if (transitionTimerRef.current !== null) {
-      window.clearTimeout(transitionTimerRef.current)
-      transitionTimerRef.current = null
-    }
     transitionTargetRef.current = null
     setPreviewTransitioning(false)
+    setCrossfadeProgress(0)
     setSequenceAutoPlay(false)
     setSelectedClipId(clipId)
     setPreviewMode('clip')
   }
 
+  const completeCrossfade = (targetClipId: string) => {
+    setSelectedClipId(targetClipId)
+    setSequenceAutoPlay(false)
+    setPreviewTransitioning(false)
+    setCrossfadeProgress(0)
+    transitionTargetRef.current = null
+  }
+
+  const handleSequenceTimeUpdate = (absoluteTime: number) => {
+    if (
+      transition !== 'crossfade'
+      || crossfadeDuration <= 0
+      || !nextClipId
+      || !nextPreviewSrc
+      || !readyPreviewClipIds.includes(nextClipId)
+    ) return
+
+    const progress = montageCrossfadeProgress(absoluteTime, selectedPreviewEnd, crossfadeDuration)
+    if (progress <= 0) return
+    if (transitionTargetRef.current !== nextClipId) {
+      transitionTargetRef.current = nextClipId
+      setPreviewTransitioning(true)
+    }
+    setCrossfadeProgress(progress)
+    if (progress >= 1) completeCrossfade(nextClipId)
+  }
+
   const handleSequenceEnded = () => {
-    const nextClipId = nextMontageClipId(segmentClipIds, selectedClipId)
     if (nextClipId) {
-      if (transition === 'crossfade') {
-        transitionTargetRef.current = nextClipId
-        setPreviewTransitioning(true)
-        transitionTimerRef.current = window.setTimeout(() => {
-          transitionTimerRef.current = null
-          setSequenceAutoPlay(true)
-          setSelectedClipId(nextClipId)
-        }, 180)
+      if (transition === 'crossfade' && transitionTargetRef.current === nextClipId) {
+        completeCrossfade(nextClipId)
         return
       }
       setSequenceAutoPlay(true)
@@ -332,6 +362,7 @@ export default function MontageBuilder() {
     }
     setSequenceAutoPlay(false)
     setPreviewTransitioning(false)
+    setCrossfadeProgress(0)
     transitionTargetRef.current = null
     setSelectedClipId(segmentClipIds[0] ?? null)
   }
@@ -358,12 +389,9 @@ export default function MontageBuilder() {
   }
 
   const handleExport = async () => {
-    if (!project || project.segments.length === 0) return
-    if (transitionTimerRef.current !== null) {
-      window.clearTimeout(transitionTimerRef.current)
-      transitionTimerRef.current = null
-    }
+    if (!project || project.segments.length === 0 || shortsOverLimit) return
     setPreviewTransitioning(false)
+    setCrossfadeProgress(0)
     transitionTargetRef.current = null
     setExporting(true)
     setExportError(null)
@@ -383,6 +411,7 @@ export default function MontageBuilder() {
       setExportStage('Montage ready')
       setSequenceAutoPlay(false)
       setPreviewTransitioning(false)
+      setCrossfadeProgress(0)
       transitionTargetRef.current = null
       setPreviewMode('export')
     } catch (error) {
@@ -414,13 +443,45 @@ export default function MontageBuilder() {
     sourceFilter,
     clipSearch,
   )
-  const previewStart = previewMode === 'export' ? 0 : selectedClip?.start_seconds || 0
+  const previewStart = previewMode === 'export' ? 0 : selectedPreviewStart
   const previewEnd = previewMode === 'export'
     ? exportResult?.durationSeconds || totalDuration
-    : selectedClip?.end_seconds || 0
+    : selectedPreviewEnd
   const previewPoster = previewMode === 'clip' && selectedClip?.thumbnail_path
     ? convertFileSrc(selectedClip.thumbnail_path)
     : null
+  const nextPreviewPoster = nextClip?.thumbnail_path ? convertFileSrc(nextClip.thumbnail_path) : null
+  const previewAspectClass = project.exportPreset === 'shorts'
+    ? 'v4-montage-preview--shorts'
+    : 'v4-montage-preview--landscape'
+  const sequencePreviewLayers = previewMode === 'clip' && selectedClip && previewSrc
+    ? [
+        {
+          clip: selectedClip,
+          src: previewSrc,
+          poster: previewPoster,
+          start: selectedPreviewStart,
+          end: selectedPreviewEnd,
+          fullFile: selectedClipFullFile,
+          current: true,
+        },
+        ...(nextClip && nextPreviewSrc ? [{
+          clip: nextClip,
+          src: nextPreviewSrc,
+          poster: nextPreviewPoster,
+          start: nextPreviewStart,
+          end: nextPreviewEnd,
+          fullFile: nextClipFullFile,
+          current: false,
+        }] : []),
+      ]
+    : []
+  const outgoingAudioGain = previewTransitioning
+    ? Math.cos(crossfadeProgress * Math.PI / 2)
+    : 1
+  const incomingAudioGain = previewTransitioning
+    ? Math.sin(crossfadeProgress * Math.PI / 2)
+    : 0
 
   return (
     <div className="space-y-6">
@@ -541,12 +602,9 @@ export default function MontageBuilder() {
                 type="button"
                 className="text-[10px] text-violet-300 hover:text-white cursor-pointer mb-3"
                 onClick={() => {
-                  if (transitionTimerRef.current !== null) {
-                    window.clearTimeout(transitionTimerRef.current)
-                    transitionTimerRef.current = null
-                  }
                   setSequenceAutoPlay(false)
                   setPreviewTransitioning(false)
+                  setCrossfadeProgress(0)
                   transitionTargetRef.current = null
                   setPreviewMode(mode => mode === 'export' ? 'clip' : 'export')
                 }}
@@ -555,34 +613,60 @@ export default function MontageBuilder() {
               </button>
             )}
           </div>
-          <div className={`v4-montage-preview ${previewSrc ? 'has-media' : ''}`}>
-            {previewSrc ? (
+          <div className={`v4-montage-preview ${previewAspectClass} ${previewSrc ? 'has-media' : ''}`}>
+            {previewMode === 'export' && previewSrc ? (
               <ClipPlayer
                 key={currentPreviewKey || 'montage-preview'}
                 src={previewSrc}
-                poster={previewPoster}
+                poster={null}
                 clipStart={previewStart}
                 clipEnd={previewEnd}
-                fullFile={previewMode === 'export' || !!selectedClip?.community_clip_mp4_path}
+                fullFile
                 mode="full"
                 controlsOverlay
                 className="h-full w-full"
                 objectFit="contain"
-                autoPlay={previewMode === 'clip' && sequenceAutoPlay}
-                onPlayChange={playing => {
-                  if (playing && sequenceAutoPlay) setSequenceAutoPlay(false)
-                }}
-                onEnded={previewMode === 'clip' ? handleSequenceEnded : undefined}
               />
+            ) : sequencePreviewLayers.length > 0 ? (
+              sequencePreviewLayers.map(layer => {
+                const incomingActive = previewTransitioning && transitionTargetRef.current === layer.clip.id
+                return (
+                  <div
+                    key={layer.clip.id}
+                    className={`absolute inset-0 ${layer.current ? 'z-[2]' : 'pointer-events-none z-[3]'}`}
+                    style={{ opacity: layer.current ? 1 : incomingActive ? crossfadeProgress : 0 }}
+                  >
+                    <ClipPlayer
+                      src={layer.src}
+                      poster={layer.poster}
+                      clipStart={layer.start}
+                      clipEnd={layer.end}
+                      fullFile={layer.fullFile}
+                      mode="full"
+                      controlsOverlay={layer.current}
+                      coordinatePlayback={false}
+                      showControls={layer.current}
+                      volumeMultiplier={layer.current ? outgoingAudioGain : incomingAudioGain}
+                      className="h-full w-full"
+                      objectFit="contain"
+                      autoPlay={layer.current ? sequenceAutoPlay : incomingActive}
+                      onReady={() => setReadyPreviewClipIds(current => current.includes(layer.clip.id)
+                        ? current
+                        : [...current, layer.clip.id])}
+                      onPlayChange={layer.current ? playing => {
+                        if (playing && sequenceAutoPlay) setSequenceAutoPlay(false)
+                      } : undefined}
+                      onTimeUpdate={layer.current ? handleSequenceTimeUpdate : undefined}
+                      onEnded={layer.current ? handleSequenceEnded : undefined}
+                    />
+                  </div>
+                )
+              })
             ) : (
               <div className="relative z-[1] px-5 text-center text-xs text-slate-400">
                 {project.segments.length === 0 ? 'Add a clip to begin.' : 'Preparing sequence preview.'}
               </div>
             )}
-            <div
-              className={`pointer-events-none absolute inset-0 z-[18] bg-black transition-opacity duration-200 ${previewTransitioning ? 'opacity-100' : 'opacity-0'}`}
-              aria-hidden="true"
-            />
             {previewLoading && (
               <div className="absolute inset-0 z-20 flex items-center justify-center gap-2 bg-black/70 text-xs text-slate-200">
                 <Loader2 className="h-4 w-4 animate-spin" /> Preparing preview
@@ -678,6 +762,17 @@ export default function MontageBuilder() {
               </button>
             ))}
           </div>
+          {project.exportPreset === 'shorts' && (
+            <div className={`mb-4 flex gap-2 rounded-md border px-3 py-2 text-[11px] ${shortsOverLimit ? 'border-red-500/35 bg-red-950/35 text-red-200' : 'border-cyan-500/25 bg-cyan-950/25 text-cyan-100'}`}>
+              {shortsOverLimit && <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+              <span>
+                <b>{fmt(totalDuration)} / {fmt(YOUTUBE_SHORTS_MAX_SECONDS)}</b>
+                {shortsOverLimit
+                  ? ` — remove or trim ${fmt(totalDuration - YOUTUBE_SHORTS_MAX_SECONDS)} before exporting, or switch to YouTube 16:9.`
+                  : ' — vertical Shorts preview and export.'}
+              </span>
+            </div>
+          )}
 
           <h4>Clip transitions</h4>
           <div className="grid grid-cols-2 gap-1 rounded-lg border border-surface-700 bg-surface-900 p-1 mb-4" role="group" aria-label="Montage clip transitions">
@@ -714,7 +809,7 @@ export default function MontageBuilder() {
 
           <button
             onClick={handleExport}
-            disabled={project.segments.length === 0 || exporting}
+            disabled={project.segments.length === 0 || exporting || shortsOverLimit}
             className="v4-btn primary mt-3"
             style={{width: '100%', justifyContent: 'center', padding: '10px 16px'}}
           >

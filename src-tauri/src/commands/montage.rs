@@ -11,6 +11,7 @@ use crate::db;
 
 const MAX_MONTAGE_CLIPS: usize = 200;
 const CROSS_DISSOLVE_SECONDS: f64 = 0.5;
+const YOUTUBE_SHORTS_MAX_SECONDS: f64 = 180.0;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -160,7 +161,10 @@ fn has_audio_stream(ffmpeg: &Path, path: &Path) -> bool {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
     }
-    command.status().map(|status| status.success()).unwrap_or(true)
+    command
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(true)
 }
 
 fn normalize_segment(
@@ -199,11 +203,10 @@ fn normalize_segment(
     if audio_present {
         command
             .arg("-af")
-            .arg("aresample=48000:async=1:first_pts=0,asetpts=PTS-STARTPTS");
-    } else {
-        command.arg("-shortest");
+            .arg("aresample=48000:async=1:first_pts=0,asetpts=PTS-STARTPTS,apad");
     }
     command
+        .arg("-shortest")
         .arg("-c:v")
         .arg("libx264")
         .arg("-preset")
@@ -365,6 +368,45 @@ fn cross_dissolve_duration(durations: &[f64]) -> Result<f64, String> {
     Ok(duration)
 }
 
+fn expected_montage_duration(
+    durations: &[f64],
+    transition: MontageTransition,
+) -> Result<f64, String> {
+    if durations.is_empty()
+        || durations
+            .iter()
+            .any(|duration| !duration.is_finite() || *duration <= 0.0)
+    {
+        return Err("Could not determine montage clip durations.".to_string());
+    }
+    let total = durations.iter().sum::<f64>();
+    if transition != MontageTransition::CrossDissolve || durations.len() < 2 {
+        return Ok(total);
+    }
+    let overlap = cross_dissolve_duration(durations)?;
+    Ok((total - overlap * (durations.len() - 1) as f64).max(0.0))
+}
+
+fn validate_preset_duration(
+    preset: &str,
+    durations: &[f64],
+    transition: MontageTransition,
+) -> Result<(), String> {
+    if preset != "shorts" {
+        return Ok(());
+    }
+    let duration = expected_montage_duration(durations, transition)?;
+    if duration > YOUTUBE_SHORTS_MAX_SECONDS + 1.0 / 30.0 {
+        let rounded_seconds = duration.ceil() as u64;
+        return Err(format!(
+            "YouTube Shorts montages can be at most 3:00. This sequence is about {}:{:02}; trim or remove clips, or switch to YouTube 16:9.",
+            rounded_seconds / 60,
+            rounded_seconds % 60,
+        ));
+    }
+    Ok(())
+}
+
 fn build_cross_dissolve_filter(
     durations: &[f64],
     dissolve_duration: f64,
@@ -373,25 +415,34 @@ fn build_cross_dissolve_filter(
         return Err("A cross dissolve needs at least two clips.".to_string());
     }
 
-    let mut filters = Vec::with_capacity((durations.len() - 1) * 2);
+    let mut filters = Vec::with_capacity(durations.len() * 2 + (durations.len() - 1) * 2);
+    for index in 0..durations.len() {
+        filters.push(format!(
+            "[{index}:v]settb=AVTB,setpts=PTS-STARTPTS,format=yuv420p[vsrc{index}]"
+        ));
+        filters.push(format!(
+            "[{index}:a]aresample=48000:async=0:first_pts=0,asetpts=PTS-STARTPTS[asrc{index}]"
+        ));
+    }
+
     let mut current_duration = durations[0];
     for index in 1..durations.len() {
         let video_input = if index == 1 {
-            "[0:v]".to_string()
+            "[vsrc0]".to_string()
         } else {
             format!("[v{}]", index - 1)
         };
         let audio_input = if index == 1 {
-            "[0:a]".to_string()
+            "[asrc0]".to_string()
         } else {
             format!("[a{}]", index - 1)
         };
         let offset = (current_duration - dissolve_duration).max(0.0);
         filters.push(format!(
-            "{video_input}[{index}:v]xfade=transition=fade:duration={dissolve_duration:.3}:offset={offset:.3}[v{index}]"
+            "{video_input}[vsrc{index}]xfade=transition=fade:duration={dissolve_duration:.3}:offset={offset:.3}[v{index}]"
         ));
         filters.push(format!(
-            "{audio_input}[{index}:a]acrossfade=d={dissolve_duration:.3}:c1=tri:c2=tri[a{index}]"
+            "{audio_input}[asrc{index}]acrossfade=d={dissolve_duration:.3}:o=1:c1=tri:c2=tri[a{index}]"
         ));
         current_duration += durations[index] - dissolve_duration;
     }
@@ -484,8 +535,8 @@ fn join_segments_with_cross_dissolve(
 
 fn reusable_rendered_clip(clip_id: &str) -> Result<Option<PathBuf>, String> {
     let db_path = db::db_path().map_err(|error| format!("DB path: {error}"))?;
-    let connection = rusqlite::Connection::open(db_path)
-        .map_err(|error| format!("DB open: {error}"))?;
+    let connection =
+        rusqlite::Connection::open(db_path).map_err(|error| format!("DB open: {error}"))?;
     let clip = db::get_clip_by_id(&connection, clip_id)
         .map_err(|error| format!("DB error: {error}"))?
         .ok_or_else(|| format!("Clip {clip_id} no longer exists."))?;
@@ -546,17 +597,16 @@ pub async fn export_montage(
         .map_err(|error| format!("Could not create the export folder: {error}"))?;
     let output_path = unique_output_path(&output_dir, &title);
 
-    let temp_dir = std::env::temp_dir().join(format!(
-        "clipgoblin-montage-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("clipgoblin-montage-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir)
         .map_err(|error| format!("Could not prepare temporary montage files: {error}"))?;
     let _temp_guard = TempMontageDir(temp_dir.clone());
 
     let total = clip_ids.len();
     let use_cross_dissolve = transition == MontageTransition::CrossDissolve && total > 1;
-    let mut normalized_durations = Vec::with_capacity(if use_cross_dissolve { total } else { 0 });
+    let needs_durations = use_cross_dissolve || preset == "shorts";
+    let mut normalized_durations = Vec::with_capacity(if needs_durations { total } else { 0 });
     emit_progress(&app, &project_id, 1, "Preparing montage", 0, total);
 
     for (index, clip_id) in clip_ids.iter().enumerate() {
@@ -586,7 +636,7 @@ pub async fn export_montage(
                 &normalized_for_task,
                 output_size,
             )?;
-            if use_cross_dissolve {
+            if needs_durations {
                 probe_media_duration(&normalized_for_task)
                     .map(Some)
                     .ok_or_else(|| {
@@ -612,6 +662,10 @@ pub async fn export_montage(
             current,
             total,
         );
+    }
+
+    if needs_durations {
+        validate_preset_duration(&preset, &normalized_durations, transition)?;
     }
 
     let manifest = if use_cross_dissolve {
@@ -712,16 +766,39 @@ mod tests {
         assert_eq!(duration, 0.5);
         let (filter, video, audio) =
             build_cross_dissolve_filter(&[2.0, 3.0, 4.0], duration).unwrap();
-        assert!(filter.contains("[0:v][1:v]xfade=transition=fade:duration=0.500:offset=1.500[v1]"));
-        assert!(filter.contains("[v1][2:v]xfade=transition=fade:duration=0.500:offset=4.000[v2]"));
-        assert!(filter.contains("[a1][2:a]acrossfade=d=0.500:c1=tri:c2=tri[a2]"));
+        assert!(filter.contains("[0:v]settb=AVTB,setpts=PTS-STARTPTS"));
+        assert!(
+            filter.contains("[vsrc0][vsrc1]xfade=transition=fade:duration=0.500:offset=1.500[v1]")
+        );
+        assert!(filter.contains("[v1][vsrc2]xfade=transition=fade:duration=0.500:offset=4.000[v2]"));
+        assert!(filter.contains("[a1][asrc2]acrossfade=d=0.500:o=1:c1=tri:c2=tri[a2]"));
         assert_eq!(video, "[v2]");
         assert_eq!(audio, "[a2]");
     }
 
     #[test]
+    fn shorts_duration_is_capped_at_three_minutes() {
+        assert!(validate_preset_duration(
+            "shorts",
+            &[90.0, 90.5],
+            MontageTransition::CrossDissolve
+        )
+        .is_ok());
+        assert!(validate_preset_duration(
+            "shorts",
+            &[90.0, 91.0],
+            MontageTransition::CrossDissolve
+        )
+        .is_err());
+        assert!(validate_preset_duration("youtube", &[400.0], MontageTransition::Cut).is_ok());
+    }
+
+    #[test]
     fn filename_stem_removes_windows_unsafe_characters_and_bounds_length() {
-        assert_eq!(safe_filename_stem(" Best: clips? <ever> "), "Best_ clips_ _ever");
+        assert_eq!(
+            safe_filename_stem(" Best: clips? <ever> "),
+            "Best_ clips_ _ever"
+        );
         assert_eq!(safe_filename_stem("..."), "ClipGoblin Montage");
         assert!(safe_filename_stem(&"x".repeat(200)).len() <= 80);
         assert_eq!(safe_filename_stem(&"é".repeat(100)).chars().count(), 80);
@@ -729,7 +806,8 @@ mod tests {
 
     #[test]
     fn concat_manifest_uses_only_generated_relative_names() {
-        let dir = std::env::temp_dir().join(format!("montage-manifest-test-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("montage-manifest-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let manifest = write_concat_manifest(&dir, 3).unwrap();
         let text = std::fs::read_to_string(manifest).unwrap();
@@ -745,7 +823,8 @@ mod tests {
         let Ok(ffmpeg) = find_ffmpeg() else {
             return;
         };
-        let dir = std::env::temp_dir().join(format!("montage-ffmpeg-test-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("montage-ffmpeg-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let landscape = dir.join("landscape.mp4");
         let vertical = dir.join("vertical.mp4");
@@ -799,7 +878,10 @@ mod tests {
 
         assert!(has_audio_stream(&ffmpeg, &output));
         if let Some(duration) = probe_media_duration(&output) {
-            assert!(duration > 1.0 && duration < 1.6, "unexpected duration: {duration}");
+            assert!(
+                duration > 1.0 && duration < 1.6,
+                "unexpected duration: {duration}"
+            );
         }
 
         let dissolved = dir.join("dissolved.mp4");
@@ -811,6 +893,31 @@ mod tests {
                 "unexpected duration: {duration}"
             );
         }
+        let blended_frame = Command::new(&ffmpeg)
+            .arg("-v")
+            .arg("error")
+            .arg("-ss")
+            .arg("0.45")
+            .arg("-i")
+            .arg(&dissolved)
+            .arg("-frames:v")
+            .arg("1")
+            .arg("-vf")
+            .arg("scale=1:1")
+            .arg("-f")
+            .arg("rawvideo")
+            .arg("-pix_fmt")
+            .arg("rgb24")
+            .arg("-")
+            .output()
+            .unwrap();
+        assert!(blended_frame.status.success());
+        assert!(blended_frame.stdout.len() >= 3);
+        assert!(
+            blended_frame.stdout[0] > 45 && blended_frame.stdout[2] > 45,
+            "transition midpoint should contain both clips, got RGB {:?}",
+            &blended_frame.stdout[..3]
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

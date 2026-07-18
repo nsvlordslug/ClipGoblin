@@ -1,7 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { filterAvailableMontageClips, montageDuration, montageSourceGroup, nextMontageClipId } from '../src/lib/montage.ts'
+import {
+  exceedsYouTubeShortsLimit,
+  filterAvailableMontageClips,
+  montageCrossfadeDuration,
+  montageCrossfadeProgress,
+  montageDuration,
+  montageSourceGroup,
+  nextMontageClipId,
+} from '../src/lib/montage.ts'
 import type { Clip } from '../src/types.ts'
 
 function clip(id: string, sourceKind: string, title: string, game: string | null = null): Clip {
@@ -76,4 +84,18 @@ test('montage duration accounts for cross-dissolve overlap', () => {
   assert.equal(montageDuration([10, 20, 30], 'crossfade'), 59)
   assert.equal(montageDuration([0.4, 1], 'crossfade'), 1.2)
   assert.equal(montageDuration([10], 'crossfade'), 10)
+})
+
+test('cross-dissolve timing overlaps the final half-second of the outgoing clip', () => {
+  assert.equal(montageCrossfadeDuration([12, 8]), 0.5)
+  assert.equal(montageCrossfadeDuration([0.4, 8]), 0.2)
+  assert.equal(montageCrossfadeProgress(9.49, 10, 0.5), 0)
+  assert.ok(Math.abs(montageCrossfadeProgress(9.75, 10, 0.5) - 0.5) < 0.0001)
+  assert.equal(montageCrossfadeProgress(10, 10, 0.5), 1)
+})
+
+test('YouTube Shorts montage limit allows three minutes and rejects longer output', () => {
+  assert.equal(exceedsYouTubeShortsLimit(180), false)
+  assert.equal(exceedsYouTubeShortsLimit(180 + 1 / 60), false)
+  assert.equal(exceedsYouTubeShortsLimit(180.1), true)
 })

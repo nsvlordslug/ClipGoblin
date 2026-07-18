@@ -4,6 +4,27 @@ export type MontageSourceFilter = 'all' | 'twitch' | 'medal' | 'obs' | 'meld' | 
 export type MontageTransitionMode = 'cut' | 'crossfade'
 
 export const MONTAGE_CROSSFADE_SECONDS = 0.5
+export const YOUTUBE_SHORTS_MAX_SECONDS = 180
+
+export function montageCrossfadeDuration(segmentDurations: number[]): number {
+  const durations = segmentDurations.filter(duration => Number.isFinite(duration) && duration > 0)
+  if (durations.length < 2) return 0
+  return Math.min(MONTAGE_CROSSFADE_SECONDS, Math.min(...durations) / 2)
+}
+
+export function montageCrossfadeProgress(
+  absoluteTime: number,
+  clipEnd: number,
+  crossfadeDuration: number,
+): number {
+  if (crossfadeDuration <= 0) return 0
+  const transitionStart = clipEnd - crossfadeDuration
+  return Math.max(0, Math.min(1, (absoluteTime - transitionStart) / crossfadeDuration))
+}
+
+export function exceedsYouTubeShortsLimit(durationSeconds: number): boolean {
+  return durationSeconds > YOUTUBE_SHORTS_MAX_SECONDS + 1 / 30
+}
 
 export function montageDuration(
   segmentDurations: number[],
@@ -13,8 +34,7 @@ export function montageDuration(
   const total = durations.reduce((sum, duration) => sum + duration, 0)
   if (transition !== 'crossfade' || durations.length < 2) return total
 
-  const shortest = Math.min(...durations)
-  const overlap = Math.min(MONTAGE_CROSSFADE_SECONDS, shortest / 2)
+  const overlap = montageCrossfadeDuration(durations)
   return Math.max(0, total - overlap * (durations.length - 1))
 }
 

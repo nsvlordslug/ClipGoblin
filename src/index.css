@@ -1913,7 +1913,10 @@ textarea.v4-input { resize: vertical; min-height: 120px; }
 }
 .v4-lib-item-meta { font-size: 10px; color: var(--color-slate-600); margin-top: 2px; }
 .v4-montage-preview {
-  height: 260px;
+  width: 100%;
+  height: auto;
+  min-height: 220px;
+  aspect-ratio: 16 / 9;
   background: #000;
   border-radius: 10px;
   display: grid;
@@ -1921,6 +1924,15 @@ textarea.v4-input { resize: vertical; min-height: 120px; }
   position: relative;
   overflow: hidden;
   margin-bottom: 14px;
+}
+.v4-montage-preview--landscape {
+  max-height: 320px;
+}
+.v4-montage-preview--shorts {
+  width: min(100%, 220px);
+  min-height: 0;
+  aspect-ratio: 9 / 16;
+  align-self: center;
 }
 .v4-montage-preview::before {
   content: '';
