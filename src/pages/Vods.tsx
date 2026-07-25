@@ -181,6 +181,12 @@ export default function Vods() {
     personalizedCandidates: number
     boundaryFeedbackSamples: number
     boundaryAdjustedCandidates: number
+    reviewedMoments: number
+    feedbackAvoidedMoments: number
+    feedbackSuppressedCandidates: number
+    feedbackAdjustedCandidates: number
+    feedbackExplorationCandidates: number
+    feedbackPreservedGoodMoments: number
   }>>({})
   const detectionStatsRequestedRef = useRef(new Set<string>())
   // Pre-run cost estimate per VOD (USD), keyed by vod.id. Only fetched when a
@@ -239,6 +245,12 @@ export default function Vods() {
               personalized_candidates?: number
               boundary_feedback_samples?: number
               boundary_adjusted_candidates?: number
+              reviewed_moments?: number
+              feedback_avoided_moments?: number
+              feedback_suppressed_candidates?: number
+              feedback_adjusted_candidates?: number
+              feedback_exploration_candidates?: number
+              feedback_preserved_good_moments?: number
             } | null>('get_detection_stats', { vodId: vod.id })
             if (stats) {
               setDetectionStats(prev => ({
@@ -253,6 +265,12 @@ export default function Vods() {
                   personalizedCandidates: stats.personalized_candidates ?? 0,
                   boundaryFeedbackSamples: stats.boundary_feedback_samples ?? 0,
                   boundaryAdjustedCandidates: stats.boundary_adjusted_candidates ?? 0,
+                  reviewedMoments: stats.reviewed_moments ?? 0,
+                  feedbackAvoidedMoments: stats.feedback_avoided_moments ?? 0,
+                  feedbackSuppressedCandidates: stats.feedback_suppressed_candidates ?? 0,
+                  feedbackAdjustedCandidates: stats.feedback_adjusted_candidates ?? 0,
+                  feedbackExplorationCandidates: stats.feedback_exploration_candidates ?? 0,
+                  feedbackPreservedGoodMoments: stats.feedback_preserved_good_moments ?? 0,
                 },
               }))
             }
@@ -379,6 +397,12 @@ export default function Vods() {
 
   const handleAnalyze = async (vodId: string) => {
     try {
+      detectionStatsRequestedRef.current.delete(vodId)
+      setDetectionStats(previous => {
+        const next = { ...previous }
+        delete next[vodId]
+        return next
+      })
       await invoke('analyze_vod', { vodId })
       // Analysis runs in background — poll DB to track progress.
       // Stale detection: if progress doesn't change for a long time, mark as failed.
@@ -821,6 +845,26 @@ export default function Vods() {
                     {detectionStats[vod.id].boundaryAdjustedCandidates > 0 && (
                       <span className="ml-1 text-cyan-400/70">
                         · learned timing applied from {detectionStats[vod.id].boundaryFeedbackSamples} edited clips
+                      </span>
+                    )}
+                    {detectionStats[vod.id].feedbackAvoidedMoments > 0 && (
+                      <span className="ml-1 text-amber-300/80">
+                        · avoided {detectionStats[vod.id].feedbackAvoidedMoments} previously rejected {detectionStats[vod.id].feedbackAvoidedMoments === 1 ? 'moment' : 'moments'}
+                      </span>
+                    )}
+                    {detectionStats[vod.id].feedbackAdjustedCandidates > 0 && (
+                      <span className="ml-1 text-fuchsia-300/70">
+                        · direct review tuning changed {detectionStats[vod.id].feedbackAdjustedCandidates} {detectionStats[vod.id].feedbackAdjustedCandidates === 1 ? 'candidate' : 'candidates'}
+                      </span>
+                    )}
+                    {detectionStats[vod.id].feedbackExplorationCandidates > 0 && (
+                      <span className="ml-1 text-cyan-300/80">
+                        · explored {detectionStats[vod.id].feedbackExplorationCandidates} fresh {detectionStats[vod.id].feedbackExplorationCandidates === 1 ? 'alternative' : 'alternatives'}
+                      </span>
+                    )}
+                    {detectionStats[vod.id].feedbackPreservedGoodMoments > 0 && (
+                      <span className="ml-1 text-emerald-300/80">
+                        · kept {detectionStats[vod.id].feedbackPreservedGoodMoments} Good {detectionStats[vod.id].feedbackPreservedGoodMoments === 1 ? 'clip' : 'clips'}
                       </span>
                     )}
                   </div>

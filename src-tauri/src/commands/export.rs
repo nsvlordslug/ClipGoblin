@@ -601,6 +601,7 @@ fn clip_to_export_request(
         context_background_path,
         context_blur_strength: clip.context_blur_strength,
         context_video_y: clip.context_video_y,
+        full_frame_scale: clip.full_frame_scale,
     }
 }
 
@@ -882,6 +883,7 @@ mod caption_style_tests {
             context_background_mode: "blur".into(),
             context_blur_strength: 0.25,
             context_video_y: 0.5,
+            full_frame_scale: 1.0,
             render_status: "pending".into(),
             output_path: None,
             thumbnail_path: None,

@@ -66,6 +66,11 @@ import {
   normalizeContextVideoY,
 } from '../lib/contextFit'
 import type { ContextBackgroundMode } from '../lib/contextFit'
+import {
+  DEFAULT_FULL_FRAME_SCALE,
+  fullFrameZoomOutPercent,
+  normalizeFullFrameScale,
+} from '../lib/fullFrame'
 
 function formatTime(seconds: number) {
   const m = Math.floor(seconds / 60)
@@ -893,6 +898,7 @@ export default function Editor() {
   const [contextBackgroundMode, setContextBackgroundMode] = useState<ContextBackgroundMode>('blur')
   const [contextBlurStrength, setContextBlurStrength] = useState(DEFAULT_CONTEXT_BLUR_STRENGTH)
   const [contextVideoY, setContextVideoY] = useState(DEFAULT_CONTEXT_VIDEO_Y)
+  const [fullFrameScale, setFullFrameScale] = useState(DEFAULT_FULL_FRAME_SCALE)
   const [pickingBranding, setPickingBranding] = useState(false)
   const [brandingError, setBrandingError] = useState('')
   const [layoutPickerOpen, setLayoutPickerOpen] = useState(false)
@@ -983,6 +989,9 @@ export default function Editor() {
     if (tmpl.contextVideoY != null) {
       setContextVideoY(normalizeContextVideoY(tmpl.contextVideoY))
     }
+    if (tmpl.fullFrameScale != null) {
+      setFullFrameScale(normalizeFullFrameScale(tmpl.fullFrameScale))
+    }
     setPublishMeta(prev => ({
       ...prev,
       hashtags: [...tmpl.hashtags],
@@ -1005,12 +1014,13 @@ export default function Editor() {
       contextBackgroundMode,
       contextBlurStrength,
       contextVideoY,
+      fullFrameScale,
     })
     setTemplateSaveName('')
     setTemplateSaveOpen(false)
     setTemplateSaved(true)
     setTimeout(() => setTemplateSaved(false), 2000)
-  }, [templateSaveName, captionStyleId, captionsPosition, captionFontScale, captionYOffset, publishMeta.hashtags, exportPresetId, contextBackgroundPath, contextBackgroundMode, contextBlurStrength, contextVideoY, templateStore])
+  }, [templateSaveName, captionStyleId, captionsPosition, captionFontScale, captionYOffset, publishMeta.hashtags, exportPresetId, contextBackgroundPath, contextBackgroundMode, contextBlurStrength, contextVideoY, fullFrameScale, templateStore])
 
   // ── Undo / Redo history ──
   const history = useEditorHistory()
@@ -1297,6 +1307,7 @@ export default function Editor() {
         setContextBackgroundMode(normalizeContextBackgroundMode(c.context_background_mode))
         setContextBlurStrength(normalizeContextBlurStrength(c.context_blur_strength))
         setContextVideoY(normalizeContextVideoY(c.context_video_y))
+        setFullFrameScale(normalizeFullFrameScale(c.full_frame_scale))
         setBrandingError('')
         setExportDone(c.render_status === 'completed')
         setOriginalStart(c.start_seconds)
@@ -1407,6 +1418,7 @@ export default function Editor() {
         contextBackgroundMode,
         contextBlurStrength,
         contextVideoY,
+        fullFrameScale,
         game: game || null,
       })
       setSaved(true)
@@ -1438,7 +1450,7 @@ export default function Editor() {
       captionsText: captionsText || null,
       captionsPosition, captionStyle: captionStyleId, captionFontScale, captionYOffset, facecamLayout,
       facecamSettings: JSON.stringify(facecamSettings),
-      contextBackgroundPath, contextBackgroundMode, contextBlurStrength, contextVideoY,
+      contextBackgroundPath, contextBackgroundMode, contextBlurStrength, contextVideoY, fullFrameScale,
       game: game || null,
     })
 
@@ -1744,13 +1756,15 @@ export default function Editor() {
                   seekRef={playerSeekRef}
                   videoElementRef={mainVideoElementRef}
                   objectFit={facecamLayout === 'context_fit' ? 'contain' : 'cover'}
-                  blurBackground={facecamLayout === 'context_fit'
+                  blurBackground={(facecamLayout === 'context_fit'
                     && contextBackgroundMode !== 'black'
-                    && !brandingActive}
+                    && !brandingActive)
+                    || (facecamLayout === 'none' && fullFrameScale < 0.999)}
                   blackBackground={facecamLayout === 'context_fit' && contextBackgroundMode === 'black'}
                   backgroundMedia={facecamLayout === 'context_fit' ? brandingMediaSrc : null}
                   backgroundBlurStrength={contextBlurStrength}
                   objectPositionY={contextVideoY}
+                  fullFrameScale={fullFrameScale}
                   overlay={<>
                     {/* ── Layout mode overlay — interactive ── */}
                     {facecamLayout === 'split' && (
@@ -2280,6 +2294,31 @@ export default function Editor() {
                 contentLabel={secondaryContentLabel}
               />
             )}
+            {facecamLayout === 'none' && (
+              <div className="mt-4 border-t border-surface-600/70 pt-4">
+                <label className="block">
+                  <span className="mb-1.5 flex items-center justify-between text-[10px] text-slate-500">
+                    <span>Zoom out</span>
+                    <span>{fullFrameZoomOutPercent(fullFrameScale)}%</span>
+                  </span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="30"
+                    step="1"
+                    value={fullFrameZoomOutPercent(fullFrameScale)}
+                    onChange={(event) => setFullFrameScale(
+                      normalizeFullFrameScale(1 - Number(event.target.value) / 100),
+                    )}
+                    className="w-full accent-cyan-400 cursor-pointer"
+                  />
+                  <div className="mt-1 flex justify-between text-[9px] text-slate-600">
+                    <span>Standard crop</span>
+                    <span>More scene</span>
+                  </div>
+                </label>
+              </div>
+            )}
             {/* Cam region (crop from source) — visible whenever layout has a cam slot */}
             {clip && vod && !brandingActive && (facecamLayout === 'split' || facecamLayout === 'pip') && (
               <div className="mt-3">
@@ -2469,7 +2508,7 @@ export default function Editor() {
             )}
             {facecamLayout === 'none' && (
               <p className="text-[9px] text-slate-600 mt-2">
-                Full Frame fills the canvas with a center crop. Choose Context Fit to preserve the whole scene.
+                Full Frame fills the canvas with a center crop. Zoom out to reveal more gameplay over a subtle video fill.
               </p>
             )}
           </Section>

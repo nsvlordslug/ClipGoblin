@@ -81,6 +81,7 @@ export interface Clip {
   context_background_mode?: ContextBackgroundMode;
   context_blur_strength?: number;
   context_video_y?: number;
+  full_frame_scale?: number;
   render_status: 'pending' | 'rendering' | 'completed' | 'failed';
   output_path: string | null;
   /**

@@ -41,7 +41,7 @@ test('personalization status copy explains learning progress and variety', () =>
 
   assert.deepEqual(getPersonalizationStatusCopy(base), {
     label: 'Personalization is learning',
-    detail: '14/20 usable ratings, 70% confidence. Future analyses are already being gently reordered.',
+    detail: '14/20 usable ratings, 70% confidence. Future analyses are already being gently reordered. Reanalyzing the same VOD keeps clips marked Good, excludes events marked Boring, Wrong moment, or Duplicate, and searches for fresh alternatives.',
     tone: 'learning',
   })
 
@@ -55,6 +55,7 @@ test('personalization status copy explains learning progress and variety', () =>
   })
   assert.equal(variety.label, 'More rating variety needed')
   assert.match(variety.detail, /at least two rating choices/)
+  assert.match(variety.detail, /excludes events marked Boring/)
 })
 
 test('personalization status distinguishes ratings from lower-weight behavior', () => {

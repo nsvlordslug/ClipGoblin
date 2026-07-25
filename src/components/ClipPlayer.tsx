@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState, useCallback, useId } from 'react'
 import { Play, Pause, Volume2, VolumeX, RotateCcw } from 'lucide-react'
 import { usePlaybackStore } from '../stores/playbackStore'
-import { contextBlurPixels, normalizeContextVideoY } from '../lib/contextFit'
+import {
+  contextBlurPixels,
+  normalizeContextVideoY,
+} from '../lib/contextFit'
+import { normalizeFullFrameScale } from '../lib/fullFrame'
 
 const PLAYBACK_FAILED_MSG = 'Playback failed'
 
@@ -67,6 +71,8 @@ interface Props {
   backgroundBlurStrength?: number
   /** Normalized 0..1 placement of contained video from top to bottom. */
   objectPositionY?: number
+  /** Full Frame crop scale. 1 is the standard crop; 0.7 reveals more of the source. */
+  fullFrameScale?: number
   /** Optional ref that receives the underlying <video> element so external
    * code (e.g. the cam-region preview) can read frames via canvas drawImage
    * without opening a second decoder on the same source. */
@@ -79,9 +85,11 @@ export default function ClipPlayer({
   onReady, coordinatePlayback = true, showControls = true, volumeMultiplier = 1,
   onTimeUpdate, seekRef: externalSeekRef,
   objectFit = 'cover', blurBackground = false, blackBackground = false, backgroundMedia = null,
-  backgroundBlurStrength = 0.25, objectPositionY = 0.5, videoElementRef, fullFile = false,
+  backgroundBlurStrength = 0.25, objectPositionY = 0.5, fullFrameScale = 1,
+  videoElementRef, fullFile = false,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
+  const videoAreaRef = useRef<HTMLDivElement>(null)
   const backgroundCanvasRef = useRef<HTMLCanvasElement>(null)
   // Mirror our internal video ref into the external ref (if provided)
   // so callers can drawImage frames without opening a second decoder.
@@ -117,6 +125,8 @@ export default function ClipPlayer({
   const [draggingSeek, setDraggingSeek] = useState(false)
   const [draggingVol, setDraggingVol] = useState(false)
   const [showVolume, setShowVolume] = useState(false)
+  const [sourceAspectRatio, setSourceAspectRatio] = useState(0)
+  const [videoAreaAspectRatio, setVideoAreaAspectRatio] = useState(9 / 16)
   // Natural duration of the loaded file — only used in fullFile mode (a
   // standalone community-clip MP4) to bound playback to the file itself.
   const [fileDuration, setFileDuration] = useState(0)
@@ -180,9 +190,13 @@ export default function ClipPlayer({
       setError('')
       setPlaying(false)
       setFileDuration(0)
+      setSourceAspectRatio(0)
       completedRef.current = false
     }
     const onMeta = () => {
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        setSourceAspectRatio(video.videoWidth / video.videoHeight)
+      }
       if (fullFileRef.current) {
         // Standalone clip: it's already trimmed — start at 0 and bound to the
         // file's own duration. No VOD-relative seek.
@@ -231,6 +245,21 @@ export default function ClipPlayer({
       video.removeEventListener('error', onErr)
     }
   }, [setPlayingState, src])
+
+  useEffect(() => {
+    const area = videoAreaRef.current
+    if (!area || typeof ResizeObserver === 'undefined') return
+
+    const updateAspectRatio = () => {
+      const width = area.clientWidth
+      const height = area.clientHeight
+      if (width > 0 && height > 0) setVideoAreaAspectRatio(width / height)
+    }
+    const observer = new ResizeObserver(updateAspectRatio)
+    observer.observe(area)
+    updateAspectRatio()
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
     const video = videoRef.current
@@ -500,11 +529,24 @@ export default function ClipPlayer({
   const useLiveBlur = blurBackground && !backgroundMedia
   const blurPixels = contextBlurPixels(backgroundBlurStrength)
   const containedVideoPosition = `${normalizeContextVideoY(objectPositionY) * 100}%`
+  const normalizedFullFrameScale = normalizeFullFrameScale(fullFrameScale)
+  const scaledFullFrame = objectFit === 'cover' && normalizedFullFrameScale < 0.999
+  const coverScale = sourceAspectRatio > 0 && videoAreaAspectRatio > 0
+    ? Math.max(
+        sourceAspectRatio / videoAreaAspectRatio,
+        videoAreaAspectRatio / sourceAspectRatio,
+      )
+    : 1
+  const fullFrameTransform = coverScale * normalizedFullFrameScale
 
   return (
     <div className={`flex flex-col ${className}`}>
       {/* ── Video area ── */}
-      <div className={`relative group flex-1 min-h-0 ${showControls ? 'cursor-pointer' : ''} ${blackBackground ? 'bg-black' : 'bg-surface-900'}`} onClick={showControls ? togglePlay : undefined}>
+      <div
+        ref={videoAreaRef}
+        className={`relative group flex-1 min-h-0 overflow-hidden ${showControls ? 'cursor-pointer' : ''} ${blackBackground ? 'bg-black' : 'bg-surface-900'}`}
+        onClick={showControls ? togglePlay : undefined}
+      >
         {backgroundMedia && (
           <img
             src={backgroundMedia}
@@ -533,8 +575,18 @@ export default function ClipPlayer({
         {useLiveBlur && <div className="absolute inset-0 bg-black/5" aria-hidden="true" />}
         <video
           ref={videoRef}
-          className={`absolute inset-0 z-[1] w-full h-full ${objectFit === 'contain' ? 'object-contain' : 'object-cover'}`}
-          style={objectFit === 'contain' ? { objectPosition: `center ${containedVideoPosition}` } : undefined}
+          className={`absolute inset-0 z-[1] w-full h-full ${
+            objectFit === 'contain' || scaledFullFrame ? 'object-contain' : 'object-cover'
+          }`}
+          style={objectFit === 'contain'
+            ? { objectPosition: `center ${containedVideoPosition}` }
+            : scaledFullFrame
+              ? {
+                  objectPosition: 'center center',
+                  transform: `scale(${fullFrameTransform})`,
+                  transformOrigin: 'center center',
+                }
+              : undefined}
           playsInline
           poster={poster || undefined}
         />

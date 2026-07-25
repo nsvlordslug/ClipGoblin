@@ -561,6 +561,45 @@ fn context_fit_filter(
     (filter, true)
 }
 
+fn full_frame_filter(
+    target: OutputSize,
+    caption_filter: Option<&str>,
+    full_frame_scale: f64,
+    blur_strength: f64,
+) -> (String, bool) {
+    let scale = if full_frame_scale.is_finite() {
+        full_frame_scale.clamp(0.70, 1.0)
+    } else {
+        1.0
+    };
+    if scale >= 0.999 {
+        return layout_filter(&LayoutMode::GameplayFocus, target, caption_filter);
+    }
+
+    let tw = target.width;
+    let th = target.height;
+    let blur_strength = if blur_strength.is_finite() {
+        blur_strength.clamp(0.0, 1.0)
+    } else {
+        0.25
+    };
+    let blur_radius = 1 + (blur_strength * 9.0).round() as u32;
+    let mut filter = format!(
+        "[0:v]split=2[blur_src][focus_src];\
+         [blur_src]scale={tw}:{th}:force_original_aspect_ratio=increase:flags=lanczos,\
+         crop={tw}:{th},setsar=1,boxblur={blur_radius}:1,eq=contrast=0.92:brightness=0.01:saturation=0.90,setpts=PTS-STARTPTS[background];\
+         [focus_src]scale={tw}:{th}:force_original_aspect_ratio=increase:force_divisible_by=2:flags=lanczos,\
+         scale=trunc(iw*{scale:.3}/2)*2:trunc(ih*{scale:.3}/2)*2:flags=lanczos,setsar=1,setpts=PTS-STARTPTS[focus];\
+         [background][focus]overlay=(W-w)/2:(H-h)/2:shortest=1:eof_action=endall:repeatlast=0"
+    );
+    if let Some(caption_filter) = caption_filter {
+        filter.push_str(&format!("[composed];[composed]{caption_filter}[out]"));
+    } else {
+        filter.push_str("[out]");
+    }
+    (filter, true)
+}
+
 fn branded_split_filter(
     target: OutputSize,
     caption_filter: Option<&str>,
@@ -760,11 +799,21 @@ pub struct ExportRequest {
     pub context_blur_strength: f64,
     /// Normalized 0..1 placement of the fitted video from top to bottom.
     pub context_video_y: f64,
+    /// Full Frame crop scale. Clamped to 0.70..1.0.
+    pub full_frame_scale: f64,
 }
 
 fn export_layout_filter(request: &ExportRequest) -> (String, bool) {
     let has_branding_input = request.context_background_mode == ContextBackgroundMode::Branding
         && request.context_background_path.is_some();
+    if matches!(request.layout, LayoutMode::GameplayFocus) {
+        return full_frame_filter(
+            request.target,
+            request.caption_filter.as_deref(),
+            request.full_frame_scale,
+            request.context_blur_strength,
+        );
+    }
     if matches!(request.layout, LayoutMode::ContextFit) {
         let background_mode = if request.context_background_mode == ContextBackgroundMode::Branding
             && !has_branding_input
@@ -1280,6 +1329,40 @@ mod tests {
     }
 
     #[test]
+    fn full_frame_zoom_out_reveals_more_source_over_a_filled_canvas() {
+        let (f, complex) = full_frame_filter(
+            OutputSize::VERTICAL_1080,
+            None,
+            0.8,
+            0.25,
+        );
+        assert!(complex);
+        assert!(
+            f.contains("[focus_src]scale=1080:1920:force_original_aspect_ratio=increase"),
+            "foreground should retain the full source before its pullback: {f}"
+        );
+        assert!(
+            f.contains("scale=trunc(iw*0.800/2)*2:trunc(ih*0.800/2)*2"),
+            "foreground should pull back without changing aspect ratio: {f}"
+        );
+        assert!(f.contains("[background][focus]overlay=(W-w)/2"), "filter: {f}");
+        assert!(f.contains("boxblur="), "background must still fill the canvas: {f}");
+    }
+
+    #[test]
+    fn default_full_frame_export_keeps_the_simple_center_crop() {
+        let (f, complex) = full_frame_filter(
+            OutputSize::VERTICAL_1080,
+            None,
+            1.0,
+            0.25,
+        );
+        assert!(!complex);
+        assert!(f.contains("crop=1080:1920"), "filter: {f}");
+        assert!(!f.contains("boxblur="), "standard crop should stay unchanged: {f}");
+    }
+
+    #[test]
     fn caption_appended_after_context_fit_composition() {
         let (f, complex) = layout_filter(
             &LayoutMode::ContextFit,
@@ -1429,6 +1512,7 @@ mod tests {
             context_background_path: None,
             context_blur_strength: 0.25,
             context_video_y: 0.5,
+            full_frame_scale: 1.0,
         }
     }
 

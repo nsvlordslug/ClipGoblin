@@ -100,11 +100,12 @@ export function getPersonalizationStatusCopy(
   const boundarySuffix = status.boundary_learning_active
     ? ` Boundary timing is also learning from ${boundarySamples} edited clips.`
     : '';
+  const sameVodSuffix = ' Reanalyzing the same VOD keeps clips marked Good, excludes events marked Boring, Wrong moment, or Duplicate, and searches for fresh alternatives.';
 
   if (status.boundary_learning_active && !status.is_personalizing) {
     return {
       label: 'Boundary learning is active',
-      detail: `${boundarySamples} clips are teaching ClipGoblin where your clips should start and end. Add varied Good, Meh, or Boring ratings to personalize ranking too.`,
+      detail: `${boundarySamples} clips are teaching ClipGoblin where your clips should start and end.${sameVodSuffix} Add varied Good, Meh, or Boring ratings to personalize broader ranking too.`,
       tone: 'learning',
     };
   }
@@ -114,36 +115,36 @@ export function getPersonalizationStatusCopy(
       return {
         label: 'Learning not active yet',
         detail: behavior > 0
-          ? `${totalEvidence}/4 usable signals (${usable} ratings, ${behavior} actions). Add a few more Good, Meh, or Boring choices.`
-          : `${usable}/4 usable ratings. Add a few more Good, Meh, or Boring choices.`,
+          ? `${totalEvidence}/4 usable signals (${usable} ratings, ${behavior} actions).${sameVodSuffix} Add a few more Good, Meh, or Boring choices for broader ranking.`
+          : `${usable}/4 usable ratings.${sameVodSuffix} Add a few more Good, Meh, or Boring choices for broader ranking.`,
         tone: 'attention',
       };
     case 'needs_variety':
       return {
         label: 'More rating variety needed',
-        detail: `${usable} usable ratings. Use at least two rating choices so ClipGoblin can learn a contrast.`,
+        detail: `${usable} usable ratings.${sameVodSuffix} Use at least two rating choices so ClipGoblin can learn a broader contrast.`,
         tone: 'attention',
       };
     case 'learning':
       return {
         label: 'Personalization is learning',
         detail: behavior > 0
-          ? `${usable}/${target} ratings plus ${behavior} useful actions, ${confidence}% confidence. Future analyses are already being gently reordered.${boundarySuffix}`
-          : `${usable}/${target} usable ratings, ${confidence}% confidence. Future analyses are already being gently reordered.${boundarySuffix}`,
+          ? `${usable}/${target} ratings plus ${behavior} useful actions, ${confidence}% confidence. Future analyses are already being gently reordered.${sameVodSuffix}${boundarySuffix}`
+          : `${usable}/${target} usable ratings, ${confidence}% confidence. Future analyses are already being gently reordered.${sameVodSuffix}${boundarySuffix}`,
         tone: 'learning',
       };
     case 'active':
       return {
         label: 'Personalization is active',
         detail: behavior > 0
-          ? `${usable} ratings plus ${behavior} useful actions, ${confidence}% confidence. New feedback keeps refining your local profile.${boundarySuffix}`
-          : `${usable} usable ratings, ${confidence}% confidence. New feedback keeps refining your local profile.${boundarySuffix}`,
+          ? `${usable} ratings plus ${behavior} useful actions, ${confidence}% confidence. New feedback keeps refining your local profile.${sameVodSuffix}${boundarySuffix}`
+          : `${usable} usable ratings, ${confidence}% confidence. New feedback keeps refining your local profile.${sameVodSuffix}${boundarySuffix}`,
         tone: 'active',
       };
     default:
       return {
         label: 'Ready to learn your taste',
-        detail: 'Rate clips Good, Meh, or Boring. Feedback stays on this PC and applies to future analyses.',
+        detail: `Rate clips Good, Meh, or Boring.${sameVodSuffix} Varied ratings teach broader future ranking, and all feedback stays on this PC.`,
         tone: 'neutral',
       };
   }

@@ -466,6 +466,7 @@ pub(crate) fn import_media_path(
         context_background_mode: "blur".to_string(),
         context_blur_strength: 0.25,
         context_video_y: 0.5,
+        full_frame_scale: 1.0,
         render_status: "pending".to_string(),
         output_path: None,
         thumbnail_path,

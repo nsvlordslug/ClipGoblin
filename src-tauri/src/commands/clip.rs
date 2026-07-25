@@ -113,6 +113,7 @@ pub fn update_clip_settings(
     context_background_mode: String,
     context_blur_strength: f64,
     context_video_y: f64,
+    full_frame_scale: f64,
     game: Option<String>,
     db: State<'_, DbConn>,
 ) -> Result<(), String> {
@@ -157,7 +158,7 @@ pub fn update_clip_settings(
         &facecam_layout,
         facecam_settings.as_deref(),
         context_background_path.as_deref(), context_background_mode,
-        context_blur_strength, context_video_y,
+        context_blur_strength, context_video_y, full_frame_scale,
         game.as_deref(),
     ).map_err(|e| format!("DB error: {}", e))?;
 

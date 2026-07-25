@@ -143,6 +143,11 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
         [],
     )
     .ok();
+    conn.execute(
+        "ALTER TABLE clips ADD COLUMN full_frame_scale REAL DEFAULT 1.0",
+        [],
+    )
+    .ok();
     conn.execute("ALTER TABLE clips ADD COLUMN thumbnail_path TEXT", [])
         .ok();
     conn.execute(
@@ -523,6 +528,8 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
             vod_id TEXT NOT NULL,
             channel_id TEXT,
             game_name TEXT,
+            start_seconds REAL,
+            end_seconds REAL,
             rating TEXT NOT NULL,
             note TEXT,
             scoring_dimensions TEXT,
@@ -557,6 +564,44 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
             ON clip_edit_feedback(vod_id);
         CREATE INDEX IF NOT EXISTS idx_clip_edit_feedback_channel
             ON clip_edit_feedback(channel_id);",
+    )?;
+
+    // Older builds only stored rating timing in clip_edit_feedback (when an
+    // issue/note was also present) or in the generated highlight itself.
+    // Recover either source so same-VOD feedback survives reanalysis.
+    conn.execute(
+        "ALTER TABLE detection_feedback ADD COLUMN start_seconds REAL",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "ALTER TABLE detection_feedback ADD COLUMN end_seconds REAL",
+        [],
+    )
+    .ok();
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_detection_feedback_vod
+            ON detection_feedback(vod_id);
+         UPDATE detection_feedback
+            SET start_seconds = COALESCE(
+                    start_seconds,
+                    (SELECT e.start_seconds
+                       FROM clip_edit_feedback e
+                      WHERE e.highlight_id = detection_feedback.highlight_id),
+                    (SELECT h.start_seconds
+                       FROM highlights h
+                      WHERE h.id = detection_feedback.highlight_id)
+                ),
+                end_seconds = COALESCE(
+                    end_seconds,
+                    (SELECT e.end_seconds
+                       FROM clip_edit_feedback e
+                      WHERE e.highlight_id = detection_feedback.highlight_id),
+                    (SELECT h.end_seconds
+                       FROM highlights h
+                      WHERE h.id = detection_feedback.highlight_id)
+                )
+          WHERE start_seconds IS NULL OR end_seconds IS NULL;",
     )?;
 
     // Append-only, local behavioral evidence. Events intentionally do not
@@ -610,10 +655,12 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
     // Preserve ratings created before the durable feedback table existed.
     conn.execute(
         "INSERT OR IGNORE INTO detection_feedback
-            (highlight_id, vod_id, channel_id, game_name, rating, note,
-             scoring_dimensions, signal_sources, tags, created_at, updated_at)
-         SELECT h.id, h.vod_id, v.channel_id, v.game_name, h.review_rating,
-                h.review_note, h.scoring_dimensions, h.signal_sources, h.tags,
+            (highlight_id, vod_id, channel_id, game_name, start_seconds,
+             end_seconds, rating, note, scoring_dimensions, signal_sources,
+             tags, created_at, updated_at)
+         SELECT h.id, h.vod_id, v.channel_id, v.game_name, h.start_seconds,
+                h.end_seconds, h.review_rating, h.review_note,
+                h.scoring_dimensions, h.signal_sources, h.tags,
                 COALESCE(h.created_at, datetime('now')), datetime('now')
          FROM highlights h
          LEFT JOIN vods v ON v.id = h.vod_id
@@ -725,6 +772,16 @@ pub struct DetectionFeedbackRow {
     pub tags: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReviewedMomentFeedbackRow {
+    pub highlight_id: String,
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    pub rating: Option<String>,
+    pub note: Option<String>,
+    pub issues: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClipBehaviorEventRow {
     pub id: String,
@@ -816,6 +873,10 @@ fn default_context_video_y() -> f64 {
     0.5
 }
 
+fn default_full_frame_scale() -> f64 {
+    1.0
+}
+
 fn normalize_context_blur_strength(value: f64) -> f64 {
     if value.is_finite() {
         value.clamp(0.0, 1.0)
@@ -829,6 +890,14 @@ fn normalize_context_video_y(value: f64) -> f64 {
         value.clamp(0.0, 1.0)
     } else {
         default_context_video_y()
+    }
+}
+
+fn normalize_full_frame_scale(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.70, 1.0)
+    } else {
+        default_full_frame_scale()
     }
 }
 
@@ -878,6 +947,10 @@ pub struct ClipRow {
     /// Normalized 0..1 placement of the sharp fitted video (top..bottom).
     #[serde(default = "default_context_video_y")]
     pub context_video_y: f64,
+    /// Full Frame crop scale. `1.0` is the standard center crop; smaller
+    /// values reveal more source context over a subtle video background.
+    #[serde(default = "default_full_frame_scale")]
+    pub full_frame_scale: f64,
     pub render_status: String,
     pub output_path: Option<String>,
     pub thumbnail_path: Option<String>,
@@ -1347,11 +1420,12 @@ pub fn set_clip_review(
         let now = chrono::Utc::now().to_rfc3339();
         let inserted = tx.execute(
             "INSERT INTO detection_feedback
-                (highlight_id, vod_id, channel_id, game_name, rating, note,
-                 scoring_dimensions, signal_sources, tags, created_at, updated_at)
-             SELECT h.id, h.vod_id, v.channel_id, v.game_name, ?2, ?3,
-                    h.scoring_dimensions, h.signal_sources, h.tags,
-                    COALESCE(h.created_at, ?4), ?4
+                (highlight_id, vod_id, channel_id, game_name, start_seconds,
+                 end_seconds, rating, note, scoring_dimensions, signal_sources,
+                 tags, created_at, updated_at)
+             SELECT h.id, h.vod_id, v.channel_id, v.game_name, h.start_seconds,
+                    h.end_seconds, ?2, ?3, h.scoring_dimensions,
+                    h.signal_sources, h.tags, COALESCE(h.created_at, ?4), ?4
              FROM highlights h
              LEFT JOIN vods v ON v.id = h.vod_id
              WHERE h.id = ?1
@@ -1359,6 +1433,8 @@ pub fn set_clip_review(
                 vod_id = excluded.vod_id,
                 channel_id = excluded.channel_id,
                 game_name = excluded.game_name,
+                start_seconds = excluded.start_seconds,
+                end_seconds = excluded.end_seconds,
                 rating = excluded.rating,
                 note = excluded.note,
                 scoring_dimensions = excluded.scoring_dimensions,
@@ -1434,6 +1510,52 @@ pub fn get_detection_feedback(conn: &Connection) -> SqliteResult<Vec<DetectionFe
             scoring_dimensions: row.get(3)?,
             signal_sources: row.get(4)?,
             tags: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn get_reviewed_moments_for_vod(
+    conn: &Connection,
+    vod_id: &str,
+) -> SqliteResult<Vec<ReviewedMomentFeedbackRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT df.highlight_id,
+                COALESCE(df.start_seconds, ef.start_seconds, h.start_seconds) AS start_seconds,
+                COALESCE(df.end_seconds, ef.end_seconds, h.end_seconds) AS end_seconds,
+                df.rating,
+                COALESCE(df.note, ef.note) AS note,
+                ef.issues
+           FROM detection_feedback df
+           LEFT JOIN clip_edit_feedback ef ON ef.highlight_id = df.highlight_id
+           LEFT JOIN highlights h ON h.id = df.highlight_id
+          WHERE df.vod_id = ?1
+            AND COALESCE(df.start_seconds, ef.start_seconds, h.start_seconds) IS NOT NULL
+            AND COALESCE(df.end_seconds, ef.end_seconds, h.end_seconds) IS NOT NULL
+         UNION ALL
+         SELECT ef.highlight_id,
+                ef.start_seconds,
+                ef.end_seconds,
+                NULL AS rating,
+                ef.note,
+                ef.issues
+           FROM clip_edit_feedback ef
+          WHERE ef.vod_id = ?1
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM detection_feedback df
+                 WHERE df.highlight_id = ef.highlight_id
+            )
+          ORDER BY start_seconds ASC",
+    )?;
+    let rows = stmt.query_map(params![vod_id], |row| {
+        Ok(ReviewedMomentFeedbackRow {
+            highlight_id: row.get(0)?,
+            start_seconds: row.get(1)?,
+            end_seconds: row.get(2)?,
+            rating: row.get(3)?,
+            note: row.get(4)?,
+            issues: row.get(5)?,
         })
     })?;
     rows.collect()
@@ -1661,8 +1783,8 @@ pub fn get_clip_edit_feedback(conn: &Connection) -> SqliteResult<Vec<ClipEditFee
 
 pub fn insert_clip(conn: &Connection, c: &ClipRow) -> SqliteResult<()> {
     conn.execute(
-        "INSERT INTO clips (id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, render_status, output_path, thumbnail_path, created_at, game, community_clip_mp4_path, caption_font_scale, source_kind, source_media_path, source_fingerprint, source_recorded_at, context_background_path, context_background_mode, context_blur_strength, context_video_y, facecam_settings, caption_y_offset, captions_source_start)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34)
+        "INSERT INTO clips (id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, render_status, output_path, thumbnail_path, created_at, game, community_clip_mp4_path, caption_font_scale, source_kind, source_media_path, source_fingerprint, source_recorded_at, context_background_path, context_background_mode, context_blur_strength, context_video_y, full_frame_scale, facecam_settings, caption_y_offset, captions_source_start)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35)
          ON CONFLICT(id) DO UPDATE SET
            highlight_id = excluded.highlight_id,
            vod_id = excluded.vod_id,
@@ -1693,10 +1815,11 @@ pub fn insert_clip(conn: &Connection, c: &ClipRow) -> SqliteResult<()> {
            context_background_mode = excluded.context_background_mode,
            context_blur_strength = excluded.context_blur_strength,
            context_video_y = excluded.context_video_y,
+           full_frame_scale = excluded.full_frame_scale,
            facecam_settings = excluded.facecam_settings,
            caption_y_offset = excluded.caption_y_offset,
            captions_source_start = excluded.captions_source_start",
-        params![c.id, c.highlight_id, c.vod_id, c.title, c.start_seconds, c.end_seconds, c.aspect_ratio, c.crop_x, c.crop_y, c.crop_width, c.crop_height, c.captions_enabled, c.captions_text, c.captions_position, c.caption_style, c.facecam_layout, c.render_status, c.output_path, c.thumbnail_path, c.created_at, c.game, c.community_clip_mp4_path, normalize_caption_font_scale(c.caption_font_scale), c.source_kind, c.source_media_path, c.source_fingerprint, c.source_recorded_at, c.context_background_path, normalize_context_background_mode(&c.context_background_mode), normalize_context_blur_strength(c.context_blur_strength), normalize_context_video_y(c.context_video_y), c.facecam_settings, normalize_caption_y_offset(c.caption_y_offset), c.captions_source_start.filter(|value| value.is_finite()).map(|value| value.max(0.0))],
+        params![c.id, c.highlight_id, c.vod_id, c.title, c.start_seconds, c.end_seconds, c.aspect_ratio, c.crop_x, c.crop_y, c.crop_width, c.crop_height, c.captions_enabled, c.captions_text, c.captions_position, c.caption_style, c.facecam_layout, c.render_status, c.output_path, c.thumbnail_path, c.created_at, c.game, c.community_clip_mp4_path, normalize_caption_font_scale(c.caption_font_scale), c.source_kind, c.source_media_path, c.source_fingerprint, c.source_recorded_at, c.context_background_path, normalize_context_background_mode(&c.context_background_mode), normalize_context_blur_strength(c.context_blur_strength), normalize_context_video_y(c.context_video_y), normalize_full_frame_scale(c.full_frame_scale), c.facecam_settings, normalize_caption_y_offset(c.caption_y_offset), c.captions_source_start.filter(|value| value.is_finite()).map(|value| value.max(0.0))],
     )?;
     Ok(())
 }
@@ -1805,12 +1928,16 @@ fn read_clip_row(row: &rusqlite::Row) -> rusqlite::Result<ClipRow> {
         context_video_y: normalize_context_video_y(
             row.get::<_, Option<f64>>(34)?.unwrap_or_else(default_context_video_y),
         ),
-        facecam_settings: row.get(35)?,
+        full_frame_scale: normalize_full_frame_scale(
+            row.get::<_, Option<f64>>(35)?
+                .unwrap_or_else(default_full_frame_scale),
+        ),
+        facecam_settings: row.get(36)?,
         caption_y_offset: normalize_caption_y_offset(
-            row.get::<_, Option<f64>>(36)?.unwrap_or(0.0),
+            row.get::<_, Option<f64>>(37)?.unwrap_or(0.0),
         ),
         captions_source_start: row
-            .get::<_, Option<f64>>(37)?
+            .get::<_, Option<f64>>(38)?
             .filter(|value| value.is_finite())
             .map(|value| value.max(0.0)),
     })
@@ -1822,7 +1949,7 @@ fn read_clip_row(row: &rusqlite::Row) -> rusqlite::Result<ClipRow> {
 /// `VodRow` so positional `row.get(idx)?` calls stay in sync.
 const VOD_SELECT: &str = "SELECT id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress, game_name, cam_region_norm FROM vods";
 
-const CLIP_SELECT: &str = "SELECT id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, render_status, output_path, thumbnail_path, created_at, game, publish_description, publish_hashtags, cam_region_norm_override, cam_fit_mode, community_clip_mp4_path, caption_font_scale, source_kind, source_media_path, source_fingerprint, source_recorded_at, context_background_path, context_background_mode, context_blur_strength, context_video_y, facecam_settings, caption_y_offset, captions_source_start FROM clips";
+const CLIP_SELECT: &str = "SELECT id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, render_status, output_path, thumbnail_path, created_at, game, publish_description, publish_hashtags, cam_region_norm_override, cam_fit_mode, community_clip_mp4_path, caption_font_scale, source_kind, source_media_path, source_fingerprint, source_recorded_at, context_background_path, context_background_mode, context_blur_strength, context_video_y, full_frame_scale, facecam_settings, caption_y_offset, captions_source_start FROM clips";
 
 pub fn get_all_clips(conn: &Connection) -> SqliteResult<Vec<ClipRow>> {
     let mut stmt = conn.prepare(&format!("{} ORDER BY created_at DESC, start_seconds ASC", CLIP_SELECT))?;
@@ -1858,11 +1985,12 @@ pub fn update_clip_settings(
     context_background_mode: &str,
     context_blur_strength: f64,
     context_video_y: f64,
+    full_frame_scale: f64,
     game: Option<&str>,
 ) -> SqliteResult<()> {
     conn.execute(
-        "UPDATE clips SET title = ?1, start_seconds = ?2, end_seconds = ?3, aspect_ratio = ?4, captions_enabled = ?5, captions_text = ?6, captions_position = ?7, caption_style = ?8, facecam_layout = ?9, game = ?10, caption_font_scale = ?11, context_background_path = ?12, context_background_mode = ?13, context_blur_strength = ?14, context_video_y = ?15, facecam_settings = ?16, caption_y_offset = ?17, render_status = 'pending' WHERE id = ?18",
-        params![title, start_seconds, end_seconds, aspect_ratio, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, game, normalize_caption_font_scale(caption_font_scale), context_background_path, normalize_context_background_mode(context_background_mode), normalize_context_blur_strength(context_blur_strength), normalize_context_video_y(context_video_y), facecam_settings, normalize_caption_y_offset(caption_y_offset), clip_id],
+        "UPDATE clips SET title = ?1, start_seconds = ?2, end_seconds = ?3, aspect_ratio = ?4, captions_enabled = ?5, captions_text = ?6, captions_position = ?7, caption_style = ?8, facecam_layout = ?9, game = ?10, caption_font_scale = ?11, context_background_path = ?12, context_background_mode = ?13, context_blur_strength = ?14, context_video_y = ?15, full_frame_scale = ?16, facecam_settings = ?17, caption_y_offset = ?18, render_status = 'pending' WHERE id = ?19",
+        params![title, start_seconds, end_seconds, aspect_ratio, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, game, normalize_caption_font_scale(caption_font_scale), context_background_path, normalize_context_background_mode(context_background_mode), normalize_context_blur_strength(context_blur_strength), normalize_context_video_y(context_video_y), normalize_full_frame_scale(full_frame_scale), facecam_settings, normalize_caption_y_offset(caption_y_offset), clip_id],
     )?;
     Ok(())
 }
@@ -2854,6 +2982,7 @@ mod tests {
             context_background_mode: "blur".to_string(),
             context_blur_strength: 0.25,
             context_video_y: 0.5,
+            full_frame_scale: 1.0,
             render_status: "pending".to_string(),
             output_path: None,
             thumbnail_path: None,
@@ -3053,6 +3182,13 @@ mod tests {
         let feedback = get_detection_feedback(&conn).unwrap();
         assert_eq!(feedback.len(), 1);
         assert_eq!(feedback[0].rating, "good");
+        let reviewed = get_reviewed_moments_for_vod(&conn, "v1").unwrap();
+        assert_eq!(reviewed.len(), 1);
+        assert_eq!(reviewed[0].highlight_id, "h1");
+        assert_eq!(reviewed[0].start_seconds, 0.0);
+        assert_eq!(reviewed[0].end_seconds, 30.0);
+        assert_eq!(reviewed[0].rating.as_deref(), Some("good"));
+        assert_eq!(reviewed[0].note.as_deref(), Some("nice banter"));
     }
 
     #[test]
@@ -3102,6 +3238,14 @@ mod tests {
             edit_feedback[0].note.as_deref(),
             Some("setup and punchline are both clipped")
         );
+        let reviewed = get_reviewed_moments_for_vod(&conn, "v1").unwrap();
+        assert_eq!(reviewed.len(), 1);
+        assert_eq!(reviewed[0].rating, None);
+        assert_eq!(
+            reviewed[0].note.as_deref(),
+            Some("setup and punchline are both clipped")
+        );
+        assert_eq!(reviewed[0].issues.as_deref(), Some(issues));
     }
 
     #[test]
@@ -3164,6 +3308,10 @@ mod tests {
         let feedback = get_detection_feedback(&conn).unwrap();
         assert_eq!(feedback.len(), 1);
         assert_eq!(feedback[0].rating, "good");
+        let reviewed = get_reviewed_moments_for_vod(&conn, "v1").unwrap();
+        assert_eq!(reviewed.len(), 1);
+        assert_eq!(reviewed[0].start_seconds, 0.0);
+        assert_eq!(reviewed[0].end_seconds, 30.0);
     }
 
     #[test]
@@ -3269,6 +3417,7 @@ mod tests {
             context_background_mode: "blur".to_string(),
             context_blur_strength: 0.25,
             context_video_y: 0.5,
+            full_frame_scale: 1.0,
             render_status: "pending".to_string(),
             output_path: None,
             thumbnail_path: None,
@@ -3313,6 +3462,7 @@ mod tests {
             "blur",
             0.25,
             0.5,
+            1.0,
             None,
         )
         .unwrap();
@@ -3333,13 +3483,14 @@ mod tests {
     }
 
     #[test]
-    fn context_fit_settings_round_trip_and_clamp_at_the_database_boundary() {
+    fn context_fit_and_full_frame_settings_round_trip_and_clamp_at_the_database_boundary() {
         let conn = fresh_db();
         let mut clip = test_clip("clip-context-fit", "highlight-context-fit", "vod-context-fit");
         clip.context_background_path = Some("branding/original.gif".to_string());
         clip.context_background_mode = "unsupported".to_string();
         clip.context_blur_strength = 4.0;
         clip.context_video_y = -2.0;
+        clip.full_frame_scale = 0.2;
 
         insert_clip(&conn, &clip).unwrap();
         let inserted = get_clip_by_id(&conn, &clip.id).unwrap().unwrap();
@@ -3347,6 +3498,7 @@ mod tests {
         assert_eq!(inserted.context_background_mode, "blur");
         assert_eq!(inserted.context_blur_strength, 1.0);
         assert_eq!(inserted.context_video_y, 0.0);
+        assert_eq!(inserted.full_frame_scale, 0.70);
 
         update_clip_settings(
             &conn,
@@ -3367,6 +3519,7 @@ mod tests {
             "branding",
             0.4,
             0.82,
+            0.86,
             None,
         )
         .unwrap();
@@ -3376,6 +3529,7 @@ mod tests {
         assert_eq!(updated.context_background_mode, "branding");
         assert!((updated.context_blur_strength - 0.4).abs() < f64::EPSILON);
         assert!((updated.context_video_y - 0.82).abs() < f64::EPSILON);
+        assert!((updated.full_frame_scale - 0.86).abs() < f64::EPSILON);
         assert_eq!(updated.caption_y_offset, MIN_CAPTION_Y_OFFSET);
         assert!(updated
             .facecam_settings

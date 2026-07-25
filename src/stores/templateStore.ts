@@ -27,6 +27,7 @@ export interface ClipTemplate {
   contextBackgroundMode?: ContextBackgroundMode
   contextBlurStrength?: number
   contextVideoY?: number
+  fullFrameScale?: number
   createdAt: string
 }
 

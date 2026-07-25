@@ -1785,6 +1785,7 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
                         context_background_mode: "blur".to_string(),
                         context_blur_strength: 0.25,
                         context_video_y: 0.5,
+                        full_frame_scale: 1.0,
                         render_status: "pending".to_string(),
                         output_path: None,
                         thumbnail_path: None,
@@ -2315,19 +2316,29 @@ fn serialize_signal_sources(sources: &[clip_selector::SignalSource]) -> String {
 }
 
 /// Run the AI clip-worthiness judge when it's enabled AND a BYOK provider is
-/// configured. Returns the judge's moments, or an empty Vec on disabled / no key
-/// / API error — the analysis NEVER fails because of the judge. Runs inside
+/// configured. `completed` distinguishes a legitimate empty verdict from disabled
+/// / no-key / API-error fallback, so "the judge found nothing" can veto weak local
+/// candidates without treating a failed request as a judgment. Runs inside
 /// `spawn_blocking`, so it opens a direct DB connection (for the setting, the
 /// provider, and the usage log) and `block_on`s the async judge.
+#[derive(Default)]
+struct AiJudgeOutcome {
+    moments: Vec<crate::clip_judge::JudgedMoment>,
+    completed: bool,
+}
+
 fn run_ai_judge(
     transcript: Option<&TranscriptResult>,
     vod_id: &str,
     vod_title: &str,
     duration: f64,
-) -> Vec<crate::clip_judge::JudgedMoment> {
-    let Some(t) = transcript else { return Vec::new() };
-    let Ok(db_path) = db::db_path() else { return Vec::new() };
-    let Ok(conn) = rusqlite::Connection::open(&db_path) else { return Vec::new() };
+    reviewed_moments: &[db::ReviewedMomentFeedbackRow],
+) -> AiJudgeOutcome {
+    let Some(t) = transcript else { return AiJudgeOutcome::default() };
+    let Ok(db_path) = db::db_path() else { return AiJudgeOutcome::default() };
+    let Ok(conn) = rusqlite::Connection::open(&db_path) else {
+        return AiJudgeOutcome::default();
+    };
 
     let enabled = db::get_setting(&conn, "ai_clip_detection_enabled")
         .ok()
@@ -2335,12 +2346,45 @@ fn run_ai_judge(
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
     if !enabled {
-        return Vec::new();
+        return AiJudgeOutcome::default();
     }
     let resolved = crate::ai_provider::resolve(&conn, crate::ai_provider::Scope::ClipJudge);
     if !resolved.is_llm() {
         log::info!("AI clip detection on but no AI provider/key configured — signal-only");
-        return Vec::new();
+        return AiJudgeOutcome::default();
+    }
+    let excluded_windows: Vec<(f64, f64)> = reviewed_moments
+        .iter()
+        .filter(|review| clip_selector::review_rejects_moment(review))
+        .map(|review| (review.start_seconds, review.end_seconds))
+        .collect();
+    let approved_examples: Vec<crate::clip_judge::ApprovedMomentExample> = reviewed_moments
+        .iter()
+        .filter(|review| review.rating.as_deref() == Some("good"))
+        .filter_map(|review| {
+            let transcript = extract_transcript_for_range(
+                t,
+                review.start_seconds,
+                review.end_seconds,
+            )?;
+            Some(crate::clip_judge::ApprovedMomentExample {
+                start_sec: review.start_seconds,
+                end_sec: review.end_seconds,
+                transcript: transcript.chars().take(500).collect(),
+            })
+        })
+        .collect();
+    if !excluded_windows.is_empty() {
+        log::info!(
+            "AI clip detection: asking the judge for alternatives to {} creator-rejected moment(s)",
+            excluded_windows.len(),
+        );
+    }
+    if !approved_examples.is_empty() {
+        log::info!(
+            "AI clip detection: using {} creator-approved Good moment(s) as taste examples while reserving their ranges",
+            approved_examples.len(),
+        );
     }
     log::info!("AI clip detection: judging via {:?} {}", resolved.provider, resolved.model);
     let fut = crate::clip_judge::judge(
@@ -2350,6 +2394,8 @@ fn run_ai_judge(
         t,
         vod_title,
         duration,
+        &excluded_windows,
+        &approved_examples,
     );
     match tokio::runtime::Handle::current().block_on(fut) {
         Ok((moments, tin, tout)) => {
@@ -2373,15 +2419,19 @@ fn run_ai_judge(
             // Optional cheap Sonnet final-pass: re-rank/curate only the top
             // survivors (their snippets, not the VOD) for near-Sonnet taste at
             // ~Haiku-bulk cost. Skips gracefully on any error → Haiku ranking.
-            if resolved.use_sonnet_final_pass && moments.len() >= 2 {
+            let moments = if resolved.use_sonnet_final_pass && moments.len() >= 2 {
                 run_final_pass(&conn, &resolved.api_key, t, moments, vod_id, vod_title)
             } else {
                 moments
+            };
+            AiJudgeOutcome {
+                moments,
+                completed: true,
             }
         }
         Err(e) => {
             log::warn!("AI clip detection failed — falling back to signal-only: {}", e);
-            Vec::new()
+            AiJudgeOutcome::default()
         }
     }
 }
@@ -2634,18 +2684,18 @@ fn run_analysis_signals(
     // it runs inside tokio::task::spawn_blocking) and passed in as `community_clips`.
     log::info!("Signal analysis: running clip selector pipeline...");
     set_analysis_progress(vod_id, 52);
-    // AI clip-worthiness judge (opt-in, BYOK) — empty Vec when off / no key / error.
-    let ai_moments = run_ai_judge(transcript.as_ref(), vod_id, &vod.title, duration);
     // Build a local preference profile from durable Good / Meh / Boring
     // feedback. Invalid/legacy rows are skipped by the profile builder, and an
     // inactive profile is a strict no-op until enough varied ratings exist.
-    let (personalization_profile, boundary_profile) = db::db_path()
+    let (personalization_profile, boundary_profile, reviewed_moments) = db::db_path()
         .ok()
         .and_then(|path| rusqlite::Connection::open(path).ok())
         .map(|conn| {
             let feedback = db::get_detection_feedback(&conn).unwrap_or_default();
             let behavior = db::get_clip_behavior_events(&conn).unwrap_or_default();
             let edit_feedback = db::get_clip_edit_feedback(&conn).unwrap_or_default();
+            let reviewed_moments =
+                db::get_reviewed_moments_for_vod(&conn, vod_id).unwrap_or_default();
             (
                 crate::personalization::PersonalizationProfile::from_evidence(
                     &feedback,
@@ -2659,21 +2709,40 @@ fn run_analysis_signals(
                     Some(&vod.channel_id),
                     vod.game_name.as_deref(),
                 ),
+                reviewed_moments,
             )
         })
         .unwrap_or_default();
+    if !reviewed_moments.is_empty() {
+        log::info!(
+            "Signal analysis: applying {} durable review window(s) from this VOD",
+            reviewed_moments.len()
+        );
+    }
+    // AI clip-worthiness judge (opt-in, BYOK) receives same-VOD rejections in
+    // the existing call so it searches for different events instead of spending
+    // its shortlist on moments the creator already rejected.
+    let ai_judge = run_ai_judge(
+        transcript.as_ref(),
+        vod_id,
+        &vod.title,
+        duration,
+        &reviewed_moments,
+    );
     let (selected, detection_stats): (Vec<clip_selector::ClipCandidate>, _) = clip_selector::select_clips(
         audio_ctx.as_ref(),
         transcript.as_ref(),
         &chat_peaks,
         &emote_peaks,
         community_clips,
-        &ai_moments,
+        &ai_judge.moments,
+        ai_judge.completed,
         duration,
         sensitivity,
         &game_config.selector,
         personalization_profile.is_active().then_some(&personalization_profile),
         boundary_profile.is_active().then_some(&boundary_profile),
+        &reviewed_moments,
     );
     set_analysis_progress(vod_id, 60);
 
@@ -2686,6 +2755,13 @@ fn run_analysis_signals(
     }
 
     if selected.is_empty() {
+        if detection_stats.feedback_avoided_moments > 0 {
+            log::info!(
+                "Signal analysis: no new candidates survived after avoiding {} explicitly rejected moment(s); returning an honest empty result instead of ignoring feedback",
+                detection_stats.feedback_avoided_moments
+            );
+            return Ok(Vec::new());
+        }
         log::warn!("Signal analysis: selector returned no clips, falling back to position heuristic");
         set_analysis_progress(vod_id, 55);
         return run_analysis(vod, chat_messages);
@@ -2793,7 +2869,11 @@ fn run_analysis_signals(
         };
 
         highlights.push(db::HighlightRow {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: c
+                .preserved_review
+                .as_ref()
+                .map(|review| review.highlight_id.clone())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             vod_id: vod_id.clone(),
             start_seconds: c.start_time,
             end_seconds: c.end_time,
@@ -2811,9 +2891,18 @@ fn run_analysis_signals(
             event_summary: Some(event_summary),
             scoring_dimensions: Some(serialize_scoring_dimensions(c)),
             signal_sources: Some(serialize_signal_sources(&c.signal_sources)),
-            review_rating: None,       // user-set via Review UI
-            review_note: None,         // user-set via Review UI
-            review_issues: None,       // user-set edit-quality feedback
+            review_rating: c
+                .preserved_review
+                .as_ref()
+                .map(|review| review.rating.clone()),
+            review_note: c
+                .preserved_review
+                .as_ref()
+                .and_then(|review| review.note.clone()),
+            review_issues: c
+                .preserved_review
+                .as_ref()
+                .and_then(|review| review.issues.clone()),
             community_clip_mp4_path,
         });
 

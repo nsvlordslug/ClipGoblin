@@ -70,6 +70,15 @@ pub struct FusedMoment {
     pub transcript_snippet: Option<String>,
 }
 
+/// Durable review metadata carried by a creator-approved moment.
+#[derive(Clone, Debug)]
+pub struct PreservedReview {
+    pub highlight_id: String,
+    pub rating: String,
+    pub note: Option<String>,
+    pub issues: Option<String>,
+}
+
 /// A fully scored clip candidate.
 #[derive(Clone, Debug)]
 pub struct ClipCandidate {
@@ -107,9 +116,13 @@ pub struct ClipCandidate {
     /// persist loop downloads this and uses the resulting MP4 as the clip video.
     /// `None` for every normal candidate.
     pub community_url: Option<String>,
+    /// Set only when a creator-approved Good moment is deliberately carried
+    /// across same-VOD reanalysis.
+    pub preserved_review: Option<PreservedReview>,
 }
 
 /// Configurable curation parameters.
+#[derive(Clone)]
 pub struct CurationConfig {
     /// Seconds after a selected clip during which nearby clips are penalized.
     pub cooldown_window: f64,
@@ -515,6 +528,79 @@ fn is_corroborated(c: &ClipCandidate) -> bool {
     c.signal_sources.len() >= 2 || c.signal_sources.contains(&SignalSource::Community)
 }
 
+fn transcript_context_for_window(
+    transcript: Option<&TranscriptResult>,
+    start: f64,
+    end: f64,
+) -> Option<String> {
+    let transcript = transcript?;
+    let mut text = String::new();
+    for segment in transcript
+        .segments
+        .iter()
+        .filter(|segment| segment.end > start && segment.start < end)
+    {
+        let clean = segment.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if clean.is_empty() {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(&clean);
+        if text.chars().count() >= 500 {
+            break;
+        }
+    }
+    let text = text.chars().take(500).collect::<String>();
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// A single local signal is allowed only when the surrounding transcript carries
+/// an actual thought or exchange. This keeps a lone laugh, scream, chat spike, or
+/// one-word reaction from becoming a clip merely because it was loud.
+fn has_meaningful_transcript_context(candidate: &ClipCandidate) -> bool {
+    let Some(text) = candidate.transcript_excerpt.as_deref() else {
+        return false;
+    };
+    const FILLER: &[&str] = &[
+        "a", "ah", "aha", "ahaha", "an", "and", "are", "bro", "but", "did", "do",
+        "does", "dude", "ha", "haha", "hahaha", "he", "hehe", "hmm", "i", "im",
+        "in", "is", "it", "lmao", "lol", "me", "mm", "my", "no", "of", "oh", "ok",
+        "okay", "on", "or", "rofl", "she", "so", "that", "the", "they", "this", "to",
+        "uh", "um", "was", "we", "were", "whoa", "with", "woo", "wow", "yeah", "yep",
+        "you", "your",
+    ];
+    let words: Vec<String> = text
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '\'')
+        .filter(|word| !word.is_empty())
+        .map(|word| word.to_lowercase())
+        .collect();
+    if words.len() < 5 {
+        return false;
+    }
+    let substantive: Vec<&str> = words
+        .iter()
+        .map(String::as_str)
+        .filter(|word| !FILLER.contains(word))
+        .collect();
+    if substantive.len() < 3 {
+        return false;
+    }
+    let unique: std::collections::HashSet<&str> = substantive.iter().copied().collect();
+    unique.len() >= 3
+}
+
+fn has_local_contextual_support(candidate: &ClipCandidate) -> bool {
+    if candidate.signal_sources.len() >= 2
+        || candidate.signal_sources.contains(&SignalSource::Community)
+        || candidate.signal_sources.contains(&SignalSource::Semantic)
+    {
+        return true;
+    }
+    has_meaningful_transcript_context(candidate)
+}
+
 /// True if this candidate carries a community (viewer-clipped) signal. Such clips
 /// were validated by a human on Twitch, so they're exempt from the loudness/payoff
 /// quality gates and are pinned into the final output (see pin_community_clips).
@@ -752,7 +838,7 @@ fn passes_quality_gates(c: &ClipCandidate, audio: Option<&AudioContext>, cfg: &C
             let body_end = (c.end_time - 2.0).max(body_start + 1.0);
             if a.intensity_in_range(body_start, body_end) < a.avg_rms * 0.4 { return false; }
         }
-        if c.signal_sources.len() == 1 && c.transcript_excerpt.is_none() && c.payoff_clarity < 0.35 {
+        if !has_local_contextual_support(c) {
             return false;
         }
     }
@@ -846,17 +932,20 @@ pub fn is_music_only_text(s: &str) -> bool {
 
 // ── AI clip-worthiness fusion (Piece 2) ──
 // When the BYOK judge ran, blend its per-moment verdict into the signal score.
-// The AI is the primary ranker; signals corroborate. This VETOES loud-but-empty
-// moments (the AI read the transcript and passed them over → low ai_score →
-// demoted out) and RESCUES quiet ones the signals never spiked on (AI-only
-// moments appended as Semantic candidates that bypass the signal quality gates).
+// The AI is the primary ranker for moments it actually returns; signals
+// corroborate. The judge returns a selective shortlist, not a score for every
+// second of the VOD, so an unmentioned local candidate is not an explicit veto.
+// It must still clear the stricter local context gates. AI-only moments rescue
+// quiet banter that never produced an audio/chat spike.
 
 /// Weight on the AI verdict vs. the signal composite in the fused score.
 const AI_WEIGHT: f64 = 0.65;
 const SIGNAL_WEIGHT: f64 = 0.35;
-/// ai_score for a signal candidate the AI did NOT flag — it read the transcript
-/// and passed this moment over, so treat it as probably-not-clip-worthy.
-const AI_PASSED_OVER: f64 = 0.15;
+/// A local candidate omitted from a non-empty AI shortlist receives a modest
+/// ranking penalty, but keeps `ai_score = None` so it can still qualify on
+/// corroborated local evidence. An empty shortlist applies no penalty because
+/// there is no positive AI ranking to compare against.
+const AI_UNMENTIONED_SCORE_MULTIPLIER: f64 = 0.85;
 /// Neutral signal composite for an AI-discovered moment no signal fired on
 /// (quiet banter): the AI vouches; the signals are silent, not opposed.
 const AI_RESCUE_SIGNAL: f64 = 0.40;
@@ -881,24 +970,33 @@ fn best_overlapping(
         .max_by(|x, y| x.score.partial_cmp(&y.score).unwrap_or(std::cmp::Ordering::Equal))
 }
 
-/// Blend the AI verdict into `candidates` and append AI-discovered moments the
-/// signals missed. No-op when `ai_moments` is empty (AI off). Afterwards each
-/// candidate's `total_score` is the fused score and `ai_score` is set.
+/// Blend AI nominations into `candidates` and append AI-discovered moments the
+/// signals missed. The model returns a selective shortlist rather than an
+/// exhaustive per-candidate verdict, so only overlapping moments receive an
+/// `ai_score`. A completed empty shortlist and a failed/disabled judge both leave
+/// local candidates to the normal context gates.
 fn fuse_ai_moments(
     candidates: &mut Vec<ClipCandidate>,
     ai_moments: &[crate::clip_judge::JudgedMoment],
+    ai_judge_completed: bool,
     duration: f64,
 ) {
-    if ai_moments.is_empty() {
+    if !ai_judge_completed || ai_moments.is_empty() {
         return;
     }
-    // 1. Blend the AI verdict into every existing signal candidate.
+    // 1. Blend positive/low AI evidence into overlapping signal candidates.
+    // Unmentioned candidates remain eligible on local evidence, but rank below
+    // comparable AI-backed candidates.
     for c in candidates.iter_mut() {
-        let ai = best_overlapping(c.start_time, c.end_time, ai_moments)
-            .map(|m| m.score)
-            .unwrap_or(AI_PASSED_OVER);
-        c.ai_score = Some(ai);
-        c.total_score = (AI_WEIGHT * ai + SIGNAL_WEIGHT * c.total_score).min(0.99);
+        if let Some(ai) =
+            best_overlapping(c.start_time, c.end_time, ai_moments).map(|m| m.score)
+        {
+            c.ai_score = Some(ai);
+            c.total_score =
+                (AI_WEIGHT * ai + SIGNAL_WEIGHT * c.total_score).min(0.99);
+        } else {
+            c.total_score *= AI_UNMENTIONED_SCORE_MULTIPLIER;
+        }
     }
     // 2. Rescue: AI moments overlapping NO signal candidate become candidates.
     let existing: Vec<(f64, f64)> =
@@ -937,6 +1035,7 @@ fn fuse_ai_moments(
             selected_reason: None,
             rejection_reason: None,
             community_url: None,
+            preserved_review: None,
         };
         c.similarity_fingerprint = compute_similarity_fingerprint(&c);
         candidates.push(c);
@@ -998,18 +1097,465 @@ fn apply_personalization(
     adjusted
 }
 
+const REVIEW_MATCH_MIN_OVERLAP: f64 = 0.45;
+const REVIEW_MATCH_MAX_CENTER_DELTA_SECONDS: f64 = 12.0;
+const REVIEW_REJECTION_MIN_OVERLAP: f64 = 0.20;
+const REVIEW_REJECTION_MIN_OVERLAP_SECONDS: f64 = 5.0;
+const FEEDBACK_EXPLORATION_MIN_RESULTS: usize = 3;
+const DIRECT_REVIEW_START_PADDING_SECONDS: f64 = 2.5;
+const DIRECT_REVIEW_END_PADDING_SECONDS: f64 = 3.5;
+const DIRECT_REVIEW_MIN_DURATION_SECONDS: f64 = 12.0;
+const DIRECT_REVIEW_MAX_DURATION_SECONDS: f64 = 60.0;
+const DIRECT_GOOD_SCORE_BOOST: f64 = 0.06;
+const DIRECT_MEH_SCORE_PENALTY: f64 = 0.10;
+const PRESERVED_GOOD_SCORE_FLOOR: f64 = 0.72;
+
+#[derive(Debug, Default)]
+struct DirectFeedbackEffects {
+    boundary_adjusted_candidates: usize,
+    score_adjusted_candidates: usize,
+}
+
+fn parsed_review_issues(value: Option<&str>) -> Vec<String> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<String>>(value)
+        .unwrap_or_else(|_| value.split(',').map(str::to_string).collect())
+        .into_iter()
+        .map(|issue| issue.trim().to_ascii_lowercase())
+        .filter(|issue| !issue.is_empty())
+        .collect()
+}
+
+pub(crate) fn review_rejects_moment(review: &db::ReviewedMomentFeedbackRow) -> bool {
+    if review.rating.as_deref() == Some("boring") {
+        return true;
+    }
+    let issues = parsed_review_issues(review.issues.as_deref());
+    issues
+        .iter()
+        .any(|issue| issue == "wrong_moment" || issue == "duplicate")
+}
+
+fn reviewed_window_overlap_metrics(
+    start: f64,
+    end: f64,
+    peak: f64,
+    review: &db::ReviewedMomentFeedbackRow,
+) -> Option<(f64, f64, f64)> {
+    if !start.is_finite()
+        || !end.is_finite()
+        || !peak.is_finite()
+        || !review.start_seconds.is_finite()
+        || !review.end_seconds.is_finite()
+        || end <= start
+        || review.end_seconds <= review.start_seconds
+    {
+        return None;
+    }
+
+    let overlap = (end.min(review.end_seconds) - start.max(review.start_seconds)).max(0.0);
+    let shorter_duration = (end - start)
+        .min(review.end_seconds - review.start_seconds)
+        .max(0.001);
+    let overlap_ratio = overlap / shorter_duration;
+    let reviewed_center = (review.start_seconds + review.end_seconds) / 2.0;
+    let peak_delta = (peak - reviewed_center).abs();
+    Some((overlap, overlap_ratio, peak_delta))
+}
+
+fn reviewed_window_match_score(
+    start: f64,
+    end: f64,
+    peak: f64,
+    review: &db::ReviewedMomentFeedbackRow,
+) -> Option<f64> {
+    let (_, overlap_ratio, peak_delta) =
+        reviewed_window_overlap_metrics(start, end, peak, review)?;
+    if overlap_ratio < REVIEW_MATCH_MIN_OVERLAP
+        || peak_delta > REVIEW_MATCH_MAX_CENTER_DELTA_SECONDS
+    {
+        return None;
+    }
+
+    Some(overlap_ratio - peak_delta / 100.0)
+}
+
+fn reviewed_window_rejection_matches(
+    start: f64,
+    end: f64,
+    peak: f64,
+    review: &db::ReviewedMomentFeedbackRow,
+) -> bool {
+    let Some((overlap, overlap_ratio, peak_delta)) =
+        reviewed_window_overlap_metrics(start, end, peak, review)
+    else {
+        return false;
+    };
+    (overlap_ratio >= REVIEW_MATCH_MIN_OVERLAP
+        && peak_delta <= REVIEW_MATCH_MAX_CENTER_DELTA_SECONDS)
+    || (overlap >= REVIEW_REJECTION_MIN_OVERLAP_SECONDS
+        && overlap_ratio >= REVIEW_REJECTION_MIN_OVERLAP)
+}
+
+fn matching_rejections<'a>(
+    start: f64,
+    end: f64,
+    center: f64,
+    reviewed_moments: &'a [db::ReviewedMomentFeedbackRow],
+) -> Vec<&'a db::ReviewedMomentFeedbackRow> {
+    reviewed_moments
+        .iter()
+        .filter(|review| {
+            review_rejects_moment(review)
+                && reviewed_window_rejection_matches(start, end, center, review)
+        })
+        .collect()
+}
+
+fn suppress_reviewed_candidates(
+    candidates: &mut Vec<ClipCandidate>,
+    reviewed_moments: &[db::ReviewedMomentFeedbackRow],
+    avoided_review_ids: &mut std::collections::HashSet<String>,
+) -> usize {
+    let before = candidates.len();
+    candidates.retain(|candidate| {
+        let rejections = matching_rejections(
+            candidate.start_time,
+            candidate.end_time,
+            candidate.peak_time,
+            reviewed_moments,
+        );
+        for review in &rejections {
+            avoided_review_ids.insert(review.highlight_id.clone());
+        }
+        rejections.is_empty()
+    });
+    before.saturating_sub(candidates.len())
+}
+
+fn apply_direct_review_boundary(
+    candidate: &mut ClipCandidate,
+    review: &db::ReviewedMomentFeedbackRow,
+    duration: f64,
+) -> bool {
+    let issues = parsed_review_issues(review.issues.as_deref());
+    let starts_too_late = issues.iter().any(|issue| issue == "starts_too_late");
+    let cuts_off_early = issues.iter().any(|issue| issue == "cuts_off_early");
+    let too_long = issues.iter().any(|issue| issue == "too_long");
+    if !starts_too_late && !cuts_off_early && !too_long {
+        return false;
+    }
+
+    let original_start = candidate.start_time;
+    let original_end = candidate.end_time;
+
+    if starts_too_late {
+        candidate.start_time = candidate
+            .start_time
+            .min((review.start_seconds - DIRECT_REVIEW_START_PADDING_SECONDS).max(0.0));
+    }
+    if cuts_off_early {
+        candidate.end_time = candidate
+            .end_time
+            .max((review.end_seconds + DIRECT_REVIEW_END_PADDING_SECONDS).min(duration));
+    }
+
+    if too_long && !starts_too_late && !cuts_off_early {
+        let reviewed_duration = review.end_seconds - review.start_seconds;
+        let shrink_by = (reviewed_duration * 0.15).clamp(3.0, 8.0);
+        let target_duration =
+            (reviewed_duration - shrink_by).max(DIRECT_REVIEW_MIN_DURATION_SECONDS);
+        if candidate.end_time - candidate.start_time > target_duration + 0.5 {
+            let mut start = (candidate.peak_time - target_duration * 0.35).max(0.0);
+            let mut end = start + target_duration;
+            if end > duration {
+                end = duration;
+                start = (end - target_duration).max(0.0);
+            }
+            candidate.start_time = start;
+            candidate.end_time = end;
+        }
+    }
+
+    if candidate.end_time - candidate.start_time > DIRECT_REVIEW_MAX_DURATION_SECONDS {
+        if cuts_off_early && !starts_too_late {
+            candidate.start_time =
+                (candidate.end_time - DIRECT_REVIEW_MAX_DURATION_SECONDS).max(0.0);
+        } else {
+            candidate.end_time =
+                (candidate.start_time + DIRECT_REVIEW_MAX_DURATION_SECONDS).min(duration);
+        }
+    }
+    if candidate.end_time - candidate.start_time < DIRECT_REVIEW_MIN_DURATION_SECONDS {
+        candidate.start_time = original_start;
+        candidate.end_time = original_end;
+        return false;
+    }
+
+    (candidate.start_time - original_start).abs() >= 0.05
+        || (candidate.end_time - original_end).abs() >= 0.05
+}
+
+fn apply_direct_review_feedback(
+    candidates: &mut [ClipCandidate],
+    reviewed_moments: &[db::ReviewedMomentFeedbackRow],
+    duration: f64,
+) -> DirectFeedbackEffects {
+    let mut effects = DirectFeedbackEffects::default();
+    for candidate in candidates {
+        let best_match = reviewed_moments
+            .iter()
+            .filter(|review| !review_rejects_moment(review))
+            .filter_map(|review| {
+                reviewed_window_match_score(
+                    candidate.start_time,
+                    candidate.end_time,
+                    candidate.peak_time,
+                    review,
+                )
+                .map(|score| (review, score))
+            })
+            .max_by(|(_, left), (_, right)| {
+                left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(review, _)| review);
+        let Some(review) = best_match else {
+            continue;
+        };
+
+        if apply_direct_review_boundary(candidate, review, duration) {
+            effects.boundary_adjusted_candidates += 1;
+        }
+
+        let adjustment = match review.rating.as_deref() {
+            Some("good") => DIRECT_GOOD_SCORE_BOOST,
+            Some("meh") => -DIRECT_MEH_SCORE_PENALTY,
+            _ => 0.0,
+        };
+        if adjustment.abs() > f64::EPSILON {
+            candidate.total_score = (candidate.total_score + adjustment).clamp(0.0, 0.99);
+            effects.score_adjusted_candidates += 1;
+        }
+    }
+    effects
+}
+
+fn review_is_good(review: &db::ReviewedMomentFeedbackRow) -> bool {
+    review.rating.as_deref() == Some("good") && !review_rejects_moment(review)
+}
+
+fn transcript_excerpt_for_window(
+    transcript: Option<&TranscriptResult>,
+    start: f64,
+    end: f64,
+) -> Option<String> {
+    let text = transcript?
+        .segments
+        .iter()
+        .filter(|segment| segment.end > start && segment.start < end)
+        .map(|segment| segment.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn synthetic_good_candidate(
+    review: &db::ReviewedMomentFeedbackRow,
+    transcript: Option<&TranscriptResult>,
+    duration: f64,
+) -> Option<ClipCandidate> {
+    let start = review.start_seconds.max(0.0);
+    let end = review.end_seconds.min(duration);
+    if !start.is_finite() || !end.is_finite() || end - start < 1.0 {
+        return None;
+    }
+    let excerpt = transcript_excerpt_for_window(transcript, start, end);
+    Some(ClipCandidate {
+        start_time: start,
+        end_time: end,
+        peak_time: (start + end) / 2.0,
+        transcript_excerpt: excerpt.clone(),
+        event_tags: vec!["creator-approved".to_string()],
+        emotion_tags: Vec::new(),
+        payoff_summary: excerpt,
+        outcome_label: None,
+        signal_sources: vec![SignalSource::Transcript],
+        hook_strength: PRESERVED_GOOD_SCORE_FLOOR,
+        emotional_spike: PRESERVED_GOOD_SCORE_FLOOR,
+        payoff_clarity: PRESERVED_GOOD_SCORE_FLOOR,
+        event_reaction_alignment: PRESERVED_GOOD_SCORE_FLOOR,
+        context_simplicity: PRESERVED_GOOD_SCORE_FLOOR,
+        replay_value: PRESERVED_GOOD_SCORE_FLOOR,
+        total_score: PRESERVED_GOOD_SCORE_FLOOR,
+        ai_score: None,
+        similarity_fingerprint: "creator-approved".to_string(),
+        novelty_score: 1.0,
+        diversity_penalty: 0.0,
+        selection_score: PRESERVED_GOOD_SCORE_FLOOR,
+        selected_reason: None,
+        rejection_reason: None,
+        community_url: None,
+        preserved_review: None,
+    })
+}
+
+fn pin_good_reviewed_moments(
+    selected: &mut Vec<ClipCandidate>,
+    candidate_pool: &[ClipCandidate],
+    reviewed_moments: &[db::ReviewedMomentFeedbackRow],
+    transcript: Option<&TranscriptResult>,
+    duration: f64,
+    max_clips: usize,
+) -> usize {
+    let mut pinned_review_ids = std::collections::HashSet::new();
+    let mut pinned_count = 0usize;
+
+    for review in reviewed_moments.iter().filter(|review| review_is_good(review)) {
+        if !pinned_review_ids.insert(review.highlight_id.clone()) {
+            continue;
+        }
+        if selected.iter().any(|candidate| {
+            candidate.preserved_review.is_some()
+                && reviewed_window_rejection_matches(
+                    candidate.start_time,
+                    candidate.end_time,
+                    candidate.peak_time,
+                    review,
+                )
+        }) {
+            continue;
+        }
+
+        let best_evidence = selected
+            .iter()
+            .chain(candidate_pool.iter())
+            .filter_map(|candidate| {
+                reviewed_window_match_score(
+                    candidate.start_time,
+                    candidate.end_time,
+                    candidate.peak_time,
+                    review,
+                )
+                .map(|match_score| (candidate, match_score))
+            })
+            .max_by(|(left, left_match), (right, right_match)| {
+                left_match
+                    .partial_cmp(right_match)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        left.total_score
+                            .partial_cmp(&right.total_score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            })
+            .map(|(candidate, _)| candidate.clone());
+
+        let Some(mut pin) = best_evidence
+            .or_else(|| synthetic_good_candidate(review, transcript, duration))
+        else {
+            continue;
+        };
+
+        pin.start_time = review.start_seconds.max(0.0);
+        pin.end_time = review.end_seconds.min(duration);
+        pin.peak_time = (pin.start_time + pin.end_time) / 2.0;
+        if pin.end_time - pin.start_time < 1.0 {
+            continue;
+        }
+        let _ = apply_direct_review_boundary(&mut pin, review, duration);
+        pin.transcript_excerpt =
+            transcript_excerpt_for_window(transcript, pin.start_time, pin.end_time)
+                .or(pin.transcript_excerpt);
+        pin.total_score = pin.total_score.max(PRESERVED_GOOD_SCORE_FLOOR);
+        pin.selection_score = pin.selection_score.max(pin.total_score);
+        if !pin.event_tags.iter().any(|tag| tag == "creator-approved") {
+            pin.event_tags.push("creator-approved".to_string());
+        }
+        pin.selected_reason = Some("kept because you rated this moment Good".to_string());
+        pin.rejection_reason = None;
+        pin.preserved_review = Some(PreservedReview {
+            highlight_id: review.highlight_id.clone(),
+            rating: "good".to_string(),
+            note: review.note.clone(),
+            issues: review.issues.clone(),
+        });
+
+        selected.retain(|candidate| {
+            candidate.preserved_review.is_some()
+                || !reviewed_window_rejection_matches(
+                    candidate.start_time,
+                    candidate.end_time,
+                    candidate.peak_time,
+                    review,
+                )
+        });
+        selected.push(pin);
+        pinned_count += 1;
+    }
+
+    let target_len = max_clips.max(pinned_count);
+    while selected.len() > target_len {
+        let removable = selected
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| candidate.preserved_review.is_none())
+            .min_by(|(_, left), (_, right)| {
+                left.total_score
+                    .partial_cmp(&right.total_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(index, _)| index);
+        let Some(index) = removable else {
+            break;
+        };
+        selected.remove(index);
+    }
+
+    if pinned_count > 0 {
+        log::info!(
+            "Clip selector: preserved {} creator-approved Good moment(s) across reanalysis",
+            pinned_count,
+        );
+    }
+    pinned_count
+}
+
 /// Two-gate selection. Gate A = the no-noise quality gates + the per-sensitivity
 /// display-score floor. Gate B = rank Gate-A survivors by score and take the top
 /// `max_clips` (the existing diversity/cooldown logic). The old fixed total_score
 /// cliff is gone — score now RANKS, it no longer guillotines, so a loud stream's
 /// (calibrated) moments are capped rather than collapsed.
+fn passes_selection_structure(
+    candidate: &ClipCandidate,
+    audio: Option<&AudioContext>,
+    transcript: Option<&TranscriptResult>,
+    duration: f64,
+    cfg: &CurationConfig,
+) -> bool {
+    if is_scene_card_full(candidate, transcript, duration) {
+        return false;
+    }
+    match candidate.ai_score {
+        Some(score) => score >= AI_VOUCH_THRESHOLD,
+        None => passes_quality_gates(candidate, audio, cfg),
+    }
+}
+
 fn apply_two_gate_selection(
     candidates: &mut Vec<ClipCandidate>,
     audio: Option<&AudioContext>,
     transcript: Option<&TranscriptResult>,
     duration: f64,
     cfg: &CurationConfig,
-) -> Vec<ClipCandidate> {
+    allow_feedback_exploration: bool,
+) -> (Vec<ClipCandidate>, usize) {
     let display = crate::signal_calibration::DisplayCalibrator::default();
     // Diagnostic (for real-VOD tuning from the log): quality-gate pass count,
     // scene cards dropped, and the full display-score distribution entering the gate.
@@ -1020,15 +1566,54 @@ fn apply_two_gate_selection(
     log::info!("Clip selector: gate-A — {} of {} pass quality gates; {} scene card(s) dropped; floor={:.0}; display scores desc: {}",
         qpass, candidates.len(), scene_cards, cfg.min_display_score,
         dscores.iter().map(|d| format!("{:.0}", d)).collect::<Vec<_>>().join(","));
+    let structurally_safe: Vec<ClipCandidate> = candidates
+        .iter()
+        .filter(|candidate| {
+            passes_selection_structure(candidate, audio, transcript, duration, cfg)
+        })
+        .cloned()
+        .collect();
     candidates.retain(|c| {
-        // An AI-vouched moment bypasses the SIGNAL quality gates — the judge's
-        // verdict is its quality check (this is what lets quiet banter survive).
-        let ai_vouched = c.ai_score.map_or(false, |s| s >= AI_VOUCH_THRESHOLD);
-        !is_scene_card_full(c, transcript, duration)
-            && (ai_vouched || passes_quality_gates(c, audio, cfg))
+        passes_selection_structure(c, audio, transcript, duration, cfg)
             && display.to_display(c.total_score) >= cfg.min_display_score
     });
-    diversify_final_selection(&candidates[..], duration, cfg)
+    let mut selected = diversify_final_selection(&candidates[..], duration, cfg);
+    let mut exploration_count = 0usize;
+
+    if allow_feedback_exploration
+        && selected.len() < FEEDBACK_EXPLORATION_MIN_RESULTS
+        && structurally_safe.len() > candidates.len()
+    {
+        let target = selected
+            .len()
+            .max(FEEDBACK_EXPLORATION_MIN_RESULTS)
+            .min(cfg.max_clips)
+            .min(structurally_safe.len());
+        let mut exploration_cfg = cfg.clone();
+        exploration_cfg.max_clips = target;
+        selected = diversify_final_selection(
+            &structurally_safe,
+            duration,
+            &exploration_cfg,
+        );
+        for clip in &mut selected {
+            if display.to_display(clip.total_score) < cfg.min_display_score {
+                exploration_count += 1;
+                let reason = clip
+                    .selected_reason
+                    .take()
+                    .unwrap_or_else(|| "structurally safe alternative".to_string());
+                clip.selected_reason = Some(format!("feedback exploration; {reason}"));
+            }
+        }
+        log::info!(
+            "Clip selector: feedback exploration surfaced {} below-floor clean alternative(s), returning {} clip(s)",
+            exploration_count,
+            selected.len(),
+        );
+    }
+
+    (selected, exploration_count)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1752,6 +2337,7 @@ fn pin_community_clips(
             // Carry the Twitch clip URL so the persist loop can download the
             // actual viewer-made MP4 and use it as the clip's video verbatim.
             community_url: cc.clip_url.clone(),
+            preserved_review: None,
         };
         for candidate in &evidence {
             merge_candidate_evidence(&mut pin, candidate);
@@ -1840,6 +2426,12 @@ pub struct DetectionStats {
     pub boundary_feedback_samples: usize,
     pub boundary_confidence: f64,
     pub boundary_adjusted_candidates: usize,
+    pub reviewed_moments: usize,
+    pub feedback_avoided_moments: usize,
+    pub feedback_suppressed_candidates: usize,
+    pub feedback_adjusted_candidates: usize,
+    pub feedback_exploration_candidates: usize,
+    pub feedback_preserved_good_moments: usize,
 }
 
 /// Pre-selector: identify audio time ranges worth transcribing.
@@ -1998,17 +2590,44 @@ pub fn select_clips(
     emote_peaks: &[db::HighlightRow],
     community_clips: &[CommunityClip],
     ai_moments: &[crate::clip_judge::JudgedMoment],
+    ai_judge_completed: bool,
     duration: f64,
     sensitivity: &str,
     selector_config: &crate::game_config::SelectorConfig,
     personalization: Option<&crate::personalization::PersonalizationProfile>,
     boundary_preferences: Option<&crate::boundary_learning::BoundaryPreferenceProfile>,
+    reviewed_moments: &[db::ReviewedMomentFeedbackRow],
 ) -> (Vec<ClipCandidate>, DetectionStats) {
     let cfg = CurationConfig::for_duration(duration, sensitivity, selector_config);
     let personalization_samples = personalization.map_or(0, |profile| profile.sample_count());
     let personalization_confidence = personalization.map_or(0.0, |profile| profile.confidence());
     let boundary_feedback_samples = boundary_preferences.map_or(0, |profile| profile.sample_count());
     let boundary_confidence = boundary_preferences.map_or(0.0, |profile| profile.confidence());
+    let has_rejected_review = reviewed_moments.iter().any(review_rejects_moment);
+    let mut avoided_review_ids = std::collections::HashSet::new();
+    let mut feedback_suppressed_candidates = 0usize;
+
+    let eligible_community_clips: Vec<CommunityClip> = community_clips
+        .iter()
+        .filter(|clip| {
+            let start = clip.vod_offset_seconds;
+            let end = start + clip.duration_seconds;
+            let rejections = matching_rejections(
+                start,
+                end,
+                (start + end) / 2.0,
+                reviewed_moments,
+            );
+            for review in &rejections {
+                avoided_review_ids.insert(review.highlight_id.clone());
+            }
+            if !rejections.is_empty() {
+                feedback_suppressed_candidates += 1;
+            }
+            rejections.is_empty()
+        })
+        .cloned()
+        .collect();
 
     // ── Stage 1: Generate candidates ──
     let mut all_signals: Vec<RawSignal> = Vec::new();
@@ -2028,25 +2647,15 @@ pub fn select_clips(
     let es = generate_emote_candidates(emote_peaks);
     if !es.is_empty() { log::info!("Clip selector: {} emote-burst candidates", es.len()); }
     all_signals.extend(es);
-    let community = generate_community_candidates(community_clips);
+    let community = generate_community_candidates(&eligible_community_clips);
     if !community.is_empty() {
         log::info!("Clip selector: {} community clip candidates", community.len());
     }
     all_signals.extend(community);
     if all_signals.is_empty() {
-        log::warn!("Clip selector: no candidates");
-        let stats = DetectionStats {
-            candidates_found: 0, candidates_rejected: 0,
-            duplicates_suppressed: 0, clips_selected: 0,
-            sensitivity: sensitivity.to_string(),
-            personalization_samples,
-            personalization_confidence,
-            personalized_candidates: 0,
-            boundary_feedback_samples,
-            boundary_confidence,
-            boundary_adjusted_candidates: 0,
-        };
-        return (Vec::new(), stats);
+        log::warn!(
+            "Clip selector: no local candidates; continuing so AI or preserved Good moments can still produce results"
+        );
     }
 
     // ── Stage 2: Fuse signals ──
@@ -2073,11 +2682,15 @@ pub fn select_clips(
             matches!(t.as_str(), "escape"|"death"|"save"|"win"|"fail"|"clutch")
         }).cloned();
 
+        let transcript_excerpt = m
+            .transcript_snippet
+            .clone()
+            .or_else(|| transcript_context_for_window(transcript, start, end));
         let mut c = ClipCandidate {
             start_time: start, end_time: end, peak_time: m.center,
-            transcript_excerpt: m.transcript_snippet.clone(),
+            transcript_excerpt: transcript_excerpt.clone(),
             event_tags, emotion_tags,
-            payoff_summary: m.transcript_snippet.clone(),
+            payoff_summary: transcript_excerpt,
             outcome_label,
             signal_sources: m.signal_sources.clone(),
             hook_strength: analyze_hook_strength(m, audio),
@@ -2092,6 +2705,7 @@ pub fn select_clips(
             novelty_score: 0.0, diversity_penalty: 0.0, selection_score: 0.0,
             selected_reason: None, rejection_reason: None,
             community_url: None,
+            preserved_review: None,
         };
         score_clip_candidate(&mut c);
         // Baseline-relative boost: reward a moment that spikes above the stream's
@@ -2124,6 +2738,8 @@ pub fn select_clips(
         boundary_preferences,
         duration,
     );
+    feedback_suppressed_candidates +=
+        suppress_reviewed_candidates(&mut candidates, reviewed_moments, &mut avoided_review_ids);
 
     // ── Stage 5: Suppress duplicates ──
     let before_dedup = candidates.len();
@@ -2140,23 +2756,67 @@ pub fn select_clips(
         cfg.max_same_type, cfg.max_clips, cfg.min_display_score);
     // Fuse the AI verdict (no-op when AI detection is off / found nothing).
     let before_ai_rescue = candidates.len();
-    fuse_ai_moments(&mut candidates, ai_moments, duration);
+    let eligible_ai_moments: Vec<crate::clip_judge::JudgedMoment> = ai_moments
+        .iter()
+        .filter(|moment| {
+            let center = (moment.start_sec + moment.end_sec) / 2.0;
+            let rejections =
+                matching_rejections(moment.start_sec, moment.end_sec, center, reviewed_moments);
+            for review in &rejections {
+                avoided_review_ids.insert(review.highlight_id.clone());
+            }
+            if !rejections.is_empty() {
+                feedback_suppressed_candidates += 1;
+            }
+            rejections.is_empty()
+        })
+        .cloned()
+        .collect();
+    fuse_ai_moments(
+        &mut candidates,
+        &eligible_ai_moments,
+        ai_judge_completed,
+        duration,
+    );
     boundary_adjusted_candidates += apply_learned_boundaries(
         &mut candidates[before_ai_rescue..],
         boundary_preferences,
         duration,
     );
+    // AI fusion can widen an existing candidate or rescue a new one after the
+    // first suppression pass. Recheck the final windows so a shifted version
+    // of a rejected moment cannot re-enter through that path.
+    feedback_suppressed_candidates +=
+        suppress_reviewed_candidates(&mut candidates, reviewed_moments, &mut avoided_review_ids);
+    let direct_feedback = apply_direct_review_feedback(&mut candidates, reviewed_moments, duration);
+    boundary_adjusted_candidates += direct_feedback.boundary_adjusted_candidates;
     // User preferences are deliberately applied after the base/AI score is
     // complete and before ranking. Structural quality gates still run below.
     let personalized_candidates = apply_personalization(&mut candidates, personalization);
+    let preservation_pool = candidates.clone();
     let before_gate = candidates.len();
-    let mut final_clips = apply_two_gate_selection(&mut candidates, audio, transcript, duration, &cfg);
+    let (mut final_clips, feedback_exploration_candidates) = apply_two_gate_selection(
+        &mut candidates,
+        audio,
+        transcript,
+        duration,
+        &cfg,
+        has_rejected_review,
+    );
     let rejected = before_gate.saturating_sub(candidates.len());
 
     // ── Stage 6b: Pin community clips — GUARANTEE viewer-clipped moments survive
     // the gates/dedup/caps (deduped against what's already selected, preferring
     // the community version so the same moment never shows twice). ──
-    pin_community_clips(&mut final_clips, community_clips, audio, duration);
+    pin_community_clips(&mut final_clips, &eligible_community_clips, audio, duration);
+    let feedback_preserved_good_moments = pin_good_reviewed_moments(
+        &mut final_clips,
+        &preservation_pool,
+        reviewed_moments,
+        transcript,
+        duration,
+        cfg.max_clips,
+    );
 
     log::info!("Clip selector: final {} clips from {} candidates (scores: {})",
         final_clips.len(), candidates_found,
@@ -2184,6 +2844,12 @@ pub fn select_clips(
         boundary_feedback_samples,
         boundary_confidence,
         boundary_adjusted_candidates,
+        reviewed_moments: reviewed_moments.len(),
+        feedback_avoided_moments: avoided_review_ids.len(),
+        feedback_suppressed_candidates,
+        feedback_adjusted_candidates: direct_feedback.score_adjusted_candidates,
+        feedback_exploration_candidates,
+        feedback_preserved_good_moments,
     };
 
     (final_clips, stats)
@@ -2211,6 +2877,7 @@ mod tests {
             novelty_score: 0.0, diversity_penalty: 0.0, selection_score: 0.0,
             selected_reason: None, rejection_reason: None,
             community_url: None,
+            preserved_review: None,
         }
     }
 
@@ -2255,6 +2922,200 @@ mod tests {
 
         assert_eq!(apply_personalization(std::slice::from_mut(&mut candidate), Some(&profile)), 1);
         assert!(candidate.total_score <= 0.65);
+    }
+
+    fn reviewed_moment(
+        id: &str,
+        start: f64,
+        end: f64,
+        rating: Option<&str>,
+        issues: Option<&str>,
+    ) -> crate::db::ReviewedMomentFeedbackRow {
+        crate::db::ReviewedMomentFeedbackRow {
+            highlight_id: id.to_string(),
+            start_seconds: start,
+            end_seconds: end,
+            rating: rating.map(str::to_string),
+            note: None,
+            issues: issues.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn good_review_is_preserved_with_feedback_and_consumes_a_normal_slot() {
+        let mut selected = (0..4)
+            .map(|index| {
+                let mut candidate = build_test_candidate(vec![SignalSource::Audio]);
+                candidate.start_time = 300.0 + index as f64 * 100.0;
+                candidate.end_time = candidate.start_time + 30.0;
+                candidate.peak_time = candidate.start_time + 15.0;
+                candidate.total_score = 0.40 + index as f64 * 0.05;
+                candidate
+            })
+            .collect::<Vec<_>>();
+        let mut evidence = build_test_candidate(vec![
+            SignalSource::Audio,
+            SignalSource::Transcript,
+        ]);
+        evidence.start_time = 96.0;
+        evidence.end_time = 134.0;
+        evidence.peak_time = 115.0;
+        evidence.total_score = 0.61;
+        let mut review = reviewed_moment("approved-1", 100.0, 130.0, Some("good"), None);
+        review.note = Some("keep the full punchline".to_string());
+
+        let preserved = pin_good_reviewed_moments(
+            &mut selected,
+            &[evidence],
+            &[review],
+            None,
+            900.0,
+            3,
+        );
+
+        assert_eq!(preserved, 1);
+        assert_eq!(selected.len(), 3, "a Good clip consumes a normal result slot");
+        let pin = selected
+            .iter()
+            .find(|candidate| candidate.preserved_review.is_some())
+            .expect("Good moment should be preserved");
+        assert!((pin.start_time - 100.0).abs() < f64::EPSILON);
+        assert!((pin.end_time - 130.0).abs() < f64::EPSILON);
+        assert!(pin.total_score >= PRESERVED_GOOD_SCORE_FLOOR);
+        let feedback = pin.preserved_review.as_ref().unwrap();
+        assert_eq!(feedback.highlight_id, "approved-1");
+        assert_eq!(feedback.rating, "good");
+        assert_eq!(feedback.note.as_deref(), Some("keep the full punchline"));
+    }
+
+    #[test]
+    fn same_vod_reanalysis_suppresses_boring_and_wrong_moment_windows() {
+        let mut boring = build_test_candidate(vec![SignalSource::Audio]);
+        boring.start_time = 100.0;
+        boring.end_time = 130.0;
+        boring.peak_time = 110.0;
+        let mut wrong = build_test_candidate(vec![SignalSource::Transcript]);
+        wrong.start_time = 200.0;
+        wrong.end_time = 230.0;
+        wrong.peak_time = 210.0;
+        let mut alternate = build_test_candidate(vec![SignalSource::Chat]);
+        alternate.start_time = 300.0;
+        alternate.end_time = 330.0;
+        alternate.peak_time = 310.0;
+        let mut candidates = vec![boring, wrong, alternate];
+        let reviews = vec![
+            reviewed_moment("boring", 99.0, 129.0, Some("boring"), None),
+            reviewed_moment(
+                "wrong",
+                199.0,
+                229.0,
+                Some("meh"),
+                Some(r#"["wrong_moment"]"#),
+            ),
+        ];
+        let mut avoided = std::collections::HashSet::new();
+
+        let suppressed = suppress_reviewed_candidates(&mut candidates, &reviews, &mut avoided);
+
+        assert_eq!(suppressed, 2);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].peak_time, 310.0);
+        assert_eq!(avoided.len(), 2);
+    }
+
+    #[test]
+    fn same_vod_rejection_does_not_hide_a_distinct_nearby_moment() {
+        let mut candidate = build_test_candidate(vec![SignalSource::Transcript]);
+        candidate.start_time = 132.0;
+        candidate.end_time = 162.0;
+        candidate.peak_time = 147.0;
+        let mut candidates = vec![candidate];
+        let reviews = [reviewed_moment(
+            "rejected",
+            100.0,
+            130.0,
+            Some("boring"),
+            Some(r#"["wrong_moment"]"#),
+        )];
+        let mut avoided = std::collections::HashSet::new();
+
+        let suppressed = suppress_reviewed_candidates(&mut candidates, &reviews, &mut avoided);
+
+        assert_eq!(suppressed, 0);
+        assert_eq!(candidates.len(), 1);
+        assert!(avoided.is_empty());
+    }
+
+    #[test]
+    fn shifted_repeat_with_meaningful_overlap_is_still_suppressed() {
+        let mut candidate = build_test_candidate(vec![SignalSource::Semantic]);
+        candidate.start_time = 3197.12;
+        candidate.end_time = 3221.75;
+        candidate.peak_time = 3209.0;
+        let mut candidates = vec![candidate];
+        let reviews = [reviewed_moment(
+            "rejected",
+            3182.12,
+            3204.0,
+            Some("boring"),
+            Some(r#"["wrong_moment"]"#),
+        )];
+        let mut avoided = std::collections::HashSet::new();
+
+        let suppressed = suppress_reviewed_candidates(&mut candidates, &reviews, &mut avoided);
+
+        assert_eq!(suppressed, 1);
+        assert!(candidates.is_empty());
+        assert!(avoided.contains("rejected"));
+    }
+
+    #[test]
+    fn partial_tail_overlap_from_live_vod_is_suppressed_as_same_event() {
+        let mut candidate = build_test_candidate(vec![SignalSource::Semantic]);
+        candidate.start_time = 1243.12;
+        candidate.end_time = 1298.75;
+        candidate.peak_time = 1270.0;
+        let mut candidates = vec![candidate];
+        let reviews = [reviewed_moment(
+            "earlier",
+            1197.0,
+            1257.0,
+            Some("boring"),
+            Some(r#"["wrong_moment"]"#),
+        )];
+        let mut avoided = std::collections::HashSet::new();
+
+        let suppressed = suppress_reviewed_candidates(&mut candidates, &reviews, &mut avoided);
+
+        assert_eq!(suppressed, 1);
+        assert!(candidates.is_empty());
+        assert!(avoided.contains("earlier"));
+    }
+
+    #[test]
+    fn one_same_vod_timing_review_forces_a_concrete_recut() {
+        let mut candidate =
+            build_test_candidate(vec![SignalSource::Audio, SignalSource::Transcript]);
+        candidate.start_time = 100.0;
+        candidate.end_time = 130.0;
+        candidate.peak_time = 112.0;
+        candidate.total_score = 0.70;
+        let reviews = [reviewed_moment(
+            "timing",
+            100.0,
+            130.0,
+            Some("meh"),
+            Some(r#"["starts_too_late","cuts_off_early"]"#),
+        )];
+
+        let effects =
+            apply_direct_review_feedback(std::slice::from_mut(&mut candidate), &reviews, 500.0);
+
+        assert_eq!(effects.boundary_adjusted_candidates, 1);
+        assert_eq!(effects.score_adjusted_candidates, 1);
+        assert_eq!(candidate.start_time, 97.5);
+        assert_eq!(candidate.end_time, 133.5);
+        assert!((candidate.total_score - 0.60).abs() < 1e-6);
     }
 
     fn build_community_clip(
@@ -2462,9 +3323,11 @@ mod tests {
             c.similarity_fingerprint = compute_similarity_fingerprint(&c);
             c
         }).collect();
-        let kept = apply_two_gate_selection(&mut cands, None, None, 99.0 * 60.0, &cfg);
+        let (kept, explored) =
+            apply_two_gate_selection(&mut cands, None, None, 99.0 * 60.0, &cfg, false);
         assert!(kept.len() >= 5, "must not collapse to ~1, got {}", kept.len());
         assert!(kept.len() <= cfg.max_clips, "must respect the cap, got {} > {}", kept.len(), cfg.max_clips);
+        assert_eq!(explored, 0);
     }
 
     #[test]
@@ -2481,8 +3344,61 @@ mod tests {
             c.total_score = 0.05;
             c
         }).collect();
-        let kept = apply_two_gate_selection(&mut cands, None, None, 99.0 * 60.0, &cfg);
+        let (kept, explored) =
+            apply_two_gate_selection(&mut cands, None, None, 99.0 * 60.0, &cfg, false);
         assert_eq!(kept.len(), 0, "dead-air candidates must yield no clips");
+        assert_eq!(explored, 0);
+    }
+
+    #[test]
+    fn feedback_reanalysis_surfaces_clean_alternatives_below_normal_floor() {
+        let sel = crate::game_config::SelectorConfig {
+            min_clip_duration: 15,
+            max_clip_duration: 60,
+            min_gap_between_clips: 30,
+        };
+        let cfg = CurationConfig::for_duration(60.0 * 60.0, "medium", &sel);
+        let mut cands: Vec<ClipCandidate> = (0..5)
+            .map(|i| {
+                let mut candidate =
+                    build_test_candidate(vec![SignalSource::Audio, SignalSource::Transcript]);
+                candidate.start_time = 120.0 + i as f64 * 500.0;
+                candidate.end_time = candidate.start_time + 25.0;
+                candidate.peak_time = candidate.start_time + 12.0;
+                candidate.total_score = 0.20 + i as f64 * 0.005;
+                candidate.event_tags = vec![format!("event-{i}")];
+                candidate.similarity_fingerprint =
+                    compute_similarity_fingerprint(&candidate);
+                candidate
+            })
+            .collect();
+
+        let (without_feedback, without_count) = apply_two_gate_selection(
+            &mut cands.clone(),
+            None,
+            None,
+            60.0 * 60.0,
+            &cfg,
+            false,
+        );
+        let (with_feedback, exploration_count) = apply_two_gate_selection(
+            &mut cands,
+            None,
+            None,
+            60.0 * 60.0,
+            &cfg,
+            true,
+        );
+
+        assert!(without_feedback.is_empty());
+        assert_eq!(without_count, 0);
+        assert_eq!(with_feedback.len(), FEEDBACK_EXPLORATION_MIN_RESULTS);
+        assert_eq!(exploration_count, FEEDBACK_EXPLORATION_MIN_RESULTS);
+        assert!(with_feedback.iter().all(|clip| {
+            clip.selected_reason
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with("feedback exploration;"))
+        }));
     }
 
     #[test]
@@ -2497,9 +3413,23 @@ mod tests {
             for k in 0..4 { rms[s + k] = 0.90; }
         }
         let audio = AudioContext::new(rms, vec![]);
+        let transcript = TranscriptResult {
+            segments: (500usize..5600)
+                .step_by(500)
+                .map(|second| crate::commands::vod::TranscriptSegment {
+                    start: second as f64 - 4.0,
+                    end: second as f64 + 8.0,
+                    text: "we baited the chase and made it out alive".to_string(),
+                    words: Vec::new(),
+                })
+                .collect(),
+            full_text: String::new(),
+            language: "en".to_string(),
+            keywords_found: Vec::new(),
+        };
         let sel = crate::game_config::SelectorConfig { min_clip_duration: 15, max_clip_duration: 60, min_gap_between_clips: 30 };
         let (clips, _stats) = select_clips(
-            Some(&audio), None, &[], &[], &[], &[], dur, "medium", &sel, None, None,
+            Some(&audio), Some(&transcript), &[], &[], &[], &[], false, dur, "medium", &sel, None, None, &[],
         );
         assert!(clips.len() >= 4, "loud stream with many real spikes should yield a healthy set, got {}", clips.len());
     }
@@ -2564,6 +3494,41 @@ mod tests {
         assert!(!is_corroborated(&soft));
     }
 
+    #[test]
+    fn local_context_gate_rejects_lone_noise_and_laughter() {
+        let sel = crate::game_config::SelectorConfig {
+            min_clip_duration: 15,
+            max_clip_duration: 60,
+            min_gap_between_clips: 30,
+        };
+        let cfg = CurationConfig::for_duration(3600.0, "medium", &sel);
+        let mut no_context = build_test_candidate(vec![SignalSource::Audio]);
+        no_context.transcript_excerpt = None;
+        assert!(!passes_quality_gates(&no_context, None, &cfg));
+
+        let mut laughter = build_test_candidate(vec![SignalSource::Audio]);
+        laughter.transcript_excerpt = Some("haha oh wow yeah hahaha".to_string());
+        assert!(!passes_quality_gates(&laughter, None, &cfg));
+    }
+
+    #[test]
+    fn local_context_gate_keeps_coherent_or_independently_corroborated_moments() {
+        let sel = crate::game_config::SelectorConfig {
+            min_clip_duration: 15,
+            max_clip_duration: 60,
+            min_gap_between_clips: 30,
+        };
+        let cfg = CurationConfig::for_duration(3600.0, "medium", &sel);
+        let mut coherent = build_test_candidate(vec![SignalSource::Audio]);
+        coherent.transcript_excerpt =
+            Some("come heal me and then immediately stab me again".to_string());
+        assert!(passes_quality_gates(&coherent, None, &cfg));
+
+        let corroborated =
+            build_test_candidate(vec![SignalSource::Audio, SignalSource::Chat]);
+        assert!(passes_quality_gates(&corroborated, None, &cfg));
+    }
+
     fn judged(s: f64, e: f64, score: f64) -> crate::clip_judge::JudgedMoment {
         crate::clip_judge::JudgedMoment {
             start_sec: s, end_sec: e, category: "banter".into(), score,
@@ -2575,34 +3540,55 @@ mod tests {
     fn fusion_noop_when_no_ai_moments() {
         let mut c = vec![build_test_candidate(vec![SignalSource::Audio])];
         c[0].total_score = 0.6;
-        fuse_ai_moments(&mut c, &[], 600.0);
+        fuse_ai_moments(&mut c, &[], false, 600.0);
         assert!(c[0].ai_score.is_none(), "no AI run → ai_score stays None");
         assert!((c[0].total_score - 0.6).abs() < 1e-9, "score untouched");
         assert_eq!(c.len(), 1);
     }
 
     #[test]
-    fn fusion_blends_flagged_and_vetoes_unflagged() {
+    fn completed_empty_ai_shortlist_preserves_contextual_local_candidate() {
+        let mut candidates = vec![build_test_candidate(vec![SignalSource::Audio])];
+        candidates[0].total_score = 0.6;
+        candidates[0].transcript_excerpt =
+            Some("this setup has a payoff with enough real context".to_string());
+        fuse_ai_moments(&mut candidates, &[], true, 600.0);
+        assert!(candidates[0].ai_score.is_none());
+        assert!((candidates[0].total_score - 0.6).abs() < 1e-6);
+        let sel = crate::game_config::SelectorConfig {
+            min_clip_duration: 15,
+            max_clip_duration: 60,
+            min_gap_between_clips: 30,
+        };
+        let cfg = CurationConfig::for_duration(600.0, "medium", &sel);
+        assert!(
+            passes_selection_structure(&candidates[0], None, None, 600.0, &cfg),
+            "an empty AI shortlist must leave contextual local evidence eligible"
+        );
+    }
+
+    #[test]
+    fn fusion_blends_flagged_and_penalizes_unmentioned_without_vetoing() {
         let mut c0 = build_test_candidate(vec![SignalSource::Chat]);
         c0.start_time = 100.0; c0.end_time = 130.0; c0.total_score = 0.6;
         let mut c1 = build_test_candidate(vec![SignalSource::Audio]);
         c1.start_time = 500.0; c1.end_time = 530.0; c1.total_score = 0.6;
         let mut cands = vec![c0, c1];
         // One AI moment overlapping c0 only.
-        fuse_ai_moments(&mut cands, &[judged(105.0, 125.0, 0.9)], 600.0);
+        fuse_ai_moments(&mut cands, &[judged(105.0, 125.0, 0.9)], true, 600.0);
         // flagged: 0.65*0.9 + 0.35*0.6 = 0.795
         assert!((cands[0].total_score - 0.795).abs() < 1e-6);
         assert!((cands[0].ai_score.unwrap() - 0.9).abs() < 1e-9);
-        // vetoed (AI passed it over): 0.65*0.15 + 0.35*0.6 = 0.3075
-        assert!((cands[1].total_score - 0.3075).abs() < 1e-6);
-        assert!((cands[1].ai_score.unwrap() - 0.15).abs() < 1e-9);
+        // Unmentioned: modest ranking penalty, but local quality gates still apply.
+        assert!((cands[1].total_score - 0.51).abs() < 1e-6);
+        assert!(cands[1].ai_score.is_none());
     }
 
     #[test]
     fn fusion_rescues_unmatched_ai_moment_as_semantic() {
         let mut cands = vec![build_test_candidate(vec![SignalSource::Audio])];
         cands[0].start_time = 100.0; cands[0].end_time = 130.0;
-        fuse_ai_moments(&mut cands, &[judged(800.0, 825.0, 0.85)], 1000.0);
+        fuse_ai_moments(&mut cands, &[judged(800.0, 825.0, 0.85)], true, 1000.0);
         assert_eq!(cands.len(), 2, "unmatched AI moment becomes a candidate");
         let rescued = cands.iter().find(|c| c.signal_sources == vec![SignalSource::Semantic]).unwrap();
         assert!((rescued.start_time - 800.0).abs() < 1e-9);

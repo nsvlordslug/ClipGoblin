@@ -27,6 +27,16 @@ pub struct JudgedMoment {
     pub reason: String,
 }
 
+/// A creator-approved moment supplied as a compact example of personal taste.
+/// The app preserves this exact moment separately; the judge uses only its
+/// transcript to find additional moments with similar appeal.
+#[derive(Debug, Clone)]
+pub struct ApprovedMomentExample {
+    pub start_sec: f64,
+    pub end_sec: f64,
+    pub transcript: String,
+}
+
 /// Normalize a segment's text for repetition/dup comparison: lowercased, trimmed,
 /// inner whitespace collapsed, trailing punctuation stripped. So "Wait, wait!" and
 /// "wait wait" compare equal when detecting a loop.
@@ -118,9 +128,22 @@ pub fn clean_segments(segs: &[TranscriptSegment]) -> Vec<TranscriptSegment> {
 /// Segments are cleaned first (`clean_segments`): artifacts dropped, whisper
 /// repetition-loops collapsed — fewer tokens, clearer signal.
 pub fn build_transcript_text(t: &TranscriptResult) -> String {
+    build_transcript_text_excluding(t, &[])
+}
+
+fn build_transcript_text_excluding(
+    t: &TranscriptResult,
+    reserved_windows: &[(f64, f64)],
+) -> String {
     let cleaned = clean_segments(&t.segments);
     let mut s = String::with_capacity(t.full_text.len() + cleaned.len() * 8);
     for seg in &cleaned {
+        if reserved_windows
+            .iter()
+            .any(|(start, end)| seg.end > *start && seg.start < *end)
+        {
+            continue;
+        }
         let line = seg.text.trim();
         if line.is_empty() {
             continue;
@@ -132,7 +155,53 @@ pub fn build_transcript_text(t: &TranscriptResult) -> String {
 
 /// The judge prompt. Encodes the creator-confirmed criteria (all four) and the
 /// anti-criteria (logistics/dead air), and forbids loudness-alone reasoning.
-fn build_judge_prompt(transcript_text: &str, vod_title: &str, duration: f64) -> String {
+fn build_judge_prompt(
+    transcript_text: &str,
+    vod_title: &str,
+    duration: f64,
+    rejected_windows: &[(f64, f64)],
+    approved_examples: &[ApprovedMomentExample],
+) -> String {
+    let exclusion_guidance = if rejected_windows.is_empty() {
+        String::new()
+    } else {
+        let ranges = rejected_windows
+            .iter()
+            .take(50)
+            .map(|(start, end)| format!("- {start:.0}-{end:.0}s"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\nPREVIOUSLY REJECTED BY THIS CREATOR:\n\
+Do NOT return these events again, including shifted, shortened, or widened versions that overlap them. Find genuinely different moments elsewhere in the transcript.\n\
+{ranges}\n"
+        )
+    };
+    let approved_guidance = if approved_examples.is_empty() {
+        String::new()
+    } else {
+        let examples = approved_examples
+            .iter()
+            .take(12)
+            .map(|example| {
+                let transcript = example
+                    .transcript
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!(
+                    "- {:.0}-{:.0}s: \"{}\"",
+                    example.start_sec, example.end_sec, transcript
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\nCREATOR-APPROVED TASTE EXAMPLES:\n\
+These exact clips are already preserved by the app. Do NOT return the same events. Use their humor, energy, payoff, or gameplay value as evidence of this creator's taste, then find ADDITIONAL moments elsewhere with similar appeal.\n\
+{examples}\n"
+        )
+    };
     format!(
         r#"You are an elite stream-clip editor reviewing a VOD transcript to find the moments worth clipping for TikTok / Shorts / Reels.
 
@@ -148,6 +217,8 @@ NOT CLIP-WORTHY — reject, score these LOW:
 - Explaining settings / OBS / co-streaming logistics, mic checks, "what video are you watching", general housekeeping.
 - Dead air, mundane chat, transitions.
 - Loudness or laughter ALONE is NOT clip-worthy. There must be an actual moment — a joke that lands, a play, a scare. A loud laugh while explaining a menu is NOT a clip.
+{exclusions}
+{approved}
 
 Pick a tight 15-45 second window for each moment, using ONLY timestamps that appear in the transcript below (they are seconds from the start). Score each 0-100 on how clip-worthy it is. Be SELECTIVE — a strong VOD has roughly 6-15 real moments, not dozens.
 
@@ -159,61 +230,154 @@ TRANSCRIPT:
 {transcript}"#,
         title = vod_title,
         dur = duration,
+        exclusions = exclusion_guidance,
+        approved = approved_guidance,
         transcript = transcript_text,
     )
 }
 
+fn meaningfully_overlaps_excluded_window(
+    start: f64,
+    end: f64,
+    excluded_start: f64,
+    excluded_end: f64,
+) -> bool {
+    if end <= start || excluded_end <= excluded_start {
+        return false;
+    }
+    let overlap = (end.min(excluded_end) - start.max(excluded_start)).max(0.0);
+    let shorter = (end - start).min(excluded_end - excluded_start).max(0.001);
+    overlap >= 5.0 && overlap / shorter >= 0.20
+}
+
+fn validated_moment(value: &serde_json::Value, duration: f64) -> Option<JudgedMoment> {
+    let start = value.get("start").and_then(|v| v.as_f64())?;
+    let end = value.get("end").and_then(|v| v.as_f64())?;
+    if !start.is_finite() || !end.is_finite() {
+        return None;
+    }
+    let start = start.max(0.0);
+    let end = end.min(duration);
+    if start >= duration || end - start < 1.0 {
+        return None;
+    }
+    let raw = value
+        .get("score")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(50.0);
+    let score = (raw / 100.0).clamp(0.0, 1.0);
+    let category = value
+        .get("category")
+        .and_then(|v| v.as_str())
+        .unwrap_or("other")
+        .to_string();
+    let reason = value
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some(JudgedMoment {
+        start_sec: start,
+        end_sec: end,
+        category,
+        score,
+        reason,
+    })
+}
+
+fn moments_from_value(value: &serde_json::Value, duration: f64) -> Option<Vec<JudgedMoment>> {
+    let arr = value
+        .get("moments")
+        .or_else(|| value.get("clips"))
+        .or_else(|| value.get("highlights"))
+        .and_then(|v| v.as_array())
+        .or_else(|| value.as_array())?;
+    Some(
+        arr.iter()
+            .filter_map(|moment| validated_moment(moment, duration))
+            .collect(),
+    )
+}
+
+/// Return every balanced JSON object, including nested objects, while ignoring
+/// braces inside quoted strings. This lets us retain valid sibling moments when
+/// a model makes a syntax mistake in just one array item.
+fn balanced_json_objects(text: &str) -> Vec<(usize, &str)> {
+    let mut starts = Vec::new();
+    let mut objects = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, ch) in text.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => starts.push(index),
+            '}' => {
+                if let Some(start) = starts.pop() {
+                    objects.push((start, &text[start..index + ch.len_utf8()]));
+                }
+            }
+            _ => {}
+        }
+    }
+    objects.sort_by_key(|(start, _)| *start);
+    objects
+}
+
 /// Parse the model's JSON into validated moments. Robust to markdown fences and
-/// prose: extracts the first `{...}` block. Every timestamp is validated against
-/// the VOD duration — hallucinated / out-of-range / degenerate windows are
-/// dropped, never trusted blindly.
-fn parse_judge_response(text: &str, duration: f64) -> Vec<JudgedMoment> {
+/// prose: extracts the first `{...}` block. If the wrapper is malformed, valid
+/// sibling moment objects are salvaged individually rather than discarding the
+/// whole paid response. Every timestamp is validated against the VOD duration.
+fn parse_judge_response(text: &str, duration: f64) -> Result<Vec<JudgedMoment>, String> {
     let json_str = match (text.find('{'), text.rfind('}')) {
         (Some(s), Some(e)) if e > s => &text[s..=e],
-        _ => return Vec::new(),
+        _ => return Err("response did not contain a JSON object".to_string()),
     };
-    let parsed: serde_json::Value = match serde_json::from_str(json_str) {
-        Ok(v) => v,
-        Err(e) => {
-            log::warn!("clip_judge: could not parse model JSON: {e}");
-            return Vec::new();
-        }
-    };
-    let arr = parsed
-        .get("moments")
-        .or_else(|| parsed.get("clips"))
-        .or_else(|| parsed.get("highlights"))
-        .and_then(|v| v.as_array());
-    let Some(arr) = arr else { return Vec::new() };
 
-    arr.iter()
-        .filter_map(|m| {
-            let start = m.get("start").and_then(|v| v.as_f64())?;
-            let end = m.get("end").and_then(|v| v.as_f64())?;
-            if !start.is_finite() || !end.is_finite() {
-                return None;
+    match serde_json::from_str::<serde_json::Value>(json_str) {
+        Ok(value) => {
+            return moments_from_value(&value, duration)
+                .ok_or_else(|| "response JSON did not contain a moments array".to_string());
+        }
+        Err(strict_error) => {
+            let mut salvaged = Vec::new();
+            for (_, object) in balanced_json_objects(json_str) {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(object) else {
+                    continue;
+                };
+                let Some(moment) = validated_moment(&value, duration) else {
+                    continue;
+                };
+                let duplicate = salvaged.iter().any(|existing: &JudgedMoment| {
+                    (existing.start_sec - moment.start_sec).abs() < 0.001
+                        && (existing.end_sec - moment.end_sec).abs() < 0.001
+                        && existing.category == moment.category
+                });
+                if !duplicate {
+                    salvaged.push(moment);
+                }
             }
-            // Clamp into the VOD, drop degenerate / out-of-range windows.
-            let start = start.max(0.0);
-            let end = end.min(duration);
-            if start >= duration || end - start < 1.0 {
-                return None;
+            if salvaged.is_empty() {
+                Err(format!("could not parse model JSON: {strict_error}"))
+            } else {
+                log::warn!(
+                    "clip_judge: model JSON was malformed ({strict_error}); salvaged {} valid moment(s)",
+                    salvaged.len(),
+                );
+                Ok(salvaged)
             }
-            let raw = m.get("score").and_then(|v| v.as_f64()).unwrap_or(50.0);
-            let score = (raw / 100.0).clamp(0.0, 1.0);
-            let category = m
-                .get("category")
-                .and_then(|v| v.as_str())
-                .unwrap_or("other")
-                .to_string();
-            let reason = m
-                .get("reason")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            Some(JudgedMoment { start_sec: start, end_sec: end, category, score, reason })
-        })
-        .collect()
+        }
+    }
 }
 
 /// Call the resolved BYOK provider with a text prompt. Returns the raw response
@@ -336,12 +500,26 @@ pub async fn judge(
     transcript: &TranscriptResult,
     vod_title: &str,
     duration: f64,
+    rejected_windows: &[(f64, f64)],
+    approved_examples: &[ApprovedMomentExample],
 ) -> Result<(Vec<JudgedMoment>, u64, u64), AppError> {
-    let transcript_text = build_transcript_text(transcript);
+    let mut reserved_windows = rejected_windows.to_vec();
+    reserved_windows.extend(
+        approved_examples
+            .iter()
+            .map(|example| (example.start_sec, example.end_sec)),
+    );
+    let transcript_text = build_transcript_text_excluding(transcript, &reserved_windows);
     if transcript_text.trim().is_empty() {
         return Ok((Vec::new(), 0, 0));
     }
-    let prompt = build_judge_prompt(&transcript_text, vod_title, duration);
+    let prompt = build_judge_prompt(
+        &transcript_text,
+        vod_title,
+        duration,
+        rejected_windows,
+        approved_examples,
+    );
     log::info!(
         "clip_judge: judging {} transcript chars via {} ({})",
         transcript_text.len(),
@@ -354,7 +532,25 @@ pub async fn judge(
         model
     );
     let (response, tin, tout) = call_llm(provider, api_key, model, &prompt).await?;
-    let moments = parse_judge_response(&response, duration);
+    let mut moments = parse_judge_response(&response, duration)
+        .map_err(|error| AppError::Api(format!("AI clip judge returned invalid JSON: {error}")))?;
+    let before_exclusions = moments.len();
+    moments.retain(|moment| {
+        !reserved_windows.iter().any(|(start, end)| {
+            meaningfully_overlaps_excluded_window(
+                moment.start_sec,
+                moment.end_sec,
+                *start,
+                *end,
+            )
+        })
+    });
+    if moments.len() < before_exclusions {
+        log::info!(
+            "clip_judge: dropped {} returned moment(s) that overlapped reserved review windows",
+            before_exclusions - moments.len(),
+        );
+    }
     log::info!("clip_judge: {} clip-worthy moments returned", moments.len());
     Ok((moments, tin, tout))
 }
@@ -506,7 +702,7 @@ mod tests {
 
     #[test]
     fn prompt_carries_criteria_and_anti_criteria() {
-        let p = build_judge_prompt("[10] hi", "My Stream", 3600.0);
+        let p = build_judge_prompt("[10] hi", "My Stream", 3600.0, &[], &[]);
         assert!(p.contains("My Stream"));
         assert!(p.contains("3600"));
         assert!(p.contains("BANTER"));
@@ -518,12 +714,78 @@ mod tests {
     }
 
     #[test]
+    fn prompt_tells_judge_to_find_new_events_after_creator_rejections() {
+        let p = build_judge_prompt(
+            "[1197] old event\n[1400] different event",
+            "My Stream",
+            3600.0,
+            &[(1197.0, 1257.0), (3182.12, 3204.0)],
+            &[],
+        );
+        assert!(p.contains("PREVIOUSLY REJECTED BY THIS CREATOR"));
+        assert!(p.contains("1197-1257s"));
+        assert!(p.contains("3182-3204s"));
+        assert!(p.contains("shifted, shortened, or widened"));
+        assert!(p.contains("genuinely different moments"));
+    }
+
+    #[test]
+    fn reserved_review_ranges_are_removed_before_judging() {
+        let t = transcript(vec![
+            seg(10.0, 12.0, "rejected old moment"),
+            seg(20.0, 22.0, "approved old moment"),
+            seg(30.0, 32.0, "new candidate moment"),
+        ]);
+        let out = build_transcript_text_excluding(&t, &[(9.0, 13.0), (19.0, 23.0)]);
+        assert!(!out.contains("rejected old moment"));
+        assert!(!out.contains("approved old moment"));
+        assert!(out.contains("[30] new candidate moment"));
+    }
+
+    #[test]
+    fn prompt_uses_good_moments_as_taste_examples_without_reselecting_them() {
+        let examples = vec![ApprovedMomentExample {
+            start_sec: 941.0,
+            end_sec: 1002.0,
+            transcript: "the joke lands and everyone loses it".to_string(),
+        }];
+        let p = build_judge_prompt(
+            "[1200] another possible moment",
+            "My Stream",
+            3600.0,
+            &[],
+            &examples,
+        );
+        assert!(p.contains("CREATOR-APPROVED TASTE EXAMPLES"));
+        assert!(p.contains("941-1002s"));
+        assert!(p.contains("the joke lands"));
+        assert!(p.contains("Do NOT return the same events"));
+        assert!(p.contains("ADDITIONAL moments"));
+    }
+
+    #[test]
+    fn rejected_tail_overlap_is_meaningful_even_when_centers_are_far_apart() {
+        assert!(meaningfully_overlaps_excluded_window(
+            1243.12,
+            1298.75,
+            1197.0,
+            1257.0,
+        ));
+        assert!(!meaningfully_overlaps_excluded_window(
+            1258.0,
+            1298.75,
+            1197.0,
+            1257.0,
+        ));
+    }
+
+    #[test]
     fn parses_valid_moments() {
         let json = r#"{"moments":[
             {"start":37.0,"end":62.0,"category":"banter","score":86,"reason":"savage roast"},
             {"start":120.0,"end":150.0,"category":"play","score":74,"reason":"clutch save"}
         ]}"#;
-        let m = parse_judge_response(json, 5938.0);
+        let m = parse_judge_response(json, 5938.0).unwrap();
         assert_eq!(m.len(), 2);
         assert!((m[0].start_sec - 37.0).abs() < 1e-6);
         assert!((m[0].score - 0.86).abs() < 1e-6);
@@ -534,7 +796,7 @@ mod tests {
     #[test]
     fn parse_strips_markdown_and_prose() {
         let text = "Here you go:\n```json\n{\"moments\":[{\"start\":5,\"end\":25,\"score\":70,\"category\":\"hype\",\"reason\":\"x\"}]}\n```\nThanks!";
-        let m = parse_judge_response(text, 600.0);
+        let m = parse_judge_response(text, 600.0).unwrap();
         assert_eq!(m.len(), 1);
     }
 
@@ -546,16 +808,37 @@ mod tests {
             {"start":9000.0,"end":9020.0,"score":80,"category":"play","reason":"out of range"},
             {"start":50.0,"end":50.2,"score":80,"category":"play","reason":"too short"}
         ]}"#;
-        let m = parse_judge_response(json, 600.0);
+        let m = parse_judge_response(json, 600.0).unwrap();
         assert_eq!(m.len(), 1, "only the clamped-end moment survives");
         assert!((m[0].end_sec - 600.0).abs() < 1e-6, "end clamped to duration");
     }
 
     #[test]
     fn parse_empty_and_garbage_are_safe() {
-        assert!(parse_judge_response(r#"{"moments":[]}"#, 600.0).is_empty());
-        assert!(parse_judge_response("no json here", 600.0).is_empty());
-        assert!(parse_judge_response("{bad json", 600.0).is_empty());
+        assert!(parse_judge_response(r#"{"moments":[]}"#, 600.0)
+            .unwrap()
+            .is_empty());
+        assert!(parse_judge_response("no json here", 600.0).is_err());
+        assert!(parse_judge_response("{bad json", 600.0).is_err());
+    }
+
+    #[test]
+    fn parse_salvages_valid_siblings_from_malformed_array() {
+        let text = r#"{"moments":[
+            {"start":37,"end":62,"category":"banter","score":86,"reason":"real joke"},
+            {"start":120,"end":150,"category":"play","score" 74,"reason":"missing colon"},
+            {"start":210,"end":235,"category":"scare","score":91,"reason":"real scare"}
+        ]}"#;
+        let moments = parse_judge_response(text, 600.0).unwrap();
+        assert_eq!(moments.len(), 2);
+        assert_eq!(moments[0].category, "banter");
+        assert_eq!(moments[1].category, "scare");
+    }
+
+    #[test]
+    fn parse_reports_fully_malformed_paid_response() {
+        let text = r#"{"moments":[{"start":37,"end" 62,"score" 86}]}"#;
+        assert!(parse_judge_response(text, 600.0).is_err());
     }
 
     // ── Transcript cleanup ──
