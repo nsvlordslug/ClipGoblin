@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-const PROXY_BASE: &str = "https://clipgoblin-auth-proxy.lordslug.workers.dev";
+pub(crate) const PROXY_BASE: &str = "https://clipgoblin-auth-proxy.lordslug.workers.dev";
 
 /// Generic token response returned by the auth proxy for all providers.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

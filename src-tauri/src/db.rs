@@ -360,6 +360,14 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
     )
     .ok();
 
+    let recovered_uploads = recover_interrupted_scheduled_uploads(conn)?;
+    if recovered_uploads > 0 {
+        log::warn!(
+            "[db] recovered {} interrupted scheduled upload state(s)",
+            recovered_uploads
+        );
+    }
+
     // Backfill: direct uploads historically only landed in `upload_history`, which the
     // analytics pipeline doesn't read. Copy any upload_history rows without a matching
     // scheduled_uploads row into the ledger as completed, so PAST direct uploads show
@@ -2795,6 +2803,86 @@ pub fn get_due_scheduled_uploads(
     rows.collect()
 }
 
+/// Atomically move one due upload from pending to uploading. The status and
+/// due-time predicates make a stale queue snapshot harmless if another worker
+/// claimed the row first.
+pub fn claim_scheduled_upload(conn: &Connection, id: &str, now: &str) -> SqliteResult<bool> {
+    let changed = conn.execute(
+        "UPDATE scheduled_uploads SET status = 'uploading', error_message = NULL
+         WHERE id = ?1 AND status = 'pending' AND scheduled_time <= ?2",
+        params![id, now],
+    )?;
+    Ok(changed == 1)
+}
+
+/// Recover scheduler rows left in an indeterminate state by an app shutdown.
+/// Upload history is written before the adapters perform network I/O, so a row
+/// with no history is safe to retry. A completed or externally processing claim
+/// can be restored directly. All other claimed attempts require user review to
+/// avoid creating a duplicate post after an uncertain transfer.
+pub fn recover_interrupted_scheduled_uploads(conn: &Connection) -> SqliteResult<usize> {
+    let interrupted = {
+        let mut stmt = conn.prepare(
+            "SELECT id, clip_id, platform, scheduled_time, status, retry_count, error_message,
+                    video_url, job_id, platform_video_id, upload_meta_json, created_at,
+                    view_count, like_count, ctr_percent, stats_updated_at
+             FROM scheduled_uploads
+             WHERE status = 'uploading'
+                OR (status = 'processing' AND COALESCE(job_id, '') = '')",
+        )?;
+        let rows = stmt.query_map([], scheduled_upload_from_row)?;
+        rows.collect::<SqliteResult<Vec<_>>>()?
+    };
+
+    for upload in &interrupted {
+        match get_upload_for_clip(conn, &upload.clip_id, &upload.platform)? {
+            Some(history) if history.status == "completed" => {
+                update_scheduled_upload_complete(
+                    conn,
+                    &upload.id,
+                    history.video_url.as_deref(),
+                    history.job_id.as_deref(),
+                    history.platform_video_id.as_deref(),
+                )?;
+            }
+            Some(history)
+                if matches!(history.status.as_str(), "processing" | "inbox_delivered")
+                    && history.job_id.as_deref().is_some_and(|id| !id.is_empty()) =>
+            {
+                update_scheduled_upload_processing(
+                    conn,
+                    &upload.id,
+                    history.job_id.as_deref().unwrap_or_default(),
+                )?;
+            }
+            None => {
+                update_scheduled_upload_status(
+                    conn,
+                    &upload.id,
+                    "pending",
+                    None,
+                    None,
+                    None,
+                )?;
+            }
+            Some(_) => {
+                update_scheduled_upload_status(
+                    conn,
+                    &upload.id,
+                    "failed",
+                    Some(
+                        "Upload was interrupted after transfer may have started. Check the platform before rescheduling.",
+                    ),
+                    None,
+                    None,
+                )?;
+            }
+        }
+    }
+
+    Ok(interrupted.len())
+}
+
 pub fn update_scheduled_upload_status(
     conn: &Connection,
     id: &str,
@@ -3092,6 +3180,177 @@ mod tests {
         let rows = get_completed_uploads_with_url(&conn).unwrap();
         assert_eq!(rows.len(), 1, "re-upload must update, not duplicate");
         assert_eq!(rows[0].video_url.as_deref(), Some("https://youtu.be/xyz"));
+    }
+
+    fn scheduled_row(id: &str, clip_id: &str, status: &str, scheduled_time: &str) -> ScheduledUploadRow {
+        ScheduledUploadRow {
+            id: id.to_string(),
+            clip_id: clip_id.to_string(),
+            platform: "tiktok".to_string(),
+            scheduled_time: scheduled_time.to_string(),
+            status: status.to_string(),
+            retry_count: 0,
+            error_message: None,
+            video_url: None,
+            job_id: None,
+            platform_video_id: None,
+            upload_meta_json: Some("{}".to_string()),
+            created_at: "2026-08-20T00:00:00Z".to_string(),
+            view_count: None,
+            like_count: None,
+            ctr_percent: None,
+            stats_updated_at: None,
+        }
+    }
+
+    #[test]
+    fn scheduled_upload_claim_is_atomic_and_requires_a_due_pending_row() {
+        let conn = fresh_db();
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        insert_scheduled_upload(&conn, &scheduled_row(
+            "due",
+            "clip-due",
+            "pending",
+            "2026-08-20T00:00:00Z",
+        ))
+        .unwrap();
+        insert_scheduled_upload(&conn, &scheduled_row(
+            "future",
+            "clip-future",
+            "pending",
+            "2026-08-22T00:00:00Z",
+        ))
+        .unwrap();
+
+        let now = "2026-08-21T00:00:00Z";
+        assert!(claim_scheduled_upload(&conn, "due", now).unwrap());
+        assert!(!claim_scheduled_upload(&conn, "due", now).unwrap());
+        assert!(!claim_scheduled_upload(&conn, "future", now).unwrap());
+        assert_eq!(
+            get_scheduled_uploads_for_clip(&conn, "clip-due").unwrap()[0].status,
+            "uploading"
+        );
+    }
+
+    #[test]
+    fn interrupted_scheduled_uploads_recover_without_automatic_duplicate_posts() {
+        let conn = fresh_db();
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        for (id, clip_id) in [
+            ("safe-retry", "clip-no-claim"),
+            ("completed", "clip-completed"),
+            ("processing", "clip-processing"),
+            ("uncertain", "clip-uncertain"),
+        ] {
+            insert_scheduled_upload(
+                &conn,
+                &scheduled_row(id, clip_id, "uploading", "2026-08-20T00:00:00Z"),
+            )
+            .unwrap();
+        }
+
+        mark_upload_complete(
+            &conn,
+            "clip-completed",
+            "tiktok",
+            Some("https://tiktok.example/completed"),
+            Some("publish-complete"),
+            Some("video-complete"),
+        )
+        .unwrap();
+        assert_eq!(
+            begin_upload(&conn, "clip-processing", "tiktok", false).unwrap(),
+            UploadClaim::Acquired
+        );
+        mark_upload_processing(
+            &conn,
+            "clip-processing",
+            "tiktok",
+            "publish-processing",
+        )
+        .unwrap();
+        assert_eq!(
+            begin_upload(&conn, "clip-uncertain", "tiktok", false).unwrap(),
+            UploadClaim::Acquired
+        );
+        mark_upload_failed(
+            &conn,
+            "clip-uncertain",
+            "tiktok",
+            "Upload interrupted before completion",
+        )
+        .unwrap();
+
+        assert_eq!(recover_interrupted_scheduled_uploads(&conn).unwrap(), 4);
+
+        let safe_retry = get_scheduled_uploads_for_clip(&conn, "clip-no-claim").unwrap();
+        assert_eq!(safe_retry[0].status, "pending");
+
+        let completed = get_scheduled_uploads_for_clip(&conn, "clip-completed").unwrap();
+        assert_eq!(completed[0].status, "completed");
+        assert_eq!(completed[0].job_id.as_deref(), Some("publish-complete"));
+
+        let processing = get_scheduled_uploads_for_clip(&conn, "clip-processing").unwrap();
+        assert_eq!(processing[0].status, "processing");
+        assert_eq!(processing[0].job_id.as_deref(), Some("publish-processing"));
+
+        let uncertain = get_scheduled_uploads_for_clip(&conn, "clip-uncertain").unwrap();
+        assert_eq!(uncertain[0].status, "failed");
+        assert!(uncertain[0]
+            .error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Check the platform"));
+    }
+
+    #[test]
+    fn startup_migration_recovers_scheduler_rows_after_an_interrupted_claim() {
+        let conn = fresh_db();
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        insert_scheduled_upload(
+            &conn,
+            &scheduled_row(
+                "claimed",
+                "clip-claimed",
+                "uploading",
+                "2026-08-20T00:00:00Z",
+            ),
+        )
+        .unwrap();
+        insert_scheduled_upload(
+            &conn,
+            &scheduled_row(
+                "not-started",
+                "clip-not-started",
+                "uploading",
+                "2026-08-20T00:00:00Z",
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            begin_upload(&conn, "clip-claimed", "tiktok", false).unwrap(),
+            UploadClaim::Acquired
+        );
+
+        run_migrations(&conn).unwrap();
+
+        let claimed = get_scheduled_uploads_for_clip(&conn, "clip-claimed").unwrap();
+        assert_eq!(claimed[0].status, "failed");
+        assert!(claimed[0]
+            .error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Check the platform"));
+        assert_eq!(
+            get_upload_for_clip(&conn, "clip-claimed", "tiktok")
+                .unwrap()
+                .unwrap()
+                .status,
+            "failed"
+        );
+
+        let not_started = get_scheduled_uploads_for_clip(&conn, "clip-not-started").unwrap();
+        assert_eq!(not_started[0].status, "pending");
     }
 
     #[test]

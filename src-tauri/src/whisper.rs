@@ -6,7 +6,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use whisper_rs::{
     DtwMode, DtwModelPreset, FullParams, SamplingStrategy, WhisperContext,
@@ -17,6 +17,16 @@ use whisper_rs::{
 const SILERO_VAD_MODEL_BYTES: &[u8] =
     include_bytes!("../resources/models/ggml-silero-v6.2.0.bin");
 static SILERO_VAD_MODEL_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+static TRANSCRIPTION_MUTEX: Mutex<()> = Mutex::new(());
+const MAX_PCM_WINDOW_SECONDS: f64 = 5.0 * 60.0;
+const PCM_SAMPLE_RATE: f64 = 16_000.0;
+const PCM_BYTES_PER_SAMPLE: u64 = 4;
+
+fn acquire_transcription_slot() -> Result<MutexGuard<'static, ()>, String> {
+    TRANSCRIPTION_MUTEX
+        .lock()
+        .map_err(|_| "Transcription resource lock was poisoned".to_string())
+}
 
 // ── Model definitions ──
 
@@ -717,6 +727,111 @@ fn extract_pcm_audio(audio_path: &str, ffmpeg: &PathBuf) -> Result<Vec<f32>, Str
     Ok(samples)
 }
 
+fn split_transcription_windows(windows: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let mut chunks = Vec::new();
+    for &(start, end) in windows {
+        if !start.is_finite() || !end.is_finite() || start < 0.0 || end <= start {
+            continue;
+        }
+        let mut chunk_start = start;
+        while chunk_start < end {
+            let chunk_end = (chunk_start + MAX_PCM_WINDOW_SECONDS).min(end);
+            chunks.push((chunk_start, chunk_end));
+            chunk_start = chunk_end;
+        }
+    }
+    chunks
+}
+
+fn pcm_output_limit_bytes(duration_seconds: f64) -> u64 {
+    // Allow two seconds of codec/container padding while still enforcing a
+    // strict upper bound if ffmpeg ignores or mishandles the requested range.
+    ((duration_seconds + 2.0).ceil() * PCM_SAMPLE_RATE) as u64 * PCM_BYTES_PER_SAMPLE
+}
+
+/// Extract one bounded 16 kHz mono PCM range. The read cap prevents a malformed
+/// media file or ffmpeg range failure from growing the buffer without limit.
+fn extract_pcm_audio_range(
+    audio_path: &str,
+    ffmpeg: &PathBuf,
+    start_seconds: f64,
+    end_seconds: f64,
+) -> Result<Vec<f32>, String> {
+    let duration = end_seconds - start_seconds;
+    if !start_seconds.is_finite()
+        || !end_seconds.is_finite()
+        || start_seconds < 0.0
+        || duration <= 0.0
+        || duration > MAX_PCM_WINDOW_SECONDS + 0.001
+    {
+        return Err("Invalid bounded PCM extraction range".to_string());
+    }
+
+    let mut child_cmd = Command::new(ffmpeg);
+    child_cmd
+        .arg("-nostdin")
+        .arg("-v")
+        .arg("error")
+        .arg("-ss")
+        .arg(format!("{start_seconds:.3}"))
+        .arg("-i")
+        .arg(audio_path)
+        .arg("-t")
+        .arg(format!("{duration:.3}"))
+        .args(["-vn", "-ar", "16000", "-ac", "1", "-f", "f32le", "-acodec", "pcm_f32le", "pipe:1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        child_cmd.creation_flags(0x08000000);
+    }
+
+    let mut child = child_cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn ffmpeg: {e}"))?;
+    let max_bytes = pcm_output_limit_bytes(duration);
+    let mut raw = Vec::with_capacity(max_bytes.min(usize::MAX as u64) as usize);
+    let read_result = match child.stdout.as_mut() {
+        Some(stdout) => stdout.take(max_bytes + 1).read_to_end(&mut raw),
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("ffmpeg PCM output pipe was unavailable".to_string());
+        }
+    };
+    if let Err(error) = read_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("Failed to read ffmpeg output: {error}"));
+    }
+    if raw.len() as u64 > max_bytes {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("ffmpeg produced more PCM data than the requested range allows".to_string());
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("ffmpeg wait error: {e}"))?;
+    if !status.success() {
+        return Err(format!("ffmpeg exited with status: {status}"));
+    }
+    if raw.len() % PCM_BYTES_PER_SAMPLE as usize != 0 {
+        return Err("PCM data not aligned to 4 bytes".to_string());
+    }
+
+    let samples = raw
+        .chunks_exact(PCM_BYTES_PER_SAMPLE as usize)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect::<Vec<_>>();
+    if samples.is_empty() {
+        return Err("No audio samples extracted".to_string());
+    }
+    Ok(samples)
+}
+
 /// Transcribe an audio/video file using whisper-rs.
 ///
 /// - `audio_path`: path to the media file (ffmpeg extracts audio)
@@ -733,6 +848,7 @@ pub fn transcribe<F>(
 where
     F: Fn(u32) + Send + Sync + 'static,
 {
+    let _transcription_slot = acquire_transcription_slot()?;
     transcribe_internal(audio_path, model, use_gpu, false, on_progress)
 }
 
@@ -746,122 +862,18 @@ fn transcribe_internal<F>(
 where
     F: Fn(u32) + Send + Sync + 'static,
 {
-    // Wrap callback in Arc so it can be shared with the whisper progress closure
-    let progress_fn = Arc::new(on_progress);
-
-    // 1. Verify model exists
-    let mpath = model_path(model)?;
-    if !mpath.exists() {
-        return Err(format!(
-            "Model {} not downloaded. Expected at: {}",
-            model.label(),
-            mpath.display()
-        ));
-    }
-
-    progress_fn(2);
-
-    // 2. Extract PCM audio via ffmpeg
-    let ffmpeg = find_ffmpeg()?;
-    log::info!(
-        "[Whisper] Extracting 16kHz PCM from {} using {}",
+    let duration = crate::commands::export::probe_media_duration(std::path::Path::new(audio_path))
+        .ok_or_else(|| "Could not determine media duration for bounded transcription".to_string())?;
+    let windows = split_transcription_windows(&[(0.0, duration)]);
+    transcribe_windows_bounded_internal(
         audio_path,
-        ffmpeg.display()
-    );
-    progress_fn(5);
-
-    let samples = extract_pcm_audio(audio_path, &ffmpeg)?;
-    let duration = samples.len() as f64 / 16000.0;
-    log::info!(
-        "[Whisper] Extracted {:.1}s of audio ({} samples)",
+        &windows,
         duration,
-        samples.len()
-    );
-    progress_fn(15);
-
-    // 3. Load whisper model
-    log::info!(
-        "[Whisper] Loading model: {} (GPU={})",
-        mpath.display(),
-        if use_gpu { "enabled" } else { "disabled" },
-    );
-    let mut params = WhisperContextParameters::default();
-    params.use_gpu = use_gpu;
-    if align_word_timestamps {
-        params.dtw_parameters.mode = DtwMode::ModelPreset {
-            model_preset: match model {
-                WhisperModel::Base => DtwModelPreset::Base,
-                WhisperModel::Medium => DtwModelPreset::Medium,
-            },
-        };
-    }
-    let ctx = WhisperContext::new_with_params(
-        mpath.to_str().ok_or("Invalid model path encoding")?,
-        params,
+        model,
+        use_gpu,
+        align_word_timestamps,
+        on_progress,
     )
-    .map_err(|e| format!("Failed to load whisper model: {}", e))?;
-
-    progress_fn(25);
-
-    // 4. Configure inference parameters
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    params.set_language(Some("en"));
-    params.set_token_timestamps(true);
-    params.set_print_special(false);
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-    params.set_print_timestamps(false);
-    params.set_debug_mode(false);
-    params.set_n_threads(optimal_thread_count());
-
-    // Progress callback — whisper calls this periodically during inference.
-    let progress_fn_clone = Arc::clone(&progress_fn);
-    params.set_progress_callback_safe(move |progress: i32| {
-        // Map whisper progress (0–100) to our range (30–95)
-        let mapped = 30 + ((progress as u32) * 65 / 100);
-        progress_fn_clone(mapped.min(95));
-    });
-
-    // 5. Run inference
-    log::info!("[Whisper] Starting transcription...");
-    let mut state = ctx
-        .create_state()
-        .map_err(|e| format!("Failed to create whisper state: {}", e))?;
-
-    state
-        .full(params, &samples)
-        .map_err(|e| format!("Whisper inference failed: {}", e))?;
-
-    progress_fn(96);
-
-    // 6. Extract segments
-    // whisper-rs 0.16: these methods return values directly, not Result
-    let num_segments = state.full_n_segments();
-    let mut segments = Vec::with_capacity(num_segments as usize);
-
-    for i in 0..num_segments {
-        let segment = match state.get_segment(i) {
-            Some(s) => s,
-            None => continue,
-        };
-        if let Some(converted) = convert_segment(&segment, 0.0) {
-            segments.push(converted);
-        }
-    }
-
-    progress_fn(100);
-
-    log::info!(
-        "[Whisper] Transcription complete: {} segments, {:.1}s duration",
-        segments.len(),
-        duration
-    );
-
-    Ok(TranscriptResult {
-        segments,
-        language: "en".to_string(),
-        duration,
-    })
 }
 
 /// Transcribe only one clip range. The temporary audio slice keeps subtitle
@@ -881,6 +893,7 @@ where
     if !start_seconds.is_finite() || !end_seconds.is_finite() || start_seconds < 0.0 || duration <= 0.0 {
         return Err("Invalid clip range for transcription".to_string());
     }
+    let _transcription_slot = acquire_transcription_slot()?;
 
     let ffmpeg = find_ffmpeg()?;
     let temp_path = std::env::temp_dir().join(format!(
@@ -988,12 +1001,8 @@ where
 /// so downstream code that queries the transcript by VOD time works
 /// without modification.
 ///
-/// Implementation note: we extract full PCM once and slice in memory rather
-/// than re-running ffmpeg per window. The PCM extraction is fast (<1 min
-/// for 7h on SSD) and per-window ffmpeg invocations would have >2× the
-/// overhead for typical 5-30 window counts. Memory cost: ~1.5 GB for a 7h
-/// VOD (16kHz × 4 bytes × 7h × 3600s) — same as the existing single-pass
-/// `transcribe` function.
+/// PCM is decoded one bounded chunk at a time. This trades a small amount of
+/// ffmpeg startup overhead for stable memory use on multi-hour VODs.
 ///
 /// Falls back gracefully on empty input (returns Err so caller can decide
 /// whether to retry with full-VOD transcription).
@@ -1007,7 +1016,128 @@ pub fn transcribe_windows<F>(
 where
     F: Fn(u32) + Send + Sync + 'static,
 {
+    let _transcription_slot = acquire_transcription_slot()?;
     transcribe_windows_internal(audio_path, windows, model, use_gpu, false, on_progress)
+}
+
+fn transcribe_windows_bounded_internal<F>(
+    audio_path: &str,
+    windows: &[(f64, f64)],
+    source_duration: f64,
+    model: WhisperModel,
+    use_gpu: bool,
+    align_word_timestamps: bool,
+    on_progress: F,
+) -> Result<TranscriptResult, String>
+where
+    F: Fn(u32) + Send + Sync + 'static,
+{
+    let bounded_windows = split_transcription_windows(windows);
+    if bounded_windows.is_empty() {
+        return Err("No valid transcription windows".to_string());
+    }
+
+    let progress_fn = Arc::new(on_progress);
+    let mpath = model_path(model)?;
+    if !mpath.exists() {
+        return Err(format!(
+            "Model {} not downloaded. Expected at: {}",
+            model.label(),
+            mpath.display()
+        ));
+    }
+    let ffmpeg = find_ffmpeg()?;
+    let total_window_samples = bounded_windows
+        .iter()
+        .map(|(start, end)| ((end - start) * PCM_SAMPLE_RATE).max(0.0) as usize)
+        .sum::<usize>()
+        .max(1);
+
+    log::info!(
+        "[Whisper] Bounded transcription: {} chunk(s), at most {:.0}s PCM per chunk",
+        bounded_windows.len(),
+        MAX_PCM_WINDOW_SECONDS
+    );
+    progress_fn(5);
+
+    let mut ctx_params = WhisperContextParameters::default();
+    ctx_params.use_gpu = use_gpu;
+    if align_word_timestamps {
+        ctx_params.dtw_parameters.mode = DtwMode::ModelPreset {
+            model_preset: match model {
+                WhisperModel::Base => DtwModelPreset::Base,
+                WhisperModel::Medium => DtwModelPreset::Medium,
+            },
+        };
+    }
+    let ctx = WhisperContext::new_with_params(
+        mpath.to_str().ok_or("Invalid model path encoding")?,
+        ctx_params,
+    )
+    .map_err(|e| format!("Failed to load whisper model: {e}"))?;
+    progress_fn(15);
+
+    let mut all_segments = Vec::new();
+    let mut samples_processed = 0usize;
+    for (index, &(window_start, window_end)) in bounded_windows.iter().enumerate() {
+        log::debug!(
+            "[Whisper] Decoding chunk {}/{}: {:.1}-{:.1}s",
+            index + 1,
+            bounded_windows.len(),
+            window_start,
+            window_end
+        );
+        let samples = extract_pcm_audio_range(audio_path, &ffmpeg, window_start, window_end)?;
+        let actual_window_end =
+            (window_start + samples.len() as f64 / PCM_SAMPLE_RATE).min(window_end);
+
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_language(Some("en"));
+        params.set_token_timestamps(true);
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        params.set_debug_mode(false);
+        params.set_n_threads(optimal_thread_count());
+
+        let progress_fn_clone = Arc::clone(&progress_fn);
+        let samples_so_far = samples_processed;
+        let chunk_samples = samples.len();
+        params.set_progress_callback_safe(move |inner_progress: i32| {
+            let inner_done = (chunk_samples * inner_progress.max(0) as usize) / 100;
+            let overall = (samples_so_far + inner_done) as f64 / total_window_samples as f64;
+            progress_fn_clone((15 + (overall * 80.0) as u32).min(95));
+        });
+
+        let mut state = ctx
+            .create_state()
+            .map_err(|e| format!("Failed to create whisper state: {e}"))?;
+        state
+            .full(params, &samples)
+            .map_err(|e| format!("Whisper inference failed on chunk {}: {e}", index + 1))?;
+
+        let num_segments = state.full_n_segments();
+        for segment_index in 0..num_segments {
+            if let Some(segment) = state.get_segment(segment_index) {
+                if let Some(converted) = convert_segment(&segment, window_start) {
+                    if let Some(clamped) =
+                        clamp_segment_to_window(converted, window_start, actual_window_end)
+                    {
+                        all_segments.push(clamped);
+                    }
+                }
+            }
+        }
+        samples_processed += samples.len();
+    }
+
+    progress_fn(100);
+    Ok(TranscriptResult {
+        segments: all_segments,
+        language: "en".to_string(),
+        duration: source_duration,
+    })
 }
 
 fn transcribe_windows_internal<F>(
@@ -1023,6 +1153,23 @@ where
 {
     if windows.is_empty() {
         return Err("transcribe_windows called with empty window list".to_string());
+    }
+
+    if !align_word_timestamps {
+        let source_duration = crate::commands::export::probe_media_duration(
+            std::path::Path::new(audio_path),
+        )
+        .or_else(|| windows.iter().map(|(_, end)| *end).reduce(f64::max))
+        .ok_or_else(|| "Could not determine media duration for bounded transcription".to_string())?;
+        return transcribe_windows_bounded_internal(
+            audio_path,
+            windows,
+            source_duration,
+            model,
+            use_gpu,
+            false,
+            on_progress,
+        );
     }
 
     let progress_fn = Arc::new(on_progress);
@@ -1236,6 +1383,30 @@ fn optimal_thread_count() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_transcription_windows_are_split_into_bounded_pcm_chunks() {
+        let chunks = split_transcription_windows(&[
+            (0.0, 750.0),
+            (800.0, 850.0),
+            (10.0, 10.0),
+            (f64::NAN, 20.0),
+        ]);
+
+        assert_eq!(
+            chunks,
+            vec![
+                (0.0, 300.0),
+                (300.0, 600.0),
+                (600.0, 750.0),
+                (800.0, 850.0)
+            ]
+        );
+        assert!(chunks
+            .iter()
+            .all(|(start, end)| end - start <= MAX_PCM_WINDOW_SECONDS));
+        assert!(pcm_output_limit_bytes(MAX_PCM_WINDOW_SECONDS) < 20_000_000);
+    }
 
     #[test]
     fn merges_whisper_subword_tokens_into_timed_words() {

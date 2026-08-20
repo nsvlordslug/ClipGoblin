@@ -9,6 +9,7 @@
 //! This module has **zero** Tauri dependency — the integration lives in lib.rs.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
@@ -62,6 +63,21 @@ impl JobEvent {
 
 /// Callback type invoked on every job status/progress change.
 pub type OnJobEvent = Arc<dyn Fn(JobEvent) + Send + Sync>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AddJobError {
+    AlreadyActive(String),
+    StateUnavailable,
+}
+
+impl fmt::Display for AddJobError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AlreadyActive(id) => write!(formatter, "Job {id} is already queued or running"),
+            Self::StateUnavailable => write!(formatter, "Job queue state is unavailable"),
+        }
+    }
+}
 
 // ── Job handle ──
 
@@ -139,8 +155,8 @@ impl JobQueue {
     /// or **Failed** depending on the closure's return value. Each
     /// transition fires the [`on_progress`](Self::on_progress) callback.
     ///
-    /// Returns the job id.
-    pub fn add_job<F, Fut>(&self, id: impl Into<String>, task: F) -> String
+    /// Returns the job id, or an error if that id is already queued/running.
+    pub fn add_job<F, Fut>(&self, id: impl Into<String>, task: F) -> Result<String, AddJobError>
     where
         F: FnOnce(JobHandle) -> Fut + Send + 'static,
         Fut: Future<Output = Result<(), String>> + Send + 'static,
@@ -151,8 +167,14 @@ impl JobQueue {
         {
             let Ok(mut map) = self.state.lock() else {
                 log::error!("Job state mutex poisoned, cannot add job {}", id);
-                return id;
+                return Err(AddJobError::StateUnavailable);
             };
+            if map
+                .get(&id)
+                .is_some_and(|job| matches!(job.status, JobStatus::Queued | JobStatus::Running))
+            {
+                return Err(AddJobError::AlreadyActive(id));
+            }
             let job = Job {
                 id: id.clone(),
                 status: JobStatus::Queued,
@@ -220,7 +242,7 @@ impl JobQueue {
             // _permit dropped here → next queued job can start
         });
 
-        id
+        Ok(id)
     }
 
     /// Snapshot of all jobs (any status).
@@ -279,7 +301,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             handle.set_progress(100);
             Ok(())
-        });
+        }).unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -301,7 +323,7 @@ mod tests {
         q.add_job("cb-1", |handle| async move {
             handle.set_progress(40);
             Ok(())
-        });
+        }).unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -320,7 +342,7 @@ mod tests {
 
         q.add_job("fail-1", |_handle| async move {
             Err("something broke".to_string())
-        });
+        }).unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -344,7 +366,7 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 r.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
-            });
+            }).unwrap();
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -360,7 +382,7 @@ mod tests {
     async fn remove_only_finished() {
         let q = JobQueue::new();
 
-        q.add_job("done", |_| async { Ok(()) });
+        q.add_job("done", |_| async { Ok(()) }).unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(q.remove("done"));
         assert!(q.get("done").is_none());
@@ -368,7 +390,7 @@ mod tests {
         q.add_job("busy", |_| async {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             Ok(())
-        });
+        }).unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert!(!q.remove("busy"));
     }
@@ -386,5 +408,31 @@ mod tests {
         assert!(json.get("progress").is_some());
         assert!(json.get("status").is_some());
         assert!(json.get("error").is_none()); // skipped when None
+    }
+
+    #[tokio::test]
+    async fn duplicate_active_job_id_is_rejected_without_running_second_task() {
+        let q = JobQueue::new();
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first_executions = Arc::clone(&executions);
+        q.add_job("same-id", move |_| async move {
+            first_executions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            Ok(())
+        })
+        .unwrap();
+
+        let second_executions = Arc::clone(&executions);
+        let duplicate = q.add_job("same-id", move |_| async move {
+            second_executions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        });
+
+        assert_eq!(
+            duplicate,
+            Err(AddJobError::AlreadyActive("same-id".to_string()))
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

@@ -1,7 +1,8 @@
 //! Clip export and rendering commands.
 
+use std::collections::HashSet;
 use std::process::Stdio;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, State};
 use crate::db;
 use crate::DbConn;
@@ -13,6 +14,39 @@ use crate::commands::vod::{
     find_ffmpeg, generate_srt_for_clip, generate_thumbnail,
     run_clip_transcription_native,
 };
+
+static ACTIVE_CLIP_EXPORTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+struct ClipExportLease {
+    clip_id: String,
+}
+
+impl Drop for ClipExportLease {
+    fn drop(&mut self) {
+        let active = ACTIVE_CLIP_EXPORTS.get_or_init(|| Mutex::new(HashSet::new()));
+        match active.lock() {
+            Ok(mut clip_ids) => {
+                clip_ids.remove(&self.clip_id);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().remove(&self.clip_id);
+            }
+        }
+    }
+}
+
+fn acquire_clip_export_lease(clip_id: &str) -> Result<ClipExportLease, String> {
+    let active = ACTIVE_CLIP_EXPORTS.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut clip_ids = active
+        .lock()
+        .map_err(|_| "Export state is unavailable".to_string())?;
+    if !clip_ids.insert(clip_id.to_string()) {
+        return Err("An export for this clip is already queued or running.".to_string());
+    }
+    Ok(ClipExportLease {
+        clip_id: clip_id.to_string(),
+    })
+}
 
 /// Generate captions for a clip by transcribing its audio segment.
 #[tauri::command]
@@ -176,6 +210,7 @@ pub async fn export_clip(
     db: State<'_, DbConn>,
     queue: State<'_, JobQueue>,
 ) -> Result<(), String> {
+    let export_lease = acquire_clip_export_lease(&clip_id)?;
     let ffmpeg = find_ffmpeg().map_err(|e| report_error(&app, e))?;
 
     let (clip, vod, media_path, allow_override) = {
@@ -200,6 +235,7 @@ pub async fn export_clip(
     let clip_id_bg = clip_id.clone();
 
     queue.add_job(job_id, move |handle| async move {
+        let _export_lease = export_lease;
         // Mark rendering in DB inside the job, so status is only set once
         // the job is actually running (not stuck if app crashes before queuing).
         {
@@ -282,7 +318,8 @@ pub async fn export_clip(
             };
             Err(msg)
         }
-    });
+    })
+    .map_err(|error| error.to_string())?;
 
     Ok(())
 }
@@ -295,6 +332,7 @@ pub async fn export_clip(
 /// need to juggle the DbConn State mutex. Safe to call from any async context;
 /// the actual ffmpeg work runs inside `tokio::task::spawn_blocking`.
 pub(crate) async fn render_clip_by_id(clip_id: &str) -> Result<std::path::PathBuf, String> {
+    let _export_lease = acquire_clip_export_lease(clip_id)?;
     let ffmpeg = find_ffmpeg().map_err(|e| e.to_string())?;
 
     // Load clip + vod path (sync)
@@ -844,6 +882,21 @@ fn cardboard_ass_drawings(
         .join(" ");
 
     (board, texture)
+}
+
+#[cfg(test)]
+mod export_concurrency_tests {
+    use super::acquire_clip_export_lease;
+
+    #[test]
+    fn clip_export_lease_blocks_overlapping_renderers_and_releases_after_drop() {
+        let clip_id = format!("export-lease-test-{}", uuid::Uuid::new_v4());
+        let first = acquire_clip_export_lease(&clip_id).unwrap();
+
+        assert!(acquire_clip_export_lease(&clip_id).is_err());
+        drop(first);
+        assert!(acquire_clip_export_lease(&clip_id).is_ok());
+    }
 }
 
 #[cfg(test)]

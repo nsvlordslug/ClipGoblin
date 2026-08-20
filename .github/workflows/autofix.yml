@@ -4,19 +4,24 @@ on:
   issues:
     types: [labeled]
 
+permissions:
+  contents: read
+
 jobs:
   autofix:
-    if: github.event.label.name == 'fix-requested'
+    if: >-
+      github.event.label.name == 'fix-requested' &&
+      github.event.sender.login == github.repository_owner
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
       issues: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Generate fix with Claude Sonnet
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -24,7 +29,7 @@ jobs:
           script: |
             const fs = require('fs');
             const path = require('path');
-            const { execSync } = require('child_process');
+            const { execFileSync } = require('child_process');
 
             const issue = context.payload.issue;
             const branchName = `fix/issue-${issue.number}`;
@@ -54,9 +59,25 @@ jobs:
               'src-tauri/tauri.conf.json',
             ];
 
+            const repositoryRoot = process.cwd();
+
+            function repositoryPath(filePath) {
+              if (typeof filePath !== 'string' || filePath.length === 0) return null;
+              const absolute = path.resolve(repositoryRoot, filePath);
+              const relative = path.relative(repositoryRoot, absolute);
+              if (relative.startsWith('..') || path.isAbsolute(relative)) return null;
+              return relative.split(path.sep).join('/');
+            }
+
             function isAllowed(filePath) {
-              if (FORBIDDEN_PATHS.some(f => filePath.startsWith(f))) return false;
-              return ALLOWED_DIRS.some(d => filePath.startsWith(d));
+              const relative = repositoryPath(filePath);
+              if (!relative) return false;
+              if (FORBIDDEN_PATHS.some(f =>
+                f.endsWith('/') ? relative.startsWith(f) : relative === f
+              )) return false;
+              return ALLOWED_DIRS.some(d =>
+                d.endsWith('/') ? relative.startsWith(d) : relative === d
+              );
             }
 
             // ── Read source files ──
@@ -181,6 +202,7 @@ jobs:
 
             // ── Validate and apply edits ──
             let appliedCount = 0;
+            const editedFiles = new Set();
 
             for (const edit of fix.edits) {
               if (!isAllowed(edit.file)) {
@@ -188,19 +210,22 @@ jobs:
                 continue;
               }
 
-              if (!fs.existsSync(edit.file)) {
+              const editPath = repositoryPath(edit.file);
+
+              if (!fs.existsSync(editPath)) {
                 core.warning(`File not found: ${edit.file}`);
                 continue;
               }
 
-              let content = fs.readFileSync(edit.file, 'utf-8');
+              let content = fs.readFileSync(editPath, 'utf-8');
               if (!content.includes(edit.search)) {
                 core.warning(`Search string not found in ${edit.file}`);
                 continue;
               }
 
               content = content.replace(edit.search, edit.replace);
-              fs.writeFileSync(edit.file, content, 'utf-8');
+              fs.writeFileSync(editPath, content, 'utf-8');
+              editedFiles.add(editPath);
               appliedCount++;
               core.info(`Applied edit to ${edit.file}`);
             }
@@ -216,12 +241,16 @@ jobs:
             }
 
             // ── Create branch, commit, push, PR ──
-            execSync(`git config user.name "ClipGoblin Bot"`);
-            execSync(`git config user.email "bot@clipgoblin.app"`);
-            execSync(`git checkout -b ${branchName}`);
-            execSync(`git add -A`);
-            execSync(`git commit -m "fix: auto-fix for #${issue.number} — ${issue.title.substring(0, 50)}"`);
-            execSync(`git push origin ${branchName}`);
+            execFileSync('git', ['config', 'user.name', 'ClipGoblin Bot']);
+            execFileSync('git', ['config', 'user.email', 'bot@clipgoblin.app']);
+            execFileSync('git', ['checkout', '-b', branchName]);
+            execFileSync('git', ['add', '--', ...editedFiles]);
+            execFileSync('git', [
+              'commit',
+              '-m',
+              `fix: auto-fix for #${issue.number} — ${issue.title.substring(0, 50)}`,
+            ]);
+            execFileSync('git', ['push', 'origin', branchName]);
 
             const pr = await github.rest.pulls.create({
               owner: context.repo.owner,

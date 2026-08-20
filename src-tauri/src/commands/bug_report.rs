@@ -20,7 +20,7 @@ pub struct BugReport {
     severity: String,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BugReportResult {
     success: bool,
@@ -99,32 +99,21 @@ fn rate_limit_key(user_id: &str) -> String {
     format!("bug_report_count_{}_{}", user_id, today)
 }
 
-/// Send a Discord webhook notification that a user hit the rate limit.
-async fn notify_rate_limit_hit(username: &str, user_id: &str) {
-    let webhook_url = match option_env!("DISCORD_WEBHOOK_URL")
-        .map(|s| s.to_string())
-        .or_else(|| std::env::var("DISCORD_WEBHOOK_URL").ok())
-    {
-        Some(u) if !u.is_empty() => u,
-        _ => return, // no webhook configured — silently skip
-    };
-
-    let payload = serde_json::json!({
-        "embeds": [{
-            "title": "Bug Report Rate Limit Hit",
-            "description": format!(
-                "User **{}** (ID: `{}`) has hit the 5 reports/day cap.",
-                username, user_id
-            ),
-            "color": 16744448 // orange
-        }]
-    });
-
-    let _ = reqwest::Client::new()
-        .post(&webhook_url)
-        .json(&payload)
-        .send()
-        .await;
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BugReportPayload<'a> {
+    title: &'a str,
+    description: &'a str,
+    steps: &'a str,
+    expected: &'a str,
+    page: &'a str,
+    severity: &'a str,
+    reporter_username: &'a str,
+    reporter_user_id: &'a str,
+    app_version: &'static str,
+    os: &'static str,
+    arch: &'static str,
+    logs: &'a str,
 }
 
 // ── Command ──
@@ -157,11 +146,6 @@ pub async fn submit_bug_report(
     };
 
     if current_count >= 5 {
-        // Fire-and-forget Discord notification
-        let uname = username.clone();
-        let uid = user_id.clone();
-        tokio::spawn(async move { notify_rate_limit_hit(&uname, &uid).await });
-
         return Ok(BugReportResult {
             success: false,
             issue_url: None,
@@ -177,75 +161,63 @@ pub async fn submit_bug_report(
     // 4. Scrubbed logs
     let log_tail = tail_latest_log(100);
 
-    // 5. Build issue body
-    let body = format!(
-        "## Bug Report (auto-submitted)\n\n\
-         **Reporter:** {username} (`{user_id}`)\n\
-         **Page:** {page}\n\
-         **Severity:** {severity}\n\
-         **App Version:** {version}\n\
-         **OS:** {os} ({arch})\n\n\
-         ### Description\n{description}\n\n\
-         ### Steps to Reproduce\n{steps}\n\n\
-         ### Expected Behavior\n{expected}\n\n\
-         ### Recent Logs (scrubbed)\n\
-         <details>\n<summary>Last 100 log lines</summary>\n\n\
-         ```\n{logs}\n```\n\n\
-         </details>",
-        username = username,
-        user_id = user_id,
-        page = report.page,
-        severity = report.severity,
-        version = version,
-        os = os,
-        arch = arch,
-        description = report.description,
-        steps = report.steps,
-        expected = report.expected,
-        logs = log_tail,
-    );
-
-    // 6. POST to GitHub Issues API
-    let gh_token = option_env!("GITHUB_BUG_TOKEN")
-        .map(|s| s.to_string())
-        .or_else(|| std::env::var("GITHUB_BUG_TOKEN").ok())
-        .ok_or_else(|| "GITHUB_BUG_TOKEN not configured — cannot submit bug report".to_string())?;
-
-    let severity_label = format!("severity:{}", report.severity.to_lowercase());
-    let payload = serde_json::json!({
-        "title": report.title,
-        "body": body,
-        "labels": ["bug", "auto-reported", severity_label],
-    });
-
-    let client = reqwest::Client::new();
+    // 5. Submit through the Worker so release binaries never contain GitHub or
+    // Discord credentials. The Worker independently validates and rate-limits.
+    let payload = BugReportPayload {
+        title: &report.title,
+        description: &report.description,
+        steps: &report.steps,
+        expected: &report.expected,
+        page: &report.page,
+        severity: &report.severity,
+        reporter_username: &username,
+        reporter_user_id: &user_id,
+        app_version: version,
+        os,
+        arch,
+        logs: &log_tail,
+    };
+    let client = reqwest::Client::builder()
+        .use_native_tls()
+        .http1_only()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| format!("Failed to build bug report client: {e}"))?;
+    let url = format!("{}/reports/bug", crate::auth_proxy::PROXY_BASE);
     let resp = client
-        .post("https://api.github.com/repos/nsvlordslug/ClipGoblin/issues")
-        .header("Authorization", format!("Bearer {}", gh_token))
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", format!("ClipGoblin/{}", version))
+        .post(url)
         .json(&payload)
         .send()
         .await
-        .map_err(|e| format!("GitHub API request failed: {}", e))?;
+        .map_err(|e| format!("Bug report service request failed: {e}"))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        log::error!("[BugReport] GitHub API error {}: {}", status, text);
+        let service_error = resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|value| value["error"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| "unknown_error".to_string());
+        log::error!(
+            "[BugReport] Report service error {}: {}",
+            status,
+            service_error
+        );
         return Ok(BugReportResult {
             success: false,
             issue_url: None,
-            error: Some(format!("GitHub API error ({})", status)),
+            error: Some(format!("Bug report service error ({status})")),
         });
     }
 
-    let json: serde_json::Value = resp
+    let result: BugReportResult = resp
         .json()
         .await
-        .map_err(|e| format!("Failed to parse GitHub response: {}", e))?;
-
-    let issue_url = json["html_url"].as_str().unwrap_or("").to_string();
+        .map_err(|e| format!("Failed to parse bug report response: {e}"))?;
+    if !result.success {
+        return Ok(result);
+    }
 
     // 7. Increment rate limit counter
     {
@@ -255,11 +227,7 @@ pub async fn submit_bug_report(
             .map_err(|e| format!("DB: {}", e))?;
     }
 
-    log::info!("[BugReport] Submitted: {} → {}", report.title, issue_url);
+    log::info!("[BugReport] Submitted: {}", report.title);
 
-    Ok(BugReportResult {
-        success: true,
-        issue_url: Some(issue_url),
-        error: None,
-    })
+    Ok(result)
 }

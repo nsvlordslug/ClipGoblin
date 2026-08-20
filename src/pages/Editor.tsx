@@ -56,6 +56,7 @@ import TwitchProvenanceBadges from '../components/TwitchProvenanceBadges'
 import { getNextEditorWorkspace, isEditorWorkspaceId } from '../lib/editorWorkspace'
 import type { EditorWorkspaceId, EditorWorkspaceNavigationKey } from '../lib/editorWorkspace'
 import { canGenerateTimedCaptions, getCaptionTimelineStart, hasUsableSourceMedia } from '../lib/editorCaptions'
+import { canPersistEditorState, LatestRequestGate } from '../lib/editorRequestGuard'
 import {
   brandingAssetName,
   contextVideoPositionLabel,
@@ -865,6 +866,10 @@ export default function Editor() {
   const [videoSrc, setVideoSrc] = useState<string | null>(null)
   const [editorLoadError, setEditorLoadError] = useState<string | null>(null)
   const [editorLoadAttempt, setEditorLoadAttempt] = useState(0)
+  const editorLoadGateRef = useRef<LatestRequestGate | null>(null)
+  if (!editorLoadGateRef.current) editorLoadGateRef.current = new LatestRequestGate()
+  const loadedClipIdRef = useRef<string | null>(null)
+  const saveRequestGenerationRef = useRef(0)
   const [saving, setSaving] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [exportProgress, setExportProgress] = useState(0)
@@ -1095,18 +1100,14 @@ export default function Editor() {
   }, [handleUndo, handleRedo])
 
   // ── Auto-save publish metadata (description + hashtags) to DB ──
-  const publishMetaInitRef = useRef(false) // skip initial load write-back
   useEffect(() => {
-    if (!clipId) return
-    // Skip the first update (initial load from DB)
-    if (!publishMetaInitRef.current) {
-      publishMetaInitRef.current = true
-      return
-    }
+    if (!canPersistEditorState(clipId, loadedClipIdRef.current)) return
+    const saveClipId = clipId
     const timer = setTimeout(() => {
+      if (!canPersistEditorState(saveClipId, loadedClipIdRef.current)) return
       const hashtagStr = publishMeta.hashtags.length > 0 ? publishMeta.hashtags.join(',') : null
       invoke('set_clip_publish_meta', {
-        clipId,
+        clipId: saveClipId,
         description: publishMeta.description || null,
         hashtags: hashtagStr,
       }).catch(err => console.warn('[Editor] Failed to auto-save publish meta:', err))
@@ -1274,15 +1275,24 @@ export default function Editor() {
   // ── Load clip data ──
   useEffect(() => {
     if (!clipId) return
-    publishMetaInitRef.current = false // reset so next publishMeta update from load is skipped
+    const loadGate = editorLoadGateRef.current!
+    const loadGeneration = loadGate.begin()
+    const isCurrentLoad = () => loadGate.isCurrent(loadGeneration)
+    loadedClipIdRef.current = null
+    saveRequestGenerationRef.current += 1
+    setSaving(false)
+    setSaved(false)
     setEditorLoadError(null)
     setClip(null)
     setHighlight(null)
     setVod(null)
     setVideoSrc(null)
+    setUploadHistory({})
     ;(async () => {
       try {
         const c = await invoke<Clip>('get_clip_detail', { clipId })
+        if (!isCurrentLoad()) return
+        loadedClipIdRef.current = clipId
         setClip(c)
         setTitle(c.title)
         setStartSeconds(c.start_seconds)
@@ -1325,6 +1335,7 @@ export default function Editor() {
         // Load persisted upload history (View on YouTube/TikTok links)
         invoke<Array<{ platform: string; video_url: string | null }>>('get_clip_upload_history', { clipId })
           .then(rows => {
+            if (!isCurrentLoad()) return
             const hist: Record<string, string> = {}
             for (const r of rows) {
               if (r.video_url) hist[r.platform] = r.video_url
@@ -1353,6 +1364,7 @@ export default function Editor() {
         let loadedHighlight: Highlight | undefined
         try {
           const highlights = await invoke<Array<Omit<Highlight, 'tags'> & { tags: unknown }>>('get_all_highlights')
+          if (!isCurrentLoad()) return
           const rawHighlight = highlights.find(h => h.id === c.highlight_id)
           loadedHighlight = rawHighlight
             ? { ...rawHighlight, tags: parseStoredTags(rawHighlight.tags) }
@@ -1364,9 +1376,11 @@ export default function Editor() {
           setVod(null)
           setGame(c.game || '')
           const previewPath = await invoke<string>('prepare_clip_preview_source', { clipId })
+          if (!isCurrentLoad()) return
           setVideoSrc(convertFileSrc(previewPath))
         } else {
           const v = await invoke<Vod>('get_vod_detail', { vodId: c.vod_id })
+          if (!isCurrentLoad()) return
           setVod(v)
 
           // Load game from stored values — clip.game takes priority, then VOD.game_name
@@ -1382,13 +1396,18 @@ export default function Editor() {
           }
         }
 
-        invoke('record_clip_opened', { clipId }).catch(() => {})
+        if (isCurrentLoad()) invoke('record_clip_opened', { clipId }).catch(() => {})
 
       } catch (err) {
+        if (!isCurrentLoad()) return
         console.error('Failed to load clip:', err)
         setEditorLoadError(String(err))
       }
     })()
+    return () => {
+      loadGate.cancel(loadGeneration)
+      if (loadedClipIdRef.current === clipId) loadedClipIdRef.current = null
+    }
   }, [clipId, history, editorLoadAttempt])
 
   // ── Sync aspect ratio when export preset changes ──
@@ -1397,11 +1416,14 @@ export default function Editor() {
   }, [exportPreset.aspectRatio])
 
   const handleSave = async () => {
-    if (!clipId) return
+    if (!canPersistEditorState(clipId, loadedClipIdRef.current)) return
+    const saveClipId = clipId
+    const saveGeneration = saveRequestGenerationRef.current + 1
+    saveRequestGenerationRef.current = saveGeneration
     setSaving(true)
     try {
       await invoke('update_clip_settings', {
-        clipId,
+        clipId: saveClipId,
         title,
         startSeconds,
         endSeconds,
@@ -1421,13 +1443,23 @@ export default function Editor() {
         fullFrameScale,
         game: game || null,
       })
-      setSaved(true)
-      setExportDone(false)
-      setTimeout(() => setSaved(false), 2000)
+      if (
+        saveRequestGenerationRef.current === saveGeneration &&
+        canPersistEditorState(saveClipId, loadedClipIdRef.current)
+      ) {
+        setSaved(true)
+        setExportDone(false)
+        setTimeout(() => {
+          if (
+            saveRequestGenerationRef.current === saveGeneration &&
+            canPersistEditorState(saveClipId, loadedClipIdRef.current)
+          ) setSaved(false)
+        }, 2000)
+      }
     } catch (err) {
-      alert(`Save failed: ${err}`)
+      if (saveRequestGenerationRef.current === saveGeneration) alert(`Save failed: ${err}`)
     } finally {
-      setSaving(false)
+      if (saveRequestGenerationRef.current === saveGeneration) setSaving(false)
     }
   }
 

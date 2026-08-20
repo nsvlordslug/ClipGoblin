@@ -10,6 +10,17 @@ TWITCH_CLIENT_ID = "i734ser5qcdf8grvlllx6yzprwegfr"
 YOUTUBE_CLIENT_ID = "963785158873-iuutl54610isuch1mcaqnbsoc90acrnb.apps.googleusercontent.com"
 TIKTOK_CLIENT_KEY = "awzco3f3mgjpwjam"
 
+[secrets]
+required = [
+  "TWITCH_CLIENT_SECRET",
+  "YOUTUBE_CLIENT_SECRET",
+  "TIKTOK_CLIENT_SECRET",
+  "GITHUB_APP_ID",
+  "GITHUB_APP_INSTALLATION_ID",
+  "GITHUB_APP_PRIVATE_KEY",
+  "DISCORD_WEBHOOK_URL",
+]
+
 [[ratelimits]]
 name = "OAUTH_RATE_LIMITER"
 namespace_id = "1001"
@@ -22,4 +33,18 @@ name = "OAUTH_GLOBAL_RATE_LIMITER"
 namespace_id = "1002"
 [ratelimits.simple]
 limit = 300
+period = 60
+
+[[ratelimits]]
+name = "BUG_REPORT_RATE_LIMITER"
+namespace_id = "1003"
+[ratelimits.simple]
+limit = 5
+period = 60
+
+[[ratelimits]]
+name = "BUG_REPORT_GLOBAL_RATE_LIMITER"
+namespace_id = "1004"
+[ratelimits.simple]
+limit = 30
 period = 60

@@ -2,9 +2,11 @@
 
 use std::io::{BufRead, BufReader};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_opener::OpenerExt;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::db;
 use crate::DbConn;
@@ -19,6 +21,54 @@ use crate::commands::captions::{
     compute_confidence,
     build_highlight_explanation, count_active_signals,
 };
+
+static ANALYSIS_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+static ACTIVE_VOD_DOWNLOADS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+
+struct VodDownloadLease {
+    vod_id: String,
+}
+
+impl Drop for VodDownloadLease {
+    fn drop(&mut self) {
+        let downloads = ACTIVE_VOD_DOWNLOADS
+            .get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+        match downloads.lock() {
+            Ok(mut active) => {
+                active.remove(&self.vod_id);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().remove(&self.vod_id);
+            }
+        }
+    }
+}
+
+fn acquire_vod_download_lease(vod_id: &str) -> Result<VodDownloadLease, String> {
+    let downloads = ACTIVE_VOD_DOWNLOADS
+        .get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    let mut active = downloads
+        .lock()
+        .map_err(|_| "Download state is unavailable. Restart ClipGoblin and try again.".to_string())?;
+    if !active.insert(vod_id.to_string()) {
+        return Err("This VOD is already downloading.".to_string());
+    }
+    Ok(VodDownloadLease {
+        vod_id: vod_id.to_string(),
+    })
+}
+
+fn analysis_semaphore() -> Arc<Semaphore> {
+    Arc::clone(ANALYSIS_SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(1))))
+}
+
+fn try_acquire_analysis_slot(
+    semaphore: Arc<Semaphore>,
+) -> Result<OwnedSemaphorePermit, String> {
+    semaphore
+        .try_acquire_owned()
+        .map_err(|_| "Another VOD analysis is already using transcription resources.".to_string())
+}
 
 /// A fixed-capacity ring of the most recent stderr lines. Used to keep a
 /// bounded tail of yt-dlp's diagnostic output without buffering its full
@@ -295,41 +345,91 @@ fn parse_ytdlp_progress(line: &str) -> Option<u8> {
     Some(val.min(100.0).max(0.0) as u8)
 }
 
+const YTDLP_OUTPUT_PREFIX: &str = "CLIPGOBLIN_OUTPUT=";
+
+fn validate_twitch_video_id(video_id: &str) -> Result<(), String> {
+    if video_id.is_empty()
+        || video_id.len() > 128
+        || !video_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("Twitch returned an invalid VOD identifier.".to_string());
+    }
+    Ok(())
+}
+
+fn validate_download_output(
+    download_dir: &std::path::Path,
+    twitch_video_id: &str,
+    reported_path: Option<&std::path::Path>,
+) -> Result<std::path::PathBuf, String> {
+    let expected = download_dir.join(format!("{twitch_video_id}.mp4"));
+    let candidate = reported_path.unwrap_or(&expected);
+
+    let canonical_dir = std::fs::canonicalize(download_dir)
+        .map_err(|e| format!("Could not verify the download directory: {e}"))?;
+    let canonical_candidate = std::fs::canonicalize(candidate)
+        .map_err(|e| format!("yt-dlp finished but its output file was not found: {e}"))?;
+    let expected_name = format!("{twitch_video_id}.mp4");
+    let has_exact_name = canonical_candidate
+        .file_name()
+        .is_some_and(|name| name == std::ffi::OsStr::new(&expected_name));
+
+    if canonical_candidate.parent() != Some(canonical_dir.as_path()) || !has_exact_name {
+        return Err(format!(
+            "yt-dlp reported an unexpected output path: {}",
+            canonical_candidate.display()
+        ));
+    }
+
+    let metadata = std::fs::metadata(&canonical_candidate)
+        .map_err(|e| format!("Could not inspect the downloaded VOD: {e}"))?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Err("yt-dlp produced an empty or invalid VOD file.".to_string());
+    }
+
+    Ok(canonical_candidate)
+}
+
 /// Download a VOD using yt-dlp with real-time progress tracking.
 #[tauri::command]
 pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>) -> Result<(), String> {
     let ytdlp = find_ytdlp().map_err(|e| report_error(&app, e))?;
+    let download_lease = acquire_vod_download_lease(&vod_id)?;
 
-    // Atomic check-and-set: read status and update in a single lock scope
-    let vod = {
+    let (vod, download_dir) = {
         let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
         let vod = db::get_vod_by_id(&conn, &vod_id)
             .map_err(|e| format!("DB error: {}", e))?
             .ok_or_else(|| "VOD not found".to_string())?;
-
-        if vod.download_status == "downloading" {
-            return Err("This VOD is already downloading.".to_string());
-        }
-
-        db::update_vod_download_status(&conn, &vod_id, "downloading", None, None)
-            .map_err(|e| format!("DB error: {}", e))?;
-        db::update_vod_download_progress(&conn, &vod_id, 0)
-            .map_err(|e| format!("DB error: {}", e))?;
-        vod
-    };
-
-    // Get download directory from settings or use default
-    let download_dir = {
-        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-        match db::get_setting(&conn, "download_dir") {
+        let download_dir = match db::get_setting(&conn, "download_dir") {
             Ok(Some(dir)) if !dir.is_empty() => std::path::PathBuf::from(dir),
             _ => dirs::data_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
                 .join("clipviral")
                 .join("downloads"),
-        }
+        };
+        (vod, download_dir)
     };
-    std::fs::create_dir_all(&download_dir).ok();
+
+    validate_twitch_video_id(&vod.twitch_video_id)?;
+    std::fs::create_dir_all(&download_dir)
+        .map_err(|e| format!("Could not create the VOD download directory: {e}"))?;
+
+    {
+        let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+        if vod.download_status == "downloading" {
+            log::warn!(
+                "[download_vod] resuming interrupted download for {}",
+                vod.twitch_video_id
+            );
+        }
+        db::update_vod_download_status(&conn, &vod_id, "downloading", None, None)
+            .map_err(|e| format!("DB error: {}", e))?;
+        db::update_vod_download_progress(&conn, &vod_id, 0)
+            .map_err(|e| format!("DB error: {}", e))?;
+    }
 
     let output_template = download_dir
         .join(format!("{}.%(ext)s", vod.twitch_video_id))
@@ -338,12 +438,13 @@ pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>)
 
     let vod_url = vod.vod_url.clone();
     let twitch_video_id = vod.twitch_video_id.clone();
-    let dl_dir = download_dir.clone();
+    let dl_dir = download_dir;
     let vod_id_bg = vod_id.clone();
     let app_handle = app.clone();
 
     // Spawn background task â€” returns immediately so UI stays responsive
     tokio::task::spawn(async move {
+        let _download_lease = download_lease;
         let vod_id_progress = vod_id_bg.clone();
         let vod_id_status = vod_id_bg;
 
@@ -351,9 +452,12 @@ pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>)
             let progress_conn = db::db_path().ok().and_then(|p| rusqlite::Connection::open(p).ok());
 
             let mut cmd = std::process::Command::new(&ytdlp);
-            cmd.arg("--force-overwrites")
+            cmd.arg("--continue")
                 .arg("--newline")
+                .arg("--progress")
                 .arg("--no-color")
+                .arg("--print")
+                .arg(format!("after_move:{YTDLP_OUTPUT_PREFIX}%(filepath)s"))
                 .arg("--remux-video").arg("mp4")
                 .arg("-o")
                 .arg(&output_template)
@@ -396,7 +500,11 @@ pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>)
             if let Some(stdout) = child.stdout.take() {
                 let reader = BufReader::new(stdout);
                 let mut last_reported: u8 = 0;
+                let mut reported_output = None;
                 for line in reader.lines().flatten() {
+                    if let Some(path) = line.strip_prefix(YTDLP_OUTPUT_PREFIX) {
+                        reported_output = Some(std::path::PathBuf::from(path.trim()));
+                    }
                     if let Some(pct) = parse_ytdlp_progress(&line) {
                         if pct != last_reported && (pct >= last_reported.saturating_add(2) || pct == 100) {
                             last_reported = pct;
@@ -406,12 +514,27 @@ pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>)
                         }
                     }
                 }
+
+                let stderr_tail = stderr_thread.join().unwrap_or_default();
+                let status = child.wait().map_err(|e| format!("yt-dlp error: {}", e))?;
+                if status.success() {
+                    return validate_download_output(
+                        &dl_dir,
+                        &twitch_video_id,
+                        reported_output.as_deref(),
+                    );
+                }
+                return Err(format!(
+                    "yt-dlp exited with code {:?}\n--- yt-dlp stderr (tail) ---\n{}",
+                    status.code(),
+                    stderr_tail
+                ));
             }
 
             let stderr_tail = stderr_thread.join().unwrap_or_default();
             let status = child.wait().map_err(|e| format!("yt-dlp error: {}", e))?;
             if status.success() {
-                Ok(())
+                validate_download_output(&dl_dir, &twitch_video_id, None)
             } else {
                 Err(format!(
                     "yt-dlp exited with code {:?}\n--- yt-dlp stderr (tail) ---\n{}",
@@ -425,57 +548,34 @@ pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>)
         let db: State<'_, DbConn> = app_handle.state();
 
         match result {
-            Ok(Ok(())) => {
-                let mut found_path: Option<std::path::PathBuf> = None;
-                if let Ok(entries) = std::fs::read_dir(&dl_dir) {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        if name.starts_with(&twitch_video_id)
-                            && !name.ends_with(".part")
-                            && !name.ends_with(".ytdl")
-                            && !name.ends_with(".remuxing.mp4")
-                            && !name.contains(".ts-original.")
-                        {
-                            found_path = Some(entry.path());
-                            break;
-                        }
-                    }
-                }
-
+            Ok(Ok(found_path)) => {
                 // Post-yt-dlp remux: yt-dlp's `--remux-video mp4` often leaves
                 // MPEG-TS packetization in the audio stream, producing files
                 // the webview can't play. We do a guaranteed stream-copy pass
                 // here to ensure every download is webview-playable. See
                 // `ensure_proper_mp4` doc comment for the full breakdown.
-                if let Some(ref p) = found_path {
-                    log::info!("[download_vod] Post-yt-dlp remux: {}", p.display());
-                    let remux_started = std::time::Instant::now();
-                    match ensure_proper_mp4(p) {
-                        Ok(()) => log::info!(
-                            "[download_vod] Remux complete in {:.1}s",
-                            remux_started.elapsed().as_secs_f64()
-                        ),
-                        Err(e) => log::warn!(
-                            "[download_vod] Remux failed (file may not play in webview): {}",
-                            e
-                        ),
-                    }
+                log::info!("[download_vod] Post-yt-dlp remux: {}", found_path.display());
+                let remux_started = std::time::Instant::now();
+                match ensure_proper_mp4(&found_path) {
+                    Ok(()) => log::info!(
+                        "[download_vod] Remux complete in {:.1}s",
+                        remux_started.elapsed().as_secs_f64()
+                    ),
+                    Err(e) => log::warn!(
+                        "[download_vod] Remux failed (file may not play in webview): {}",
+                        e
+                    ),
                 }
 
                 // Re-stat post-remux so we record the new file size in the DB.
-                let (path_str, file_size) = match &found_path {
-                    Some(p) => (
-                        Some(p.to_string_lossy().to_string()),
-                        std::fs::metadata(p).ok().map(|m| m.len() as i64),
-                    ),
-                    None => (None, None),
-                };
+                let path_str = found_path.to_string_lossy().to_string();
+                let file_size = std::fs::metadata(&found_path).ok().map(|m| m.len() as i64);
                 if let Ok(conn) = db.lock() {
                     db::update_vod_download_status(
                         &conn,
                         &vod_id_status,
                         "downloaded",
-                        path_str.as_deref(),
+                        Some(&path_str),
                         file_size,
                     )
                     .ok();
@@ -489,7 +589,7 @@ pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>)
                 let reason = match other {
                     Ok(Err(msg)) => msg,
                     Err(join_err) => format!("download task panicked/join error: {join_err}"),
-                    Ok(Ok(())) => unreachable!("Ok(Ok(())) handled by the success arm above"),
+                    Ok(Ok(_)) => unreachable!("Ok(Ok(_)) handled by the success arm above"),
                 };
                 log::error!("[download_vod] failed for {}: {}", vod_id_status, reason);
                 if let Ok(conn) = db.lock() {
@@ -1543,6 +1643,8 @@ fn keyword_boost_for_range(transcript: &TranscriptResult, start: f64, end: f64) 
 /// Falls back to position heuristics otherwise. No external API calls are made.
 #[tauri::command]
 pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, hw: State<'_, HardwareInfo>) -> Result<(), String> {
+    let analysis_permit = try_acquire_analysis_slot(analysis_semaphore())?;
+
     // Atomic check-and-set: read status, validate, and update in a single lock scope
     let (vod, has_ffmpeg) = {
         let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
@@ -1578,6 +1680,7 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
 
     // Run analysis in background
     tokio::task::spawn(async move {
+        let _analysis_permit = analysis_permit;
         let db: State<'_, DbConn> = app.state();
 
         // Progress updates: run_analysis_signals handles 5-82% internally
@@ -4144,6 +4247,54 @@ pub async fn get_stream_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vod_download_lease_blocks_duplicates_and_releases_after_drop() {
+        let vod_id = format!("download-lease-{}", uuid::Uuid::new_v4());
+        let first = acquire_vod_download_lease(&vod_id).unwrap();
+
+        assert!(acquire_vod_download_lease(&vod_id).is_err());
+        drop(first);
+        assert!(acquire_vod_download_lease(&vod_id).is_ok());
+    }
+
+    #[test]
+    fn download_output_must_be_the_exact_nonempty_vod_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "clipviral-download-output-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exact = dir.join("123.mp4");
+        let neighboring_prefix = dir.join("1234.mp4");
+        std::fs::write(&exact, b"video").unwrap();
+        std::fs::write(&neighboring_prefix, b"different video").unwrap();
+
+        let selected = validate_download_output(&dir, "123", Some(&exact)).unwrap();
+        assert_eq!(selected, std::fs::canonicalize(&exact).unwrap());
+        assert!(validate_download_output(&dir, "123", Some(&neighboring_prefix)).is_err());
+
+        std::fs::write(&exact, b"").unwrap();
+        assert!(validate_download_output(&dir, "123", Some(&exact)).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn twitch_video_id_cannot_escape_the_download_directory() {
+        assert!(validate_twitch_video_id("123456789").is_ok());
+        assert!(validate_twitch_video_id("../neighbor").is_err());
+        assert!(validate_twitch_video_id("").is_err());
+    }
+
+    #[test]
+    fn analysis_slot_allows_only_one_resource_heavy_analysis() {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let first = try_acquire_analysis_slot(Arc::clone(&semaphore)).unwrap();
+
+        assert!(try_acquire_analysis_slot(Arc::clone(&semaphore)).is_err());
+        drop(first);
+        assert!(try_acquire_analysis_slot(semaphore).is_ok());
+    }
 
     fn seg(start: f64, end: f64, text: &str) -> TranscriptSegment {
         TranscriptSegment {

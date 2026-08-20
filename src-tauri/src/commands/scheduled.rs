@@ -72,7 +72,13 @@ pub(crate) fn start_upload_scheduler(handle: tauri::AppHandle) {
     use std::time::Duration;
 
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().expect("Failed to create scheduler runtime");
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                log::error!("[Scheduler] Failed to create background runtime: {}", error);
+                return;
+            }
+        };
         rt.block_on(async move {
             // Wait 10 seconds after startup before first check
             tokio::time::sleep(Duration::from_secs(10)).await;
@@ -113,11 +119,17 @@ pub(crate) fn process_due_uploads(handle: &tauri::AppHandle) -> Result<(), Strin
     );
 
     for upload in due_uploads {
-        // Mark as uploading
-        {
+        let claimed = {
             let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-            db::update_scheduled_upload_status(&conn, &upload.id, "uploading", None, None, None)
-                .map_err(|e| format!("DB error: {}", e))?;
+            db::claim_scheduled_upload(&conn, &upload.id, &now)
+                .map_err(|e| format!("DB error: {}", e))?
+        };
+        if !claimed {
+            log::info!(
+                "[Scheduler] Skipping {} because it is no longer pending",
+                upload.id
+            );
+            continue;
         }
 
         let _ = handle.emit("scheduled-upload-status", serde_json::json!({
@@ -197,16 +209,12 @@ pub(crate) fn process_due_uploads(handle: &tauri::AppHandle) -> Result<(), Strin
                     }) {
                         Ok(path) => path.to_string_lossy().to_string(),
                         Err(e) => {
-                            let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-                            db::update_scheduled_upload_status(
-                                &conn,
-                                &upload.id,
-                                "failed",
-                                Some(&format!("Auto-export failed: {}", e)),
-                                None,
-                                None,
-                            )
-                            .ok();
+                            handle_scheduled_failure(
+                                handle,
+                                &db,
+                                &upload,
+                                &format!("Auto-export failed: {}", e),
+                            );
                             log::error!(
                                 "[Scheduler] Auto-export failed for {}: {}",
                                 upload.clip_id,
