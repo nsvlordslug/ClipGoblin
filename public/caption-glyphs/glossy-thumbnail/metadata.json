@@ -1,0 +1,1058 @@
+{
+  "rendererVersion": "glossy-thumbnail-image-glyph-v1",
+  "styleId": "minimal",
+  "displayName": "Glossy Thumbnail",
+  "construction": "original reusable OFL glyph masks with authored glossy face, white keyline, gold extrusion, and separate purple burst card",
+  "referencePixelsShipped": false,
+  "sourceFont": "Anton Regular",
+  "sourceFontLicense": "SIL Open Font License 1.1",
+  "sourceFontSha256": "a4ba3a92350ebb031da0cb47630ac49eb265082ca1bc0450442f4a83ab947cab",
+  "textTransform": "uppercase",
+  "atlas": {
+    "file": "atlas.png",
+    "width": 3240,
+    "height": 3392
+  },
+  "picker": {
+    "file": "picker.png"
+  },
+  "materialCard": {
+    "file": "glossy-thumbnail-burst-v1.png",
+    "width": 1200,
+    "height": 520
+  },
+  "metrics": {
+    "nominalFontSize": 272,
+    "baseline": 308,
+    "lineHeight": 352,
+    "spaceAdvance": 90,
+    "letterSpacing": -2
+  },
+  "material": {
+    "face": "bright yellow-to-orange glossy gradient",
+    "edge": "clean white keyline with a narrow gold rim",
+    "depth": "directional gold and burnt-orange extrusion",
+    "card": "original purple radial burst with a dark rim and restrained highlights"
+  },
+  "coverage": {
+    "printableAscii": 94,
+    "physicalGlyphs": 68,
+    "uppercaseAliases": 26
+  },
+  "glyphs": {
+    "A": {
+      "advance": 153.0,
+      "originX": 92.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "A",
+      "atlas": [
+        0,
+        0,
+        360,
+        424
+      ]
+    },
+    "B": {
+      "advance": 150.0,
+      "originX": 99.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "B",
+      "atlas": [
+        360,
+        0,
+        360,
+        424
+      ]
+    },
+    "C": {
+      "advance": 149.0,
+      "originX": 97.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "C",
+      "atlas": [
+        720,
+        0,
+        360,
+        424
+      ]
+    },
+    "D": {
+      "advance": 154.0,
+      "originX": 97.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "D",
+      "atlas": [
+        1080,
+        0,
+        360,
+        424
+      ]
+    },
+    "E": {
+      "advance": 132.0,
+      "originX": 108.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "E",
+      "atlas": [
+        1440,
+        0,
+        360,
+        424
+      ]
+    },
+    "F": {
+      "advance": 129.0,
+      "originX": 109.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "F",
+      "atlas": [
+        1800,
+        0,
+        360,
+        424
+      ]
+    },
+    "G": {
+      "advance": 152.0,
+      "originX": 96.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "G",
+      "atlas": [
+        2160,
+        0,
+        360,
+        424
+      ]
+    },
+    "H": {
+      "advance": 156.0,
+      "originX": 96.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "H",
+      "atlas": [
+        2520,
+        0,
+        360,
+        424
+      ]
+    },
+    "I": {
+      "advance": 82.0,
+      "originX": 131.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "I",
+      "atlas": [
+        2880,
+        0,
+        360,
+        424
+      ]
+    },
+    "J": {
+      "advance": 147.0,
+      "originX": 96.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "J",
+      "atlas": [
+        0,
+        424,
+        360,
+        424
+      ]
+    },
+    "K": {
+      "advance": 150.0,
+      "originX": 99.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "K",
+      "atlas": [
+        360,
+        424,
+        360,
+        424
+      ]
+    },
+    "L": {
+      "advance": 128.0,
+      "originX": 110.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "L",
+      "atlas": [
+        720,
+        424,
+        360,
+        424
+      ]
+    },
+    "M": {
+      "advance": 223.0,
+      "originX": 63.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "M",
+      "atlas": [
+        1080,
+        424,
+        360,
+        424
+      ]
+    },
+    "N": {
+      "advance": 155.0,
+      "originX": 97.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "N",
+      "atlas": [
+        1440,
+        424,
+        360,
+        424
+      ]
+    },
+    "O": {
+      "advance": 152.0,
+      "originX": 96.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "O",
+      "atlas": [
+        1800,
+        424,
+        360,
+        424
+      ]
+    },
+    "P": {
+      "advance": 148.0,
+      "originX": 100.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "P",
+      "atlas": [
+        2160,
+        424,
+        360,
+        424
+      ]
+    },
+    "Q": {
+      "advance": 154.0,
+      "originX": 94.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "Q",
+      "atlas": [
+        2520,
+        424,
+        360,
+        424
+      ]
+    },
+    "R": {
+      "advance": 150.0,
+      "originX": 99.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "R",
+      "atlas": [
+        2880,
+        424,
+        360,
+        424
+      ]
+    },
+    "S": {
+      "advance": 146.0,
+      "originX": 96.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "S",
+      "atlas": [
+        0,
+        848,
+        360,
+        424
+      ]
+    },
+    "T": {
+      "advance": 132.0,
+      "originX": 102.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "T",
+      "atlas": [
+        360,
+        848,
+        360,
+        424
+      ]
+    },
+    "U": {
+      "advance": 149.0,
+      "originX": 96.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "U",
+      "atlas": [
+        720,
+        848,
+        360,
+        424
+      ]
+    },
+    "V": {
+      "advance": 151.0,
+      "originX": 93.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "V",
+      "atlas": [
+        1080,
+        848,
+        360,
+        424
+      ]
+    },
+    "W": {
+      "advance": 217.0,
+      "originX": 60.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "W",
+      "atlas": [
+        1440,
+        848,
+        360,
+        424
+      ]
+    },
+    "X": {
+      "advance": 155.0,
+      "originX": 91.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "X",
+      "atlas": [
+        1800,
+        848,
+        360,
+        424
+      ]
+    },
+    "Y": {
+      "advance": 148.0,
+      "originX": 94.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "Y",
+      "atlas": [
+        2160,
+        848,
+        360,
+        424
+      ]
+    },
+    "Z": {
+      "advance": 133.0,
+      "originX": 102.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "Z",
+      "atlas": [
+        2520,
+        848,
+        360,
+        424
+      ]
+    },
+    "0": {
+      "advance": 154.0,
+      "originX": 92.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "0",
+      "atlas": [
+        2880,
+        848,
+        360,
+        424
+      ]
+    },
+    "1": {
+      "advance": 110.0,
+      "originX": 112.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "1",
+      "atlas": [
+        0,
+        1272,
+        360,
+        424
+      ]
+    },
+    "2": {
+      "advance": 154.0,
+      "originX": 94.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "2",
+      "atlas": [
+        360,
+        1272,
+        360,
+        424
+      ]
+    },
+    "3": {
+      "advance": 154.0,
+      "originX": 92.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "3",
+      "atlas": [
+        720,
+        1272,
+        360,
+        424
+      ]
+    },
+    "4": {
+      "advance": 159.0,
+      "originX": 89.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "4",
+      "atlas": [
+        1080,
+        1272,
+        360,
+        424
+      ]
+    },
+    "5": {
+      "advance": 154.0,
+      "originX": 93.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "5",
+      "atlas": [
+        1440,
+        1272,
+        360,
+        424
+      ]
+    },
+    "6": {
+      "advance": 154.0,
+      "originX": 94.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "6",
+      "atlas": [
+        1800,
+        1272,
+        360,
+        424
+      ]
+    },
+    "7": {
+      "advance": 154.0,
+      "originX": 96.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "7",
+      "atlas": [
+        2160,
+        1272,
+        360,
+        424
+      ]
+    },
+    "8": {
+      "advance": 154.0,
+      "originX": 93.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "8",
+      "atlas": [
+        2520,
+        1272,
+        360,
+        424
+      ]
+    },
+    "9": {
+      "advance": 154.0,
+      "originX": 94.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "9",
+      "atlas": [
+        2880,
+        1272,
+        360,
+        424
+      ]
+    },
+    "!": {
+      "advance": 82.0,
+      "originX": 130.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "!",
+      "atlas": [
+        0,
+        1696,
+        360,
+        424
+      ]
+    },
+    "\"": {
+      "advance": 137.0,
+      "originX": 100.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "\"",
+      "atlas": [
+        360,
+        1696,
+        360,
+        424
+      ]
+    },
+    "#": {
+      "advance": 169.0,
+      "originX": 84.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "#",
+      "atlas": [
+        720,
+        1696,
+        360,
+        424
+      ]
+    },
+    "$": {
+      "advance": 146.0,
+      "originX": 95.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "$",
+      "atlas": [
+        1080,
+        1696,
+        360,
+        424
+      ]
+    },
+    "%": {
+      "advance": 307.0,
+      "originX": 16.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "%",
+      "atlas": [
+        1440,
+        1696,
+        360,
+        424
+      ]
+    },
+    "&": {
+      "advance": 163.0,
+      "originX": 87.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "&",
+      "atlas": [
+        1800,
+        1696,
+        360,
+        424
+      ]
+    },
+    "'": {
+      "advance": 78.0,
+      "originX": 130.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "'",
+      "atlas": [
+        2160,
+        1696,
+        360,
+        424
+      ]
+    },
+    "(": {
+      "advance": 99.0,
+      "originX": 121.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "(",
+      "atlas": [
+        2520,
+        1696,
+        360,
+        424
+      ]
+    },
+    ")": {
+      "advance": 99.0,
+      "originX": 119.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": ")",
+      "atlas": [
+        2880,
+        1696,
+        360,
+        424
+      ]
+    },
+    "*": {
+      "advance": 144.0,
+      "originX": 97.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "*",
+      "atlas": [
+        0,
+        2120,
+        360,
+        424
+      ]
+    },
+    "+": {
+      "advance": 117.0,
+      "originX": 110.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "+",
+      "atlas": [
+        360,
+        2120,
+        360,
+        424
+      ]
+    },
+    ",": {
+      "advance": 84.0,
+      "originX": 129.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": ",",
+      "atlas": [
+        720,
+        2120,
+        360,
+        424
+      ]
+    },
+    "-": {
+      "advance": 105.0,
+      "originX": 118.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "-",
+      "atlas": [
+        1080,
+        2120,
+        360,
+        424
+      ]
+    },
+    ".": {
+      "advance": 82.0,
+      "originX": 130.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": ".",
+      "atlas": [
+        1440,
+        2120,
+        360,
+        424
+      ]
+    },
+    "/": {
+      "advance": 133.0,
+      "originX": 102.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "/",
+      "atlas": [
+        1800,
+        2120,
+        360,
+        424
+      ]
+    },
+    ":": {
+      "advance": 86.0,
+      "originX": 130.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": ":",
+      "atlas": [
+        2160,
+        2120,
+        360,
+        424
+      ]
+    },
+    ";": {
+      "advance": 87.0,
+      "originX": 129.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": ";",
+      "atlas": [
+        2520,
+        2120,
+        360,
+        424
+      ]
+    },
+    "<": {
+      "advance": 107.0,
+      "originX": 115.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "<",
+      "atlas": [
+        2880,
+        2120,
+        360,
+        424
+      ]
+    },
+    "=": {
+      "advance": 105.0,
+      "originX": 119.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "=",
+      "atlas": [
+        0,
+        2544,
+        360,
+        424
+      ]
+    },
+    ">": {
+      "advance": 107.0,
+      "originX": 118.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": ">",
+      "atlas": [
+        360,
+        2544,
+        360,
+        424
+      ]
+    },
+    "?": {
+      "advance": 154.0,
+      "originX": 93.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "?",
+      "atlas": [
+        720,
+        2544,
+        360,
+        424
+      ]
+    },
+    "@": {
+      "advance": 255.0,
+      "originX": 45.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "@",
+      "atlas": [
+        1080,
+        2544,
+        360,
+        424
+      ]
+    },
+    "[": {
+      "advance": 106.0,
+      "originX": 119.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "[",
+      "atlas": [
+        1440,
+        2544,
+        360,
+        424
+      ]
+    },
+    "\\": {
+      "advance": 133.0,
+      "originX": 102.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "\\",
+      "atlas": [
+        1800,
+        2544,
+        360,
+        424
+      ]
+    },
+    "]": {
+      "advance": 106.0,
+      "originX": 115.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "]",
+      "atlas": [
+        2160,
+        2544,
+        360,
+        424
+      ]
+    },
+    "^": {
+      "advance": 149.0,
+      "originX": 94.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "^",
+      "atlas": [
+        2520,
+        2544,
+        360,
+        424
+      ]
+    },
+    "_": {
+      "advance": 119.0,
+      "originX": 111.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "_",
+      "atlas": [
+        2880,
+        2544,
+        360,
+        424
+      ]
+    },
+    "`": {
+      "advance": 106.0,
+      "originX": 119.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "`",
+      "atlas": [
+        0,
+        2968,
+        360,
+        424
+      ]
+    },
+    "{": {
+      "advance": 113.0,
+      "originX": 112.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "{",
+      "atlas": [
+        360,
+        2968,
+        360,
+        424
+      ]
+    },
+    "|": {
+      "advance": 79.0,
+      "originX": 133.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "|",
+      "atlas": [
+        720,
+        2968,
+        360,
+        424
+      ]
+    },
+    "}": {
+      "advance": 113.0,
+      "originX": 112.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "}",
+      "atlas": [
+        1080,
+        2968,
+        360,
+        424
+      ]
+    },
+    "~": {
+      "advance": 157.0,
+      "originX": 93.0,
+      "baseline": 308.0,
+      "sourceKind": "authored-ofl-material-glyph",
+      "sourceCharacter": "~",
+      "atlas": [
+        1440,
+        2968,
+        360,
+        424
+      ]
+    },
+    "a": {
+      "alias": "A",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "A"
+    },
+    "b": {
+      "alias": "B",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "B"
+    },
+    "c": {
+      "alias": "C",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "C"
+    },
+    "d": {
+      "alias": "D",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "D"
+    },
+    "e": {
+      "alias": "E",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "E"
+    },
+    "f": {
+      "alias": "F",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "F"
+    },
+    "g": {
+      "alias": "G",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "G"
+    },
+    "h": {
+      "alias": "H",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "H"
+    },
+    "i": {
+      "alias": "I",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "I"
+    },
+    "j": {
+      "alias": "J",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "J"
+    },
+    "k": {
+      "alias": "K",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "K"
+    },
+    "l": {
+      "alias": "L",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "L"
+    },
+    "m": {
+      "alias": "M",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "M"
+    },
+    "n": {
+      "alias": "N",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "N"
+    },
+    "o": {
+      "alias": "O",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "O"
+    },
+    "p": {
+      "alias": "P",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "P"
+    },
+    "q": {
+      "alias": "Q",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "Q"
+    },
+    "r": {
+      "alias": "R",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "R"
+    },
+    "s": {
+      "alias": "S",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "S"
+    },
+    "t": {
+      "alias": "T",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "T"
+    },
+    "u": {
+      "alias": "U",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "U"
+    },
+    "v": {
+      "alias": "V",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "V"
+    },
+    "w": {
+      "alias": "W",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "W"
+    },
+    "x": {
+      "alias": "X",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "X"
+    },
+    "y": {
+      "alias": "Y",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "Y"
+    },
+    "z": {
+      "alias": "Z",
+      "sourceKind": "uppercase-material-alias",
+      "sourceCharacter": "Z"
+    }
+  }
+}

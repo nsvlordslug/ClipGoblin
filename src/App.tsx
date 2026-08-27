@@ -26,6 +26,7 @@ import BugReport from './pages/BugReport'
 import Analytics from './pages/Analytics'
 import { useScheduleStore } from './stores/scheduleStore'
 import { useAppStore } from './stores/appStore'
+import { isSpeechModelNavigationLocked } from './lib/speechModelSelection'
 
 const mainNavItems = [
   { to: '/', label: 'Dashboard', icon: '⊞', badgeKind: 'none' as const },
@@ -128,6 +129,7 @@ export default function App() {
   const loggedInUser = useAppStore(s => s.loggedInUser)
   const fetchClips = useAppStore(s => s.fetchClips)
   const fetchHighlights = useAppStore(s => s.fetchHighlights)
+  const speechModelSelectionSaving = useAppStore(s => s.speechModelSelectionSaving)
   const scheduledUploads = useScheduleStore(s => s.uploads)
   const liveVodCount = vods.filter(v => v.analysis_status === 'analyzing').length
   const reviewCount = highlights.filter(h => (h.confidence_score ?? h.virality_score) < 0.85).length
@@ -214,17 +216,23 @@ export default function App() {
         <nav className="flex-1 px-3 py-4 space-y-1">
           {mainNavItems.map(({ to, label, icon, badgeKind }) => {
             const badge = badgeFor(badgeKind)
+            const navigationLocked = isSpeechModelNavigationLocked(speechModelSelectionSaving, to)
             return (
               <NavLink
                 key={to}
                 to={to}
                 end={to === '/'}
+                aria-disabled={navigationLocked}
+                tabIndex={navigationLocked ? -1 : undefined}
+                onClick={event => {
+                  if (navigationLocked) event.preventDefault()
+                }}
                 className={({ isActive }) =>
                   `flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium transition-colors ${
                     isActive
                       ? 'bg-violet-600/20 text-violet-400'
                       : 'text-slate-400 hover:text-slate-200 hover:bg-surface-800'
-                  }`
+                  } ${navigationLocked ? 'pointer-events-none cursor-wait opacity-50' : ''}`
                 }
               >
                 <span className="v4-nav-icon">{icon}</span>
@@ -242,17 +250,23 @@ export default function App() {
 
           {accountNavItems.map(({ to, label, icon, badgeKind }) => {
             const badge = badgeFor(badgeKind)
+            const navigationLocked = isSpeechModelNavigationLocked(speechModelSelectionSaving, to)
             return (
               <NavLink
                 key={to}
                 to={to}
                 end={to === '/'}
+                aria-disabled={navigationLocked}
+                tabIndex={navigationLocked ? -1 : undefined}
+                onClick={event => {
+                  if (navigationLocked) event.preventDefault()
+                }}
                 className={({ isActive }) =>
                   `flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium transition-colors ${
                     isActive
                       ? 'bg-violet-600/20 text-violet-400'
                       : 'text-slate-400 hover:text-slate-200 hover:bg-surface-800'
-                  }`
+                  } ${navigationLocked ? 'pointer-events-none cursor-wait opacity-50' : ''}`
                 }
               >
                 <span className="v4-nav-icon">{icon}</span>

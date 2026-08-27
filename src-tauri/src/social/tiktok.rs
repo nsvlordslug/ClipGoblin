@@ -31,14 +31,12 @@ use tokio::io::AsyncReadExt;
 
 const TIKTOK_AUTH_URL: &str = "https://www.tiktok.com/v2/auth/authorize/";
 const TIKTOK_USERINFO_URL: &str = "https://open.tiktokapis.com/v2/user/info/";
-const TIKTOK_PUBLISH_INIT_URL: &str =
-    "https://open.tiktokapis.com/v2/post/publish/video/init/";
+const TIKTOK_PUBLISH_INIT_URL: &str = "https://open.tiktokapis.com/v2/post/publish/video/init/";
 const TIKTOK_UPLOAD_INIT_URL: &str =
     "https://open.tiktokapis.com/v2/post/publish/inbox/video/init/";
 const TIKTOK_CREATOR_INFO_URL: &str =
     "https://open.tiktokapis.com/v2/post/publish/creator_info/query/";
-const TIKTOK_PUBLISH_STATUS_URL: &str =
-    "https://open.tiktokapis.com/v2/post/publish/status/fetch/";
+const TIKTOK_PUBLISH_STATUS_URL: &str = "https://open.tiktokapis.com/v2/post/publish/status/fetch/";
 
 const CALLBACK_PORT: u16 = 17387;
 const REDIRECT_URI: &str = "https://nsvlordslug.github.io/ClipGoblin/callback/";
@@ -75,17 +73,14 @@ fn upload_chunk_plan(total_size: u64) -> (u64, u64) {
 /// Override with `TIKTOK_CLIENT_KEY` env var for development.
 const DEFAULT_TIKTOK_CLIENT_KEY: &str = "awzco3f3mgjpwjam";
 
-static CLIENT_KEY: Lazy<String> = Lazy::new(|| {
-    match std::env::var("TIKTOK_CLIENT_KEY") {
-        Ok(val) if !val.is_empty() => {
-            let preview = if val.len() > 6 { &val[..6] } else { &val };
-            log::info!("TikTok CLIENT_KEY loaded from env: '{}...' (len={})", preview, val.len());
-            val
-        }
-        _ => {
-            log::info!("Using embedded TikTok CLIENT_KEY");
-            DEFAULT_TIKTOK_CLIENT_KEY.to_string()
-        }
+static CLIENT_KEY: Lazy<String> = Lazy::new(|| match std::env::var("TIKTOK_CLIENT_KEY") {
+    Ok(val) if !val.is_empty() => {
+        log::info!("TikTok client key loaded from the development environment");
+        val
+    }
+    _ => {
+        log::info!("Using embedded TikTok CLIENT_KEY");
+        DEFAULT_TIKTOK_CLIENT_KEY.to_string()
     }
 });
 
@@ -126,8 +121,21 @@ struct TokenResponse {
 struct TikTokUserInfo {
     open_id: String,
     display_name: String,
-    /// The actual @handle — `Some` if user.info.profile scope is available, `None` otherwise.
-    username: Option<String>,
+}
+
+fn verified_creator_username(raw: &str) -> Option<String> {
+    let username = raw.trim().trim_start_matches('@').trim();
+    (!username.is_empty()).then(|| username.to_string())
+}
+
+fn verified_open_id(token_open_id: &str, returned_open_id: &str) -> Result<String, AppError> {
+    if token_open_id.is_empty() || returned_open_id.is_empty() || token_open_id != returned_open_id
+    {
+        return Err(AppError::Api(
+            "TikTok account identity could not be verified".into(),
+        ));
+    }
+    Ok(returned_open_id.to_string())
 }
 
 /// Response from Content Posting init endpoint.
@@ -202,8 +210,7 @@ pub fn wait_for_auth_code(listener: TcpListener) -> Result<String, AppError> {
 
         // Skip non-callback requests (e.g. /favicon.ico)
         if !path.starts_with("/callback") {
-            let resp =
-                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             if let Ok(mut w) = stream.try_clone() {
                 w.write_all(resp.as_bytes()).ok();
                 w.flush().ok();
@@ -353,7 +360,7 @@ impl PlatformAdapter for TikTokAdapter {
             urlencoding::encode(&code_challenge),
         );
 
-        log::info!("TikTok auth URL: {}", url);
+        log::info!("TikTok authorization URL prepared");
 
         Ok(url)
     }
@@ -365,6 +372,22 @@ impl PlatformAdapter for TikTokAdapter {
     ) -> Result<ConnectedAccount, AppError> {
         let code_owned = code.to_string();
         let (tokens, user_info) = do_handle_callback_net(&code_owned).await?;
+        let creator_info = match fetch_creator_info_for_connection(&tokens.access_token).await {
+            Ok(info) => Some(info),
+            Err(_) => {
+                log::warn!("TikTok account identity could not be verified");
+                None
+            }
+        };
+        let account_handle = creator_info
+            .as_ref()
+            .and_then(|info| verified_creator_username(&info.creator_username));
+        let account_name = creator_info
+            .as_ref()
+            .map(|info| info.creator_nickname.trim())
+            .filter(|nickname| !nickname.is_empty())
+            .unwrap_or(user_info.display_name.as_str())
+            .to_string();
 
         let expiry = chrono::Utc::now().timestamp() + tokens.expires_in as i64;
         let refresh_expiry = chrono::Utc::now().timestamp() + tokens.refresh_expires_in as i64;
@@ -382,29 +405,24 @@ impl PlatformAdapter for TikTokAdapter {
             .map_err(|e| AppError::Database(e.to_string()))?;
         db::save_setting(&conn, "tiktok_open_id", &user_info.open_id)
             .map_err(|e| AppError::Database(e.to_string()))?;
-        db::save_setting(&conn, "tiktok_display_name", &user_info.display_name)
+        db::save_setting(&conn, "tiktok_display_name", &account_name)
             .map_err(|e| AppError::Database(e.to_string()))?;
-        // Save the TikTok @handle. Priority:
-        // 1. API-returned username (if user.info.profile scope is available)
-        // 2. Existing manually-set handle (don't overwrite user's override)
-        // 3. display_name as a last resort
-        if let Some(ref handle) = user_info.username {
-            // Got the real handle from the API — always use it
+        if let Some(ref handle) = account_handle {
+            db::save_setting(&conn, "tiktok_creator_username", handle)
+                .map_err(|e| AppError::Database(e.to_string()))?;
             db::save_setting(&conn, "tiktok_handle", handle)
                 .map_err(|e| AppError::Database(e.to_string()))?;
-        } else if db::get_setting(&conn, "tiktok_handle")
-            .map_err(|e| AppError::Database(e.to_string()))?
-            .is_none()
-        {
-            // No API handle and nothing saved — default to display_name
-            db::save_setting(&conn, "tiktok_handle", &user_info.display_name)
+        } else {
+            db::save_setting(&conn, "tiktok_creator_username", "")
                 .map_err(|e| AppError::Database(e.to_string()))?;
+            log::warn!("TikTok account connected without a verified creator username");
         }
 
         let now = chrono::Utc::now().to_rfc3339();
         Ok(ConnectedAccount {
             platform: "tiktok".into(),
-            account_name: user_info.display_name,
+            account_name,
+            account_handle,
             account_id: user_info.open_id,
             connected_at: now,
         })
@@ -527,13 +545,8 @@ impl PlatformAdapter for TikTokAdapter {
                 let conn = db
                     .lock()
                     .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
-                db::mark_upload_inbox_delivered(
-                    &conn,
-                    &meta.clip_id,
-                    "tiktok",
-                    &publish_id,
-                )
-                .map_err(|e| AppError::Database(e.to_string()))?;
+                db::mark_upload_inbox_delivered(&conn, &meta.clip_id, "tiktok", &publish_id)
+                    .map_err(|e| AppError::Database(e.to_string()))?;
                 Ok(UploadResult {
                     status: UploadResultStatus::InboxDelivered,
                     job_id: publish_id,
@@ -575,11 +588,15 @@ impl PlatformAdapter for TikTokAdapter {
             .map_err(|e| AppError::Database(e.to_string()))?;
         let open_id =
             db::get_setting(db, "tiktok_open_id").map_err(|e| AppError::Database(e.to_string()))?;
+        let account_handle = db::get_setting(db, "tiktok_creator_username")
+            .map_err(|e| AppError::Database(e.to_string()))?
+            .and_then(|value| verified_creator_username(&value));
 
         match (display_name, open_id) {
             (Some(name), Some(id)) => Ok(Some(ConnectedAccount {
                 platform: "tiktok".into(),
                 account_name: name,
+                account_handle,
                 account_id: id,
                 connected_at: String::new(),
             })),
@@ -592,9 +609,7 @@ impl PlatformAdapter for TikTokAdapter {
 //  Async network helpers (no &Connection — safe for Send futures)
 // ═══════════════════════════════════════════════════════════════════
 
-async fn do_handle_callback_net(
-    code: &str,
-) -> Result<(TokenResponse, TikTokUserInfo), AppError> {
+async fn do_handle_callback_net(code: &str) -> Result<(TokenResponse, TikTokUserInfo), AppError> {
     let tokens = exchange_code(code).await?;
     let user_info = fetch_user_info(&tokens.access_token, &tokens.open_id).await?;
     Ok((tokens, user_info))
@@ -649,9 +664,7 @@ async fn do_refresh_token_net(refresh_tok: &str) -> Result<TokenResponse, AppErr
 /// Query creator info — recommended by TikTok before initiating a Direct Post.
 /// Returns the available privacy levels so we can pick a valid one.
 /// Non-fatal: if this fails, we fall back to SELF_ONLY and still attempt the upload.
-async fn query_creator_info(
-    access_token: &str,
-) -> Vec<String> {
+async fn query_creator_info(access_token: &str) -> Vec<String> {
     let client = reqwest::Client::new();
 
     // TikTok expects a POST with an empty JSON body (not bodyless)
@@ -665,7 +678,10 @@ async fn query_creator_info(
     {
         Ok(r) => r,
         Err(e) => {
-            log::warn!("TikTok creator_info request failed: {} — continuing with SELF_ONLY", e);
+            log::warn!(
+                "TikTok creator_info request failed: {} — continuing with SELF_ONLY",
+                e
+            );
             return vec![];
         }
     };
@@ -674,10 +690,13 @@ async fn query_creator_info(
     let body = resp.text().await.unwrap_or_default();
 
     log::info!("TikTok creator_info response ({})", status);
-    log::debug!("TikTok creator_info body: {}", body);
+    log::debug!("TikTok creator_info response received");
 
     if !status.is_success() {
-        log::warn!("TikTok creator_info returned {} — continuing with SELF_ONLY", status);
+        log::warn!(
+            "TikTok creator_info returned {} — continuing with SELF_ONLY",
+            status
+        );
         return vec![];
     }
 
@@ -685,7 +704,10 @@ async fn query_creator_info(
     let parsed: serde_json::Value = match serde_json::from_str(&body) {
         Ok(v) => v,
         Err(e) => {
-            log::warn!("Failed to parse creator_info JSON: {} — continuing with SELF_ONLY", e);
+            log::warn!(
+                "Failed to parse creator_info JSON: {} — continuing with SELF_ONLY",
+                e
+            );
             return vec![];
         }
     };
@@ -696,7 +718,8 @@ async fn query_creator_info(
         let error_msg = parsed["error"]["message"].as_str().unwrap_or("unknown");
         log::warn!(
             "TikTok creator_info API error: {} — {} — continuing with SELF_ONLY",
-            error_code, error_msg
+            error_code,
+            error_msg
         );
         return vec![];
     }
@@ -744,13 +767,9 @@ fn is_trusted_creator_avatar_url(raw_url: &str) -> bool {
     let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
         return false;
     };
-    [
-        "tiktokcdn.com",
-        "tiktokcdn-us.com",
-        "tiktokcdn-eu.com",
-    ]
-    .iter()
-    .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+    ["tiktokcdn.com", "tiktokcdn-us.com", "tiktokcdn-eu.com"]
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
 }
 
 async fn creator_avatar_data_url(raw_url: &str) -> Option<String> {
@@ -766,10 +785,7 @@ async fn creator_avatar_data_url(raw_url: &str) -> Option<String> {
         .ok()?;
     let mut response = client.get(raw_url).send().await.ok()?;
     if !response.status().is_success() {
-        log::warn!(
-            "TikTok creator avatar returned HTTP {}",
-            response.status()
-        );
+        log::warn!("TikTok creator avatar returned HTTP {}", response.status());
         return None;
     }
 
@@ -787,7 +803,10 @@ async fn creator_avatar_data_url(raw_url: &str) -> Option<String> {
         })?
         .to_string();
 
-    if response.content_length().is_some_and(|size| size > MAX_CREATOR_AVATAR_BYTES as u64) {
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_CREATOR_AVATAR_BYTES as u64)
+    {
         log::warn!("TikTok creator avatar exceeded the size limit");
         return None;
     }
@@ -810,12 +829,44 @@ async fn creator_avatar_data_url(raw_url: &str) -> Option<String> {
     ))
 }
 
+#[derive(Clone, Copy)]
+enum CreatorAvatarMode {
+    Deferred,
+    Inline,
+}
+
+async fn resolve_creator_avatar_url(remote_avatar_url: String, mode: CreatorAvatarMode) -> String {
+    if remote_avatar_url.is_empty() || matches!(mode, CreatorAvatarMode::Deferred) {
+        return remote_avatar_url;
+    }
+
+    creator_avatar_data_url(&remote_avatar_url)
+        .await
+        .unwrap_or(remote_avatar_url)
+}
+
+async fn fetch_creator_info_for_connection(
+    access_token: &str,
+) -> Result<TikTokCreatorInfo, AppError> {
+    fetch_creator_info_with_avatar_mode(access_token, CreatorAvatarMode::Deferred).await
+}
+
 /// Fetch the full creator_info for the compliance panel. Unlike
 /// `query_creator_info` (upload path, only needs the privacy list and is
 /// non-fatal), this surfaces errors to the UI so the publish screen can tell
 /// the user to reconnect instead of silently posting with defaults.
 pub async fn fetch_creator_info(access_token: &str) -> Result<TikTokCreatorInfo, AppError> {
-    let client = reqwest::Client::new();
+    fetch_creator_info_with_avatar_mode(access_token, CreatorAvatarMode::Inline).await
+}
+
+async fn fetch_creator_info_with_avatar_mode(
+    access_token: &str,
+    avatar_mode: CreatorAvatarMode,
+) -> Result<TikTokCreatorInfo, AppError> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| AppError::Api(format!("TikTok HTTP client setup failed: {}", e)))?;
 
     let resp = client
         .post(TIKTOK_CREATOR_INFO_URL)
@@ -828,7 +879,7 @@ pub async fn fetch_creator_info(access_token: &str) -> Result<TikTokCreatorInfo,
 
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
-    log::debug!("TikTok fetch_creator_info ({}) body: {}", status, body);
+    log::debug!("TikTok fetch_creator_info response ({})", status);
 
     if !status.is_success() {
         return Err(AppError::Api(format!(
@@ -858,14 +909,11 @@ pub async fn fetch_creator_info(access_token: &str) -> Result<TikTokCreatorInfo,
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let remote_avatar_url = data["creator_avatar_url"].as_str().unwrap_or("").to_string();
-    let creator_avatar_url = if remote_avatar_url.is_empty() {
-        String::new()
-    } else {
-        creator_avatar_data_url(&remote_avatar_url)
-            .await
-            .unwrap_or(remote_avatar_url)
-    };
+    let remote_avatar_url = data["creator_avatar_url"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let creator_avatar_url = resolve_creator_avatar_url(remote_avatar_url, avatar_mode).await;
 
     Ok(TikTokCreatorInfo {
         creator_nickname: data["creator_nickname"].as_str().unwrap_or("").to_string(),
@@ -1322,10 +1370,7 @@ async fn poll_publish_status(
                 );
             }
             Ok(PublishPollResult::InboxDelivered) => {
-                log::info!(
-                    "TikTok delivered draft {} to the creator inbox",
-                    publish_id
-                );
+                log::info!("TikTok delivered draft {} to the creator inbox", publish_id);
                 return UploadResultStatus::InboxDelivered;
             }
             Err(error) => {
@@ -1357,6 +1402,26 @@ mod error_message_tests {
     }
 
     #[test]
+    fn creator_username_must_be_nonempty_before_it_is_verified() {
+        assert_eq!(
+            verified_creator_username(" @lord_slug ").as_deref(),
+            Some("lord_slug")
+        );
+        assert_eq!(verified_creator_username("   "), None);
+        assert_eq!(verified_creator_username("@@  "), None);
+    }
+
+    #[test]
+    fn open_id_must_match_across_the_token_and_user_info_response() {
+        assert_eq!(
+            verified_open_id("stable-id", "stable-id").unwrap(),
+            "stable-id"
+        );
+        assert!(verified_open_id("stable-id", "different-id").is_err());
+        assert!(verified_open_id("", "stable-id").is_err());
+    }
+
+    #[test]
     fn creator_avatar_proxy_only_accepts_tiktok_https_cdn_urls() {
         assert!(is_trusted_creator_avatar_url(
             "https://p16-sign-va.tiktokcdn.com/avatar.jpeg?x-expires=123"
@@ -1375,6 +1440,15 @@ mod error_message_tests {
         ));
     }
 
+    #[tokio::test]
+    async fn connection_identity_defers_creator_avatar_download() {
+        let remote = "https://p16-sign.tiktokcdn-us.com/avatar.webp".to_string();
+        assert_eq!(
+            resolve_creator_avatar_url(remote.clone(), CreatorAvatarMode::Deferred).await,
+            remote
+        );
+    }
+
     #[test]
     fn small_upload_uses_one_whole_file_chunk() {
         let total_size = 3 * 1024 * 1024;
@@ -1390,19 +1464,13 @@ mod error_message_tests {
     #[test]
     fn large_upload_uses_floor_count_so_final_chunk_absorbs_remainder() {
         let total_size = 69 * 1024 * 1024;
-        assert_eq!(
-            upload_chunk_plan(total_size),
-            (UPLOAD_CHUNK_SIZE as u64, 6)
-        );
+        assert_eq!(upload_chunk_plan(total_size), (UPLOAD_CHUNK_SIZE as u64, 6));
     }
 
     #[test]
     fn exact_large_upload_multiple_has_no_extra_chunk() {
         let total_size = 70 * 1024 * 1024;
-        assert_eq!(
-            upload_chunk_plan(total_size),
-            (UPLOAD_CHUNK_SIZE as u64, 7)
-        );
+        assert_eq!(upload_chunk_plan(total_size), (UPLOAD_CHUNK_SIZE as u64, 7));
     }
 
     #[test]
@@ -1534,10 +1602,7 @@ mod error_message_tests {
 /// Exchange an authorization code for access + refresh tokens via auth proxy.
 async fn exchange_code(code: &str) -> Result<TokenResponse, AppError> {
     // Retrieve the PKCE code_verifier generated during start_auth
-    let code_verifier = PKCE_VERIFIER
-        .lock()
-        .map(|g| g.clone())
-        .unwrap_or_default();
+    let code_verifier = PKCE_VERIFIER.lock().map(|g| g.clone()).unwrap_or_default();
 
     if code_verifier.is_empty() {
         return Err(AppError::Api(
@@ -1546,13 +1611,12 @@ async fn exchange_code(code: &str) -> Result<TokenResponse, AppError> {
     }
 
     log::info!(
-        "TikTok token exchange via auth proxy (code={}..., verifier={} chars)",
-        &code[..code.len().min(10)],
+        "TikTok token exchange via auth proxy (verifier={} chars)",
         code_verifier.len()
     );
 
-    let proxy = AuthProxy::new()
-        .map_err(|e| AppError::Api(format!("Auth proxy init failed: {}", e)))?;
+    let proxy =
+        AuthProxy::new().map_err(|e| AppError::Api(format!("Auth proxy init failed: {}", e)))?;
     let proxy_resp = proxy
         .tiktok_token_exchange(code, REDIRECT_URI, &code_verifier)
         .await
@@ -1567,9 +1631,11 @@ async fn exchange_code(code: &str) -> Result<TokenResponse, AppError> {
         )));
     }
 
-    let access_token = proxy_resp.access_token
+    let access_token = proxy_resp
+        .access_token
         .ok_or_else(|| AppError::Api("Proxy response missing access_token".into()))?;
-    let refresh_token = proxy_resp.refresh_token
+    let refresh_token = proxy_resp
+        .refresh_token
         .ok_or_else(|| AppError::Api("Proxy response missing refresh_token".into()))?;
 
     log::info!("TikTok token exchange succeeded via proxy");
@@ -1585,10 +1651,7 @@ async fn exchange_code(code: &str) -> Result<TokenResponse, AppError> {
 }
 
 /// Fetch the authenticated user's TikTok display name and open_id.
-async fn fetch_user_info(
-    access_token: &str,
-    open_id: &str,
-) -> Result<TikTokUserInfo, AppError> {
+async fn fetch_user_info(access_token: &str, open_id: &str) -> Result<TikTokUserInfo, AppError> {
     let client = reqwest::Client::new();
     let resp = client
         .get(TIKTOK_USERINFO_URL)
@@ -1601,72 +1664,31 @@ async fn fetch_user_info(
     let body_text = resp.text().await.unwrap_or_default();
 
     log::info!("TikTok user info response ({})", status);
-    log::debug!("TikTok user info body: {}", body_text);
 
     if !status.is_success() {
         return Err(AppError::Api(format!(
-            "TikTok user info fetch failed ({}): {}",
-            status, body_text
+            "TikTok user info fetch failed ({})",
+            status
         )));
     }
 
     let body: serde_json::Value = serde_json::from_str(&body_text)
-        .map_err(|e| AppError::Api(format!(
-            "TikTok user info: failed to parse response: {} — body: {}",
-            e, body_text
-        )))?;
+        .map_err(|e| AppError::Api(format!("TikTok user info response was invalid: {}", e)))?;
     let data = &body["data"]["user"];
+    let returned_open_id = data["open_id"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AppError::Api("TikTok user info response was missing open_id".into()))?;
+    let verified_open_id = verified_open_id(open_id, returned_open_id)?;
     let display_name = data["display_name"]
         .as_str()
         .unwrap_or("TikTok User")
         .to_string();
-    log::info!("TikTok user info: display_name={}", display_name);
-
-    // Try to fetch the actual @handle (requires user.info.profile scope).
-    // This is a separate call so it can fail gracefully in sandbox mode
-    // where user.info.profile isn't approved.
-    let username = fetch_username_best_effort(&client, access_token).await;
-    log::info!("TikTok user info: display_name={}, username={:?}", display_name, username);
 
     Ok(TikTokUserInfo {
-        open_id: open_id.to_string(),
+        open_id: verified_open_id,
         display_name,
-        username,
     })
-}
-
-/// Try to fetch the TikTok @handle via user.info.profile scope.
-/// Returns None if the scope isn't authorized — this is expected in sandbox.
-async fn fetch_username_best_effort(
-    client: &reqwest::Client,
-    access_token: &str,
-) -> Option<String> {
-    let resp = client
-        .get(TIKTOK_USERINFO_URL)
-        .header("Authorization", format!("Bearer {}", access_token))
-        .query(&[("fields", "username")])
-        .send()
-        .await
-        .ok()?;
-
-    let body_text = resp.text().await.ok()?;
-    log::debug!("TikTok username fetch response: {}", body_text);
-
-    let body: serde_json::Value = serde_json::from_str(&body_text).ok()?;
-
-    // Check for API error (scope not authorized, etc.)
-    if let Some(err) = body.get("error") {
-        let code = err.get("code").and_then(|v| v.as_str()).unwrap_or("");
-        if code != "ok" {
-            log::info!("TikTok username fetch not available ({}), will use display_name", code);
-            return None;
-        }
-    }
-
-    body["data"]["user"]["username"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
 }
 
 /// Send a styled HTML response through the TCP stream.
@@ -1733,12 +1755,16 @@ pub fn extract_video_id(url: &str) -> Option<String> {
     if let Some(idx) = url.find("/video/") {
         let rest = &url[idx + "/video/".len()..];
         let id: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if !id.is_empty() { return Some(id) }
+        if !id.is_empty() {
+            return Some(id);
+        }
     }
     if let Some(idx) = url.find("/v/") {
         let rest = &url[idx + "/v/".len()..];
         let id: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if !id.is_empty() { return Some(id) }
+        if !id.is_empty() {
+            return Some(id);
+        }
     }
     None
 }

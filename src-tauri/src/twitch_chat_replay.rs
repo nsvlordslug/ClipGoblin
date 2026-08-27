@@ -50,7 +50,8 @@ const PUBLIC_CLIENT_ID: &str = "kd1unb4b3q4t58fwlpcbzcbnm76a8fp";
 /// Persisted-query hash for `VideoCommentsByOffsetOrCursor`. This is the same
 /// hash TwitchDownloaderCLI and the in-browser chat replay use. If it rotates,
 /// pull the new value from any maintained Twitch chat downloader.
-const VIDEO_COMMENTS_HASH: &str = "b70a3591ff0f4e0313d126c6a1502d79a1c02baebb288227c582044aa76adf6a";
+const VIDEO_COMMENTS_HASH: &str =
+    "b70a3591ff0f4e0313d126c6a1502d79a1c02baebb288227c582044aa76adf6a";
 
 /// Per-VOD pagination cap. ~100 messages per page → 200,000 messages.
 ///
@@ -134,9 +135,7 @@ struct GqlPageInfo {
 /// Returns messages in temporal order (Twitch returns them ordered by
 /// `contentOffsetSeconds` ascending within each page). Empty messages
 /// and messages without a timestamp are filtered out.
-pub async fn fetch_chat_replay(
-    twitch_video_id: &str,
-) -> Result<Vec<ChatMessage>, String> {
+pub async fn fetch_chat_replay(twitch_video_id: &str) -> Result<Vec<ChatMessage>, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -150,7 +149,8 @@ pub async fn fetch_chat_replay(
         if pages_fetched >= MAX_PAGES {
             log::warn!(
                 "twitch_chat_replay: hit MAX_PAGES ({}) for video {}, stopping",
-                MAX_PAGES, twitch_video_id,
+                MAX_PAGES,
+                twitch_video_id,
             );
             break;
         }
@@ -200,9 +200,10 @@ pub async fn fetch_chat_replay(
         }
 
         // Batch response → single-element array. We pull the first.
-        let parsed: Vec<GqlResponse> = resp.json().await.map_err(|e| {
-            format!("Parse GQL response: {}", e)
-        })?;
+        let parsed: Vec<GqlResponse> = resp
+            .json()
+            .await
+            .map_err(|e| format!("Parse GQL response: {}", e))?;
 
         let comments = parsed
             .into_iter()
@@ -241,7 +242,10 @@ pub async fn fetch_chat_replay(
             if body.trim().is_empty() {
                 continue;
             }
-            all.push(ChatMessage { time_seconds: time, body });
+            all.push(ChatMessage {
+                time_seconds: time,
+                body,
+            });
         }
 
         if !comments.page_info.has_next_page {
@@ -249,10 +253,7 @@ pub async fn fetch_chat_replay(
         }
 
         // Continuation: use the cursor from the last edge.
-        cursor = comments
-            .edges
-            .last()
-            .and_then(|e| e.cursor.clone());
+        cursor = comments.edges.last().and_then(|e| e.cursor.clone());
         if cursor.is_none() {
             break; // Can't continue without a cursor.
         }
@@ -276,7 +277,10 @@ mod tests {
 
     #[test]
     fn message_struct_clones_cheaply() {
-        let m = ChatMessage { time_seconds: 12.5, body: "KEKW".to_string() };
+        let m = ChatMessage {
+            time_seconds: 12.5,
+            body: "KEKW".to_string(),
+        };
         let m2 = m.clone();
         assert_eq!(m.time_seconds, m2.time_seconds);
         assert_eq!(m.body, m2.body);

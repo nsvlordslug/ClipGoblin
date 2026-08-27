@@ -24,7 +24,8 @@ pub async fn twitch_login(app: AppHandle, db: State<'_, DbConn>) -> Result<db::C
     // 2. Open the auth URL in the user's browser (uses embedded client_id + PKCE)
     let auth_url = twitch::get_auth_url();
     log::info!("[twitch_login] Step 2: Opening browser for OAuth");
-    app.opener().open_url(&auth_url, None::<&str>)
+    app.opener()
+        .open_url(&auth_url, None::<&str>)
         .map_err(|e| format!("Failed to open browser: {}", e))?;
 
     // 3. Wait for the OAuth callback on the already-listening server
@@ -32,7 +33,10 @@ pub async fn twitch_login(app: AppHandle, db: State<'_, DbConn>) -> Result<db::C
     let code = tokio::task::spawn_blocking(move || twitch::wait_for_auth_code(listener))
         .await
         .map_err(|e| format!("Task error: {}", e))??;
-    log::info!("[twitch_login] Step 3: Auth code received (len={})", code.len());
+    log::info!(
+        "[twitch_login] Step 3: Auth code received (len={})",
+        code.len()
+    );
 
     // Exchange the code for an access token (PKCE — no client_secret needed)
     log::info!("[twitch_login] Step 4: Exchanging code for token...");
@@ -42,7 +46,11 @@ pub async fn twitch_login(app: AppHandle, db: State<'_, DbConn>) -> Result<db::C
     // Fetch the authenticated user's identity
     log::info!("[twitch_login] Step 5: Fetching user info...");
     let user = twitch::get_authenticated_user(&token_resp.access_token).await?;
-    log::info!("[twitch_login] Step 5: Got user: {} ({})", user.display_name, user.login);
+    log::info!(
+        "[twitch_login] Step 5: Got user: {} ({})",
+        user.display_name,
+        user.login
+    );
 
     // Save the user token for future API calls
     log::info!("[twitch_login] Step 6: Saving tokens and user info to DB...");
@@ -90,8 +98,11 @@ pub async fn twitch_login(app: AppHandle, db: State<'_, DbConn>) -> Result<db::C
         .map_err(|e| format!("DB error: {}", e))?;
     }
 
-    log::info!("[twitch_login] === Login complete: {} ({}) — returning ChannelRow to frontend ===",
-        channel.display_name, channel.twitch_login);
+    log::info!(
+        "[twitch_login] === Login complete: {} ({}) — returning ChannelRow to frontend ===",
+        channel.display_name,
+        channel.twitch_login
+    );
 
     Ok(channel)
 }
@@ -122,7 +133,9 @@ pub fn get_logged_in_user(db: State<'_, DbConn>) -> Result<Option<db::ChannelRow
     }
 
     let channels = db::get_all_channels(&conn).map_err(|e| format!("DB error: {}", e))?;
-    Ok(channels.into_iter().find(|c| c.twitch_user_id == logged_in_twitch_user_id))
+    Ok(channels
+        .into_iter()
+        .find(|c| c.twitch_user_id == logged_in_twitch_user_id))
 }
 
 /// Log out — clear saved tokens and channel.
@@ -130,7 +143,8 @@ pub fn get_logged_in_user(db: State<'_, DbConn>) -> Result<Option<db::ChannelRow
 pub fn twitch_logout(db: State<'_, DbConn>) -> Result<(), String> {
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
     db::delete_all_channels(&conn).map_err(|e| format!("DB error: {}", e))?;
-    db::save_setting(&conn, "twitch_user_access_token", "").map_err(|e| format!("DB error: {}", e))?;
+    db::save_setting(&conn, "twitch_user_access_token", "")
+        .map_err(|e| format!("DB error: {}", e))?;
     db::save_setting(&conn, "twitch_refresh_token", "").map_err(|e| format!("DB error: {}", e))?;
     db::save_setting(&conn, "twitch_user_id", "").map_err(|e| format!("DB error: {}", e))?;
     db::save_setting(&conn, "twitch_login", "").map_err(|e| format!("DB error: {}", e))?;

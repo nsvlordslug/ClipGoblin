@@ -202,10 +202,18 @@ impl ClipScoreBreakdown {
     /// How many non-zero signal sources contributed.
     pub fn active_signal_count(&self) -> usize {
         let mut n = 0;
-        if self.audio_score > 0.0 { n += 1; }
-        if self.speech_score > 0.0 { n += 1; }
-        if self.scene_score > 0.0 { n += 1; }
-        if self.vision_score.unwrap_or(0.0) > 0.0 { n += 1; }
+        if self.audio_score > 0.0 {
+            n += 1;
+        }
+        if self.speech_score > 0.0 {
+            n += 1;
+        }
+        if self.scene_score > 0.0 {
+            n += 1;
+        }
+        if self.vision_score.unwrap_or(0.0) > 0.0 {
+            n += 1;
+        }
         n
     }
 
@@ -262,11 +270,11 @@ impl DimensionScores {
         let v = raw.vision_score.unwrap_or(0.0);
 
         Self {
-            hook_strength:      (a * 0.55 + sc * 0.30 + v * 0.15).min(1.0),
-            emotional_intensity:(a * 0.40 + s * 0.35 + v * 0.25).min(1.0),
-            context_clarity:    (s * 0.55 + v * 0.35 + sc * 0.10).min(1.0),
-            visual_activity:    (sc * 0.60 + v * 0.25 + a * 0.15).min(1.0),
-            speech_punch:       (s * 0.65 + a * 0.25 + sc * 0.10).min(1.0),
+            hook_strength: (a * 0.55 + sc * 0.30 + v * 0.15).min(1.0),
+            emotional_intensity: (a * 0.40 + s * 0.35 + v * 0.25).min(1.0),
+            context_clarity: (s * 0.55 + v * 0.35 + sc * 0.10).min(1.0),
+            visual_activity: (sc * 0.60 + v * 0.25 + a * 0.15).min(1.0),
+            speech_punch: (s * 0.65 + a * 0.25 + sc * 0.10).min(1.0),
         }
     }
 
@@ -582,8 +590,14 @@ mod tests {
 
     #[test]
     fn score_breakdown_active_signal_count() {
-        assert_eq!(ClipScoreBreakdown::new(0.5, 0.0, 0.3, None).active_signal_count(), 2);
-        assert_eq!(ClipScoreBreakdown::new(0.5, 0.5, 0.5, Some(0.5)).active_signal_count(), 4);
+        assert_eq!(
+            ClipScoreBreakdown::new(0.5, 0.0, 0.3, None).active_signal_count(),
+            2
+        );
+        assert_eq!(
+            ClipScoreBreakdown::new(0.5, 0.5, 0.5, Some(0.5)).active_signal_count(),
+            4
+        );
         assert_eq!(ClipScoreBreakdown::default().active_signal_count(), 0);
     }
 
@@ -658,12 +672,20 @@ mod tests {
     #[test]
     fn dimension_weights_validate() {
         let w = DimensionWeights {
-            hook: 0.25, emotion: 0.30, context: 0.15, visual: 0.15, speech: 0.15,
+            hook: 0.25,
+            emotion: 0.30,
+            context: 0.15,
+            visual: 0.15,
+            speech: 0.15,
         };
         assert!(w.validate().is_ok());
 
         let bad = DimensionWeights {
-            hook: 0.9, emotion: 0.3, context: 0.1, visual: 0.1, speech: 0.1,
+            hook: 0.9,
+            emotion: 0.3,
+            context: 0.1,
+            visual: 0.1,
+            speech: 0.1,
         };
         assert!(bad.validate().is_err());
     }
@@ -692,8 +714,14 @@ mod tests {
 
     #[test]
     fn signal_type_serializes_as_snake_case() {
-        assert_eq!(serde_json::to_string(&SignalType::SceneChange).unwrap(), "\"scene_change\"");
-        assert_eq!(serde_json::to_string(&SignalType::Vision).unwrap(), "\"vision\"");
+        assert_eq!(
+            serde_json::to_string(&SignalType::SceneChange).unwrap(),
+            "\"scene_change\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SignalType::Vision).unwrap(),
+            "\"vision\""
+        );
     }
 
     #[test]

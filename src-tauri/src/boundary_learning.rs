@@ -199,8 +199,7 @@ impl BoundaryPreferenceProfile {
             return (start, end, false);
         }
 
-        let changed = (adjusted_start - start).abs() >= 0.05
-            || (adjusted_end - end).abs() >= 0.05;
+        let changed = (adjusted_start - start).abs() >= 0.05 || (adjusted_end - end).abs() >= 0.05;
         (adjusted_start, adjusted_end, changed)
     }
 }
@@ -236,8 +235,7 @@ fn build_side_profile(samples: &[(f64, f64)]) -> (f64, f64) {
         .sum::<f64>()
         / total_weight;
     let sample_confidence = (0.35 + samples.len() as f64 * 0.075).min(1.0);
-    let evidence_quality = (total_weight / (samples.len() as f64 * ISSUE_WEIGHT))
-        .clamp(0.4, 1.0);
+    let evidence_quality = (total_weight / (samples.len() as f64 * ISSUE_WEIGHT)).clamp(0.4, 1.0);
     let confidence = sample_confidence * evidence_quality;
     (average * confidence, confidence)
 }
@@ -319,7 +317,12 @@ mod tests {
     #[test]
     fn one_clip_cannot_activate_boundary_learning() {
         let profile = BoundaryPreferenceProfile::from_evidence(
-            &[feedback("one", &["starts_too_late", "cuts_off_early"], "creator-1", "Valorant")],
+            &[feedback(
+                "one",
+                &["starts_too_late", "cuts_off_early"],
+                "creator-1",
+                "Valorant",
+            )],
             &[],
             Some("creator-1"),
             Some("Valorant"),
@@ -330,8 +333,18 @@ mod tests {
     #[test]
     fn both_boundary_issues_adjust_their_own_side() {
         let rows = vec![
-            feedback("one", &["starts_too_late", "cuts_off_early"], "creator-1", "Valorant"),
-            feedback("two", &["starts_too_late", "cuts_off_early"], "creator-1", "Valorant"),
+            feedback(
+                "one",
+                &["starts_too_late", "cuts_off_early"],
+                "creator-1",
+                "Valorant",
+            ),
+            feedback(
+                "two",
+                &["starts_too_late", "cuts_off_early"],
+                "creator-1",
+                "Valorant",
+            ),
         ];
         let profile = BoundaryPreferenceProfile::from_evidence(
             &rows,
@@ -382,7 +395,12 @@ mod tests {
     #[test]
     fn non_boundary_issues_never_change_timing() {
         let rows = vec![
-            feedback("one", &["wrong_moment", "duplicate"], "creator-1", "Valorant"),
+            feedback(
+                "one",
+                &["wrong_moment", "duplicate"],
+                "creator-1",
+                "Valorant",
+            ),
             feedback("two", &["too_long"], "creator-1", "Valorant"),
         ];
         let profile = BoundaryPreferenceProfile::from_evidence(

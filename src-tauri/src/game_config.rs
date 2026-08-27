@@ -15,6 +15,81 @@
 
 use serde::Deserialize;
 
+// ── Stream style ──
+
+/// Per-VOD detection style. `Auto` keeps the existing game-aware resolver;
+/// explicit choices let the creator correct the broad pacing/signal profile
+/// without adding another global settings surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamStyle {
+    Auto,
+    Action,
+    Cozy,
+    Story,
+    Talking,
+    Mixed,
+}
+
+impl StreamStyle {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "action" => Some(Self::Action),
+            "cozy" => Some(Self::Cozy),
+            "story" => Some(Self::Story),
+            "talking" => Some(Self::Talking),
+            "mixed" => Some(Self::Mixed),
+            _ => None,
+        }
+    }
+
+    pub fn from_str_or_default(value: &str) -> Self {
+        Self::parse(value).unwrap_or(Self::Auto)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Action => "action",
+            Self::Cozy => "cozy",
+            Self::Story => "story",
+            Self::Talking => "talking",
+            Self::Mixed => "mixed",
+        }
+    }
+}
+
+/// Broad style inferred from the VOD's existing game-category metadata.
+/// Unknown and strategy games stay Mixed so Auto never invents a stronger
+/// content assumption than the metadata supports.
+pub fn detected_stream_style(game_name: Option<&str>) -> StreamStyle {
+    match genre_for_game(game_name).as_deref() {
+        Some("horror" | "fps") => StreamStyle::Action,
+        Some("cozy") => StreamStyle::Cozy,
+        Some("rpg") => StreamStyle::Story,
+        Some("talking") => StreamStyle::Talking,
+        _ => StreamStyle::Mixed,
+    }
+}
+
+pub fn effective_stream_style(game_name: Option<&str>, requested: StreamStyle) -> StreamStyle {
+    if requested == StreamStyle::Auto {
+        detected_stream_style(game_name)
+    } else {
+        requested
+    }
+}
+
+/// Stable marker for the detector profile used by an analysis. Auto includes
+/// its detected style so changing the game's broad category can be recognized.
+pub fn stream_style_analysis_key(game_name: Option<&str>, requested: StreamStyle) -> String {
+    if requested == StreamStyle::Auto {
+        format!("auto:{}", detected_stream_style(game_name).as_str())
+    } else {
+        requested.as_str().to_string()
+    }
+}
+
 // ── Sensitivity ──
 
 /// User-facing sensitivity setting from Settings → Detection.
@@ -179,30 +254,44 @@ struct KnownGames {
 /// missing any required field — those would be developer bugs in the
 /// bundled config that ship with the binary, not user errors.
 pub(crate) fn parse_default() -> ResolvedConfig {
-    let partial: PartialConfig = toml::from_str(DEFAULT_TOML)
-        .expect("default.toml must be valid TOML");
+    let partial: PartialConfig =
+        toml::from_str(DEFAULT_TOML).expect("default.toml must be valid TOML");
 
     ResolvedConfig {
         audio: AudioConfig {
-            spike_threshold: partial.audio.spike_threshold
+            spike_threshold: partial
+                .audio
+                .spike_threshold
                 .expect("default.toml must define audio.spike_threshold"),
         },
         chat: ChatConfig {
-            rate_min_msgs_per_window: partial.chat.rate_min_msgs_per_window
+            rate_min_msgs_per_window: partial
+                .chat
+                .rate_min_msgs_per_window
                 .expect("default.toml must define chat.rate_min_msgs_per_window"),
-            emote_burst_threshold: partial.chat.emote_burst_threshold
+            emote_burst_threshold: partial
+                .chat
+                .emote_burst_threshold
                 .expect("default.toml must define chat.emote_burst_threshold"),
         },
         transcript: TranscriptConfig {
-            weight: partial.transcript.weight
+            weight: partial
+                .transcript
+                .weight
                 .expect("default.toml must define transcript.weight"),
         },
         selector: SelectorConfig {
-            min_clip_duration: partial.selector.min_clip_duration
+            min_clip_duration: partial
+                .selector
+                .min_clip_duration
                 .expect("default.toml must define selector.min_clip_duration"),
-            max_clip_duration: partial.selector.max_clip_duration
+            max_clip_duration: partial
+                .selector
+                .max_clip_duration
                 .expect("default.toml must define selector.max_clip_duration"),
-            min_gap_between_clips: partial.selector.min_gap_between_clips
+            min_gap_between_clips: partial
+                .selector
+                .min_gap_between_clips
                 .expect("default.toml must define selector.min_gap_between_clips"),
         },
         titles: TitleConfig {
@@ -223,30 +312,55 @@ impl ResolvedConfig {
     /// Unknown games skip layers 2 and 3 → behavior identical to pre-v1.3.11
     /// hardcoded defaults.
     pub fn resolve(game_name: Option<&str>, sensitivity: Sensitivity) -> Self {
+        Self::resolve_for_stream_style(game_name, sensitivity, StreamStyle::Auto).0
+    }
+
+    /// Resolve detection config for either the existing game-aware Auto mode or
+    /// an explicit stream-style correction. Manual styles intentionally choose
+    /// the broad profile directly; Auto retains per-game overrides.
+    pub fn resolve_for_stream_style(
+        game_name: Option<&str>,
+        sensitivity: Sensitivity,
+        requested_style: StreamStyle,
+    ) -> (Self, StreamStyle) {
         // Layer 1: Default
         let mut config = parse_default();
 
-        // Layer 2: Genre file (if game is in _known_games.toml)
-        if let Some(genre) = genre_for_game(game_name) {
-            if let Some(genre_toml) = bundled_genre_toml(&genre) {
-                if let Err(e) = apply_partial(&mut config, genre_toml) {
-                    log::warn!(
-                        "[game-config] Skipping malformed genre file '{}': {}",
-                        genre, e
-                    );
+        if requested_style == StreamStyle::Auto {
+            // Auto layer 2: Genre file (if game is in _known_games.toml)
+            if let Some(genre) = genre_for_game(game_name) {
+                if let Some(genre_toml) = bundled_genre_toml(&genre) {
+                    if let Err(e) = apply_partial(&mut config, genre_toml) {
+                        log::warn!(
+                            "[game-config] Skipping malformed genre file '{}': {}",
+                            genre,
+                            e
+                        );
+                    }
                 }
             }
-        }
 
-        // Layer 3: Per-game override file (optional)
-        if let Some(name) = game_name {
-            if let Some(game_toml) = bundled_game_toml(name) {
-                if let Err(e) = apply_partial(&mut config, game_toml) {
-                    log::warn!(
-                        "[game-config] Skipping malformed per-game file '{}': {}",
-                        name, e
-                    );
+            // Auto layer 3: Per-game override file (optional)
+            if let Some(name) = game_name {
+                if let Some(game_toml) = bundled_game_toml(name) {
+                    if let Err(e) = apply_partial(&mut config, game_toml) {
+                        log::warn!(
+                            "[game-config] Skipping malformed per-game file '{}': {}",
+                            name,
+                            e
+                        );
+                    }
                 }
+            }
+        } else if let Some(style_toml) = bundled_stream_style_toml(requested_style) {
+            // An explicit correction replaces the broad game assumption. Mixed
+            // deliberately keeps the universal baseline without an override.
+            if let Err(e) = apply_partial(&mut config, style_toml) {
+                log::warn!(
+                    "[game-config] Skipping malformed stream style '{}': {}",
+                    requested_style.as_str(),
+                    e
+                );
             }
         }
 
@@ -259,7 +373,7 @@ impl ResolvedConfig {
         config.chat.emote_burst_threshold =
             ((config.chat.emote_burst_threshold as f64) * m).round() as u32;
 
-        config
+        (config, effective_stream_style(game_name, requested_style))
     }
 }
 
@@ -321,8 +435,8 @@ pub(crate) fn genre_for_game(game_name: Option<&str>) -> Option<String> {
     // Parse the known-games file lazily on each call. Cheap (~30-50 entries)
     // and avoids the complexity of OnceLock / lazy_static for v1.3.11. Can
     // optimize later if profiling shows it matters.
-    let known: KnownGames = toml::from_str(KNOWN_GAMES_TOML)
-        .expect("_known_games.toml must be valid TOML");
+    let known: KnownGames =
+        toml::from_str(KNOWN_GAMES_TOML).expect("_known_games.toml must be valid TOML");
     known.games.get(name).map(|e| e.genre.clone())
 }
 
@@ -333,13 +447,23 @@ pub(crate) fn genre_for_game(game_name: Option<&str>) -> Option<String> {
 /// just a static dispatch on the slug.
 fn bundled_genre_toml(genre: &str) -> Option<&'static str> {
     match genre {
-        "horror"   => Some(include_str!("../config/games/_horror.toml")),
-        "fps"      => Some(include_str!("../config/games/_fps.toml")),
-        "rpg"      => Some(include_str!("../config/games/_rpg.toml")),
-        "cozy"     => Some(include_str!("../config/games/_cozy.toml")),
-        "talking"  => Some(include_str!("../config/games/_talking.toml")),
+        "horror" => Some(include_str!("../config/games/_horror.toml")),
+        "fps" => Some(include_str!("../config/games/_fps.toml")),
+        "rpg" => Some(include_str!("../config/games/_rpg.toml")),
+        "cozy" => Some(include_str!("../config/games/_cozy.toml")),
+        "talking" => Some(include_str!("../config/games/_talking.toml")),
         "strategy" => Some(include_str!("../config/games/_strategy.toml")),
-        _          => None,
+        _ => None,
+    }
+}
+
+fn bundled_stream_style_toml(style: StreamStyle) -> Option<&'static str> {
+    match style {
+        StreamStyle::Action => bundled_genre_toml("fps"),
+        StreamStyle::Cozy => bundled_genre_toml("cozy"),
+        StreamStyle::Story => bundled_genre_toml("rpg"),
+        StreamStyle::Talking => bundled_genre_toml("talking"),
+        StreamStyle::Auto | StreamStyle::Mixed => None,
     }
 }
 
@@ -353,8 +477,8 @@ fn bundled_genre_toml(genre: &str) -> Option<&'static str> {
 fn bundled_game_toml(game_name: &str) -> Option<&'static str> {
     match game_name {
         "Dead by Daylight" => Some(include_str!("../config/games/dead_by_daylight.toml")),
-        "VALORANT"         => Some(include_str!("../config/games/valorant.toml")),
-        "Stardew Valley"   => Some(include_str!("../config/games/stardew_valley.toml")),
+        "VALORANT" => Some(include_str!("../config/games/valorant.toml")),
+        "Stardew Valley" => Some(include_str!("../config/games/stardew_valley.toml")),
         _ => None,
     }
 }
@@ -424,30 +548,87 @@ weight = 0.7
 
     #[test]
     fn known_game_resolves_to_genre() {
-        assert_eq!(genre_for_game(Some("Dead by Daylight")), Some("horror".to_string()));
+        assert_eq!(
+            genre_for_game(Some("Dead by Daylight")),
+            Some("horror".to_string())
+        );
         assert_eq!(genre_for_game(Some("VALORANT")), Some("fps".to_string()));
-        assert_eq!(genre_for_game(Some("Stardew Valley")), Some("cozy".to_string()));
+        assert_eq!(
+            genre_for_game(Some("Stardew Valley")),
+            Some("cozy".to_string())
+        );
     }
 
     #[test]
     fn unknown_game_returns_none() {
-        assert_eq!(genre_for_game(Some("Some Indie Game That Doesnt Exist")), None);
+        assert_eq!(
+            genre_for_game(Some("Some Indie Game That Doesnt Exist")),
+            None
+        );
         assert_eq!(genre_for_game(Some("")), None);
         assert_eq!(genre_for_game(None), None);
     }
 
     #[test]
-    fn resolve_unknown_game_returns_default_unmodified() {
-        let resolved = ResolvedConfig::resolve(
-            Some("Totally Made Up Game"),
-            Sensitivity::Medium,
+    fn auto_reports_a_broad_style_from_game_metadata() {
+        assert_eq!(
+            detected_stream_style(Some("Dead by Daylight")),
+            StreamStyle::Action
         );
+        assert_eq!(
+            detected_stream_style(Some("Stardew Valley")),
+            StreamStyle::Cozy
+        );
+        assert_eq!(
+            detected_stream_style(Some("Some Unknown Game")),
+            StreamStyle::Mixed
+        );
+        assert_eq!(
+            stream_style_analysis_key(Some("Stardew Valley"), StreamStyle::Auto),
+            "auto:cozy"
+        );
+    }
+
+    #[test]
+    fn explicit_style_replaces_the_auto_game_profile() {
+        let (cozy, effective) = ResolvedConfig::resolve_for_stream_style(
+            Some("Dead by Daylight"),
+            Sensitivity::Medium,
+            StreamStyle::Cozy,
+        );
+        assert_eq!(effective, StreamStyle::Cozy);
+        assert!((cozy.audio.spike_threshold - 0.30).abs() < 1e-6);
+        assert!((cozy.transcript.weight - 1.5).abs() < 1e-6);
+        assert_eq!(cozy.selector.max_clip_duration, 60);
+
+        let (mixed, effective) = ResolvedConfig::resolve_for_stream_style(
+            Some("Dead by Daylight"),
+            Sensitivity::Medium,
+            StreamStyle::Mixed,
+        );
+        assert_eq!(effective, StreamStyle::Mixed);
+        assert!((mixed.audio.spike_threshold - 0.55).abs() < 1e-6);
+        assert_eq!(mixed.selector.max_clip_duration, 30);
+    }
+
+    #[test]
+    fn resolve_unknown_game_returns_default_unmodified() {
+        let resolved = ResolvedConfig::resolve(Some("Totally Made Up Game"), Sensitivity::Medium);
         // Should match parse_default() output exactly.
         let baseline = parse_default();
         assert!((resolved.audio.spike_threshold - baseline.audio.spike_threshold).abs() < 1e-6);
-        assert_eq!(resolved.chat.rate_min_msgs_per_window, baseline.chat.rate_min_msgs_per_window);
-        assert_eq!(resolved.chat.emote_burst_threshold, baseline.chat.emote_burst_threshold);
-        assert_eq!(resolved.selector.min_clip_duration, baseline.selector.min_clip_duration);
+        assert_eq!(
+            resolved.chat.rate_min_msgs_per_window,
+            baseline.chat.rate_min_msgs_per_window
+        );
+        assert_eq!(
+            resolved.chat.emote_burst_threshold,
+            baseline.chat.emote_burst_threshold
+        );
+        assert_eq!(
+            resolved.selector.min_clip_duration,
+            baseline.selector.min_clip_duration
+        );
     }
 
     #[test]
@@ -461,10 +642,7 @@ weight = 0.7
     fn resolve_horror_game_applies_genre_override() {
         // Use Phasmophobia (horror, no per-game file) so this test isolates
         // layer-2 behavior. DBD now has a layer-3 override on emote_burst_threshold.
-        let resolved = ResolvedConfig::resolve(
-            Some("Phasmophobia"),
-            Sensitivity::Medium,
-        );
+        let resolved = ResolvedConfig::resolve(Some("Phasmophobia"), Sensitivity::Medium);
         // _horror.toml overrides:
         assert!((resolved.audio.spike_threshold - 0.45).abs() < 1e-6);
         assert_eq!(resolved.chat.emote_burst_threshold, 5);
@@ -476,10 +654,7 @@ weight = 0.7
 
     #[test]
     fn resolve_dbd_applies_per_game_on_top_of_horror() {
-        let resolved = ResolvedConfig::resolve(
-            Some("Dead by Daylight"),
-            Sensitivity::Medium,
-        );
+        let resolved = ResolvedConfig::resolve(Some("Dead by Daylight"), Sensitivity::Medium);
         // dead_by_daylight.toml overrides _horror.toml's emote_burst_threshold (5 → 7):
         assert_eq!(resolved.chat.emote_burst_threshold, 7);
         // _horror.toml's audio threshold still applies (DBD doesn't override):
@@ -492,10 +667,7 @@ weight = 0.7
     fn resolve_horror_game_without_per_game_file_uses_genre_only() {
         // Phasmophobia is in _known_games (horror) but has no per-game file
         // → resolution stops after layer 2 (horror).
-        let resolved = ResolvedConfig::resolve(
-            Some("Phasmophobia"),
-            Sensitivity::Medium,
-        );
+        let resolved = ResolvedConfig::resolve(Some("Phasmophobia"), Sensitivity::Medium);
         // _horror.toml's emote_burst_threshold = 5 (NOT 7 like DBD):
         assert_eq!(resolved.chat.emote_burst_threshold, 5);
     }
@@ -532,23 +704,32 @@ weight = 0.7
         let medium = ResolvedConfig::resolve(None, Sensitivity::Medium);
 
         // Durations unchanged across sensitivities:
-        assert_eq!(high.selector.min_clip_duration, medium.selector.min_clip_duration);
-        assert_eq!(high.selector.max_clip_duration, medium.selector.max_clip_duration);
-        assert_eq!(high.selector.min_gap_between_clips, medium.selector.min_gap_between_clips);
+        assert_eq!(
+            high.selector.min_clip_duration,
+            medium.selector.min_clip_duration
+        );
+        assert_eq!(
+            high.selector.max_clip_duration,
+            medium.selector.max_clip_duration
+        );
+        assert_eq!(
+            high.selector.min_gap_between_clips,
+            medium.selector.min_gap_between_clips
+        );
 
         // Transcript weight is a balance knob, not a threshold — unchanged:
         assert!((high.transcript.weight - medium.transcript.weight).abs() < 1e-6);
 
         // Title category lists unchanged:
-        assert_eq!(high.titles.preferred_categories, medium.titles.preferred_categories);
+        assert_eq!(
+            high.titles.preferred_categories,
+            medium.titles.preferred_categories
+        );
     }
 
     #[test]
     fn resolve_stardew_applies_cozy_then_per_game() {
-        let resolved = ResolvedConfig::resolve(
-            Some("Stardew Valley"),
-            Sensitivity::Medium,
-        );
+        let resolved = ResolvedConfig::resolve(Some("Stardew Valley"), Sensitivity::Medium);
         // stardew_valley.toml overrides _cozy.toml's spike_threshold (0.30 → 0.25):
         assert!((resolved.audio.spike_threshold - 0.25).abs() < 1e-6);
         // stardew_valley.toml overrides _cozy.toml's transcript.weight (1.5 → 1.7):
@@ -556,6 +737,9 @@ weight = 0.7
         // _cozy.toml's chat values still apply (Stardew doesn't override):
         assert_eq!(resolved.chat.rate_min_msgs_per_window, 2);
         // _cozy.toml's disabled_categories carries through:
-        assert!(resolved.titles.disabled_categories.contains(&"death".to_string()));
+        assert!(resolved
+            .titles
+            .disabled_categories
+            .contains(&"death".to_string()));
     }
 }

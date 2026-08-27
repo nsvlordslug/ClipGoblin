@@ -6,6 +6,11 @@ import {
   isTikTokInboxDelivered,
   shouldOfferForcedReupload,
 } from '../src/lib/uploadStatus.ts'
+import {
+  EXPORT_PRESETS,
+  isYouTubeShortsDuration,
+  YOUTUBE_SHORTS_MAX_DURATION_SECONDS,
+} from '../src/lib/editTypes.ts'
 
 test('a duplicate without a link is not presented as a successful new upload', () => {
   assert.equal(isSuccessfulUploadHandoff('duplicate'), false)
@@ -31,4 +36,12 @@ test('only TikTok inbox delivery is classified as a draft handoff', () => {
   assert.equal(isTikTokInboxDelivered('processing'), false)
   assert.equal(isTikTokInboxDelivered('complete'), false)
   assert.equal(isTikTokInboxDelivered(undefined), false)
+})
+
+test('YouTube Shorts editor preset supports current three-minute uploads', () => {
+  const preset = EXPORT_PRESETS.find(candidate => candidate.id === 'shorts')
+  assert.equal(YOUTUBE_SHORTS_MAX_DURATION_SECONDS, 180)
+  assert.equal(preset?.maxDuration, 180)
+  assert.equal(isYouTubeShortsDuration(180), true)
+  assert.equal(isYouTubeShortsDuration(180.01), false)
 })

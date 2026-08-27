@@ -1,12 +1,12 @@
 //! Caption generation, AI title, and clip naming commands.
 
-use tauri::State;
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
-use crate::db;
 use crate::ai_provider;
+use crate::db;
 use crate::post_captions;
 use crate::DbConn;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use tauri::State;
 
 /// In-memory regenerate history keyed by clip_id. Cleared on app restart.
 /// Each clip keeps the last ~10 titles produced so the anti-repeat rule in
@@ -48,18 +48,43 @@ fn read_title_history(clip_id: &str) -> Vec<String> {
 /// Event vocabulary — maps tag substrings to readable action labels.
 /// These describe WHAT HAPPENED.
 pub(crate) const EVENTS: &[(&str, &str)] = &[
-    ("kill", "Kill"), ("death", "Death"), ("clutch", "Clutch Play"), ("save", "Save"),
-    ("escape", "Escape"), ("chase", "Chase"), ("fight", "Fight"), ("ambush", "Ambush"),
-    ("snipe", "Snipe"), ("headshot", "Headshot"), ("combo", "Combo"), ("dodge", "Dodge"),
-    ("block", "Block"), ("counter", "Counter"), ("gank", "Gank"), ("wipe", "Team Wipe"),
-    ("ace", "Ace"), ("steal", "Steal"), ("grab", "Grab"), ("explosion", "Explosion"),
-    ("jumpscare", "Jumpscare"), ("scare", "Scare"),
-    ("generator", "Generator"), ("repair", "Repair"),
-    ("hook", "Hook"), ("interrupt", "Interrupt"), ("down", "Down"),
-    ("rescue", "Rescue"), ("loop", "Loop"), ("mindgame", "Mind Game"),
-    ("juke", "Juke"), ("bait", "Bait"), ("outplay", "Outplay"),
-    ("miss", "Missed Hit"), ("whiff", "Whiff"),
-    ("encounter", "Encounter"), ("skirmish", "Skirmish"),
+    ("kill", "Kill"),
+    ("death", "Death"),
+    ("clutch", "Clutch Play"),
+    ("save", "Save"),
+    ("escape", "Escape"),
+    ("chase", "Chase"),
+    ("fight", "Fight"),
+    ("ambush", "Ambush"),
+    ("snipe", "Snipe"),
+    ("headshot", "Headshot"),
+    ("combo", "Combo"),
+    ("dodge", "Dodge"),
+    ("block", "Block"),
+    ("counter", "Counter"),
+    ("gank", "Gank"),
+    ("wipe", "Team Wipe"),
+    ("ace", "Ace"),
+    ("steal", "Steal"),
+    ("grab", "Grab"),
+    ("explosion", "Explosion"),
+    ("jumpscare", "Jumpscare"),
+    ("scare", "Scare"),
+    ("generator", "Generator"),
+    ("repair", "Repair"),
+    ("hook", "Hook"),
+    ("interrupt", "Interrupt"),
+    ("down", "Down"),
+    ("rescue", "Rescue"),
+    ("loop", "Loop"),
+    ("mindgame", "Mind Game"),
+    ("juke", "Juke"),
+    ("bait", "Bait"),
+    ("outplay", "Outplay"),
+    ("miss", "Missed Hit"),
+    ("whiff", "Whiff"),
+    ("encounter", "Encounter"),
+    ("skirmish", "Skirmish"),
     ("scream", "Scream"),
 ];
 
@@ -212,11 +237,26 @@ pub(crate) fn grounded_highlight_title(
     // same event tag don't all land on the same line.
     if let Some(ev) = event {
         let phrases: &[&str] = match ev {
-            "jumpscare" | "ambush" => &["Ambush comes out of nowhere", "Caught off guard instantly", "Jumpscare hits with no warning"],
-            "fight" => &["Fight breaks out instantly", "Fight goes wrong fast", "Fight starts and it gets bad"],
+            "jumpscare" | "ambush" => &[
+                "Ambush comes out of nowhere",
+                "Caught off guard instantly",
+                "Jumpscare hits with no warning",
+            ],
+            "fight" => &[
+                "Fight breaks out instantly",
+                "Fight goes wrong fast",
+                "Fight starts and it gets bad",
+            ],
             "explosion" => &["Explosion hits out of nowhere", "Blows up with no warning"],
-            "panic" => &["Panic hits instantly", "Everything goes wrong at once", "Panic sets in right away"],
-            "celebration" => &["Clutches it at the last second", "Barely survives then celebrates"],
+            "panic" => &[
+                "Panic hits instantly",
+                "Everything goes wrong at once",
+                "Panic sets in right away",
+            ],
+            "celebration" => &[
+                "Clutches it at the last second",
+                "Barely survives then celebrates",
+            ],
             "frustration" => &["Nothing goes right", "Loses it after that play"],
             "shock" | "disbelief" => &["Didn't see that coming", "Shock hits out of nowhere"],
             "hype" => &["Hype hits out of nowhere", "Goes off at the perfect time"],
@@ -244,8 +284,11 @@ pub(crate) fn grounded_highlight_title(
 
 fn save_punctuate(s: &str) -> String {
     let t = s.trim_end();
-    if t.ends_with('.') || t.ends_with('!') || t.ends_with('?') { t.to_string() }
-    else { format!("{}.", t) }
+    if t.ends_with('.') || t.ends_with('!') || t.ends_with('?') {
+        t.to_string()
+    } else {
+        format!("{}.", t)
+    }
 }
 
 fn save_context_tag(event: &str) -> &'static str {
@@ -266,19 +309,35 @@ fn save_context_tag(event: &str) -> &'static str {
 
 fn save_outcome_title(tag_list: &[String]) -> Option<String> {
     let has = |t: &str| tag_list.iter().any(|x| x.contains(t));
-    if has("fight") && has("celebration") { return Some("Fight breaks out and they clutch it".into()); }
-    if has("fight") && has("frustration") { return Some("Fight goes wrong and they lose it".into()); }
-    if has("fight") && has("panic") { return Some("Fight turns bad fast".into()); }
-    if (has("ambush") || has("jumpscare")) && has("panic") { return Some("Ambush hits and panic sets in".into()); }
-    if (has("ambush") || has("jumpscare")) && has("shock") { return Some("Ambush out of nowhere".into()); }
-    if has("panic") && has("celebration") { return Some("Almost dies then clutches it".into()); }
-    if has("hype") && has("celebration") { return Some("Clutch play at the last second".into()); }
+    if has("fight") && has("celebration") {
+        return Some("Fight breaks out and they clutch it".into());
+    }
+    if has("fight") && has("frustration") {
+        return Some("Fight goes wrong and they lose it".into());
+    }
+    if has("fight") && has("panic") {
+        return Some("Fight turns bad fast".into());
+    }
+    if (has("ambush") || has("jumpscare")) && has("panic") {
+        return Some("Ambush hits and panic sets in".into());
+    }
+    if (has("ambush") || has("jumpscare")) && has("shock") {
+        return Some("Ambush out of nowhere".into());
+    }
+    if has("panic") && has("celebration") {
+        return Some("Almost dies then clutches it".into());
+    }
+    if has("hype") && has("celebration") {
+        return Some("Clutch play at the last second".into());
+    }
     None
 }
 
 fn extract_title_phrase(excerpt: &str) -> Option<String> {
     let trimmed = excerpt.trim();
-    if trimmed.len() < 3 { return None; }
+    if trimmed.len() < 3 {
+        return None;
+    }
     // Reject signal-stat placeholder strings — chat-only and emote-only
     // candidates inject these as fake "transcripts" (see vod.rs around
     // lines 1900-1955) so the analysis stage has SOMETHING to put in
@@ -291,11 +350,14 @@ fn extract_title_phrase(excerpt: &str) -> Option<String> {
         return None;
     }
     let filler = ["like", "so", "um", "uh", "okay", "ok", "well", "and", "but"];
-    let words: Vec<&str> = trimmed.split_whitespace()
+    let words: Vec<&str> = trimmed
+        .split_whitespace()
         .skip_while(|w| filler.iter().any(|f| w.to_lowercase() == *f))
         .take(8)
         .collect();
-    if words.len() < 2 { return None; }
+    if words.len() < 2 {
+        return None;
+    }
     Some(words.join(" "))
 }
 
@@ -313,10 +375,19 @@ fn is_signal_placeholder(s: &str) -> bool {
 
 fn is_vague_phrase(s: &str) -> bool {
     let wc = s.split_whitespace().count();
-    if wc < 4 { return true; }
+    if wc < 4 {
+        return true;
+    }
     let lower = s.to_lowercase();
-    let vague = ["oh my god", "oh my gosh", "what the hell", "what the fuck",
-                  "no way dude", "are you serious", "holy shit"];
+    let vague = [
+        "oh my god",
+        "oh my gosh",
+        "what the hell",
+        "what the fuck",
+        "no way dude",
+        "are you serious",
+        "holy shit",
+    ];
     wc <= 4 && vague.iter().any(|v| lower.contains(v))
 }
 
@@ -324,17 +395,42 @@ fn primary_event_from_tags(tags: Option<&str>) -> Option<&'static str> {
     let tag_str = tags?;
     let tag_list = parse_tags(Some(tag_str));
     let lower: Vec<String> = tag_list.iter().map(|t| t.to_lowercase()).collect();
-    if lower.iter().any(|t| t.contains("jumpscare") || t.contains("ambush")) { return Some("jumpscare"); }
-    if lower.iter().any(|t| t.contains("fight"))     { return Some("fight"); }
-    if lower.iter().any(|t| t.contains("explosion")) { return Some("explosion"); }
-    if lower.iter().any(|t| t.contains("celebration")){ return Some("celebration"); }
-    if lower.iter().any(|t| t.contains("panic"))     { return Some("panic"); }
-    if lower.iter().any(|t| t.contains("frustration")){ return Some("frustration"); }
-    if lower.iter().any(|t| t.contains("disbelief")) { return Some("disbelief"); }
-    if lower.iter().any(|t| t.contains("shock"))     { return Some("shock"); }
-    if lower.iter().any(|t| t.contains("hype"))      { return Some("hype"); }
-    if lower.iter().any(|t| t.contains("reaction"))  { return Some("reaction"); }
-    if lower.iter().any(|t| t.contains("rapid"))     { return Some("rapid cuts"); }
+    if lower
+        .iter()
+        .any(|t| t.contains("jumpscare") || t.contains("ambush"))
+    {
+        return Some("jumpscare");
+    }
+    if lower.iter().any(|t| t.contains("fight")) {
+        return Some("fight");
+    }
+    if lower.iter().any(|t| t.contains("explosion")) {
+        return Some("explosion");
+    }
+    if lower.iter().any(|t| t.contains("celebration")) {
+        return Some("celebration");
+    }
+    if lower.iter().any(|t| t.contains("panic")) {
+        return Some("panic");
+    }
+    if lower.iter().any(|t| t.contains("frustration")) {
+        return Some("frustration");
+    }
+    if lower.iter().any(|t| t.contains("disbelief")) {
+        return Some("disbelief");
+    }
+    if lower.iter().any(|t| t.contains("shock")) {
+        return Some("shock");
+    }
+    if lower.iter().any(|t| t.contains("hype")) {
+        return Some("hype");
+    }
+    if lower.iter().any(|t| t.contains("reaction")) {
+        return Some("reaction");
+    }
+    if lower.iter().any(|t| t.contains("rapid")) {
+        return Some("rapid cuts");
+    }
     None
 }
 
@@ -390,7 +486,9 @@ pub fn save_path_heuristic_title(
         // past-tense templated lines, anchored on the game when available. Picks
         // the least-used variant per tag combo so multiple clips sharing a
         // dominant tag don't collide on the same line within a batch.
-        if let Some(line) = aftermath_from_tags(&tags, game_name, start_seconds, usage, title_config) {
+        if let Some(line) =
+            aftermath_from_tags(&tags, game_name, start_seconds, usage, title_config)
+        {
             return line;
         }
 
@@ -450,7 +548,10 @@ fn aftermath_from_tags(
 
     // Helper: check if a category is allowed by title_config.disabled_categories.
     let is_category_enabled = |category: &str| -> bool {
-        !title_config.disabled_categories.iter().any(|c| c == category)
+        !title_config
+            .disabled_categories
+            .iter()
+            .any(|c| c == category)
     };
 
     // TODO(v1.3.x): preferred_categories ordering is not yet implemented in
@@ -798,28 +899,59 @@ pub(crate) fn compute_confidence(raw_score: f64, signal_count: usize) -> f64 {
 }
 
 /// Count how many of the score channels are meaningfully active.
-pub(crate) fn count_active_signals(audio: f64, visual: f64, chat: f64, has_transcript: bool) -> usize {
+pub(crate) fn count_active_signals(
+    audio: f64,
+    visual: f64,
+    chat: f64,
+    has_transcript: bool,
+) -> usize {
     let mut n = 0;
-    if audio > 0.1 { n += 1; }
-    if visual > 0.1 { n += 1; }
-    if chat > 0.1 { n += 1; }
-    if has_transcript { n += 1; }
+    if audio > 0.1 {
+        n += 1;
+    }
+    if visual > 0.1 {
+        n += 1;
+    }
+    if chat > 0.1 {
+        n += 1;
+    }
+    if has_transcript {
+        n += 1;
+    }
     n
 }
 
 /// Build a factual explanation: signal values + count.
-pub(crate) fn build_highlight_explanation(audio: f64, visual: f64, chat: f64, has_transcript: bool) -> String {
+pub(crate) fn build_highlight_explanation(
+    audio: f64,
+    visual: f64,
+    chat: f64,
+    has_transcript: bool,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
-    if audio > 0.0 { parts.push(format!("audio {:.0}%", audio * 100.0)); }
-    if visual > 0.0 { parts.push(format!("visual {:.0}%", visual * 100.0)); }
-    if chat > 0.0 { parts.push(format!("chat {:.0}%", chat * 100.0)); }
-    if has_transcript { parts.push("transcript match".into()); }
+    if audio > 0.0 {
+        parts.push(format!("audio {:.0}%", audio * 100.0));
+    }
+    if visual > 0.0 {
+        parts.push(format!("visual {:.0}%", visual * 100.0));
+    }
+    if chat > 0.0 {
+        parts.push(format!("chat {:.0}%", chat * 100.0));
+    }
+    if has_transcript {
+        parts.push("transcript match".into());
+    }
 
     let count = parts.len();
     if parts.is_empty() {
         "No signal data".into()
     } else {
-        format!("{} signal{} — {}", count, if count != 1 { "s" } else { "" }, parts.join(", "))
+        format!(
+            "{} signal{} — {}",
+            count,
+            if count != 1 { "s" } else { "" },
+            parts.join(", ")
+        )
     }
 }
 
@@ -873,7 +1005,14 @@ pub async fn generate_post_captions(
         // Resolve provider for captions scope
         let resolved = ai_provider::resolve(&conn, ai_provider::Scope::Captions);
 
-        (clip, tags, transcript, scores, stored_event_summary, resolved)
+        (
+            clip,
+            tags,
+            transcript,
+            scores,
+            stored_event_summary,
+            resolved,
+        )
     };
 
     // Use frontend title if provided, otherwise fall back to clip title
@@ -1315,7 +1454,7 @@ pub async fn test_ai_connection(
                 403 => Err("API key lacks permission".into()),
                 404 => Err(format!("Model '{}' not available", model)),
                 429 => Err("Rate limited — try again in a moment".into()),
-                s   => {
+                s => {
                     let body = resp.text().await.unwrap_or_default();
                     Err(format!("HTTP {}: {}", s, &body[..body.len().min(100)]))
                 }
@@ -1343,7 +1482,7 @@ pub async fn test_ai_connection(
                 403 => Err("API key lacks permission".into()),
                 404 => Err(format!("Model '{}' not available", model)),
                 429 => Err("Rate limited — try again in a moment".into()),
-                s   => {
+                s => {
                     let body = resp.text().await.unwrap_or_default();
                     Err(format!("HTTP {}: {}", s, &body[..body.len().min(100)]))
                 }
@@ -1373,7 +1512,7 @@ pub async fn test_ai_connection(
                 403 => Err("API key invalid or lacks permission".into()),
                 404 => Err(format!("Model '{}' not available", model)),
                 429 => Err("Rate limited — try again in a moment".into()),
-                s   => {
+                s => {
                     let body = resp.text().await.unwrap_or_default();
                     Err(format!("HTTP {}: {}", s, &body[..body.len().min(100)]))
                 }

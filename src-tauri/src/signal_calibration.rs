@@ -14,7 +14,12 @@ pub struct EwmaStat {
 impl EwmaStat {
     /// `alpha` in (0,1]: higher = faster adaptation (shorter memory).
     pub fn new(alpha: f64) -> Self {
-        Self { mean: 0.0, var: 0.0, alpha: alpha.clamp(1e-4, 1.0), initialized: false }
+        Self {
+            mean: 0.0,
+            var: 0.0,
+            alpha: alpha.clamp(1e-4, 1.0),
+            initialized: false,
+        }
     }
 
     pub fn update(&mut self, x: f64) {
@@ -64,7 +69,9 @@ impl RollingBaseline {
 
 /// Convert a half-life (seconds) to an EWMA alpha given sample spacing `dt`.
 pub fn alpha_from_halflife(dt: f64, halflife: f64) -> f64 {
-    if halflife <= 0.0 { return 1.0; }
+    if halflife <= 0.0 {
+        return 1.0;
+    }
     1.0 - (-(dt / halflife) * std::f64::consts::LN_2).exp()
 }
 
@@ -83,7 +90,10 @@ impl Default for DisplayCalibrator {
     fn default() -> Self {
         // Starting constants; final tuning happens against the real VODs when the
         // v1.5.0 build is run live (the synthetic test only exercises the mechanism).
-        Self { midpoint: 0.55, slope: 6.0 }
+        Self {
+            midpoint: 0.55,
+            slope: 6.0,
+        }
     }
 }
 
@@ -103,12 +113,20 @@ mod tests {
         // Constant-loud stream (0.8) for 60 samples, then a brief spike to 1.5.
         let mut b = RollingBaseline::new(1.0, 90.0, 5.0, 1e-4);
         let mut last_baseline_z = 0.0;
-        for _ in 0..60 { last_baseline_z = b.push(0.8); }
+        for _ in 0..60 {
+            last_baseline_z = b.push(0.8);
+        }
         let spike_z = b.push(1.5);
         // At steady loud baseline, z is near zero; the spike is clearly positive
         // and well above the baseline reading.
-        assert!(last_baseline_z.abs() < 0.5, "baseline z should be ~0, got {last_baseline_z}");
-        assert!(spike_z > last_baseline_z + 1.0, "spike z {spike_z} should exceed baseline {last_baseline_z}");
+        assert!(
+            last_baseline_z.abs() < 0.5,
+            "baseline z should be ~0, got {last_baseline_z}"
+        );
+        assert!(
+            spike_z > last_baseline_z + 1.0,
+            "spike z {spike_z} should exceed baseline {last_baseline_z}"
+        );
     }
 
     #[test]
@@ -116,9 +134,14 @@ mod tests {
         // A near-silent flat stream with a 1% blip must NOT produce a huge z
         // (the var_floor guards against divide-by-tiny-variance).
         let mut b = RollingBaseline::new(1.0, 90.0, 5.0, 1e-2);
-        for _ in 0..60 { b.push(0.01); }
+        for _ in 0..60 {
+            b.push(0.01);
+        }
         let blip_z = b.push(0.011);
-        assert!(blip_z < 1.0, "flat-signal blip z should stay small, got {blip_z}");
+        assert!(
+            blip_z < 1.0,
+            "flat-signal blip z should stay small, got {blip_z}"
+        );
     }
 
     #[test]

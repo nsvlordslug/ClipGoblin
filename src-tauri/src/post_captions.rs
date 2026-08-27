@@ -8,10 +8,10 @@
 //!
 //! Every caption references what happened.  No fabricated outcomes, no clickbait.
 
-use crate::pipeline::CandidateClip;
-use crate::error::AppError;
 use crate::ai_provider::Provider;
 use crate::detection::Platform;
+use crate::error::AppError;
+use crate::pipeline::CandidateClip;
 use once_cell::sync::Lazy;
 
 // ═══════════════════════════════════════════════════════════════════
@@ -34,7 +34,9 @@ pub struct PostCaptions {
     pub hype: String,
 }
 
-fn default_source() -> String { "free".into() }
+fn default_source() -> String {
+    "free".into()
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CaptionVariant {
@@ -258,20 +260,28 @@ pub fn detect_game_type(
     // ── Transcript-based ──
     if let Some(text) = transcript {
         let lower = text.to_lowercase();
-        if lower.contains("scared") || lower.contains("terrified")
-            || lower.contains("behind you") || lower.contains("dont look")
+        if lower.contains("scared")
+            || lower.contains("terrified")
+            || lower.contains("behind you")
+            || lower.contains("dont look")
         {
             return GameType::Horror;
         }
-        if lower.contains("whose fault") || lower.contains("blame")
-            || lower.contains("you did this") || lower.contains("team")
-            || lower.contains("why did you") || lower.contains("together")
+        if lower.contains("whose fault")
+            || lower.contains("blame")
+            || lower.contains("you did this")
+            || lower.contains("team")
+            || lower.contains("why did you")
+            || lower.contains("together")
         {
             return GameType::Social;
         }
-        if lower.contains("kitchen") || lower.contains("recipe")
-            || lower.contains("oops") || lower.contains("whoops")
-            || lower.contains("mess") || lower.contains("broke")
+        if lower.contains("kitchen")
+            || lower.contains("recipe")
+            || lower.contains("oops")
+            || lower.contains("whoops")
+            || lower.contains("mess")
+            || lower.contains("broke")
         {
             return GameType::Cozy;
         }
@@ -290,8 +300,11 @@ pub fn detect_game_type(
 
 /// Backward-compat wrapper — calls `detect_game_type`.
 fn classify_tone(
-    tags: &[String], transcript: Option<&str>,
-    audio_score: f64, speech_score: f64, scene_score: f64,
+    tags: &[String],
+    transcript: Option<&str>,
+    audio_score: f64,
+    speech_score: f64,
+    scene_score: f64,
 ) -> GameType {
     detect_game_type(tags, transcript, audio_score, speech_score, scene_score)
 }
@@ -300,10 +313,10 @@ impl GameType {
     /// Human-readable label for the LLM prompt.
     pub fn label(self) -> &'static str {
         match self {
-            GameType::FPS     => "FPS / competitive shooter",
-            GameType::Horror  => "horror / survival",
-            GameType::Cozy    => "cozy / chaotic casual",
-            GameType::Social  => "social / party / co-op",
+            GameType::FPS => "FPS / competitive shooter",
+            GameType::Horror => "horror / survival",
+            GameType::Cozy => "cozy / chaotic casual",
+            GameType::Social => "social / party / co-op",
             GameType::Generic => "general gaming",
         }
     }
@@ -347,12 +360,9 @@ pub fn generate_event_summary(clip: &CandidateClip) -> String {
     let seed = clip.start_time as usize;
 
     // 1. Try transcript-enhanced summary
-    if let Some(summary) = transcript_action_summary(
-        clip.transcript_excerpt.as_deref(),
-        event,
-        &clip.tags,
-        tone,
-    ) {
+    if let Some(summary) =
+        transcript_action_summary(clip.transcript_excerpt.as_deref(), event, &clip.tags, tone)
+    {
         return summary;
     }
 
@@ -373,55 +383,41 @@ fn transcript_action_summary(
     let text = transcript?;
     let lower = text.to_lowercase();
     let words: Vec<&str> = lower.split_whitespace().collect();
-    if words.len() < 3 { return None; }
+    if words.len() < 3 {
+        return None;
+    }
 
     // Match action keywords that describe what happened (not reactions).
     // These are verbs/phrases a streamer says that reveal the actual event.
     let action = match () {
-        _ if lower.contains("missed") && lower.contains("shot")
-            => Some("missed the shot"),
-        _ if lower.contains("missed")
-            => Some("missed the play"),
-        _ if lower.contains("whiffed") || lower.contains("whiff")
-            => Some("whiffed completely"),
-        _ if lower.contains("choked")
-            => Some("choked at the worst time"),
-        _ if lower.contains("died") || lower.contains("i'm dead")
-            => Some("died"),
-        _ if lower.contains("killed") && lower.contains("me")
-            => Some("got killed"),
-        _ if lower.contains("got him") || lower.contains("got them")
-            => Some("got the kill"),
-        _ if lower.contains("killed him") || lower.contains("killed it")
-            => Some("landed the kill"),
-        _ if lower.contains("stuck") || lower.contains("trapped")
-            => Some("got trapped"),
-        _ if lower.contains("fell") || lower.contains("falling")
-            => Some("fell"),
-        _ if lower.contains("ran") || lower.contains("running") || lower.contains("run")
-            => Some("had to run for it"),
-        _ if lower.contains("lost")
-            => Some("lost it"),
-        _ if lower.contains("won") || lower.contains("clutch")
-            => Some("clutched it"),
-        _ if lower.contains("broke") || lower.contains("broken")
-            => Some("everything broke"),
-        _ if lower.contains("explod") || lower.contains("blew up") || lower.contains("blown")
-            => Some("got blown up"),
-        _ if lower.contains("scared") || lower.contains("terrif")
-            => Some("got scared"),
-        _ if lower.contains("jumped") && !lower.contains("jumped in")
-            => Some("got jumpscared"),
-        _ if lower.contains("behind") && (lower.contains("you") || lower.contains("me"))
-            => Some("something was right behind them"),
-        _ if lower.contains("hit") && lower.contains("me")
-            => Some("got hit out of nowhere"),
-        _ if lower.contains("lag") || lower.contains("froze")
-            => Some("froze at the worst moment"),
-        _ if lower.contains("messed up") || lower.contains("screwed")
-            => Some("messed up bad"),
-        _ if lower.contains("forgot")
-            => Some("forgot what to do"),
+        _ if lower.contains("missed") && lower.contains("shot") => Some("missed the shot"),
+        _ if lower.contains("missed") => Some("missed the play"),
+        _ if lower.contains("whiffed") || lower.contains("whiff") => Some("whiffed completely"),
+        _ if lower.contains("choked") => Some("choked at the worst time"),
+        _ if lower.contains("died") || lower.contains("i'm dead") => Some("died"),
+        _ if lower.contains("killed") && lower.contains("me") => Some("got killed"),
+        _ if lower.contains("got him") || lower.contains("got them") => Some("got the kill"),
+        _ if lower.contains("killed him") || lower.contains("killed it") => Some("landed the kill"),
+        _ if lower.contains("stuck") || lower.contains("trapped") => Some("got trapped"),
+        _ if lower.contains("fell") || lower.contains("falling") => Some("fell"),
+        _ if lower.contains("ran") || lower.contains("running") || lower.contains("run") => {
+            Some("had to run for it")
+        }
+        _ if lower.contains("lost") => Some("lost it"),
+        _ if lower.contains("won") || lower.contains("clutch") => Some("clutched it"),
+        _ if lower.contains("broke") || lower.contains("broken") => Some("everything broke"),
+        _ if lower.contains("explod") || lower.contains("blew up") || lower.contains("blown") => {
+            Some("got blown up")
+        }
+        _ if lower.contains("scared") || lower.contains("terrif") => Some("got scared"),
+        _ if lower.contains("jumped") && !lower.contains("jumped in") => Some("got jumpscared"),
+        _ if lower.contains("behind") && (lower.contains("you") || lower.contains("me")) => {
+            Some("something was right behind them")
+        }
+        _ if lower.contains("hit") && lower.contains("me") => Some("got hit out of nowhere"),
+        _ if lower.contains("lag") || lower.contains("froze") => Some("froze at the worst moment"),
+        _ if lower.contains("messed up") || lower.contains("screwed") => Some("messed up bad"),
+        _ if lower.contains("forgot") => Some("forgot what to do"),
         _ => None,
     };
 
@@ -431,22 +427,14 @@ fn transcript_action_summary(
     let has = |t: &str| tags.iter().any(|x| x == t);
 
     let combined = match event {
-        Some("fight") if has("frustration") =>
-            format!("{} and lost the fight", action),
-        Some("fight") if has("celebration") =>
-            format!("{} but won the fight anyway", action),
-        Some("fight") if has("panic") =>
-            format!("{} and the fight went sideways", action),
-        Some("fight") =>
-            format!("{} during the fight", action),
-        Some("ambush") | Some("jumpscare") =>
-            format!("{} after getting ambushed", action),
-        Some("panic") =>
-            format!("{} and panicked", action),
-        Some("frustration") =>
-            format!("{} and lost it", action),
-        Some("clutch") | Some("celebration") =>
-            format!("{} but somehow survived", action),
+        Some("fight") if has("frustration") => format!("{} and lost the fight", action),
+        Some("fight") if has("celebration") => format!("{} but won the fight anyway", action),
+        Some("fight") if has("panic") => format!("{} and the fight went sideways", action),
+        Some("fight") => format!("{} during the fight", action),
+        Some("ambush") | Some("jumpscare") => format!("{} after getting ambushed", action),
+        Some("panic") => format!("{} and panicked", action),
+        Some("frustration") => format!("{} and lost it", action),
+        Some("clutch") | Some("celebration") => format!("{} but somehow survived", action),
         _ => action.to_string(),
     };
 
@@ -633,8 +621,8 @@ struct TemplateEntry {
 /// the developer catches it before shipping, not testers at runtime.
 static CAPTION_TEMPLATES: Lazy<Vec<TemplateEntry>> = Lazy::new(|| {
     const TOML: &str = include_str!("../../config/caption_templates.toml");
-    let file: TemplateFile = toml::from_str(TOML)
-        .expect("config/caption_templates.toml must parse at compile time");
+    let file: TemplateFile =
+        toml::from_str(TOML).expect("config/caption_templates.toml must parse at compile time");
     file.templates
 });
 
@@ -662,10 +650,10 @@ fn infer_emotion(tone: Tone, tags: &[String]) -> Option<&'static str> {
 
     // Fallback to GameType-based inference for clips with no strong tags.
     match tone {
-        Tone::Horror  => Some("panic"),
-        Tone::FPS     => Some("hype"),
-        Tone::Social  => Some("funny"),
-        Tone::Cozy    => Some("funny"),
+        Tone::Horror => Some("panic"),
+        Tone::FPS => Some("hype"),
+        Tone::Social => Some("funny"),
+        Tone::Cozy => Some("funny"),
         Tone::Generic => None, // no strong signal — fall through to hardcoded
     }
 }
@@ -766,12 +754,7 @@ fn try_matrix_template(
 
 /// Build a concrete event summary from available signals.
 /// Returns a short action phrase (no "i", no quotes — just what happened).
-fn synthesize_event(
-    event: Option<&str>,
-    tone: Tone,
-    tags: &[String],
-    seed: usize,
-) -> String {
+fn synthesize_event(event: Option<&str>, tone: Tone, tags: &[String], seed: usize) -> String {
     // Matrix-first (Phase 12 Wave 3b). Falls through to hardcoded rules
     // below if no matrix template matches.
     if let Some(from_matrix) = try_matrix_template(event, tone, tags, seed) {
@@ -782,116 +765,170 @@ fn synthesize_event(
 
     // ── Compound tag combinations → specific events ──
     if has("fight") && has("panic") {
-        return pick(seed, &[
-            "fight broke out and went wrong fast",
-            "got into a fight and panicked",
-            "the fight spiraled out of control",
-        ]);
+        return pick(
+            seed,
+            &[
+                "fight broke out and went wrong fast",
+                "got into a fight and panicked",
+                "the fight spiraled out of control",
+            ],
+        );
     }
     if has("fight") && has("celebration") {
-        return pick(seed, &[
-            "won the fight barely",
-            "clutched the fight at the last second",
-            "somehow survived that fight",
-        ]);
+        return pick(
+            seed,
+            &[
+                "won the fight barely",
+                "clutched the fight at the last second",
+                "somehow survived that fight",
+            ],
+        );
     }
     if has("fight") && has("frustration") {
-        return pick(seed, &[
-            "lost that fight and it stung",
-            "the fight went wrong and it hurt",
-            "got outplayed in the fight",
-        ]);
+        return pick(
+            seed,
+            &[
+                "lost that fight and it stung",
+                "the fight went wrong and it hurt",
+                "got outplayed in the fight",
+            ],
+        );
     }
     if (has("jumpscare") || has("ambush")) && has("panic") {
-        return pick(seed, &[
-            "got ambushed and completely panicked",
-            "something appeared out of nowhere",
-            "got jumped and had zero time to react",
-        ]);
+        return pick(
+            seed,
+            &[
+                "got ambushed and completely panicked",
+                "something appeared out of nowhere",
+                "got jumped and had zero time to react",
+            ],
+        );
     }
     if (has("jumpscare") || has("ambush")) && has("shock") {
-        return pick(seed, &[
-            "got scared out of nowhere",
-            "something jumped out at the worst time",
-            "the jumpscare hit with no warning",
-        ]);
+        return pick(
+            seed,
+            &[
+                "got scared out of nowhere",
+                "something jumped out at the worst time",
+                "the jumpscare hit with no warning",
+            ],
+        );
     }
 
     // ── Single event + tone → specific actions ──
     if let Some(ev) = event {
         return match (ev, tone) {
-            ("ambush", GameType::Horror)  => pick(seed, &[
-                "something came out of the dark",
-                "turned a corner and regretted it",
-                "heard a noise and it was already too late",
-            ]),
-            ("ambush", _)             => pick(seed, &[
-                "got rushed with no warning",
-                "enemy appeared out of nowhere",
-                "got caught completely off guard",
-            ]),
-            ("fight", GameType::FPS)  => pick(seed, &[
-                "took a fight and got dropped instantly",
-                "pushed and it went wrong immediately",
-                "the gunfight lasted about one second",
-            ]),
-            ("fight", _)              => pick(seed, &[
-                "a fight broke out suddenly",
-                "things got heated fast",
-                "the fight went sideways",
-            ]),
-            ("clutch", _)             => pick(seed, &[
-                "barely survived at the last second",
-                "pulled it off with almost nothing left",
-                "clutched it when it looked impossible",
-            ]),
-            ("panic", GameType::Cozy)     => pick(seed, &[
-                "the kitchen caught fire",
-                "everything went wrong at once",
-                "the whole plan fell apart instantly",
-            ]),
-            ("panic", GameType::Social)   => pick(seed, &[
-                "the whole group panicked at once",
-                "someone made a bad call and everyone suffered",
-                "the team fell apart in seconds",
-            ]),
-            ("panic", _)              => pick(seed, &[
-                "everything went wrong at the same time",
-                "panic set in and nothing worked",
-                "lost control of the situation completely",
-            ]),
-            ("frustration", _)        => pick(seed, &[
-                "nothing went right",
-                "missed the obvious play",
-                "made the wrong call and paid for it",
-            ]),
-            ("shock" | "disbelief", _) => pick(seed, &[
-                "something unexpected happened",
-                "nobody saw that coming",
-                "it came completely out of nowhere",
-            ]),
-            ("hype" | "reaction", _)   => pick(seed, &[
-                "something big happened and the reaction was instant",
-                "the moment hit and the energy shifted",
-                "it happened and there was no holding back",
-            ]),
-            ("explosion", _)          => pick(seed, &[
-                "everything blew up with no warning",
-                "an explosion hit out of nowhere",
-                "it all went up in flames instantly",
-            ]),
-            _ => pick(seed, &[
-                "something happened that nobody expected",
-                "the moment came out of nowhere",
-            ]),
+            ("ambush", GameType::Horror) => pick(
+                seed,
+                &[
+                    "something came out of the dark",
+                    "turned a corner and regretted it",
+                    "heard a noise and it was already too late",
+                ],
+            ),
+            ("ambush", _) => pick(
+                seed,
+                &[
+                    "got rushed with no warning",
+                    "enemy appeared out of nowhere",
+                    "got caught completely off guard",
+                ],
+            ),
+            ("fight", GameType::FPS) => pick(
+                seed,
+                &[
+                    "took a fight and got dropped instantly",
+                    "pushed and it went wrong immediately",
+                    "the gunfight lasted about one second",
+                ],
+            ),
+            ("fight", _) => pick(
+                seed,
+                &[
+                    "a fight broke out suddenly",
+                    "things got heated fast",
+                    "the fight went sideways",
+                ],
+            ),
+            ("clutch", _) => pick(
+                seed,
+                &[
+                    "barely survived at the last second",
+                    "pulled it off with almost nothing left",
+                    "clutched it when it looked impossible",
+                ],
+            ),
+            ("panic", GameType::Cozy) => pick(
+                seed,
+                &[
+                    "the kitchen caught fire",
+                    "everything went wrong at once",
+                    "the whole plan fell apart instantly",
+                ],
+            ),
+            ("panic", GameType::Social) => pick(
+                seed,
+                &[
+                    "the whole group panicked at once",
+                    "someone made a bad call and everyone suffered",
+                    "the team fell apart in seconds",
+                ],
+            ),
+            ("panic", _) => pick(
+                seed,
+                &[
+                    "everything went wrong at the same time",
+                    "panic set in and nothing worked",
+                    "lost control of the situation completely",
+                ],
+            ),
+            ("frustration", _) => pick(
+                seed,
+                &[
+                    "nothing went right",
+                    "missed the obvious play",
+                    "made the wrong call and paid for it",
+                ],
+            ),
+            ("shock" | "disbelief", _) => pick(
+                seed,
+                &[
+                    "something unexpected happened",
+                    "nobody saw that coming",
+                    "it came completely out of nowhere",
+                ],
+            ),
+            ("hype" | "reaction", _) => pick(
+                seed,
+                &[
+                    "something big happened and the reaction was instant",
+                    "the moment hit and the energy shifted",
+                    "it happened and there was no holding back",
+                ],
+            ),
+            ("explosion", _) => pick(
+                seed,
+                &[
+                    "everything blew up with no warning",
+                    "an explosion hit out of nowhere",
+                    "it all went up in flames instantly",
+                ],
+            ),
+            _ => pick(
+                seed,
+                &[
+                    "something happened that nobody expected",
+                    "the moment came out of nowhere",
+                ],
+            ),
         };
     }
 
     // ── Tone-only fallback ──
     match tone {
-        GameType::Horror  => pick(seed, &["something scary happened", "got scared"]),
-        GameType::Cozy    => pick(seed, &["things went chaotic", "the plan fell apart"]),
-        GameType::Social  => pick(seed, &["the group fell apart", "someone messed up"]),
+        GameType::Horror => pick(seed, &["something scary happened", "got scared"]),
+        GameType::Cozy => pick(seed, &["things went chaotic", "the plan fell apart"]),
+        GameType::Social => pick(seed, &["the group fell apart", "someone messed up"]),
         GameType::FPS => pick(seed, &["got outplayed", "the play went wrong"]),
         GameType::Generic => pick(seed, &["something happened", "a moment hit"]),
     }
@@ -920,8 +957,11 @@ enum Mode {
 }
 
 const MODES: [Mode; 5] = [
-    Mode::DirectQuote, Mode::Blame, Mode::InternalThought,
-    Mode::Observation, Mode::Minimal,
+    Mode::DirectQuote,
+    Mode::Blame,
+    Mode::InternalThought,
+    Mode::Observation,
+    Mode::Minimal,
 ];
 
 fn mix_seed(base: usize, seed: u32) -> usize {
@@ -939,11 +979,11 @@ fn mix_seed(base: usize, seed: u32) -> usize {
 /// reference what happened.  Each mode applies a unique transformation.
 fn generate_caption(mode: Mode, ctx: &CaptionCtx) -> String {
     let text = match mode {
-        Mode::DirectQuote     => gen_direct_quote(ctx),
-        Mode::Blame           => gen_blame(ctx),
+        Mode::DirectQuote => gen_direct_quote(ctx),
+        Mode::Blame => gen_blame(ctx),
         Mode::InternalThought => gen_internal_thought(ctx),
-        Mode::Observation     => gen_observation(ctx),
-        Mode::Minimal         => gen_minimal(ctx),
+        Mode::Observation => gen_observation(ctx),
+        Mode::Minimal => gen_minimal(ctx),
     };
 
     // Global rule: reject generics, retry once with shifted seed
@@ -955,11 +995,11 @@ fn generate_caption(mode: Mode, ctx: &CaptionCtx) -> String {
             game_type: ctx.game_type,
         };
         return match mode {
-            Mode::DirectQuote     => gen_direct_quote(&retry),
-            Mode::Blame           => gen_blame(&retry),
+            Mode::DirectQuote => gen_direct_quote(&retry),
+            Mode::Blame => gen_blame(&retry),
             Mode::InternalThought => gen_internal_thought(&retry),
-            Mode::Observation     => gen_observation(&retry),
-            Mode::Minimal         => gen_minimal(&retry),
+            Mode::Observation => gen_observation(&retry),
+            Mode::Minimal => gen_minimal(&retry),
         };
     }
 
@@ -999,24 +1039,40 @@ fn gen_direct_quote(ctx: &CaptionCtx) -> String {
     let core = first_n_words(ev, 5);
 
     match ctx.game_type {
-        GameType::FPS    => {
-            let opts = [format!("\"no shot— {}\"", core), format!("\"how did {}\"", core)];
+        GameType::FPS => {
+            let opts = [
+                format!("\"no shot— {}\"", core),
+                format!("\"how did {}\"", core),
+            ];
             opts[ctx.seed % opts.len()].clone()
         }
         GameType::Horror => {
-            let opts = [format!("\"oh god— {}\"", core), format!("\"nope— {}\"", core)];
+            let opts = [
+                format!("\"oh god— {}\"", core),
+                format!("\"nope— {}\"", core),
+            ];
             opts[ctx.seed % opts.len()].clone()
         }
-        GameType::Cozy   => {
-            let opts = [format!("\"wait how did {}\"", core), format!("\"why did {}\"", core)];
+        GameType::Cozy => {
+            let opts = [
+                format!("\"wait how did {}\"", core),
+                format!("\"why did {}\"", core),
+            ];
             opts[ctx.seed % opts.len()].clone()
         }
         GameType::Social => {
-            let opts = [format!("\"who— {}\"", core), format!("\"okay so {}\"", core)];
+            let opts = [
+                format!("\"who— {}\"", core),
+                format!("\"okay so {}\"", core),
+            ];
             opts[ctx.seed % opts.len()].clone()
         }
         GameType::Generic => {
-            let opts = [format!("\"i just {}\"", core), format!("\"wait— {}\"", core), format!("\"{}\"", core)];
+            let opts = [
+                format!("\"i just {}\"", core),
+                format!("\"wait— {}\"", core),
+                format!("\"{}\"", core),
+            ];
             opts[ctx.seed % opts.len()].clone()
         }
     }
@@ -1050,20 +1106,32 @@ fn gen_internal_thought(ctx: &CaptionCtx) -> String {
 
     // Tone determines the reflective frame around the event
     match ctx.game_type {
-        GameType::Horror  => {
-            let opts = [format!("i'm still not over when {}", ev), format!("i can't stop thinking about when {}", ev)];
+        GameType::Horror => {
+            let opts = [
+                format!("i'm still not over when {}", ev),
+                format!("i can't stop thinking about when {}", ev),
+            ];
             opts[ctx.seed % opts.len()].clone()
         }
-        GameType::Cozy    => {
-            let opts = [format!("i genuinely did not expect {}", ev), format!("nobody prepared me for {}", ev)];
+        GameType::Cozy => {
+            let opts = [
+                format!("i genuinely did not expect {}", ev),
+                format!("nobody prepared me for {}", ev),
+            ];
             opts[ctx.seed % opts.len()].clone()
         }
-        GameType::Social  => {
-            let opts = [format!("i should have seen it coming. {}", ev), format!("i trusted them. then {}", ev)];
+        GameType::Social => {
+            let opts = [
+                format!("i should have seen it coming. {}", ev),
+                format!("i trusted them. then {}", ev),
+            ];
             opts[ctx.seed % opts.len()].clone()
         }
         GameType::FPS => {
-            let opts = [format!("i keep replaying it. {}", ev), format!("i still think about when {}", ev)];
+            let opts = [
+                format!("i keep replaying it. {}", ev),
+                format!("i still think about when {}", ev),
+            ];
             opts[ctx.seed % opts.len()].clone()
         }
         GameType::Generic => {
@@ -1100,24 +1168,39 @@ fn gen_blame(ctx: &CaptionCtx) -> String {
 
     // Tone determines the blame target — derived from the game type
     match ctx.game_type {
-        GameType::Horror  => {
-            let opts = [format!("{} and nobody warned me", ev), format!("{} — this game set me up", ev)];
+        GameType::Horror => {
+            let opts = [
+                format!("{} and nobody warned me", ev),
+                format!("{} — this game set me up", ev),
+            ];
             opts[ctx.seed % opts.len()].clone()
         }
-        GameType::Cozy    => {
-            let opts = [format!("{} and it was entirely preventable", ev), format!("{} — the game did this on purpose", ev)];
+        GameType::Cozy => {
+            let opts = [
+                format!("{} and it was entirely preventable", ev),
+                format!("{} — the game did this on purpose", ev),
+            ];
             opts[ctx.seed % opts.len()].clone()
         }
-        GameType::Social  => {
-            let opts = [format!("{} and i know exactly whose fault that was", ev), format!("{} — trusting teammates was the first mistake", ev)];
+        GameType::Social => {
+            let opts = [
+                format!("{} and i know exactly whose fault that was", ev),
+                format!("{} — trusting teammates was the first mistake", ev),
+            ];
             opts[ctx.seed % opts.len()].clone()
         }
         GameType::FPS => {
-            let opts = [format!("{} and that was not a fair fight", ev), format!("{} — explain how that's balanced", ev)];
+            let opts = [
+                format!("{} and that was not a fair fight", ev),
+                format!("{} — explain how that's balanced", ev),
+            ];
             opts[ctx.seed % opts.len()].clone()
         }
         GameType::Generic => {
-            let opts = [format!("{}. somebody explain how that's okay", ev), format!("{}. i need answers", ev)];
+            let opts = [
+                format!("{}. somebody explain how that's okay", ev),
+                format!("{}. i need answers", ev),
+            ];
             opts[ctx.seed % opts.len()].clone()
         }
     }
@@ -1138,20 +1221,32 @@ fn gen_observation(ctx: &CaptionCtx) -> String {
     let ev = &ctx.event_summary;
 
     match ctx.game_type {
-        GameType::FPS     => {
-            let opts = [format!("the play where {}. watch it back", ev), format!("frame by frame: {}", ev)];
+        GameType::FPS => {
+            let opts = [
+                format!("the play where {}. watch it back", ev),
+                format!("frame by frame: {}", ev),
+            ];
             opts[ctx.seed % opts.len()].clone()
         }
-        GameType::Horror  => {
-            let opts = [format!("you can hear the panic when {}", ev), format!("the moment {}", ev)];
+        GameType::Horror => {
+            let opts = [
+                format!("you can hear the panic when {}", ev),
+                format!("the moment {}", ev),
+            ];
             opts[ctx.seed % opts.len()].clone()
         }
-        GameType::Cozy    => {
-            let opts = [format!("total destruction: {}", ev), format!("a quiet stream until {}", ev)];
+        GameType::Cozy => {
+            let opts = [
+                format!("total destruction: {}", ev),
+                format!("a quiet stream until {}", ev),
+            ];
             opts[ctx.seed % opts.len()].clone()
         }
-        GameType::Social  => {
-            let opts = [format!("the group the moment {}: silence", ev), format!("everyone watched {} happen", ev)];
+        GameType::Social => {
+            let opts = [
+                format!("the group the moment {}: silence", ev),
+                format!("everyone watched {} happen", ev),
+            ];
             opts[ctx.seed % opts.len()].clone()
         }
         GameType::Generic => {
@@ -1190,10 +1285,10 @@ fn gen_minimal(ctx: &CaptionCtx) -> String {
     let ev_short = first_n_words(&ctx.event_summary, 5);
 
     match ctx.game_type {
-        GameType::FPS     => format!("{} — gone", ev_short),
-        GameType::Horror  => format!("{} — nope", ev_short),
-        GameType::Cozy    => format!("{} — whoops", ev_short),
-        GameType::Social  => format!("{} — really", ev_short),
+        GameType::FPS => format!("{} — gone", ev_short),
+        GameType::Horror => format!("{} — nope", ev_short),
+        GameType::Cozy => format!("{} — whoops", ev_short),
+        GameType::Social => format!("{} — really", ev_short),
         GameType::Generic => ev_short,
     }
 }
@@ -1202,7 +1297,8 @@ fn gen_minimal(ctx: &CaptionCtx) -> String {
 /// Tries to find a punchy sentence fragment rather than a single word.
 fn extract_short_phrase(text: &str, seed: usize) -> String {
     // Split on sentence boundaries
-    let sentences: Vec<&str> = text.split(|c: char| c == '.' || c == '!' || c == '?')
+    let sentences: Vec<&str> = text
+        .split(|c: char| c == '.' || c == '!' || c == '?')
         .map(|s| s.trim())
         .filter(|s| {
             let wc = s.split_whitespace().count();
@@ -1219,10 +1315,11 @@ fn extract_short_phrase(text: &str, seed: usize) -> String {
 
     // No good sentences — take 3-5 content words from the text
     let skip: &[&str] = &[
-        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to",
-        "of", "for", "with", "from", "um", "uh", "like", "so", "just",
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "of", "for", "with", "from",
+        "um", "uh", "like", "so", "just",
     ];
-    let content_words: Vec<&str> = text.split_whitespace()
+    let content_words: Vec<&str> = text
+        .split_whitespace()
         .filter(|w| {
             let clean = w.trim_matches(|c: char| !c.is_alphabetic()).to_lowercase();
             clean.len() >= 2 && !skip.contains(&clean.as_str())
@@ -1241,10 +1338,9 @@ fn extract_short_phrase(text: &str, seed: usize) -> String {
 /// Skips articles, prepositions, and low-information verbs.
 fn extract_punch_word(summary: &str) -> &str {
     const SKIP: &[&str] = &[
-        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to",
-        "of", "for", "with", "from", "was", "were", "is", "are",
-        "that", "this", "it", "got", "went", "had", "out", "up",
-        "no", "not", "just", "when", "then", "so", "too",
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "of", "for", "with", "from",
+        "was", "were", "is", "are", "that", "this", "it", "got", "went", "had", "out", "up", "no",
+        "not", "just", "when", "then", "so", "too",
     ];
 
     for word in summary.split_whitespace() {
@@ -1270,39 +1366,52 @@ fn first_n_words(s: &str, n: usize) -> String {
 fn build_variants(ctx: CaptionCtx, hashtags: Vec<String>) -> PostCaptions {
     // for mode in modes: generate_caption(event_summary, mode)
     // Each mode gets its own seed so outputs don't correlate.
-    let captions: Vec<CaptionVariant> = MODES.iter().enumerate().map(|(i, &mode)| {
-        let mode_ctx = CaptionCtx {
-            seed: ctx.seed.wrapping_mul(i as usize + 7),
-            event_summary: ctx.event_summary.clone(),
-            quote: ctx.quote.clone(),
-            game_type: ctx.game_type,
-        };
-        let text = generate_caption(mode, &mode_ctx);
-        CaptionVariant {
-            mode: match mode {
-                Mode::DirectQuote     => "direct_quote",
-                Mode::Blame           => "blame",
-                Mode::InternalThought => "internal_thought",
-                Mode::Observation     => "observation",
-                Mode::Minimal         => "minimal",
-            }.into(),
-            label: match mode {
-                Mode::DirectQuote     => "Direct Quote",
-                Mode::Blame           => "Blame",
-                Mode::InternalThought => "Inner Thought",
-                Mode::Observation     => "Observation",
-                Mode::Minimal         => "Minimal",
-            }.into(),
-            text,
-        }
-    }).collect();
+    let captions: Vec<CaptionVariant> = MODES
+        .iter()
+        .enumerate()
+        .map(|(i, &mode)| {
+            let mode_ctx = CaptionCtx {
+                seed: ctx.seed.wrapping_mul(i as usize + 7),
+                event_summary: ctx.event_summary.clone(),
+                quote: ctx.quote.clone(),
+                game_type: ctx.game_type,
+            };
+            let text = generate_caption(mode, &mode_ctx);
+            CaptionVariant {
+                mode: match mode {
+                    Mode::DirectQuote => "direct_quote",
+                    Mode::Blame => "blame",
+                    Mode::InternalThought => "internal_thought",
+                    Mode::Observation => "observation",
+                    Mode::Minimal => "minimal",
+                }
+                .into(),
+                label: match mode {
+                    Mode::DirectQuote => "Direct Quote",
+                    Mode::Blame => "Blame",
+                    Mode::InternalThought => "Inner Thought",
+                    Mode::Observation => "Observation",
+                    Mode::Minimal => "Minimal",
+                }
+                .into(),
+                text,
+            }
+        })
+        .collect();
 
     // Legacy compat: first 3 captions fill casual/funny/hype
     let casual = captions.first().map(|c| c.text.clone()).unwrap_or_default();
-    let funny  = captions.get(1).map(|c| c.text.clone()).unwrap_or_default();
-    let hype   = captions.get(2).map(|c| c.text.clone()).unwrap_or_default();
+    let funny = captions.get(1).map(|c| c.text.clone()).unwrap_or_default();
+    let hype = captions.get(2).map(|c| c.text.clone()).unwrap_or_default();
 
-    PostCaptions { captions, hashtags, source: "free".into(), casual, funny, hype }
+    PostCaptions {
+        captions,
+        hashtags,
+        source: "free".into(),
+        casual,
+        funny,
+        hype,
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1336,12 +1445,17 @@ const GENERIC_PHRASES: &[&str] = &[
 
 fn strong_quote(transcript: Option<&str>) -> Option<String> {
     let text = transcript?.trim();
-    if text.len() < 3 { return None; }
+    if text.len() < 3 {
+        return None;
+    }
     let filler = ["like", "so", "um", "uh", "okay", "ok", "well"];
-    let words: Vec<&str> = text.split_whitespace()
+    let words: Vec<&str> = text
+        .split_whitespace()
         .skip_while(|w| filler.contains(&w.to_lowercase().as_str()))
         .collect();
-    if words.len() < 2 { return None; }
+    if words.len() < 2 {
+        return None;
+    }
 
     // Take up to 20 words but try to end at a sentence boundary
     let taken: Vec<&str> = words.iter().take(20).copied().collect();
@@ -1361,16 +1475,36 @@ fn strong_quote(transcript: Option<&str>) -> Option<String> {
 
 fn primary_event(tags: &[String]) -> Option<&'static str> {
     let has = |t: &str| tags.iter().any(|x| x == t);
-    if has("jumpscare") || has("ambush") { return Some("ambush"); }
-    if has("fight")       { return Some("fight"); }
-    if has("explosion")   { return Some("explosion"); }
-    if has("celebration") { return Some("clutch"); }
-    if has("panic")       { return Some("panic"); }
-    if has("frustration") { return Some("frustration"); }
-    if has("disbelief")   { return Some("disbelief"); }
-    if has("shock")       { return Some("shock"); }
-    if has("hype")        { return Some("hype"); }
-    if has("reaction")    { return Some("reaction"); }
+    if has("jumpscare") || has("ambush") {
+        return Some("ambush");
+    }
+    if has("fight") {
+        return Some("fight");
+    }
+    if has("explosion") {
+        return Some("explosion");
+    }
+    if has("celebration") {
+        return Some("clutch");
+    }
+    if has("panic") {
+        return Some("panic");
+    }
+    if has("frustration") {
+        return Some("frustration");
+    }
+    if has("disbelief") {
+        return Some("disbelief");
+    }
+    if has("shock") {
+        return Some("shock");
+    }
+    if has("hype") {
+        return Some("hype");
+    }
+    if has("reaction") {
+        return Some("reaction");
+    }
     None
 }
 
@@ -1419,10 +1553,10 @@ pub fn build_hashtags_v2(
 
     // Niche slot 1: game name if present, else tone tag.
     let tone_tag = match tone {
-        GameType::Horror  => "horrorgaming",
-        GameType::Cozy    => "cozygaming",
-        GameType::Social  => "partygame",
-        GameType::FPS     => "fps",
+        GameType::Horror => "horrorgaming",
+        GameType::Cozy => "cozygaming",
+        GameType::Social => "partygame",
+        GameType::FPS => "fps",
         GameType::Generic => "clips",
     };
     if let Some(game) = game_name.map(sanitize_hashtag).filter(|g| !g.is_empty()) {
@@ -1557,7 +1691,10 @@ pub struct CaptionCandidate {
 /// `CaptionVariant` (single `text`) shape that frontend + DB currently expect.
 /// Callers that want the new two-part structure should read the candidate
 /// directly; this is the adapter for code paths mid-migration.
-pub fn caption_candidate_to_variant(candidate: &CaptionCandidate, selected_mode: &str) -> CaptionVariant {
+pub fn caption_candidate_to_variant(
+    candidate: &CaptionCandidate,
+    selected_mode: &str,
+) -> CaptionVariant {
     let hook = finish_caption_sentence(&normalize_caption_part(&candidate.hook_line, 50));
     let body = capitalize_first_letter(&finish_caption_sentence(&normalize_caption_part(
         &candidate.body,
@@ -1565,9 +1702,9 @@ pub fn caption_candidate_to_variant(candidate: &CaptionCandidate, selected_mode:
     )));
     let text = match (hook.is_empty(), body.is_empty()) {
         (false, false) => truncate_caption(&format!("{}\n\n{}", hook, body), 280),
-        (false, true)  => hook,
-        (true, false)  => body,
-        (true, true)   => String::new(),
+        (false, true) => hook,
+        (true, false) => body,
+        (true, true) => String::new(),
     };
     CaptionVariant {
         mode: selected_mode.to_string(),
@@ -1667,10 +1804,8 @@ fn capitalize_first_letter(text: &str) -> String {
 /// exists to catch what Twitch missed, not re-moderate.
 const COMMUNITY_TITLE_SLUR_BANLIST: &[&str] = &[
     // Racial slurs
-    "n1gger", "n1gga", "nigger", "nigga",
-    // Homophobic / transphobic slurs
-    "faggot", "tranny",
-    // Ableist slurs (strongest)
+    "n1gger", "n1gga", "nigger", "nigga", // Homophobic / transphobic slurs
+    "faggot", "tranny", // Ableist slurs (strongest)
     "retard", "retarded",
 ];
 
@@ -1776,16 +1911,16 @@ pub const LLM_SYSTEM_PROMPT: &str = "You are a gaming content creator writing ca
 /// Human-readable label for each caption mode.
 fn mode_label(mode: &str) -> &'static str {
     match mode {
-        "direct_quote"     => "Quote",
-        "blame"            => "Blame",
+        "direct_quote" => "Quote",
+        "blame" => "Blame",
         "internal_thought" => "Thought",
-        "observation"      => "Observe",
-        "minimal"          => "Minimal",
-        "punchy"           => "Punchy",
-        "clean"            => "Clean",
-        "funny"            => "Funny",
-        "hype"             => "Hype",
-        "search"           => "SEO",
+        "observation" => "Observe",
+        "minimal" => "Minimal",
+        "punchy" => "Punchy",
+        "clean" => "Clean",
+        "funny" => "Funny",
+        "hype" => "Hype",
+        "search" => "SEO",
         _ => "Caption",
     }
 }
@@ -1828,7 +1963,10 @@ pub async fn generate_llm(
     let transcript_section = if let Some(ft) = full_transcript.filter(|t| !t.trim().is_empty()) {
         // Truncate to ~800 chars to give Claude enough context about what happened
         let truncated = if ft.len() > 800 { &ft[..800] } else { ft };
-        format!("TRANSCRIPT (what was said in the clip):\n\"{}\"\n\n", truncated)
+        format!(
+            "TRANSCRIPT (what was said in the clip):\n\"{}\"\n\n",
+            truncated
+        )
     } else if let Some(q) = transcript_quote {
         format!("The person said: \"{}\"\n\n", q)
     } else {
@@ -1851,15 +1989,18 @@ pub async fn generate_llm(
         Some(name) if !name.is_empty() => {
             log::info!("[generate_llm] Game name received: {}", name);
             format!("GAME: {}\n", name)
-        },
+        }
         _ => {
             log::info!("[generate_llm] No game name provided");
             String::new()
-        },
+        }
     };
 
     let game_context = match game_name {
-        Some(name) if !name.is_empty() => format!(" This is a {} clip — reference the game naturally where it fits.", name),
+        Some(name) if !name.is_empty() => format!(
+            " This is a {} clip — reference the game naturally where it fits.",
+            name
+        ),
         _ => String::new(),
     };
 
@@ -1934,10 +2075,16 @@ Respond with ONLY the caption. No quotes, no labels, nothing else."#,
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(AppError::Api(format!("Claude API {}: {}", status, &body[..body.len().min(200)])));
+        return Err(AppError::Api(format!(
+            "Claude API {}: {}",
+            status,
+            &body[..body.len().min(200)]
+        )));
     }
 
-    let resp_json: serde_json::Value = resp.json().await
+    let resp_json: serde_json::Value = resp
+        .json()
+        .await
         .map_err(|e| AppError::Api(format!("Failed to parse Claude response: {e}")))?;
 
     let text = resp_json["content"][0]["text"]
@@ -1957,7 +2104,8 @@ Respond with ONLY the caption. No quotes, no labels, nothing else."#,
     let enforced = if cleaned.chars().count() > 280 {
         // Try to truncate at the last sentence/phrase boundary before 280
         let truncated: String = cleaned.chars().take(277).collect();
-        if let Some(pos) = truncated.rfind(|c: char| c == '.' || c == '!' || c == '?' || c == '\n') {
+        if let Some(pos) = truncated.rfind(|c: char| c == '.' || c == '!' || c == '?' || c == '\n')
+        {
             truncated[..=pos].trim().to_string()
         } else if let Some(pos) = truncated.rfind(' ') {
             // No sentence end — break at last space and add ellipsis
@@ -1971,7 +2119,12 @@ Respond with ONLY the caption. No quotes, no labels, nothing else."#,
 
     let label = mode_label(selected_mode).to_string();
 
-    log::debug!("Caption RESULT — mode: {}, len: {}, text: \"{}\"", selected_mode, enforced.chars().count(), enforced);
+    log::debug!(
+        "Caption RESULT — mode: {}, len: {}, text: \"{}\"",
+        selected_mode,
+        enforced.chars().count(),
+        enforced
+    );
 
     Ok(vec![CaptionVariant {
         mode: selected_mode.to_string(),
@@ -2022,7 +2175,8 @@ pub async fn generate_llm_title(
     let avoid_word = full_transcript
         .filter(|t| !t.trim().is_empty())
         .and_then(|t| {
-            let words: Vec<&str> = t.split_whitespace()
+            let words: Vec<&str> = t
+                .split_whitespace()
                 .filter(|w| w.len() >= 4)
                 .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
                 .filter(|w| !w.is_empty())
@@ -2092,7 +2246,11 @@ Respond with ONLY the title. No quotes, no explanation — just the title text."
         }]
     });
 
-    log::debug!("Title API Request (angle: {}, avoid: {:?}):", angle_name, avoid_word);
+    log::debug!(
+        "Title API Request (angle: {}, avoid: {:?}):",
+        angle_name,
+        avoid_word
+    );
     log::debug!("Model: {}", model);
     log::debug!("System: {}", LLM_SYSTEM_PROMPT);
     log::debug!("User message:\n{}", prompt);
@@ -2111,10 +2269,16 @@ Respond with ONLY the title. No quotes, no explanation — just the title text."
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(AppError::Api(format!("Claude API {}: {}", status, &body[..body.len().min(200)])));
+        return Err(AppError::Api(format!(
+            "Claude API {}: {}",
+            status,
+            &body[..body.len().min(200)]
+        )));
     }
 
-    let resp_json: serde_json::Value = resp.json().await
+    let resp_json: serde_json::Value = resp
+        .json()
+        .await
         .map_err(|e| AppError::Api(format!("Failed to parse Claude title response: {e}")))?;
 
     let text = resp_json["content"][0]["text"]
@@ -2142,7 +2306,11 @@ Respond with ONLY the title. No quotes, no explanation — just the title text."
         cleaned
     };
 
-    log::debug!("Title RESULT — len: {}, text: \"{}\"", final_title.chars().count(), final_title);
+    log::debug!(
+        "Title RESULT — len: {}, text: \"{}\"",
+        final_title.chars().count(),
+        final_title
+    );
 
     Ok(final_title)
 }
@@ -2205,9 +2373,7 @@ pub fn extract_money_quote_free(
                 let phrase_words = &words[start_idx..start_idx + window_size];
 
                 let keyword_hit = phrase_words.iter().any(|w| {
-                    let clean = w
-                        .trim_matches(|c: char| !c.is_alphabetic())
-                        .to_lowercase();
+                    let clean = w.trim_matches(|c: char| !c.is_alphabetic()).to_lowercase();
                     DEFAULT_EMOTIONAL_WORDS.iter().any(|k| clean == *k)
                 });
 
@@ -2629,7 +2795,10 @@ pub async fn generate_llm_caption(
     let transcript_section = match full_transcript.filter(|t| !t.trim().is_empty()) {
         Some(ft) => {
             let truncated = transcript_evidence(ft, TRANSCRIPT_CHAR_LIMIT);
-            format!("FULL CLIP TRANSCRIPT (primary evidence):\n\"{}\"\n\n", truncated)
+            format!(
+                "FULL CLIP TRANSCRIPT (primary evidence):\n\"{}\"\n\n",
+                truncated
+            )
         }
         None => match transcript_quote {
             Some(q) if !q.trim().is_empty() => format!("The person said: \"{}\"\n\n", q),
@@ -2806,16 +2975,10 @@ OUTPUT - JSON only, no prose, no markdown fence:
             let hook_score = crate::detection::ranker::score_title(&hook_truncated, &ctx);
             let body_score = score_caption_body(&normalized_body);
             let combined_text = format!("{} {}", hook_truncated, normalized_body);
-            let grounding_adjustment = caption_grounding_adjustment(
-                &combined_text,
-                &grounding_evidence,
-            );
-            let quality_adjustment =
-                caption_quality_adjustment(&hook_truncated, &normalized_body);
-            let novelty_adjustment = caption_novelty_adjustment(
-                &combined_text,
-                avoid_captions,
-            );
+            let grounding_adjustment =
+                caption_grounding_adjustment(&combined_text, &grounding_evidence);
+            let quality_adjustment = caption_quality_adjustment(&hook_truncated, &normalized_body);
+            let novelty_adjustment = caption_novelty_adjustment(&combined_text, avoid_captions);
             // Wave 3 fix: de-prefer money-quote-led candidates. Quote hooks nail the
             // ranker's brevity/specificity criteria so they would auto-win every regen
             // unless we put a thumb on the scale. 0.10 is enough to let a non-quote
@@ -2890,10 +3053,9 @@ fn truncate_hook(hook: &str, max_chars: usize) -> String {
 /// score (which can reach 1.0 via the ranker) dominates sort order.
 fn caption_content_tokens(text: &str) -> std::collections::HashSet<String> {
     const STOP_WORDS: &[&str] = &[
-        "and", "are", "but", "clip", "for", "from", "game", "gaming", "had",
-        "has", "have", "into", "its", "just", "moment", "not", "that", "the",
-        "their", "then", "this", "stream", "streamer", "was", "were", "what",
-        "when", "with", "you", "your",
+        "and", "are", "but", "clip", "for", "from", "game", "gaming", "had", "has", "have", "into",
+        "its", "just", "moment", "not", "that", "the", "their", "then", "this", "stream",
+        "streamer", "was", "were", "what", "when", "with", "you", "your",
     ];
 
     text.split(|character: char| !character.is_alphanumeric() && character != '\'')
@@ -2925,12 +3087,10 @@ fn caption_grounding_adjustment(caption: &str, evidence: &str) -> f32 {
 
 fn caption_quality_adjustment(hook: &str, body: &str) -> f32 {
     const DANGLING_WORDS: &[&str] = &[
-        "a", "an", "and", "as", "because", "but", "for", "if", "of", "or", "the",
-        "then", "to", "when", "while", "with", "without",
+        "a", "an", "and", "as", "because", "but", "for", "if", "of", "or", "the", "then", "to",
+        "when", "while", "with", "without",
     ];
-    const CLAUSE_CONNECTORS: &[&str] = &[
-        "and", "because", "but", "so", "then", "when", "while",
-    ];
+    const CLAUSE_CONNECTORS: &[&str] = &["and", "because", "but", "so", "then", "when", "while"];
 
     let hook = hook.trim();
     let body = body.trim();
@@ -3182,9 +3342,11 @@ pub(crate) fn extract_json_from_markdown(text: &str) -> Result<String, AppError>
     }
 
     // Layer 3: first `{` to last `}`
-    let start = trimmed.find('{')
+    let start = trimmed
+        .find('{')
         .ok_or_else(|| AppError::Api("No JSON object in response".into()))?;
-    let end = trimmed.rfind('}')
+    let end = trimmed
+        .rfind('}')
         .ok_or_else(|| AppError::Api("No JSON closing brace in response".into()))?;
     if end <= start {
         return Err(AppError::Api("Unbalanced braces in response".into()));
@@ -3201,16 +3363,22 @@ pub type TonePub = GameType;
 
 /// Public game type detection — primary API.
 pub fn detect_game_type_pub(
-    tags: &[String], transcript: Option<&str>,
-    audio: f64, speech: f64, scene: f64,
+    tags: &[String],
+    transcript: Option<&str>,
+    audio: f64,
+    speech: f64,
+    scene: f64,
 ) -> GameType {
     detect_game_type(tags, transcript, audio, speech, scene)
 }
 
 /// Backward-compat wrapper.
 pub fn classify_tone_pub(
-    tags: &[String], transcript: Option<&str>,
-    audio: f64, speech: f64, scene: f64,
+    tags: &[String],
+    transcript: Option<&str>,
+    audio: f64,
+    speech: f64,
+    scene: f64,
 ) -> GameType {
     detect_game_type(tags, transcript, audio, speech, scene)
 }
@@ -3219,7 +3387,12 @@ pub fn primary_event_pub(tags: &[String]) -> Option<&'static str> {
     primary_event(tags)
 }
 
-pub fn synthesize_event_pub(event: Option<&str>, tone: Tone, tags: &[String], seed: usize) -> String {
+pub fn synthesize_event_pub(
+    event: Option<&str>,
+    tone: Tone,
+    tags: &[String],
+    seed: usize,
+) -> String {
     synthesize_event(event, tone, tags, seed)
 }
 
@@ -3330,7 +3503,8 @@ mod tests {
 
     fn make_clip(tags: &[&str], audio: f64, speech: f64, scene: f64) -> CandidateClip {
         let mut c = CandidateClip::new(
-            60.0, 85.0,
+            60.0,
+            85.0,
             ClipScoreBreakdown::new(audio, speech, scene, None),
             vec![SignalType::Audio, SignalType::Transcript],
         );
@@ -3396,12 +3570,18 @@ mod tests {
         clip.transcript_excerpt = Some("Oh no oh no".into());
         clip.title = Some("Jumpscare detected".into());
         let captions = generate(&clip);
-        let all = format!("{} {} {}", captions.casual, captions.funny, captions.hype).to_lowercase();
+        let all =
+            format!("{} {} {}", captions.casual, captions.funny, captions.hype).to_lowercase();
         // Captions should reference the specific event, not be generic
         assert!(
-            all.contains("ambush") || all.contains("panic") || all.contains("jump")
-            || all.contains("oh no") || all.contains("scar") || all.contains("corner")
-            || all.contains("dark") || all.contains("noise"),
+            all.contains("ambush")
+                || all.contains("panic")
+                || all.contains("jump")
+                || all.contains("oh no")
+                || all.contains("scar")
+                || all.contains("corner")
+                || all.contains("dark")
+                || all.contains("noise"),
             "horror captions should reference the event: {all}"
         );
         // Should NOT be totally generic
@@ -3416,12 +3596,18 @@ mod tests {
         let mut clip = make_clip(&["fight", "ambush"], 0.9, 0.3, 0.7);
         clip.title = Some("Fight goes wrong fast".into());
         let captions = generate(&clip);
-        let all = format!("{} {} {}", captions.casual, captions.funny, captions.hype).to_lowercase();
+        let all =
+            format!("{} {} {}", captions.casual, captions.funny, captions.hype).to_lowercase();
         // Captions must reference the specific event
         assert!(
-            all.contains("rush") || all.contains("fight") || all.contains("ambush")
-            || all.contains("push") || all.contains("warning") || all.contains("guard")
-            || all.contains("wrong") || all.contains("dropped"),
+            all.contains("rush")
+                || all.contains("fight")
+                || all.contains("ambush")
+                || all.contains("push")
+                || all.contains("warning")
+                || all.contains("guard")
+                || all.contains("wrong")
+                || all.contains("dropped"),
             "shooter captions should reference the event: {all}"
         );
         assert!(
@@ -3490,8 +3676,17 @@ mod tests {
     #[test]
     fn hashtags_capped_at_five() {
         let clip = make_clip(
-            &["jumpscare", "fight", "celebration", "frustration", "reaction", "shock"],
-            0.9, 0.8, 0.7,
+            &[
+                "jumpscare",
+                "fight",
+                "celebration",
+                "frustration",
+                "reaction",
+                "shock",
+            ],
+            0.9,
+            0.8,
+            0.7,
         );
         let captions = generate(&clip);
         assert!(captions.hashtags.len() <= 5);
@@ -3503,7 +3698,11 @@ mod tests {
         clip.transcript_excerpt = Some("Oh my god what just happened right now".into());
         clip.title = Some("Ambush hits and panic sets in".into());
         let captions = generate(&clip);
-        for (name, text) in [("casual", &captions.casual), ("funny", &captions.funny), ("hype", &captions.hype)] {
+        for (name, text) in [
+            ("casual", &captions.casual),
+            ("funny", &captions.funny),
+            ("hype", &captions.hype),
+        ] {
             let wc = text.split_whitespace().count();
             assert!(wc <= 16, "{name} too long ({wc} words): {text}");
         }
@@ -3515,9 +3714,21 @@ mod tests {
         clip.transcript_excerpt = Some("That was the best play I have ever seen in my life".into());
         clip.title = Some("Clutch play at the last second".into());
         let captions = generate(&clip);
-        let all = format!("{} {} {}", captions.casual, captions.funny, captions.hype).to_lowercase();
-        for banned in ["insane", "unbelievable", "crazy", "you won't believe", "mind-blowing"] {
-            assert!(!all.contains(banned), "found banned word '{}' in: {}", banned, all);
+        let all =
+            format!("{} {} {}", captions.casual, captions.funny, captions.hype).to_lowercase();
+        for banned in [
+            "insane",
+            "unbelievable",
+            "crazy",
+            "you won't believe",
+            "mind-blowing",
+        ] {
+            assert!(
+                !all.contains(banned),
+                "found banned word '{}' in: {}",
+                banned,
+                all
+            );
         }
     }
 
@@ -3528,8 +3739,16 @@ mod tests {
         let mut clip = make_clip(&["fight", "frustration"], 0.8, 0.6, 0.4);
         clip.transcript_excerpt = Some("I missed that shot are you kidding me".into());
         let summary = generate_event_summary(&clip);
-        assert!(summary.contains("missed"), "should extract 'missed': {}", summary);
-        assert!(summary.contains("fight"), "should mention fight context: {}", summary);
+        assert!(
+            summary.contains("missed"),
+            "should extract 'missed': {}",
+            summary
+        );
+        assert!(
+            summary.contains("fight"),
+            "should mention fight context: {}",
+            summary
+        );
     }
 
     #[test]
@@ -3537,7 +3756,11 @@ mod tests {
         let mut clip = make_clip(&["fight", "panic"], 0.8, 0.6, 0.4);
         clip.transcript_excerpt = Some("Oh no I died again this is so bad".into());
         let summary = generate_event_summary(&clip);
-        assert!(summary.contains("died"), "should extract 'died': {}", summary);
+        assert!(
+            summary.contains("died"),
+            "should extract 'died': {}",
+            summary
+        );
     }
 
     #[test]
@@ -3558,7 +3781,8 @@ mod tests {
             || lower.contains("wrong") || lower.contains("sound") || lower.contains("safe")
             // OR legacy hardcoded vocab
             || lower.contains("ambush") || lower.contains("panic") || lower.contains("jumped"),
-            "should reference the panic/ambush scenario: {}", summary
+            "should reference the panic/ambush scenario: {}",
+            summary
         );
     }
 
@@ -3578,7 +3802,8 @@ mod tests {
             // OR legacy hardcoded vocab
             || lower.contains("fight") || lower.contains("clutch")
             || lower.contains("won") || lower.contains("survived"),
-            "should reference fight+celebration: {}", summary
+            "should reference fight+celebration: {}",
+            summary
         );
     }
 
@@ -3594,7 +3819,11 @@ mod tests {
         let mut clip = make_clip(&["jumpscare"], 0.8, 0.6, 0.5);
         clip.transcript_excerpt = Some("I just got so scared what was that".into());
         let summary = generate_event_summary(&clip);
-        assert!(summary.contains("scared"), "should extract 'scared': {}", summary);
+        assert!(
+            summary.contains("scared"),
+            "should extract 'scared': {}",
+            summary
+        );
     }
 
     #[test]
@@ -3602,7 +3831,11 @@ mod tests {
         let mut clip = make_clip(&["fight"], 0.7, 0.5, 0.3);
         clip.transcript_excerpt = Some("I whiffed that so hard what am I doing".into());
         let summary = generate_event_summary(&clip);
-        assert!(summary.contains("whiff"), "should extract 'whiffed': {}", summary);
+        assert!(
+            summary.contains("whiff"),
+            "should extract 'whiffed': {}",
+            summary
+        );
     }
 
     #[test]
@@ -3610,15 +3843,22 @@ mod tests {
         let mut clip = make_clip(&["fight", "frustration"], 0.8, 0.6, 0.4);
         clip.transcript_excerpt = Some("I missed that shot completely".into());
         let captions = generate(&clip);
-        let all_text: String = captions.captions.iter()
+        let all_text: String = captions
+            .captions
+            .iter()
             .map(|c| c.text.to_lowercase())
             .collect::<Vec<_>>()
             .join(" ");
         // At least one caption should reference the event
         assert!(
-            all_text.contains("miss") || all_text.contains("fight") || all_text.contains("shot")
-            || all_text.contains("wrong") || all_text.contains("fault") || all_text.contains("lost"),
-            "captions should reference the event: {}", all_text
+            all_text.contains("miss")
+                || all_text.contains("fight")
+                || all_text.contains("shot")
+                || all_text.contains("wrong")
+                || all_text.contains("fault")
+                || all_text.contains("lost"),
+            "captions should reference the event: {}",
+            all_text
         );
     }
 
@@ -3647,69 +3887,117 @@ mod tests {
         // Same event summary, different game types → different captions
         let ev = "got ambushed out of nowhere";
         let fps = generate_from_parts(
-            &["fight".into(), "ambush".into()], None, "", 60.0, 0.8, 0.3, 0.7, 0,
+            &["fight".into(), "ambush".into()],
+            None,
+            "",
+            60.0,
+            0.8,
+            0.3,
+            0.7,
+            0,
         );
         let horror = generate_from_parts(
-            &["jumpscare".into(), "ambush".into()], None, "", 60.0, 0.8, 0.3, 0.7, 0,
+            &["jumpscare".into(), "ambush".into()],
+            None,
+            "",
+            60.0,
+            0.8,
+            0.3,
+            0.7,
+            0,
         );
 
         // DirectQuote should differ (FPS: "no shot—" vs Horror: "oh god—")
         let fps_quote = &fps.captions[0].text;
         let horror_quote = &horror.captions[0].text;
-        assert_ne!(fps_quote, horror_quote,
-            "FPS and Horror direct quotes should differ:\n  FPS: {}\n  Horror: {}", fps_quote, horror_quote);
+        assert_ne!(
+            fps_quote, horror_quote,
+            "FPS and Horror direct quotes should differ:\n  FPS: {}\n  Horror: {}",
+            fps_quote, horror_quote
+        );
 
         // Blame should differ (FPS: "not a fair fight" vs Horror: "nobody warned me")
         let fps_blame = &fps.captions[1].text;
         let horror_blame = &horror.captions[1].text;
-        assert_ne!(fps_blame, horror_blame,
-            "FPS and Horror blame should differ:\n  FPS: {}\n  Horror: {}", fps_blame, horror_blame);
+        assert_ne!(
+            fps_blame, horror_blame,
+            "FPS and Horror blame should differ:\n  FPS: {}\n  Horror: {}",
+            fps_blame, horror_blame
+        );
     }
 
     #[test]
     fn cozy_captions_have_cozy_flavor() {
         let captions = generate_from_parts(
-            &["explosion".into(), "celebration".into()], Some("whoops the kitchen"), "",
-            60.0, 0.5, 0.5, 0.3, 0,
+            &["explosion".into(), "celebration".into()],
+            Some("whoops the kitchen"),
+            "",
+            60.0,
+            0.5,
+            0.5,
+            0.3,
+            0,
         );
-        let all_text: String = captions.captions.iter()
+        let all_text: String = captions
+            .captions
+            .iter()
             .map(|c| c.text.to_lowercase())
             .collect::<Vec<_>>()
             .join(" ");
         // Cozy flavor: should contain cozy-specific language
         assert!(
-            all_text.contains("whoops") || all_text.contains("preventable")
-            || all_text.contains("destruction") || all_text.contains("expect")
-            || all_text.contains("kitchen"),
-            "cozy captions should have cozy flavor: {}", all_text
+            all_text.contains("whoops")
+                || all_text.contains("preventable")
+                || all_text.contains("destruction")
+                || all_text.contains("expect")
+                || all_text.contains("kitchen"),
+            "cozy captions should have cozy flavor: {}",
+            all_text
         );
     }
 
     #[test]
     fn social_blame_targets_the_group() {
         let captions = generate_from_parts(
-            &["reaction".into(), "hype".into()], Some("why did you do that to the team"), "",
-            60.0, 0.3, 0.8, 0.2, 0,
+            &["reaction".into(), "hype".into()],
+            Some("why did you do that to the team"),
+            "",
+            60.0,
+            0.3,
+            0.8,
+            0.2,
+            0,
         );
         let blame = &captions.captions[1].text.to_lowercase();
         assert!(
             blame.contains("fault") || blame.contains("team") || blame.contains("whose"),
-            "social blame should target the group: {}", blame
+            "social blame should target the group: {}",
+            blame
         );
     }
 
     #[test]
     fn minimal_uses_event_word_not_generic() {
         let captions = generate_from_parts(
-            &["fight".into(), "frustration".into()], Some("I missed that shot"), "",
-            60.0, 0.8, 0.6, 0.4, 0,
+            &["fight".into(), "frustration".into()],
+            Some("I missed that shot"),
+            "",
+            60.0,
+            0.8,
+            0.6,
+            0.4,
+            0,
         );
         let minimal = &captions.captions[4].text.to_lowercase();
         // Should contain an event-derived word, not a generic mood word
         assert!(
-            minimal.contains("missed") || minimal.contains("fight") || minimal.contains("shot")
-            || minimal.contains("lost") || minimal.contains("wrong"),
-            "minimal should use event word: {}", minimal
+            minimal.contains("missed")
+                || minimal.contains("fight")
+                || minimal.contains("shot")
+                || minimal.contains("lost")
+                || minimal.contains("wrong"),
+            "minimal should use event word: {}",
+            minimal
         );
     }
 
@@ -3746,27 +4034,19 @@ mod tests {
 
     #[test]
     fn v2_game_name_takes_niche_slot_one() {
-        let out = build_hashtags_v2(
-            &[],
-            GameType::FPS,
-            Platform::TikTok,
-            &[],
-            Some("Valorant"),
+        let out = build_hashtags_v2(&[], GameType::FPS, Platform::TikTok, &[], Some("Valorant"));
+        assert!(
+            out.contains(&"valorant".to_string()),
+            "expected valorant in {:?}",
+            out
         );
-        assert!(out.contains(&"valorant".to_string()), "expected valorant in {:?}", out);
         // Tone tag "fps" should be displaced by the game name
         assert!(!out.contains(&"fps".to_string()) || out.len() == 5);
     }
 
     #[test]
     fn v2_tone_tag_used_when_no_game_name() {
-        let out = build_hashtags_v2(
-            &[],
-            GameType::Horror,
-            Platform::TikTok,
-            &[],
-            None,
-        );
+        let out = build_hashtags_v2(&[], GameType::Horror, Platform::TikTok, &[], None);
         assert!(out.contains(&"horrorgaming".to_string()));
     }
 
@@ -4004,9 +4284,9 @@ mod tests {
     #[test]
     fn w2_money_quote_free_picks_across_multiple_segments() {
         let segments = vec![
-            (0.0, 1.0, "we went to the store".to_string()),   // no keyword
+            (0.0, 1.0, "we went to the store".to_string()), // no keyword
             (5.0, 7.0, "i'm honestly speechless here".to_string()), // keyword
-            (10.0, 11.0, "then we left".to_string()),          // no keyword
+            (10.0, 11.0, "then we left".to_string()),       // no keyword
         ];
         let q = extract_money_quote_free(&segments, None);
         assert!(q.is_some());
@@ -4038,7 +4318,10 @@ mod tests {
 
     #[test]
     fn w2_validate_money_quote_rejects_null_quote() {
-        let resp = MoneyQuoteResponse { quote: None, confidence: 0.0 };
+        let resp = MoneyQuoteResponse {
+            quote: None,
+            confidence: 0.0,
+        };
         assert_eq!(validate_money_quote(resp, 0.6), None);
     }
 
@@ -4118,7 +4401,8 @@ mod tests {
 
     #[test]
     fn titles_response_parses_markdown_fenced_shape() {
-        let fenced = "```json\n{\"candidates\":[{\"pattern\":\"QUIET_FLEX\",\"text\":\"dialed in\"}]}\n```";
+        let fenced =
+            "```json\n{\"candidates\":[{\"pattern\":\"QUIET_FLEX\",\"text\":\"dialed in\"}]}\n```";
         let extracted = extract_json_from_markdown(fenced).unwrap();
         let parsed: TitlesResponse = serde_json::from_str(&extracted).unwrap();
         assert_eq!(parsed.candidates.len(), 1);
@@ -4131,7 +4415,10 @@ mod tests {
         let extracted = extract_json_from_markdown(text).unwrap();
         let parsed: TitlesResponse = serde_json::from_str(&extracted).unwrap();
         assert_eq!(parsed.candidates.len(), 1);
-        assert_eq!(parsed.candidates[0].pattern, TitlePattern::CuriosityQuestion);
+        assert_eq!(
+            parsed.candidates[0].pattern,
+            TitlePattern::CuriosityQuestion
+        );
     }
 
     #[test]
@@ -4359,11 +4646,26 @@ mod tests {
 
     #[test]
     fn w3b_infer_emotion_from_explicit_tags() {
-        assert_eq!(infer_emotion(Tone::Generic, &vec!["panic".into()]), Some("panic"));
-        assert_eq!(infer_emotion(Tone::Generic, &vec!["shock".into()]), Some("shock"));
-        assert_eq!(infer_emotion(Tone::Generic, &vec!["celebration".into()]), Some("hype"));
-        assert_eq!(infer_emotion(Tone::Generic, &vec!["frustration".into()]), Some("rage"));
-        assert_eq!(infer_emotion(Tone::Generic, &vec!["reaction".into()]), Some("funny"));
+        assert_eq!(
+            infer_emotion(Tone::Generic, &vec!["panic".into()]),
+            Some("panic")
+        );
+        assert_eq!(
+            infer_emotion(Tone::Generic, &vec!["shock".into()]),
+            Some("shock")
+        );
+        assert_eq!(
+            infer_emotion(Tone::Generic, &vec!["celebration".into()]),
+            Some("hype")
+        );
+        assert_eq!(
+            infer_emotion(Tone::Generic, &vec!["frustration".into()]),
+            Some("rage")
+        );
+        assert_eq!(
+            infer_emotion(Tone::Generic, &vec!["reaction".into()]),
+            Some("funny")
+        );
     }
 
     #[test]
@@ -4463,8 +4765,11 @@ mod tests {
         // Matrix (hype, ace) vocab — at least one of these should appear.
         let lower = out.to_lowercase();
         assert!(
-            lower.contains("round") || lower.contains("dropped") || lower.contains("lobby")
-            || lower.contains("tap") || lower.contains("script"),
+            lower.contains("round")
+                || lower.contains("dropped")
+                || lower.contains("lobby")
+                || lower.contains("tap")
+                || lower.contains("script"),
             "expected matrix (hype, ace) output, got: {}",
             out
         );
@@ -4480,9 +4785,11 @@ mod tests {
         let lower = out.to_lowercase();
         // Hardcoded ambush-FPS vocab:
         assert!(
-            lower.contains("rush") || lower.contains("nowhere")
-            || lower.contains("caught") || lower.contains("warning")
-            || lower.contains("guard"),
+            lower.contains("rush")
+                || lower.contains("nowhere")
+                || lower.contains("caught")
+                || lower.contains("warning")
+                || lower.contains("guard"),
             "expected hardcoded ambush output, got: {}",
             out
         );
@@ -4520,7 +4827,11 @@ mod tests {
         );
         // Should fall back to synthesized — no slur passed through
         assert!(!out.to_lowercase().contains("n1gger"));
-        assert!(out.starts_with('F'), "expected synthesized fallback: {}", out);
+        assert!(
+            out.starts_with('F'),
+            "expected synthesized fallback: {}",
+            out
+        );
     }
 
     #[test]
@@ -4533,7 +4844,12 @@ mod tests {
     fn w3c_sanitize_community_title_truncates_long_titles() {
         let long_title = "this is a very long community clip title that definitely exceeds the sixty character limit by a wide margin";
         let result = sanitize_community_title(long_title).unwrap();
-        assert!(result.chars().count() <= 60, "got {} chars: {}", result.chars().count(), result);
+        assert!(
+            result.chars().count() <= 60,
+            "got {} chars: {}",
+            result.chars().count(),
+            result
+        );
         // Should cut at word boundary — no trailing partial word
         assert!(!result.ends_with(|c: char| c.is_alphabetic() && result.chars().count() == 60));
     }
@@ -4599,7 +4915,10 @@ mod tests {
 
     #[test]
     fn w3c_truncate_title_at_word_boundary_preserves_short() {
-        assert_eq!(truncate_title_at_word_boundary("short title", 60), "short title");
+        assert_eq!(
+            truncate_title_at_word_boundary("short title", 60),
+            "short title"
+        );
     }
 
     #[test]

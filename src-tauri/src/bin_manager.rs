@@ -35,14 +35,17 @@ pub fn bin_dir() -> Result<PathBuf, AppError> {
     let base = dirs::data_dir()
         .ok_or_else(|| AppError::Unknown("no APPDATA dir on this system".into()))?;
     let dir = base.join("clipviral").join("bin");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| AppError::Unknown(format!("create bin dir: {e}")))?;
+    std::fs::create_dir_all(&dir).map_err(|e| AppError::Unknown(format!("create bin dir: {e}")))?;
     Ok(dir)
 }
 
 fn bundled_path(name: &str) -> Option<PathBuf> {
     let p = bin_dir().ok()?.join(name);
-    if p.exists() { Some(p) } else { None }
+    if p.exists() {
+        Some(p)
+    } else {
+        None
+    }
 }
 
 /// Returns `true` if `<name>` runs successfully with `version_flag` via the
@@ -50,7 +53,9 @@ fn bundled_path(name: &str) -> Option<PathBuf> {
 /// installed system-wide.
 fn in_path(name: &str, version_flag: &str) -> bool {
     let mut cmd = std::process::Command::new(name);
-    cmd.arg(version_flag).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.arg(version_flag)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -69,7 +74,9 @@ pub fn ffmpeg_path() -> Result<PathBuf, AppError> {
         log::info!("[bin_manager] ffmpeg: using system PATH");
         return Ok(PathBuf::from("ffmpeg"));
     }
-    Err(AppError::Ffmpeg("ffmpeg not found (bundled or system PATH)".into()))
+    Err(AppError::Ffmpeg(
+        "ffmpeg not found (bundled or system PATH)".into(),
+    ))
 }
 
 /// Return a usable `ffprobe` path: bundled first, then system PATH (bare name).
@@ -80,7 +87,9 @@ pub fn ffprobe_path() -> Result<PathBuf, AppError> {
     if in_path("ffprobe", "-version") {
         return Ok(PathBuf::from("ffprobe"));
     }
-    Err(AppError::Ffmpeg("ffprobe not found (bundled or system PATH)".into()))
+    Err(AppError::Ffmpeg(
+        "ffprobe not found (bundled or system PATH)".into(),
+    ))
 }
 
 /// Return a usable `yt-dlp` path: bundled first, then system PATH (bare name).
@@ -93,7 +102,9 @@ pub fn ytdlp_path() -> Result<PathBuf, AppError> {
         log::info!("[bin_manager] yt-dlp: using system PATH");
         return Ok(PathBuf::from("yt-dlp"));
     }
-    Err(AppError::Download("yt-dlp not found (bundled or system PATH)".into()))
+    Err(AppError::Download(
+        "yt-dlp not found (bundled or system PATH)".into(),
+    ))
 }
 
 // ── Status ──

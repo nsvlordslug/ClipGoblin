@@ -8,12 +8,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpStream;
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::Message,
-    MaybeTlsStream,
-    WebSocketStream,
-};
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(8);
@@ -148,8 +143,12 @@ async fn obs_request(
 
 pub async fn obs_status(port: u16, password: &str) -> Result<RecorderStatus, String> {
     let mut socket = obs_connect(port, password).await?;
-    let replay = obs_request(&mut socket, "GetReplayBufferStatus", "clipgoblin-replay-status")
-        .await?;
+    let replay = obs_request(
+        &mut socket,
+        "GetReplayBufferStatus",
+        "clipgoblin-replay-status",
+    )
+    .await?;
     let record = obs_request(&mut socket, "GetRecordStatus", "clipgoblin-record-status").await?;
     let replay_active = replay
         .get("outputActive")
@@ -218,7 +217,9 @@ pub async fn obs_save_replay(port: u16, password: &str) -> Result<PathBuf, Strin
                 let path = message
                     .pointer("/d/eventData/savedReplayPath")
                     .and_then(Value::as_str)
-                    .ok_or_else(|| "OBS saved the replay but did not return its path".to_string())?;
+                    .ok_or_else(|| {
+                        "OBS saved the replay but did not return its path".to_string()
+                    })?;
                 return Ok(PathBuf::from(path));
             }
             _ => {}
@@ -268,9 +269,7 @@ async fn meld_connect() -> Result<(Socket, Value), String> {
         .await
         .map_err(|error| format!("Could not initialize Meld control: {error}"))?;
     let init = next_json(&mut socket).await?;
-    if init.get("type").and_then(Value::as_i64) != Some(3)
-        || init.pointer("/data/meld").is_none()
-    {
+    if init.get("type").and_then(Value::as_i64) != Some(3) || init.pointer("/data/meld").is_none() {
         return Err("Meld returned an unexpected control handshake".to_string());
     }
     Ok((socket, init))

@@ -146,19 +146,33 @@ struct AiSettings {
     fallback_to_free: bool,
 }
 
-fn default_provider() -> String { "free".into() }
-fn default_openai_model() -> String { "gpt-4o-mini".into() }
-fn default_claude_model() -> String { "claude-sonnet-4-6".into() }
+fn default_provider() -> String {
+    "free".into()
+}
+fn default_openai_model() -> String {
+    "gpt-4o-mini".into()
+}
+fn default_claude_model() -> String {
+    "claude-sonnet-4-6".into()
+}
 /// Default model for the clip-worthiness JUDGE — Sonnet, the quality default.
 /// Haiku measurably hurt clip quality on banter/comedy content, so Sonnet is the
 /// out-of-the-box judge; Haiku stays available as an opt-in "economy" choice.
 /// Titles/captions still use `claude_model`.
-fn default_claude_judge_model() -> String { "claude-sonnet-4-6".into() }
+fn default_claude_judge_model() -> String {
+    "claude-sonnet-4-6".into()
+}
 /// Model for the (optional) judge final-pass — a single Sonnet call over only
 /// the top survivors for taste. Kept separate from the bulk judge model.
-fn default_claude_final_pass_model() -> String { "claude-sonnet-4-6".into() }
-fn default_gemini_model() -> String { "gemini-2.5-flash".into() }
-fn default_true() -> bool { true }
+fn default_claude_final_pass_model() -> String {
+    "claude-sonnet-4-6".into()
+}
+fn default_gemini_model() -> String {
+    "gemini-2.5-flash".into()
+}
+fn default_true() -> bool {
+    true
+}
 
 impl Default for AiSettings {
     fn default() -> Self {
@@ -204,7 +218,7 @@ pub fn resolve(conn: &rusqlite::Connection, scope: Scope) -> ResolvedProvider {
 
     // Check if the scope is enabled for this provider
     let scope_enabled = match scope {
-        Scope::Titles   => settings.use_for_titles,
+        Scope::Titles => settings.use_for_titles,
         Scope::Captions => settings.use_for_captions,
         Scope::ClipJudge => true, // gated by `ai_clip_detection_enabled`, not a per-provider toggle
     };
@@ -218,7 +232,10 @@ pub fn resolve(conn: &rusqlite::Connection, scope: Scope) -> ResolvedProvider {
     // an optional `claudeJudgeModel` override — titles/captions keep following
     // `claude_model`.
     let (api_key, model) = match provider {
-        Provider::OpenAI => (settings.openai_api_key.clone(), settings.openai_model.clone()),
+        Provider::OpenAI => (
+            settings.openai_api_key.clone(),
+            settings.openai_model.clone(),
+        ),
         Provider::Claude => {
             let model = match scope {
                 Scope::ClipJudge => settings
@@ -230,13 +247,20 @@ pub fn resolve(conn: &rusqlite::Connection, scope: Scope) -> ResolvedProvider {
             };
             (settings.claude_api_key.clone(), model)
         }
-        Provider::Gemini => (settings.gemini_api_key.clone(), settings.gemini_model.clone()),
-        Provider::Free   => unreachable!(),
+        Provider::Gemini => (
+            settings.gemini_api_key.clone(),
+            settings.gemini_model.clone(),
+        ),
+        Provider::Free => unreachable!(),
     };
 
     // If no key is configured, resolve to Free (don't hard fail)
     if api_key.is_empty() {
-        log::info!("AI provider {:?} selected but no key configured — using Free mode for {:?}", provider, scope);
+        log::info!(
+            "AI provider {:?} selected but no key configured — using Free mode for {:?}",
+            provider,
+            scope
+        );
         return ResolvedProvider::free();
     }
 
@@ -244,8 +268,7 @@ pub fn resolve(conn: &rusqlite::Connection, scope: Scope) -> ResolvedProvider {
     // add Sonnet taste on top of a CHEAPER bulk judge (e.g. Haiku); when the judge
     // model is ALREADY the final-pass model (Sonnet), the extra pass would just run
     // Sonnet twice for no benefit — so disable it in that case.
-    let judge_is_final_pass_model =
-        model.trim() == default_claude_final_pass_model().trim();
+    let judge_is_final_pass_model = model.trim() == default_claude_final_pass_model().trim();
     let use_sonnet_final_pass = matches!(scope, Scope::ClipJudge)
         && provider == Provider::Claude
         && settings.use_sonnet_final_pass
@@ -375,7 +398,8 @@ mod tests {
     #[test]
     fn judge_model_defaults_to_sonnet_when_unset() {
         // No claudeJudgeModel set → judge defaults to Sonnet (quality), independent of claudeModel.
-        let json = r#"{"provider":"claude","claudeApiKey":"sk-ant","claudeModel":"claude-sonnet-4-6"}"#;
+        let json =
+            r#"{"provider":"claude","claudeApiKey":"sk-ant","claudeModel":"claude-sonnet-4-6"}"#;
         let s: AiSettings = serde_json::from_str(json).unwrap();
         assert!(s.claude_judge_model.is_none());
         assert_eq!(s.claude_model, "claude-sonnet-4-6"); // titles/captions unchanged

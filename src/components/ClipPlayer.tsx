@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback, useId } from 'react'
-import { Play, Pause, Volume2, VolumeX, RotateCcw } from 'lucide-react'
+import { Play, Pause, Volume2, VolumeX, RotateCcw, Loader2 } from 'lucide-react'
 import { usePlaybackStore } from '../stores/playbackStore'
 import {
   contextBlurPixels,
@@ -45,6 +45,10 @@ interface Props {
   onEnded?: () => void
   /** Start playback after a newly supplied source has loaded. */
   autoPlay?: boolean
+  /** Prevent playback while a required local preview asset is being prepared. */
+  playbackBlocked?: boolean
+  /** Short status shown while playback is blocked. */
+  playbackBlockedLabel?: string
   /** Called when the current source has loaded enough metadata to play. */
   onReady?: () => void
   /** Keep this player independent from the app-wide single-player coordinator. */
@@ -82,6 +86,7 @@ interface Props {
 export default function ClipPlayer({
   src, poster, clipStart, clipEnd, mode = 'compact', className = '', overlay,
   controlsOverlay = false, onPlayChange, onRequestSource, onEnded, autoPlay = false,
+  playbackBlocked = false, playbackBlockedLabel = 'Preparing preview...',
   onReady, coordinatePlayback = true, showControls = true, volumeMultiplier = 1,
   onTimeUpdate, seekRef: externalSeekRef,
   objectFit = 'cover', blurBackground = false, blackBackground = false, backgroundMedia = null,
@@ -107,6 +112,7 @@ export default function ClipPlayer({
   const onReadyRef = useRef(onReady)
   const pendingPlayRef = useRef(false)
   const completedRef = useRef(false)
+  const playbackBlockedRef = useRef(playbackBlocked)
 
   useEffect(() => {
     onTimeUpdateRef.current = onTimeUpdate
@@ -114,7 +120,8 @@ export default function ClipPlayer({
     onRequestSourceRef.current = onRequestSource
     onEndedRef.current = onEnded
     onReadyRef.current = onReady
-  }, [onEnded, onPlayChange, onReady, onRequestSource, onTimeUpdate])
+    playbackBlockedRef.current = playbackBlocked
+  }, [onEnded, onPlayChange, onReady, onRequestSource, onTimeUpdate, playbackBlocked])
 
   const [loaded, setLoaded] = useState(false)
   const [playing, setPlaying] = useState(false)
@@ -211,6 +218,7 @@ export default function ClipPlayer({
       onReadyRef.current?.()
       if (pendingPlayRef.current) {
         pendingPlayRef.current = false
+        if (playbackBlockedRef.current) return
         completedRef.current = false
         video.play()
           .then(() => setPlayingState(true))
@@ -263,13 +271,13 @@ export default function ClipPlayer({
 
   useEffect(() => {
     const video = videoRef.current
-    if (!autoPlay || !loaded || playing || error || !video) return
+    if (!autoPlay || playbackBlocked || !loaded || playing || error || !video) return
     completedRef.current = false
     if ((effClipEnd < Number.MAX_SAFE_INTEGER && video.currentTime >= effClipEnd - 0.05) || video.currentTime < effClipStart) {
       video.currentTime = effClipStart
     }
     video.play().then(() => setPlayingState(true)).catch(() => setError(PLAYBACK_FAILED_MSG))
-  }, [autoPlay, effClipEnd, effClipStart, error, loaded, playing, setPlayingState])
+  }, [autoPlay, effClipEnd, effClipStart, error, loaded, playbackBlocked, playing, setPlayingState])
 
   // ── Time tracking + boundary enforcement ──
   useEffect(() => {
@@ -427,9 +435,18 @@ export default function ClipPlayer({
     video.muted = muted
   }, [muted, volume, volumeMultiplier])
 
+  useEffect(() => {
+    if (!playbackBlocked) return
+    pendingPlayRef.current = false
+    const video = videoRef.current
+    if (video && !video.paused) {
+      video.pause()
+    }
+  }, [playbackBlocked])
+
   // ── Play / Pause ──
   const togglePlay = useCallback(async () => {
-    if (error) return
+    if (error || (playbackBlocked && !playing)) return
     const video = videoRef.current
     if (!video) return
 
@@ -456,11 +473,11 @@ export default function ClipPlayer({
       }
       video.play().then(() => setPlayingState(true)).catch(() => setError(PLAYBACK_FAILED_MSG))
     }
-  }, [loaded, playing, error, effClipStart, effClipEnd, setPlayingState, src])
+  }, [loaded, playing, error, effClipStart, effClipEnd, playbackBlocked, setPlayingState, src])
 
   const restart = () => {
     const video = videoRef.current
-    if (!video || !loaded) return
+    if (!video || !loaded || playbackBlocked) return
     completedRef.current = false
     video.currentTime = effClipStart
     setCurrentTime(effClipStart)
@@ -544,7 +561,7 @@ export default function ClipPlayer({
       {/* ── Video area ── */}
       <div
         ref={videoAreaRef}
-        className={`relative group flex-1 min-h-0 overflow-hidden ${showControls ? 'cursor-pointer' : ''} ${blackBackground ? 'bg-black' : 'bg-surface-900'}`}
+        className={`relative group flex-1 min-h-0 overflow-hidden ${showControls ? (playbackBlocked ? 'cursor-wait' : 'cursor-pointer') : ''} ${blackBackground ? 'bg-black' : 'bg-surface-900'}`}
         onClick={showControls ? togglePlay : undefined}
       >
         {backgroundMedia && (
@@ -595,7 +612,13 @@ export default function ClipPlayer({
         {overlay}
 
         {/* Play/Pause center icon */}
-        {showControls && !playing && !error && (
+        {showControls && playbackBlocked && !error && (
+          <div className="absolute inset-0 z-[16] flex flex-col items-center justify-center gap-2 bg-black/45 text-white/90">
+            <Loader2 className={`${isFull ? 'h-7 w-7' : 'h-5 w-5'} animate-spin`} />
+            <span className="text-xs font-medium">{playbackBlockedLabel}</span>
+          </div>
+        )}
+        {showControls && !playbackBlocked && !playing && !error && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/40 group-hover:bg-black/30 transition-colors">
             <Play className={`${isFull ? 'w-14 h-14' : 'w-10 h-10'} text-white/90 drop-shadow`} />
           </div>
@@ -621,7 +644,7 @@ export default function ClipPlayer({
         {/* Controls overlaid inside video area */}
         {showControls && controlsOverlay && (
           <div className="absolute bottom-0 left-0 right-0 z-[15] flex items-center gap-2 px-3 py-2 bg-gradient-to-t from-black/80 via-black/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-            <button onClick={e => { e.stopPropagation(); togglePlay() }} className="shrink-0 p-1 rounded text-white/80 hover:text-white cursor-pointer" title={playing ? 'Pause' : 'Play'}>
+            <button disabled={playbackBlocked} onClick={e => { e.stopPropagation(); togglePlay() }} className="shrink-0 p-1 rounded text-white/80 hover:text-white cursor-pointer disabled:cursor-wait disabled:opacity-50" title={playbackBlocked ? playbackBlockedLabel : playing ? 'Pause' : 'Play'}>
               {playing ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
             </button>
             <button onClick={e => { e.stopPropagation(); restart() }} className="shrink-0 p-1 rounded text-white/80 hover:text-white cursor-pointer" title="Restart">
@@ -659,7 +682,7 @@ export default function ClipPlayer({
       {/* Controls below video (non-overlay mode) */}
       {showControls && !controlsOverlay && (
         <div className={`flex items-center gap-2 ${isFull ? 'px-3 py-2' : 'px-3 pt-2 pb-1'}`}>
-          <button onClick={e => { e.stopPropagation(); togglePlay() }} className="shrink-0 p-1 rounded text-slate-400 hover:text-white transition-colors cursor-pointer" title={playing ? 'Pause' : 'Play'}>
+          <button disabled={playbackBlocked} onClick={e => { e.stopPropagation(); togglePlay() }} className="shrink-0 p-1 rounded text-slate-400 hover:text-white transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-50" title={playbackBlocked ? playbackBlockedLabel : playing ? 'Pause' : 'Play'}>
             {playing ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
           </button>
           {isFull && (

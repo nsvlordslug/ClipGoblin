@@ -6,6 +6,7 @@ import { invoke } from '@tauri-apps/api/core'
 export interface ConnectedAccount {
   platform: string
   account_name: string
+  account_handle?: string | null
   account_id: string
   connected_at: string
 }

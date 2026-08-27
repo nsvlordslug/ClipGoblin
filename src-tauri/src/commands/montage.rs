@@ -174,6 +174,8 @@ fn normalize_segment(
     size: MontageOutputSize,
 ) -> Result<(), String> {
     let audio_present = has_audio_stream(ffmpeg, input);
+    let source_duration =
+        probe_media_duration(input).filter(|duration| duration.is_finite() && *duration > 0.0);
     let video_filter = format!(
         "scale={}:{}:force_original_aspect_ratio=decrease:flags=lanczos,pad={}:{}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,setpts=PTS-STARTPTS,fps=30,format=yuv420p",
         size.width, size.height, size.width, size.height
@@ -230,7 +232,11 @@ fn normalize_segment(
         .arg("-video_track_timescale")
         .arg("90000")
         .arg("-movflags")
-        .arg("+faststart")
+        .arg("+faststart");
+    if let Some(duration) = source_duration {
+        command.arg("-t").arg(format!("{duration:.6}"));
+    }
+    command
         .arg(output)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());

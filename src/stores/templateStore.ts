@@ -14,6 +14,8 @@ export interface ClipTemplate {
   captionPosition: 'top' | 'center' | 'bottom'
   /** Optional for backward compatibility with templates saved before v1.5.10. */
   captionFontScale?: number
+  /** Cardboard-only torn-card scale. Other styles ignore this value. */
+  captionCardScale?: number
   /** Fine vertical adjustment from the selected caption anchor, in percentage points. */
   captionYOffset?: number
   /** Preferred caption tone for generation */

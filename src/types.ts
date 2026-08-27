@@ -22,6 +22,9 @@ export interface Vod {
   analysis_progress: number;
   local_path: string | null;
   game_name: string | null;
+  stream_style: 'auto' | 'action' | 'cozy' | 'story' | 'talking' | 'mixed';
+  detected_stream_style: 'action' | 'cozy' | 'story' | 'talking' | 'mixed';
+  analyzed_stream_style: string | null;
   cam_region_norm: string | null;
 }
 
@@ -72,9 +75,16 @@ export interface Clip {
   captions_position: string;
   caption_style: string;
   caption_font_scale: number;
+  caption_card_scale?: number;
   caption_y_offset?: number;
   /** Absolute source-media timestamp represented by SRT time 0:00. */
   captions_source_start?: number | null;
+  captions_provenance?: 'none' | 'analysis-draft' | 'aligned' | 'edited' | 'legacy';
+  captions_pipeline_version?: number;
+  caption_audio_mode?: 'mixed' | 'microphone';
+  captions_recognition_signature?: string | null;
+  captions_language?: string | null;
+  caption_audio_stream?: string | null;
   facecam_layout: string;
   facecam_settings?: string | null;
   context_background_path?: string | null;

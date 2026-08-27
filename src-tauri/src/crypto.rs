@@ -76,9 +76,7 @@ pub fn decrypt_sensitive(encrypted: &str) -> Result<String, String> {
 fn encrypt_dpapi(plaintext: &str) -> Result<String, String> {
     use base64::Engine;
     use windows::core::PCWSTR;
-    use windows::Win32::Security::Cryptography::{
-        CryptProtectData, CRYPT_INTEGER_BLOB,
-    };
+    use windows::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
 
     let plain_bytes = plaintext.as_bytes();
     let input_blob = CRYPT_INTEGER_BLOB {
@@ -93,24 +91,25 @@ fn encrypt_dpapi(plaintext: &str) -> Result<String, String> {
     unsafe {
         CryptProtectData(
             &input_blob,
-            PCWSTR::null(),     // description
-            None,               // optional entropy
-            None,               // reserved
-            None,               // prompt struct
-            0,                  // flags
+            PCWSTR::null(), // description
+            None,           // optional entropy
+            None,           // reserved
+            None,           // prompt struct
+            0,              // flags
             &mut output_blob,
         )
         .map_err(|e| format!("DPAPI CryptProtectData failed: {}", e))?;
     }
 
-    let encrypted_bytes = unsafe {
-        std::slice::from_raw_parts(output_blob.pbData, output_blob.cbData as usize)
-    };
+    let encrypted_bytes =
+        unsafe { std::slice::from_raw_parts(output_blob.pbData, output_blob.cbData as usize) };
     let encoded = base64::engine::general_purpose::STANDARD.encode(encrypted_bytes);
 
     // Free the DPAPI-allocated buffer
     unsafe {
-        let _ = windows::Win32::Foundation::LocalFree(windows::Win32::Foundation::HLOCAL(output_blob.pbData as *mut core::ffi::c_void));
+        let _ = windows::Win32::Foundation::LocalFree(windows::Win32::Foundation::HLOCAL(
+            output_blob.pbData as *mut core::ffi::c_void,
+        ));
     }
 
     Ok(format!("{}{}", DPAPI_PREFIX, encoded))
@@ -119,9 +118,7 @@ fn encrypt_dpapi(plaintext: &str) -> Result<String, String> {
 #[cfg(target_os = "windows")]
 fn decrypt_dpapi(base64_payload: &str) -> Result<String, String> {
     use base64::Engine;
-    use windows::Win32::Security::Cryptography::{
-        CryptUnprotectData, CRYPT_INTEGER_BLOB,
-    };
+    use windows::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
 
     let cipher_bytes = base64::engine::general_purpose::STANDARD
         .decode(base64_payload)
@@ -140,24 +137,25 @@ fn decrypt_dpapi(base64_payload: &str) -> Result<String, String> {
         CryptUnprotectData(
             &input_blob,
             Some(std::ptr::null_mut()), // description out
-            None,               // optional entropy
-            None,               // reserved
-            None,               // prompt struct
-            0,                  // flags
+            None,                       // optional entropy
+            None,                       // reserved
+            None,                       // prompt struct
+            0,                          // flags
             &mut output_blob,
         )
         .map_err(|e| format!("DPAPI CryptUnprotectData failed: {}", e))?;
     }
 
-    let decrypted_bytes = unsafe {
-        std::slice::from_raw_parts(output_blob.pbData, output_blob.cbData as usize)
-    };
+    let decrypted_bytes =
+        unsafe { std::slice::from_raw_parts(output_blob.pbData, output_blob.cbData as usize) };
     let result = String::from_utf8(decrypted_bytes.to_vec())
         .map_err(|e| format!("UTF-8 decode failed: {}", e))?;
 
     // Free the DPAPI-allocated buffer
     unsafe {
-        let _ = windows::Win32::Foundation::LocalFree(windows::Win32::Foundation::HLOCAL(output_blob.pbData as *mut core::ffi::c_void));
+        let _ = windows::Win32::Foundation::LocalFree(windows::Win32::Foundation::HLOCAL(
+            output_blob.pbData as *mut core::ffi::c_void,
+        ));
     }
 
     Ok(result)

@@ -131,11 +131,7 @@ impl Cluster {
 
     /// Distinct signal types present.
     fn source_types(&self) -> Vec<SignalType> {
-        let mut types: Vec<SignalType> = self
-            .signals
-            .iter()
-            .map(|s| s.signal_type)
-            .collect();
+        let mut types: Vec<SignalType> = self.signals.iter().map(|s| s.signal_type).collect();
         types.sort_by_key(|t| *t as u8);
         types.dedup();
         types
@@ -190,10 +186,7 @@ impl Cluster {
 ///
 /// Input: flat `Vec<SignalSegment>` from all signal providers combined.
 /// Output: ranked `Vec<CandidateClip>`, accepted clips only, best first.
-pub fn fuse(
-    segments: &[SignalSegment],
-    config: &FusionConfig,
-) -> Vec<CandidateClip> {
+pub fn fuse(segments: &[SignalSegment], config: &FusionConfig) -> Vec<CandidateClip> {
     if segments.is_empty() {
         return Vec::new();
     }
@@ -201,13 +194,15 @@ pub fn fuse(
     // 1. Cluster nearby signals
     let clusters = cluster_signals(segments, config.fusion_window);
 
-    log::info!("Fusion: {} signals → {} clusters", segments.len(), clusters.len());
+    log::info!(
+        "Fusion: {} signals → {} clusters",
+        segments.len(),
+        clusters.len()
+    );
 
     // 2. Expand clusters to clip-length candidates with score breakdowns
-    let mut clips: Vec<CandidateClip> = clusters
-        .iter()
-        .map(|c| expand_to_clip(c, config))
-        .collect();
+    let mut clips: Vec<CandidateClip> =
+        clusters.iter().map(|c| expand_to_clip(c, config)).collect();
 
     // 3. Deduplicate overlapping clips
     dedup_clips(&mut clips, config.dedup_overlap);
@@ -361,12 +356,7 @@ fn expand_to_clip(cluster: &Cluster, config: &FusionConfig) -> CandidateClip {
 fn build_fingerprint(tags: &[String]) -> String {
     let mut sorted = tags.to_vec();
     sorted.sort();
-    sorted
-        .iter()
-        .take(2)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("+")
+    sorted.iter().take(2).cloned().collect::<Vec<_>>().join("+")
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -436,7 +426,8 @@ fn reject_weak(clips: &mut [CandidateClip], config: &FusionConfig) {
         if dur < config.min_duration * 0.5 {
             clip.rejection_reason = Some(format!(
                 "Duration {:.1}s too short (minimum {:.0}s)",
-                dur, config.min_duration * 0.5
+                dur,
+                config.min_duration * 0.5
             ));
             continue;
         }
@@ -447,7 +438,9 @@ fn reject_weak(clips: &mut [CandidateClip], config: &FusionConfig) {
             && clip.transcript_excerpt.is_none()
             && clip.score_breakdown.vision_score.is_none()
         {
-            let best_raw = clip.score_breakdown.audio_score
+            let best_raw = clip
+                .score_breakdown
+                .audio_score
                 .max(clip.score_breakdown.speech_score)
                 .max(clip.score_breakdown.scene_score);
             if best_raw < config.single_source_min {
@@ -552,10 +545,7 @@ mod tests {
 
     #[test]
     fn distant_signals_stay_separate() {
-        let segments = vec![
-            audio_seg(30.0, 33.0, 0.90),
-            audio_seg(200.0, 203.0, 0.85),
-        ];
+        let segments = vec![audio_seg(30.0, 33.0, 0.90), audio_seg(200.0, 203.0, 0.85)];
         let clips = fuse(&segments, &config());
         assert_eq!(clips.len(), 2);
     }
@@ -571,7 +561,10 @@ mod tests {
         ];
         let clips = fuse(&segments, &config());
         let b = &clips[0].score_breakdown;
-        assert!((b.audio_score - 0.80).abs() < 0.01, "best audio should be 0.80");
+        assert!(
+            (b.audio_score - 0.80).abs() < 0.01,
+            "best audio should be 0.80"
+        );
         assert!((b.speech_score - 0.70).abs() < 0.01);
     }
 
@@ -688,10 +681,7 @@ mod tests {
 
     #[test]
     fn non_overlapping_clips_preserved() {
-        let segments = vec![
-            audio_seg(30.0, 33.0, 0.95),
-            audio_seg(300.0, 303.0, 0.85),
-        ];
+        let segments = vec![audio_seg(30.0, 33.0, 0.95), audio_seg(300.0, 303.0, 0.85)];
         let clips = fuse(&segments, &config());
         assert_eq!(clips.len(), 2);
     }
@@ -702,13 +692,19 @@ mod tests {
     fn weak_single_source_rejected() {
         let segments = vec![scene_seg(30.0, 33.0, 0.1)]; // raw 0.1 < single_source_min
         let clips = fuse(&segments, &config());
-        assert!(clips.is_empty(), "weak single-source clips should be rejected");
+        assert!(
+            clips.is_empty(),
+            "weak single-source clips should be rejected"
+        );
     }
 
     #[test]
     fn single_source_low_raw_rejected() {
         let segments = vec![audio_seg(30.0, 33.0, 0.40)]; // raw score < 0.55
-        let cfg = FusionConfig { single_source_min: 0.55, ..config() };
+        let cfg = FusionConfig {
+            single_source_min: 0.55,
+            ..config()
+        };
         let clips = fuse(&segments, &cfg);
         assert!(
             clips.is_empty(),
@@ -736,7 +732,10 @@ mod tests {
         for pair in clips.windows(2) {
             let a = best_raw(&pair[0].score_breakdown);
             let b = best_raw(&pair[1].score_breakdown);
-            assert!(a >= b, "clips should be sorted by best raw signal descending");
+            assert!(
+                a >= b,
+                "clips should be sorted by best raw signal descending"
+            );
         }
     }
 
@@ -762,11 +761,26 @@ mod tests {
 
     #[test]
     fn overlap_calculation() {
-        let a = CandidateClip::new(10.0, 30.0, ClipScoreBreakdown::new(0.5, 0.0, 0.0, None), vec![]);
-        let b = CandidateClip::new(20.0, 40.0, ClipScoreBreakdown::new(0.5, 0.0, 0.0, None), vec![]);
+        let a = CandidateClip::new(
+            10.0,
+            30.0,
+            ClipScoreBreakdown::new(0.5, 0.0, 0.0, None),
+            vec![],
+        );
+        let b = CandidateClip::new(
+            20.0,
+            40.0,
+            ClipScoreBreakdown::new(0.5, 0.0, 0.0, None),
+            vec![],
+        );
         assert!((overlap_secs(&a, &b) - 10.0).abs() < 0.01);
 
-        let c = CandidateClip::new(50.0, 70.0, ClipScoreBreakdown::new(0.5, 0.0, 0.0, None), vec![]);
+        let c = CandidateClip::new(
+            50.0,
+            70.0,
+            ClipScoreBreakdown::new(0.5, 0.0, 0.0, None),
+            vec![],
+        );
         assert!((overlap_secs(&a, &c) - 0.0).abs() < 0.01);
     }
 
@@ -803,7 +817,10 @@ mod tests {
             clips[0].signal_sources.len() >= 3,
             "best clip should have multi-signal support"
         );
-        assert!(clips[0].signal_count() >= 3, "best clip should have multi-signal support");
+        assert!(
+            clips[0].signal_count() >= 3,
+            "best clip should have multi-signal support"
+        );
 
         // All clips should have valid duration
         for clip in &clips {

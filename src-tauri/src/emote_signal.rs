@@ -21,19 +21,53 @@
 /// payload's body field, so the impact is negligible in practice.
 pub const DEFAULT_TWITCH_EMOTES: &[&str] = &[
     // Laughter — the highest-frequency reaction class on most channels
-    "KEKW", "OMEGALUL", "LULW", "PepeLaugh", "KEKL", "PETTHEPEEPO", "OMEGALUUL",
+    "KEKW",
+    "OMEGALUL",
+    "LULW",
+    "PepeLaugh",
+    "KEKL",
+    "PETTHEPEEPO",
+    "OMEGALUUL",
     // Hype / excitement
-    "Pog", "PogU", "PogChamp", "POGGERS", "POGGIES", "PogO", "PauseChamp",
+    "Pog",
+    "PogU",
+    "PogChamp",
+    "POGGERS",
+    "POGGIES",
+    "PogO",
+    "PauseChamp",
     // Tension / anxiety — predictive of "something is about to happen"
-    "monkaS", "monkaW", "monkaGIGA", "monkaH",
+    "monkaS",
+    "monkaW",
+    "monkaGIGA",
+    "monkaH",
     // Sadness / disappointment / frustration
-    "Sadge", "PepeHands", "FeelsBadMan", "Madge", "Mad", "Cope",
+    "Sadge",
+    "PepeHands",
+    "FeelsBadMan",
+    "Madge",
+    "Mad",
+    "Cope",
     // Disbelief / surprise / shock
-    "WutFace", "5Head", "BibleThump", "NotLikeThis", "WICKED", "Stare",
+    "WutFace",
+    "5Head",
+    "BibleThump",
+    "NotLikeThis",
+    "WICKED",
+    "Stare",
     // Common reactions (mixed valence)
-    "EZ", "EZY", "Pepega", "WeirdChamp", "FeelsStrongMan", "Clap",
+    "EZ",
+    "EZY",
+    "Pepega",
+    "WeirdChamp",
+    "FeelsStrongMan",
+    "Clap",
     // Twitch global classics — still showing up in 2026
-    "LUL", "Kappa", "TriHard", "ResidentSleeper", "BabyRage",
+    "LUL",
+    "Kappa",
+    "TriHard",
+    "ResidentSleeper",
+    "BabyRage",
 ];
 
 /// Count total emote occurrences in a single message text. Multiple emotes
@@ -57,9 +91,7 @@ pub fn count_emotes(text: &str) -> u32 {
         let mut best_len = 0usize;
         for emote in DEFAULT_TWITCH_EMOTES {
             let elen = emote.len();
-            if elen <= bytes.len() - i
-                && &bytes[i..i + elen] == emote.as_bytes()
-                && elen > best_len
+            if elen <= bytes.len() - i && &bytes[i..i + elen] == emote.as_bytes() && elen > best_len
             {
                 best_len = elen;
             }

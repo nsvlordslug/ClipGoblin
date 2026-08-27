@@ -44,12 +44,12 @@ use crate::clip_fusion::{self, FusionConfig};
 use crate::clip_labeler;
 use crate::clip_output::{self, OutputConfig};
 use crate::clip_ranker::{self, RankedClip, ScoringConfig};
+use crate::commands::vod::{find_ffmpeg, run_transcription};
 use crate::error::AppError;
 use crate::hardware::HardwareInfo;
 use crate::pipeline::{AnalysisMode, CandidateClip, SignalSegment};
 use crate::scene_signal::{self, SceneDetection};
 use crate::transcript_signal::{self, InputKeyword, InputSegment, TranscriptInput};
-use crate::commands::vod::{run_transcription, find_ffmpeg};
 
 // ═══════════════════════════════════════════════════════════════════
 //  Configuration
@@ -140,9 +140,8 @@ pub async fn analyze_vod(
     let hw = req.hardware.clone();
     let ffmpeg_clone = ffmpeg.clone();
 
-    let (audio_result, transcript_result, scene_result) = run_local_signals(
-        &vod_path, &ffmpeg_clone, &hw, progress,
-    ).await;
+    let (audio_result, transcript_result, scene_result) =
+        run_local_signals(&vod_path, &ffmpeg_clone, &hw, progress).await;
 
     // Unpack audio — needed later for thumbnails and frame sampling
     let audio_profile: Option<AudioProfile> = match audio_result {
@@ -322,15 +321,13 @@ async fn run_local_signals(
     // Audio extraction
     let vod_a = vod.clone();
     let ff_a = ff.clone();
-    let audio_handle = tokio::task::spawn_blocking(move || {
-        audio_signal::extract_rms(&vod_a, &ff_a)
-    });
+    let audio_handle =
+        tokio::task::spawn_blocking(move || audio_signal::extract_rms(&vod_a, &ff_a));
 
     // Transcription
     let vod_t = vod.clone();
-    let transcript_handle = tokio::task::spawn_blocking(move || {
-        run_and_convert_transcript(&vod_t, &hw_clone)
-    });
+    let transcript_handle =
+        tokio::task::spawn_blocking(move || run_and_convert_transcript(&vod_t, &hw_clone));
 
     // Scene detection (two ffmpeg passes)
     let vod_s = vod.clone();
@@ -387,28 +384,40 @@ fn run_and_convert_transcript(
     if cache_path.exists() {
         if let Ok(json) = std::fs::read_to_string(&cache_path) {
             if let Ok(result) = serde_json::from_str::<TranscriptResultCompat>(&json) {
-                log::info!("Using cached transcript ({} segments)", result.segments.len());
+                log::info!(
+                    "Using cached transcript ({} segments)",
+                    result.segments.len()
+                );
                 return Ok(convert_transcript(result));
             }
         }
     }
 
     // Run fresh transcription
-    run_transcription(vod_path, &cache_str, hw, None)
-        .map(|r| convert_transcript(TranscriptResultCompat {
-            segments: r.segments.iter().map(|s| SegCompat {
-                start: s.start,
-                end: s.end,
-                text: s.text.clone(),
-            }).collect(),
-            keywords_found: r.keywords_found.iter().map(|k| KwCompat {
-                keyword: k.keyword.clone(),
-                timestamp: k.timestamp,
-                end_timestamp: k.end_timestamp,
-                context: k.context.clone(),
-            }).collect(),
+    run_transcription(vod_path, &cache_str, hw, None).map(|r| {
+        convert_transcript(TranscriptResultCompat {
+            segments: r
+                .segments
+                .iter()
+                .map(|s| SegCompat {
+                    start: s.start,
+                    end: s.end,
+                    text: s.text.clone(),
+                })
+                .collect(),
+            keywords_found: r
+                .keywords_found
+                .iter()
+                .map(|k| KwCompat {
+                    keyword: k.keyword.clone(),
+                    timestamp: k.timestamp,
+                    end_timestamp: k.end_timestamp,
+                    context: k.context.clone(),
+                })
+                .collect(),
             language: r.language.clone(),
-        }))
+        })
+    })
 }
 
 // Minimal compat structs to avoid depending on lib.rs's private types
@@ -438,18 +447,30 @@ struct KwCompat {
 
 fn convert_transcript(r: TranscriptResultCompat) -> TranscriptInput {
     TranscriptInput {
-        segments: r.segments.into_iter().map(|s| InputSegment {
-            start: s.start,
-            end: s.end,
-            text: s.text,
-        }).collect(),
-        keywords: r.keywords_found.into_iter().map(|k| InputKeyword {
-            keyword: k.keyword,
-            start: k.timestamp,
-            end: k.end_timestamp,
-            context: k.context,
-        }).collect(),
-        language: if r.language.is_empty() { "en".into() } else { r.language },
+        segments: r
+            .segments
+            .into_iter()
+            .map(|s| InputSegment {
+                start: s.start,
+                end: s.end,
+                text: s.text,
+            })
+            .collect(),
+        keywords: r
+            .keywords_found
+            .into_iter()
+            .map(|k| InputKeyword {
+                keyword: k.keyword,
+                start: k.timestamp,
+                end: k.end_timestamp,
+                context: k.context,
+            })
+            .collect(),
+        language: if r.language.is_empty() {
+            "en".into()
+        } else {
+            r.language
+        },
     }
 }
 

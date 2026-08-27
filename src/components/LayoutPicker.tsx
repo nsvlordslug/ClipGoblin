@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { X, Check } from 'lucide-react'
-import { LAYOUT_OPTIONS } from '../lib/editTypes'
+import { LAYOUT_OPTIONS, recommendedLayoutForAspect } from '../lib/editTypes'
 import type { LayoutMode, LayoutOption } from '../lib/editTypes'
 
 interface Props {
@@ -57,6 +57,7 @@ function LayoutCard({ option, aspectRatio, selected, hovered }: {
 export default function LayoutPicker({ current, aspectRatio, platformName, onSelect, onClose }: Props) {
   const [hoveredId, setHoveredId] = useState<LayoutMode | null>(null)
   const previewOption = LAYOUT_OPTIONS.find(o => o.id === (hoveredId || current)) || LAYOUT_OPTIONS[0]
+  const recommendedLayout = recommendedLayoutForAspect(aspectRatio)
 
   const formatLabel = aspectRatio === '9:16' ? 'Vertical' : 'Landscape'
 
@@ -79,10 +80,19 @@ export default function LayoutPicker({ current, aspectRatio, platformName, onSel
 
         {/* Layout grid */}
         <div className="p-5">
+          {aspectRatio === '9:16' && (
+            <div className="mb-4 border-l-2 border-cyan-400 bg-cyan-500/5 px-3 py-2">
+              <p className="text-xs font-medium text-cyan-200">Context Fit is recommended for vertical gameplay</p>
+              <p className="mt-0.5 text-[10px] leading-relaxed text-slate-400">
+                It keeps characters, HUD, and scene edges visible. Choose Full Frame only when you want an intentional crop.
+              </p>
+            </div>
+          )}
           <div className="grid grid-cols-4 gap-3">
             {LAYOUT_OPTIONS.map(option => {
               const isSelected = option.id === current
               const isHovered = option.id === hoveredId
+              const optionTag = option.id === recommendedLayout ? 'Recommended' : option.tag
 
               return (
                 <button
@@ -104,10 +114,10 @@ export default function LayoutPicker({ current, aspectRatio, platformName, onSel
                     {option.name}
                   </span>
 
-                  {option.tag && (
+                  {optionTag && (
                     <span className="text-[9px] px-1.5 py-0.5 rounded-full"
                       style={{ color: option.accent, background: `${option.accent}20`, border: `1px solid ${option.accent}30` }}>
-                      {option.tag}
+                      {optionTag}
                     </span>
                   )}
                 </button>

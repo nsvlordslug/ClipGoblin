@@ -2,9 +2,18 @@ export const MIN_CAPTION_FONT_SCALE = 0.75
 export const MAX_CAPTION_FONT_SCALE = 1.25
 export const DEFAULT_CAPTION_FONT_SCALE = 1
 
+export const MIN_CAPTION_CARD_SCALE = 0.5
+export const MAX_CAPTION_CARD_SCALE = 1
+export const DEFAULT_CAPTION_CARD_SCALE = 0.75
+
 export function clampCaptionFontScale(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_CAPTION_FONT_SCALE
   return Math.min(MAX_CAPTION_FONT_SCALE, Math.max(MIN_CAPTION_FONT_SCALE, value))
+}
+
+export function clampCaptionCardScale(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_CAPTION_CARD_SCALE
+  return Math.min(MAX_CAPTION_CARD_SCALE, Math.max(MIN_CAPTION_CARD_SCALE, value))
 }
 
 export function longestCaptionWordLength(text: string): number {

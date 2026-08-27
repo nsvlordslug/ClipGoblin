@@ -157,7 +157,10 @@ mod tests {
     #[test]
     fn category_returns_machine_tag() {
         assert_eq!(AppError::Api("timeout".into()).category(), "api");
-        assert_eq!(AppError::Transcription("crash".into()).category(), "transcription");
+        assert_eq!(
+            AppError::Transcription("crash".into()).category(),
+            "transcription"
+        );
         assert_eq!(AppError::Database("locked".into()).category(), "database");
     }
 

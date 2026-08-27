@@ -10,7 +10,9 @@ import type { TikTokComplianceValue } from '../lib/tiktokCompliance'
 import type { Clip } from '../types'
 import { errorMessage } from '../lib/errors'
 import { localDateTimeAfter } from '../lib/dateTime'
-import { isTikTokInboxDelivered } from '../lib/platformUpload'
+import { getPresetForPlatform, isTikTokInboxDelivered } from '../lib/platformUpload'
+import { artifactUploadFields } from '../lib/exportArtifacts'
+import type { RenderedArtifact } from '../lib/exportArtifacts'
 
 // ── Types ──
 
@@ -39,7 +41,7 @@ function getDefaultVisibility(platform: string): string {
   return 'public'
 }
 
-function buildMetaForClip(clip: Clip, platform: string, visibility: string, useSavedCaptions: boolean, force: boolean, tiktok?: TikTokComplianceValue) {
+function buildMetaForClip(clip: Clip, platform: string, visibility: string, useSavedCaptions: boolean, force: boolean, artifact: RenderedArtifact, tiktok?: TikTokComplianceValue) {
   const title = clip.title?.trim() || 'Untitled Clip'
   let description = ''
   let tags: string[] = []
@@ -63,6 +65,7 @@ function buildMetaForClip(clip: Clip, platform: string, visibility: string, useS
     // TikTok privacy comes from the compliance panel (a real creator_info enum).
     visibility: isTikTok && tiktok?.privacyLevel ? tiktok.privacyLevel : visibility,
     force,
+    ...artifactUploadFields(artifact),
     ...(isTikTok && tiktok ? {
       disable_comment: tiktok.disableComment,
       disable_duet: tiktok.disableDuet,
@@ -74,11 +77,24 @@ function buildMetaForClip(clip: Clip, platform: string, visibility: string, useS
   }
 }
 
-/** Export a clip and wait for it to finish. Returns the refreshed clip. */
-function exportClip(clipId: string, onProgress: (pct: number) => void): Promise<Clip> {
+/** Export one exact format and wait for its immutable artifact to finish. */
+function exportClip(
+  clipId: string,
+  aspectRatio: string,
+  onProgress: (pct: number) => void,
+): Promise<RenderedArtifact> {
   return new Promise((resolve, reject) => {
     const jobId = `export-${clipId}`
     let unlistenFn: (() => void) | null = null
+    let artifactPromise: Promise<RenderedArtifact> | null = null
+    let settled = false
+
+    const rejectExport = (error: unknown) => {
+      if (settled) return
+      settled = true
+      unlistenFn?.()
+      reject(error instanceof Error ? error : new Error(errorMessage(error, 'Export failed')))
+    }
 
     listen<{ jobId: string; progress: number; status: string; error?: string }>('job-progress', (event) => {
       if (event.payload.jobId !== jobId) return
@@ -86,21 +102,25 @@ function exportClip(clipId: string, onProgress: (pct: number) => void): Promise<
       onProgress(progress)
 
       if (status === 'completed') {
-        unlistenFn?.()
-        invoke<Clip>('get_clip_detail', { clipId })
-          .then(resolve)
-          .catch(() => reject(new Error('Export completed but failed to fetch clip')))
+        const pendingArtifact = artifactPromise
+        if (!pendingArtifact) {
+          rejectExport(new Error('Export completed without an artifact identity'))
+          return
+        }
+        pendingArtifact.then(artifact => {
+          if (settled) return
+          settled = true
+          unlistenFn?.()
+          resolve(artifact)
+        }).catch(rejectExport)
       } else if (status === 'failed') {
-        unlistenFn?.()
-        reject(new Error(error || 'Export failed'))
+        rejectExport(new Error(error || 'Export failed'))
       }
     }).then(fn => {
       unlistenFn = fn
-      invoke('export_clip', { clipId }).catch(err => {
-        unlistenFn?.()
-        reject(err)
-      })
-    })
+      artifactPromise = invoke<RenderedArtifact>('export_clip', { clipId, aspectRatio })
+      artifactPromise.catch(rejectExport)
+    }).catch(rejectExport)
   })
 }
 
@@ -240,26 +260,6 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
     return () => { unlisten.then(stop => stop()) }
   }, [updateClipStatus])
 
-  /** Ensure a clip is exported, exporting it if needed. Returns the up-to-date clip. */
-  const ensureExported = useCallback(async (clip: Clip, firstPlatform: string): Promise<Clip> => {
-    // Check latest state — might have been exported in a previous iteration
-    const current = clipMapRef.current[clip.id] || clip
-    if (current.render_status === 'completed' && current.output_path) {
-      return current
-    }
-
-    // Need to export — show exporting status on the first platform
-    updateClipStatus(firstPlatform, clip.id, { status: 'exporting', exportProgress: 0 })
-
-    const exported = await exportClip(clip.id, (pct) => {
-      updateClipStatus(firstPlatform, clip.id, { status: 'exporting', exportProgress: pct })
-    })
-
-    // Update the ref so subsequent platforms see it as exported
-    clipMapRef.current[clip.id] = exported
-    return exported
-  }, [updateClipStatus])
-
   // ── Sequential export-then-upload ──
   const startUpload = useCallback(async (retryOnly = false) => {
     cancelRef.current = false
@@ -294,22 +294,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
       })
       if (allDoneForClip) continue
 
-      // Export once for all platforms
-      let exportedClip: Clip
-      try {
-        exportedClip = await ensureExported(clip, activePlatforms[0])
-      } catch (error: unknown) {
-        // Export failed — mark all platforms as error for this clip
-        for (const platform of activePlatforms) {
-          updateClipStatus(platform, clip.id, {
-            status: 'error',
-            error: `Export failed: ${errorMessage(error, 'Unknown error')}`,
-          })
-        }
-        continue
-      }
-
-      // Upload to each platform
+      const artifactsByAspect = new Map<string, RenderedArtifact>()
       for (const platform of activePlatforms) {
         if (cancelRef.current) break
 
@@ -318,10 +303,28 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
         if (!retryOnly && existing?.status === 'done') continue
         if (!retryOnly && existing?.status === 'error') continue
 
+        const aspectRatio = getPresetForPlatform(platform).aspectRatio
+        let artifact = artifactsByAspect.get(aspectRatio)
+        if (!artifact) {
+          updateClipStatus(platform, clip.id, { status: 'exporting', exportProgress: 0 })
+          try {
+            artifact = await exportClip(clip.id, aspectRatio, (pct) => {
+              updateClipStatus(platform, clip.id, { status: 'exporting', exportProgress: pct })
+            })
+            artifactsByAspect.set(aspectRatio, artifact)
+          } catch (error: unknown) {
+            updateClipStatus(platform, clip.id, {
+              status: 'error',
+              error: `Export failed: ${errorMessage(error, 'Unknown error')}`,
+            })
+            continue
+          }
+        }
+
         updateClipStatus(platform, clip.id, { status: 'uploading', error: undefined })
 
         try {
-          const meta = buildMetaForClip(exportedClip, platform, visibility[platform] || getDefaultVisibility(platform), useSavedCaptions, false, tiktokCompliance)
+          const meta = buildMetaForClip(clip, platform, visibility[platform] || getDefaultVisibility(platform), useSavedCaptions, false, artifact, tiktokCompliance)
           const result = await invoke<UploadResult>('upload_to_platform', { platform, meta })
 
           if (result.status.status === 'complete') {
@@ -352,7 +355,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
 
     setUploading(false)
     setCompleted(true)
-  }, [activePlatforms, clips, clipStatuses, visibility, useSavedCaptions, isConnected, connect, updateClipStatus, ensureExported, tiktokCompliance])
+  }, [activePlatforms, clips, clipStatuses, visibility, useSavedCaptions, isConnected, connect, updateClipStatus, tiktokCompliance])
 
   const retryFailed = useCallback(() => {
     setClipStatuses(prev => {
@@ -380,25 +383,29 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
     for (const clip of clips) {
       if (cancelRef.current) break
 
-      // Export if needed before scheduling
-      let exportedClip: Clip
-      try {
-        exportedClip = await ensureExported(clip, activePlatforms[0])
-      } catch (error: unknown) {
-        for (const platform of activePlatforms) {
-          updateClipStatus(platform, clip.id, {
-            status: 'error',
-            error: `Export failed: ${errorMessage(error, 'Unknown error')}`,
-          })
-        }
-        continue
-      }
-
+      const artifactsByAspect = new Map<string, RenderedArtifact>()
       for (const platform of activePlatforms) {
         if (cancelRef.current) break
+        const aspectRatio = getPresetForPlatform(platform).aspectRatio
+        let artifact = artifactsByAspect.get(aspectRatio)
+        if (!artifact) {
+          updateClipStatus(platform, clip.id, { status: 'exporting', exportProgress: 0 })
+          try {
+            artifact = await exportClip(clip.id, aspectRatio, (pct) => {
+              updateClipStatus(platform, clip.id, { status: 'exporting', exportProgress: pct })
+            })
+            artifactsByAspect.set(aspectRatio, artifact)
+          } catch (error: unknown) {
+            updateClipStatus(platform, clip.id, {
+              status: 'error',
+              error: `Export failed: ${errorMessage(error, 'Unknown error')}`,
+            })
+            continue
+          }
+        }
         updateClipStatus(platform, clip.id, { status: 'uploading' })
         try {
-          const meta = buildMetaForClip(exportedClip, platform, visibility[platform] || getDefaultVisibility(platform), useSavedCaptions, false, tiktokCompliance)
+          const meta = buildMetaForClip(clip, platform, visibility[platform] || getDefaultVisibility(platform), useSavedCaptions, false, artifact, tiktokCompliance)
           await scheduleUpload(clip.id, platform, isoTime, JSON.stringify(meta))
           updateClipStatus(platform, clip.id, { status: 'done' })
         } catch (error: unknown) {
@@ -410,7 +417,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
     setUploading(false)
     setScheduleComplete(true)
     setCompleted(true)
-  }, [scheduleTime, activePlatforms, clips, visibility, useSavedCaptions, cancelRef, updateClipStatus, scheduleUpload, ensureExported, tiktokCompliance])
+  }, [scheduleTime, activePlatforms, clips, visibility, useSavedCaptions, cancelRef, updateClipStatus, scheduleUpload, tiktokCompliance])
 
   const handleCancel = () => {
     cancelRef.current = true

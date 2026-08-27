@@ -1,0 +1,1252 @@
+{
+  "rendererVersion": "scary-image-glyph-v3",
+  "styleId": "scary",
+  "displayName": "Scary",
+  "construction": "cleaned transparent image glyphs assembled by metadata; no generic font skeleton",
+  "sourceSheetSha256": "002280931e72e21bc9c91195697dfaa26c174d603f0cc0faf0a14e3b3b692cd8",
+  "sourceStored": false,
+  "atlas": {
+    "file": "atlas.png",
+    "width": 3240,
+    "height": 4664
+  },
+  "picker": {
+    "file": "picker.png"
+  },
+  "metrics": {
+    "nominalFontSize": 272,
+    "baseline": 314,
+    "lineHeight": 352,
+    "spaceAdvance": 92,
+    "letterSpacing": -2
+  },
+  "material": {
+    "face": "actual jagged red dry-brush face retained from the cleaned source glyphs",
+    "depth": "restrained black separation and contact shadow preserve the scratched paint silhouette"
+  },
+  "glyphs": {
+    "A": {
+      "atlas": [
+        0,
+        0,
+        360,
+        424
+      ],
+      "advance": 148,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "A"
+    },
+    "B": {
+      "atlas": [
+        360,
+        0,
+        360,
+        424
+      ],
+      "advance": 151,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "B"
+    },
+    "C": {
+      "atlas": [
+        720,
+        0,
+        360,
+        424
+      ],
+      "advance": 148,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "C"
+    },
+    "D": {
+      "atlas": [
+        1080,
+        0,
+        360,
+        424
+      ],
+      "advance": 156,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "D"
+    },
+    "E": {
+      "atlas": [
+        1440,
+        0,
+        360,
+        424
+      ],
+      "advance": 165,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "E"
+    },
+    "F": {
+      "atlas": [
+        1800,
+        0,
+        360,
+        424
+      ],
+      "advance": 153,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "F"
+    },
+    "G": {
+      "atlas": [
+        2160,
+        0,
+        360,
+        424
+      ],
+      "advance": 148,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "G"
+    },
+    "H": {
+      "atlas": [
+        2520,
+        0,
+        360,
+        424
+      ],
+      "advance": 131,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "H"
+    },
+    "I": {
+      "atlas": [
+        2880,
+        0,
+        360,
+        424
+      ],
+      "advance": 106,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "I"
+    },
+    "J": {
+      "atlas": [
+        0,
+        424,
+        360,
+        424
+      ],
+      "advance": 114,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "J"
+    },
+    "K": {
+      "atlas": [
+        360,
+        424,
+        360,
+        424
+      ],
+      "advance": 149,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "K"
+    },
+    "L": {
+      "atlas": [
+        720,
+        424,
+        360,
+        424
+      ],
+      "advance": 146,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "L"
+    },
+    "M": {
+      "atlas": [
+        1080,
+        424,
+        360,
+        424
+      ],
+      "advance": 161,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "M"
+    },
+    "N": {
+      "atlas": [
+        1440,
+        424,
+        360,
+        424
+      ],
+      "advance": 132,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "N"
+    },
+    "O": {
+      "atlas": [
+        1800,
+        424,
+        360,
+        424
+      ],
+      "advance": 144,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "O"
+    },
+    "P": {
+      "atlas": [
+        2160,
+        424,
+        360,
+        424
+      ],
+      "advance": 144,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "P"
+    },
+    "Q": {
+      "atlas": [
+        2520,
+        424,
+        360,
+        424
+      ],
+      "advance": 152,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "Q"
+    },
+    "R": {
+      "atlas": [
+        2880,
+        424,
+        360,
+        424
+      ],
+      "advance": 179,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "R"
+    },
+    "S": {
+      "atlas": [
+        0,
+        848,
+        360,
+        424
+      ],
+      "advance": 132,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "S"
+    },
+    "T": {
+      "atlas": [
+        360,
+        848,
+        360,
+        424
+      ],
+      "advance": 144,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "T"
+    },
+    "U": {
+      "atlas": [
+        720,
+        848,
+        360,
+        424
+      ],
+      "advance": 135,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "U"
+    },
+    "V": {
+      "atlas": [
+        1080,
+        848,
+        360,
+        424
+      ],
+      "advance": 126,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "source-derived-case-fallback",
+      "sourceCharacter": "v"
+    },
+    "W": {
+      "atlas": [
+        1440,
+        848,
+        360,
+        424
+      ],
+      "advance": 193,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "W"
+    },
+    "X": {
+      "atlas": [
+        1800,
+        848,
+        360,
+        424
+      ],
+      "advance": 158,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "X"
+    },
+    "Y": {
+      "atlas": [
+        2160,
+        848,
+        360,
+        424
+      ],
+      "advance": 152,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "Y"
+    },
+    "Z": {
+      "atlas": [
+        2520,
+        848,
+        360,
+        424
+      ],
+      "advance": 179,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "Z"
+    },
+    "a": {
+      "atlas": [
+        2880,
+        848,
+        360,
+        424
+      ],
+      "advance": 91,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "source-derived-case-fallback",
+      "sourceCharacter": "A"
+    },
+    "b": {
+      "atlas": [
+        0,
+        1272,
+        360,
+        424
+      ],
+      "advance": 92,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "source-derived-case-fallback",
+      "sourceCharacter": "B"
+    },
+    "c": {
+      "atlas": [
+        360,
+        1272,
+        360,
+        424
+      ],
+      "advance": 117,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "c"
+    },
+    "d": {
+      "atlas": [
+        720,
+        1272,
+        360,
+        424
+      ],
+      "advance": 95,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "source-derived-case-fallback",
+      "sourceCharacter": "D"
+    },
+    "e": {
+      "atlas": [
+        1080,
+        1272,
+        360,
+        424
+      ],
+      "advance": 120,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "e"
+    },
+    "f": {
+      "atlas": [
+        1440,
+        1272,
+        360,
+        424
+      ],
+      "advance": 111,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "f"
+    },
+    "g": {
+      "atlas": [
+        1800,
+        1272,
+        360,
+        424
+      ],
+      "advance": 108,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "g"
+    },
+    "h": {
+      "atlas": [
+        2160,
+        1272,
+        360,
+        424
+      ],
+      "advance": 106,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "h"
+    },
+    "i": {
+      "atlas": [
+        2520,
+        1272,
+        360,
+        424
+      ],
+      "advance": 59,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "i"
+    },
+    "j": {
+      "atlas": [
+        2880,
+        1272,
+        360,
+        424
+      ],
+      "advance": 82,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "j"
+    },
+    "k": {
+      "atlas": [
+        0,
+        1696,
+        360,
+        424
+      ],
+      "advance": 123,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "k"
+    },
+    "l": {
+      "atlas": [
+        360,
+        1696,
+        360,
+        424
+      ],
+      "advance": 63,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "l"
+    },
+    "m": {
+      "atlas": [
+        720,
+        1696,
+        360,
+        424
+      ],
+      "advance": 151,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "m"
+    },
+    "n": {
+      "atlas": [
+        1080,
+        1696,
+        360,
+        424
+      ],
+      "advance": 106,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "n"
+    },
+    "o": {
+      "atlas": [
+        1440,
+        1696,
+        360,
+        424
+      ],
+      "advance": 117,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "o"
+    },
+    "p": {
+      "atlas": [
+        1800,
+        1696,
+        360,
+        424
+      ],
+      "advance": 117,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "p"
+    },
+    "q": {
+      "atlas": [
+        2160,
+        1696,
+        360,
+        424
+      ],
+      "advance": 141,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "q"
+    },
+    "r": {
+      "atlas": [
+        2520,
+        1696,
+        360,
+        424
+      ],
+      "advance": 105,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "source-derived-case-fallback",
+      "sourceCharacter": "R"
+    },
+    "s": {
+      "atlas": [
+        2880,
+        1696,
+        360,
+        424
+      ],
+      "advance": 103,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "s"
+    },
+    "t": {
+      "atlas": [
+        0,
+        2120,
+        360,
+        424
+      ],
+      "advance": 103,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "t"
+    },
+    "u": {
+      "atlas": [
+        360,
+        2120,
+        360,
+        424
+      ],
+      "advance": 81,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "source-derived-case-fallback",
+      "sourceCharacter": "U"
+    },
+    "v": {
+      "atlas": [
+        720,
+        2120,
+        360,
+        424
+      ],
+      "advance": 126,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "v"
+    },
+    "w": {
+      "atlas": [
+        1080,
+        2120,
+        360,
+        424
+      ],
+      "advance": 113,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "source-derived-case-fallback",
+      "sourceCharacter": "W"
+    },
+    "x": {
+      "atlas": [
+        1440,
+        2120,
+        360,
+        424
+      ],
+      "advance": 94,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "source-derived-case-fallback",
+      "sourceCharacter": "X"
+    },
+    "y": {
+      "atlas": [
+        1800,
+        2120,
+        360,
+        424
+      ],
+      "advance": 91,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "source-derived-case-fallback",
+      "sourceCharacter": "Y"
+    },
+    "z": {
+      "atlas": [
+        2160,
+        2120,
+        360,
+        424
+      ],
+      "advance": 105,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "source-derived-case-fallback",
+      "sourceCharacter": "Z"
+    },
+    "0": {
+      "atlas": [
+        2520,
+        2120,
+        360,
+        424
+      ],
+      "advance": 133,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "0"
+    },
+    "1": {
+      "atlas": [
+        2880,
+        2120,
+        360,
+        424
+      ],
+      "advance": 81,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "1"
+    },
+    "2": {
+      "atlas": [
+        0,
+        2544,
+        360,
+        424
+      ],
+      "advance": 148,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "2"
+    },
+    "3": {
+      "atlas": [
+        360,
+        2544,
+        360,
+        424
+      ],
+      "advance": 136,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "3"
+    },
+    "4": {
+      "atlas": [
+        720,
+        2544,
+        360,
+        424
+      ],
+      "advance": 160,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "4"
+    },
+    "5": {
+      "atlas": [
+        1080,
+        2544,
+        360,
+        424
+      ],
+      "advance": 133,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "5"
+    },
+    "6": {
+      "atlas": [
+        1440,
+        2544,
+        360,
+        424
+      ],
+      "advance": 142,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "6"
+    },
+    "7": {
+      "atlas": [
+        1800,
+        2544,
+        360,
+        424
+      ],
+      "advance": 139,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "7"
+    },
+    "8": {
+      "atlas": [
+        2160,
+        2544,
+        360,
+        424
+      ],
+      "advance": 148,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "8"
+    },
+    "9": {
+      "atlas": [
+        2520,
+        2544,
+        360,
+        424
+      ],
+      "advance": 136,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "9"
+    },
+    "!": {
+      "atlas": [
+        2880,
+        2544,
+        360,
+        424
+      ],
+      "advance": 51,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "!"
+    },
+    "\"": {
+      "atlas": [
+        0,
+        2968,
+        360,
+        424
+      ],
+      "advance": 92,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback",
+      "sourceCharacter": "\""
+    },
+    "#": {
+      "atlas": [
+        360,
+        2968,
+        360,
+        424
+      ],
+      "advance": 151,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "#"
+    },
+    "$": {
+      "atlas": [
+        720,
+        2968,
+        360,
+        424
+      ],
+      "advance": 129,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "$"
+    },
+    "%": {
+      "atlas": [
+        1080,
+        2968,
+        360,
+        424
+      ],
+      "advance": 149,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "%"
+    },
+    "&": {
+      "atlas": [
+        1440,
+        2968,
+        360,
+        424
+      ],
+      "advance": 149,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "&"
+    },
+    "'": {
+      "atlas": [
+        1800,
+        2968,
+        360,
+        424
+      ],
+      "advance": 45,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback",
+      "sourceCharacter": "'"
+    },
+    "(": {
+      "atlas": [
+        2160,
+        2968,
+        360,
+        424
+      ],
+      "advance": 82,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "("
+    },
+    ")": {
+      "atlas": [
+        2520,
+        2968,
+        360,
+        424
+      ],
+      "advance": 82,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": ")"
+    },
+    "*": {
+      "atlas": [
+        2880,
+        2968,
+        360,
+        424
+      ],
+      "advance": 90,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "*"
+    },
+    "+": {
+      "atlas": [
+        0,
+        3392,
+        360,
+        424
+      ],
+      "advance": 93,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "+"
+    },
+    ",": {
+      "atlas": [
+        360,
+        3392,
+        360,
+        424
+      ],
+      "advance": 54,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": ","
+    },
+    "-": {
+      "atlas": [
+        720,
+        3392,
+        360,
+        424
+      ],
+      "advance": 101,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "-"
+    },
+    ".": {
+      "atlas": [
+        1080,
+        3392,
+        360,
+        424
+      ],
+      "advance": 56,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback",
+      "sourceCharacter": "."
+    },
+    "/": {
+      "atlas": [
+        1440,
+        3392,
+        360,
+        424
+      ],
+      "advance": 93,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "/"
+    },
+    ":": {
+      "atlas": [
+        1800,
+        3392,
+        360,
+        424
+      ],
+      "advance": 60,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": ":"
+    },
+    ";": {
+      "atlas": [
+        2160,
+        3392,
+        360,
+        424
+      ],
+      "advance": 58,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback",
+      "sourceCharacter": ";"
+    },
+    "<": {
+      "atlas": [
+        2520,
+        3392,
+        360,
+        424
+      ],
+      "advance": 93,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "<"
+    },
+    "=": {
+      "atlas": [
+        2880,
+        3392,
+        360,
+        424
+      ],
+      "advance": 134,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback",
+      "sourceCharacter": "="
+    },
+    ">": {
+      "atlas": [
+        0,
+        3816,
+        360,
+        424
+      ],
+      "advance": 90,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": ">"
+    },
+    "?": {
+      "atlas": [
+        360,
+        3816,
+        360,
+        424
+      ],
+      "advance": 107,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "?"
+    },
+    "@": {
+      "atlas": [
+        720,
+        3816,
+        360,
+        424
+      ],
+      "advance": 165,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "@"
+    },
+    "[": {
+      "atlas": [
+        1080,
+        3816,
+        360,
+        424
+      ],
+      "advance": 65,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "["
+    },
+    "\\": {
+      "atlas": [
+        1440,
+        3816,
+        360,
+        424
+      ],
+      "advance": 124,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback",
+      "sourceCharacter": "\\"
+    },
+    "]": {
+      "atlas": [
+        1800,
+        3816,
+        360,
+        424
+      ],
+      "advance": 90,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "]"
+    },
+    "^": {
+      "atlas": [
+        2160,
+        3816,
+        360,
+        424
+      ],
+      "advance": 107,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "^"
+    },
+    "_": {
+      "atlas": [
+        2520,
+        3816,
+        360,
+        424
+      ],
+      "advance": 121,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "_"
+    },
+    "`": {
+      "atlas": [
+        2880,
+        3816,
+        360,
+        424
+      ],
+      "advance": 51,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback",
+      "sourceCharacter": "`"
+    },
+    "{": {
+      "atlas": [
+        0,
+        4240,
+        360,
+        424
+      ],
+      "advance": 71,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "{"
+    },
+    "|": {
+      "atlas": [
+        360,
+        4240,
+        360,
+        424
+      ],
+      "advance": 50,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback",
+      "sourceCharacter": "|"
+    },
+    "}": {
+      "atlas": [
+        720,
+        4240,
+        360,
+        424
+      ],
+      "advance": 74,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned",
+      "sourceCharacter": "}"
+    },
+    "~": {
+      "atlas": [
+        1080,
+        4240,
+        360,
+        424
+      ],
+      "advance": 141,
+      "originX": 0,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback",
+      "sourceCharacter": "~"
+    }
+  },
+  "textTransform": "uppercase"
+}

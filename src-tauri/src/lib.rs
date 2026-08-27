@@ -1,47 +1,50 @@
+mod ai_provider;
+mod ai_usage;
+mod audio_signal;
+mod auth_proxy;
 mod bin_manager;
 mod boundary_learning;
 mod cam_region;
-mod ai_provider;
-mod ai_usage;
-mod auth_proxy;
-mod crypto;
-mod signal_calibration;
-mod audio_signal;
+mod cardboard_caption;
 mod clip_fusion;
 mod clip_judge;
 mod clip_labeler;
 mod clip_output;
 mod clip_ranker;
+mod clip_selector;
+mod commands;
+mod crypto;
 mod db;
 mod detection;
 mod emote_signal;
 mod engine;
+mod error;
 mod external_sources;
 mod game_config;
-mod integration_test;
-mod clip_selector;
-mod commands;
-mod error;
 mod hardware;
+mod image_glyph_caption;
+mod integration_test;
 mod job_queue;
-mod pipeline;
+mod log_scrubber;
 mod personalization;
+mod pipeline;
 mod post_captions;
 mod recorders;
 mod scene_signal;
+mod signal_calibration;
+mod social;
 mod transcript_signal;
 mod twitch;
 mod twitch_chat_replay;
-mod log_scrubber;
-mod social;
+mod undead_legion;
 mod vertical_crop;
 mod whisper;
 
-use std::sync::Mutex;
-use rusqlite::Connection;
-use tauri::{AppHandle, Manager, State};
 use error::AppError;
 use job_queue::JobQueue;
+use rusqlite::Connection;
+use std::sync::Mutex;
+use tauri::{AppHandle, Manager, State};
 
 /// Database connection type shared across commands.
 pub(crate) type DbConn = Mutex<Connection>;
@@ -63,61 +66,66 @@ pub(crate) fn report_error(app: &AppHandle, err: AppError) -> String {
 // Tauri's generate_handler![] macro requires unqualified names, so we
 // pull every command into this module's namespace via `use`.
 
-use commands::auth::{twitch_login, twitch_logout, get_logged_in_user, get_channels};
+use cardboard_caption::render_cardboard_caption;
+use commands::auth::{get_channels, get_logged_in_user, twitch_login, twitch_logout};
+use commands::binaries::{check_binary_status, download_binaries, force_refresh_ytdlp};
 use commands::bug_report::submit_bug_report;
 use commands::cam_region::{
-    set_vod_cam_region, clear_vod_cam_region,
-    set_clip_cam_region_override, clear_clip_cam_region_override,
-    set_clip_fit_mode, set_allow_per_clip_override, get_allow_per_clip_override,
+    clear_clip_cam_region_override, clear_vod_cam_region, get_allow_per_clip_override,
+    set_allow_per_clip_override, set_clip_cam_region_override, set_clip_fit_mode,
+    set_vod_cam_region,
 };
-use commands::captions::{generate_post_captions, generate_ai_title, test_ai_connection};
+use commands::captions::{generate_ai_title, generate_post_captions, test_ai_connection};
 use commands::clip::{
     export_personalization_history, export_review_data_for_vod, get_clip_detail,
-    get_personalization_status, record_clip_opened, reset_personalization_history,
-    pick_context_branding_asset, save_clip_review, save_clip_to_disk, update_clip_settings,
+    get_personalization_status, pick_context_branding_asset, record_clip_opened,
+    reset_personalization_history, save_clip_review, save_clip_to_disk, update_clip_settings,
 };
-use commands::export::{export_clip, set_clip_thumbnail, generate_clip_captions};
-use commands::model::{check_model_status, download_model, delete_model};
+use commands::export::{
+    ensure_clip_captions_aligned, export_clip, generate_clip_captions,
+    render_paper_mischief_caption, set_clip_thumbnail,
+};
+use commands::model::{check_model_status, delete_model, download_model};
 use commands::montage::export_montage;
-use commands::binaries::{check_binary_status, download_binaries, force_refresh_ytdlp};
 use commands::scheduled::{
-    schedule_upload, list_scheduled_uploads, get_scheduled_uploads_for_clip,
-    cancel_scheduled_upload, reschedule_upload, start_upload_scheduler,
+    cancel_scheduled_upload, get_scheduled_uploads_for_clip, list_scheduled_uploads,
+    reschedule_upload, schedule_upload, start_upload_scheduler,
 };
 use commands::settings::{
-    save_setting, get_setting, open_url, get_app_info, get_hardware_info,
-    list_jobs, get_job, remove_job, pick_download_folder, get_download_dir,
-    get_storage_paths, open_folder, get_detection_stats, get_ai_cost_summary,
-    estimate_analyze_cost, get_analysis_cost,
+    estimate_analyze_cost, get_ai_cost_summary, get_analysis_cost, get_app_info,
+    get_detection_stats, get_download_dir, get_hardware_info, get_job, get_setting,
+    get_storage_paths, list_jobs, open_folder, open_url, pick_download_folder, remove_job,
+    save_setting,
 };
 use commands::social::{
-    connect_platform, disconnect_platform, get_connected_account,
-    get_all_connected_accounts, upload_to_platform, get_upload_status, tiktok_get_creator_info,
-    get_clip_upload_history, restore_deleted_vods, refresh_upload_stats,
+    connect_platform, disconnect_platform, get_all_connected_accounts, get_clip_upload_history,
+    get_connected_account, get_upload_status, refresh_upload_stats, restore_deleted_vods,
+    tiktok_get_creator_info, upload_to_platform,
 };
 use commands::sources::{
     create_stream_marker, get_external_source_configs, get_recorder_connection_settings,
     import_external_candidates, list_recent_stream_markers, pick_and_import_media,
     pick_external_source_folder, prepare_clip_preview_source, save_obs_connection_settings,
-    save_replay_and_import,
-    scan_external_source, set_external_source_auto_import, test_recorder_connection,
+    save_replay_and_import, scan_external_source, set_external_source_auto_import,
+    test_recorder_connection,
 };
 use commands::vod::{
-    download_vod, get_cached_vods, ensure_vod_thumbnail, analyze_vod, open_vod, get_vods,
-    get_highlights, get_all_highlights, get_clips, delete_clip,
-    refresh_vod_metadata, import_vod_by_url, get_stream_status, set_clip_game, set_clip_title, set_clip_publish_meta,
-    set_vod_game, delete_vod_file, delete_vod_and_clips, get_vod_disk_usage,
-    get_vod_detail, set_vod_analysis_status, save_clip_performance,
-    get_clip_performance, get_creator_profile, update_scoring_from_performance,
-    get_transcript,
+    analyze_vod, delete_clip, delete_vod_and_clips, delete_vod_file, download_vod,
+    ensure_vod_thumbnail, get_all_highlights, get_cached_vods, get_clip_performance, get_clips,
+    get_creator_profile, get_highlights, get_stream_status, get_transcript, get_vod_detail,
+    get_vod_disk_usage, get_vods, import_vod_by_url, open_vod, refresh_vod_metadata,
+    save_clip_performance, set_clip_game, set_clip_publish_meta, set_clip_title,
+    set_vod_analysis_status, set_vod_game, set_vod_stream_style, update_scoring_from_performance,
 };
+use image_glyph_caption::render_image_glyph_caption;
+use undead_legion::render_undead_legion_caption;
 
 // ── Steam init (only compiled with `steam` feature) ──
 
 #[cfg(feature = "steam")]
 fn init_steam() -> Result<(), String> {
-    let (client, _single) = steamworks::Client::init_app(480)
-        .map_err(|e| format!("Steam init failed: {}", e))?;
+    let (client, _single) =
+        steamworks::Client::init_app(480).map_err(|e| format!("Steam init failed: {}", e))?;
     log::info!("Steamworks SDK initialized");
     Ok(())
 }
@@ -233,6 +241,11 @@ pub fn run() {
             export_clip,
             set_clip_thumbnail,
             generate_clip_captions,
+            ensure_clip_captions_aligned,
+            render_cardboard_caption,
+            render_paper_mischief_caption,
+            render_undead_legion_caption,
+            render_image_glyph_caption,
             update_clip_settings,
             pick_context_branding_asset,
             get_clip_detail,
@@ -275,6 +288,7 @@ pub fn run() {
             set_clip_title,
             set_clip_publish_meta,
             set_vod_game,
+            set_vod_stream_style,
             delete_vod_file,
             delete_vod_and_clips,
             get_vod_disk_usage,

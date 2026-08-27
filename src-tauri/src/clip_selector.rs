@@ -9,8 +9,8 @@
 //!   6. Duplicate suppression (remove near-duplicate detections)
 //!   7. Diversity-aware final selection (curate a varied, non-repetitive set)
 
-use crate::db;
 use crate::commands::vod::{TranscriptKeyword, TranscriptResult};
+use crate::db;
 
 // ═══════════════════════════════════════════════════════════════════════
 // Data structures
@@ -28,7 +28,14 @@ pub struct RawSignal {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum SignalSource { Audio, Transcript, Chat, Community, EmoteBurst, Semantic }
+pub enum SignalSource {
+    Audio,
+    Transcript,
+    Chat,
+    Community,
+    EmoteBurst,
+    Semantic,
+}
 
 /// A community-created Twitch clip associated with this VOD. Used as a
 /// human-curated detection signal: if multiple viewers clipped a moment,
@@ -166,9 +173,9 @@ impl CurationConfig {
         // ── Dynamic clip count ──
         let base_max = ((duration_min / 6.0).round() as usize).clamp(6, 35);
         let (max_clips, sensitivity_mult) = match sensitivity {
-            "low"  => ((base_max as f64 * 0.6).round() as usize, 0.6_f64),
+            "low" => ((base_max as f64 * 0.6).round() as usize, 0.6_f64),
             "high" => ((base_max as f64 * 1.4).round() as usize, 1.4_f64),
-            _      => ((base_max as f64 * 0.8).round() as usize, 1.0_f64),
+            _ => ((base_max as f64 * 0.8).round() as usize, 1.0_f64),
         };
         let max_clips = max_clips.clamp(4, 40);
 
@@ -177,21 +184,21 @@ impl CurationConfig {
         // Sensitivity also shifts thresholds.
         let duration_factor = 1.0 - (duration_hrs * 0.03).min(0.12); // 0.88–1.0
         let sensitivity_threshold = match sensitivity {
-            "low"  => 1.15,  // raise the bar
-            "high" => 0.85,  // lower the bar
-            _      => 1.0,
+            "low" => 1.15,  // raise the bar
+            "high" => 0.85, // lower the bar
+            _ => 1.0,
         };
         let threshold_scale = duration_factor * sensitivity_threshold;
 
         let min_total_score = (0.50 * threshold_scale).clamp(0.50, 0.55);
-        let min_hook        = (0.32 * threshold_scale).clamp(0.22, 0.40);
-        let min_emotion     = (0.28 * threshold_scale).clamp(0.18, 0.35);
+        let min_hook = (0.32 * threshold_scale).clamp(0.22, 0.40);
+        let min_emotion = (0.28 * threshold_scale).clamp(0.18, 0.35);
         // User-facing quality floor on the 0–100 display scale. Genuinely differs
         // per preset (the old min_total_score clamp collapsed Medium==High).
         let min_display_score = match sensitivity {
-            "low"  => 58.0,
+            "low" => 58.0,
             "high" => 30.0,
-            _      => 40.0,
+            _ => 40.0,
         };
 
         // ── Cooldown scaling ──
@@ -233,13 +240,19 @@ pub struct AudioContext {
 impl AudioContext {
     pub fn new(rms: Vec<f64>, spikes: Vec<usize>) -> Self {
         let avg = rms.iter().sum::<f64>() / rms.len().max(1) as f64;
-        Self { rms_per_second: rms, avg_rms: avg, spike_seconds: spikes }
+        Self {
+            rms_per_second: rms,
+            avg_rms: avg,
+            spike_seconds: spikes,
+        }
     }
 
     pub fn intensity_in_range(&self, start: f64, end: f64) -> f64 {
         let s = (start as usize).min(self.rms_per_second.len().saturating_sub(1));
         let e = (end as usize).min(self.rms_per_second.len());
-        if e <= s { return 0.0; }
+        if e <= s {
+            return 0.0;
+        }
         self.rms_per_second[s..e].iter().sum::<f64>() / (e - s) as f64
     }
 
@@ -262,17 +275,30 @@ pub fn generate_audio_candidates(audio: &AudioContext, _duration: f64) -> Vec<Ra
     let window = 3usize;
     let avg = audio.avg_rms;
 
-    struct Moment { sec: usize, ratio: f64, delta: f64, before: f64, _during: f64 }
+    struct Moment {
+        sec: usize,
+        ratio: f64,
+        delta: f64,
+        before: f64,
+        _during: f64,
+    }
     let mut moments: Vec<Moment> = Vec::new();
 
     for i in window..len.saturating_sub(window) {
         let before_start = i.saturating_sub(5);
         let before: f64 = audio.rms_per_second[before_start..i].iter().sum::<f64>()
             / (i - before_start).max(1) as f64;
-        let during: f64 = audio.rms_per_second[i..i+window].iter().sum::<f64>()
-            / window as f64;
-        if during <= avg * 1.3 { continue; }
-        moments.push(Moment { sec: i, ratio: during / avg.max(0.001), delta: during - before, before, _during: during });
+        let during: f64 = audio.rms_per_second[i..i + window].iter().sum::<f64>() / window as f64;
+        if during <= avg * 1.3 {
+            continue;
+        }
+        moments.push(Moment {
+            sec: i,
+            ratio: during / avg.max(0.001),
+            delta: during - before,
+            before,
+            _during: during,
+        });
     }
 
     moments.sort_by(|a, b| {
@@ -285,7 +311,12 @@ pub fn generate_audio_candidates(audio: &AudioContext, _duration: f64) -> Vec<Ra
     let mut signals: Vec<RawSignal> = Vec::new();
 
     for (rank, m) in moments.iter().enumerate() {
-        if used.iter().any(|&u| (m.sec as i64 - u as i64).unsigned_abs() < 30) { continue; }
+        if used
+            .iter()
+            .any(|&u| (m.sec as i64 - u as i64).unsigned_abs() < 30)
+        {
+            continue;
+        }
         used.push(m.sec);
 
         let intensity = (0.95 - (rank as f64 * 0.03)).max(0.45);
@@ -301,52 +332,121 @@ pub fn generate_audio_candidates(audio: &AudioContext, _duration: f64) -> Vec<Ra
             tags.extend(["encounter", "skirmish"].map(String::from));
         }
 
-        signals.push(RawSignal { center: m.sec as f64 + 1.5, intensity, source: SignalSource::Audio, tags, transcript_snippet: None, spike_delta: m.delta });
-        if signals.len() >= 15 { break; }
+        signals.push(RawSignal {
+            center: m.sec as f64 + 1.5,
+            intensity,
+            source: SignalSource::Audio,
+            tags,
+            transcript_snippet: None,
+            spike_delta: m.delta,
+        });
+        if signals.len() >= 15 {
+            break;
+        }
     }
     signals
 }
 
 pub fn generate_transcript_candidates(keywords: &[TranscriptKeyword]) -> Vec<RawSignal> {
-    keywords.iter().map(|kw| {
-        let lower = kw.keyword.to_lowercase();
-        let intensity = if lower.contains("no way") || lower.contains("oh my god") || lower.contains("what the") || lower.contains("holy") { 0.85 }
-            else if lower.contains("let's go") || lower.contains("clutch") || lower.contains("rage") || lower.contains("noooo") { 0.75 }
-            else { 0.60 };
-        let mut tags = vec!["speech".to_string()];
-        // — Emotion tagging: require stronger signals than single common words —
-        // Shock: needs exclamation OR multiple shock words together, not just "oh" alone
-        let shock_words = ["what the", "oh my", "oh no", "holy", "wtf", "dude"];
-        let shock_exclaim = (lower.contains("no!") || lower.contains("what!") || lower.contains("oh!"));
-        if shock_words.iter().any(|w| lower.contains(w)) || shock_exclaim {
-            tags.push("shock".to_string());
-        }
+    keywords
+        .iter()
+        .map(|kw| {
+            let lower = kw.keyword.to_lowercase();
+            let intensity = if lower.contains("no way")
+                || lower.contains("oh my god")
+                || lower.contains("what the")
+                || lower.contains("holy")
+            {
+                0.85
+            } else if lower.contains("let's go")
+                || lower.contains("clutch")
+                || lower.contains("rage")
+                || lower.contains("noooo")
+            {
+                0.75
+            } else {
+                0.60
+            };
+            let mut tags = vec!["speech".to_string()];
+            // — Emotion tagging: require stronger signals than single common words —
+            // Shock: needs exclamation OR multiple shock words together, not just "oh" alone
+            let shock_words = ["what the", "oh my", "oh no", "holy", "wtf", "dude"];
+            let shock_exclaim =
+                (lower.contains("no!") || lower.contains("what!") || lower.contains("oh!"));
+            if shock_words.iter().any(|w| lower.contains(w)) || shock_exclaim {
+                tags.push("shock".to_string());
+            }
 
-        // Hype: "go" alone is too common — require gaming-specific phrases
-        let hype_words = ["let's go!", "lets go", "let's gooo", "yes!", "clutch", "got 'em", "got him", "got em", "nice!", "huge"];
-        if hype_words.iter().any(|w| lower.contains(w)) {
-            tags.push("hype".to_string());
-        }
+            // Hype: "go" alone is too common — require gaming-specific phrases
+            let hype_words = [
+                "let's go!",
+                "lets go",
+                "let's gooo",
+                "yes!",
+                "clutch",
+                "got 'em",
+                "got him",
+                "got em",
+                "nice!",
+                "huge",
+            ];
+            if hype_words.iter().any(|w| lower.contains(w)) {
+                tags.push("hype".to_string());
+            }
 
-        // Frustration: "dead" and "done" are too common in gaming narration
-        let frust_words = ["rage", "i'm done", "are you kidding", "are you serious", "bull", "stupid", "i quit", "i can't"];
-        if frust_words.iter().any(|w| lower.contains(w)) {
-            tags.push("frustration".to_string());
-        }
+            // Frustration: "dead" and "done" are too common in gaming narration
+            let frust_words = [
+                "rage",
+                "i'm done",
+                "are you kidding",
+                "are you serious",
+                "bull",
+                "stupid",
+                "i quit",
+                "i can't",
+            ];
+            if frust_words.iter().any(|w| lower.contains(w)) {
+                tags.push("frustration".to_string());
+            }
 
-        // Panic: these are more specific, keep but tighten
-        let panic_words = ["run!", "help!", "behind me", "behind you", "get out", "oh god", "he's coming", "she's coming"];
-        if panic_words.iter().any(|w| lower.contains(w)) {
-            tags.push("panic".to_string());
-        }
-        RawSignal { center: kw.timestamp, intensity, source: SignalSource::Transcript, tags, transcript_snippet: Some(kw.context.clone()), spike_delta: 0.0 }
-    }).collect()
+            // Panic: these are more specific, keep but tighten
+            let panic_words = [
+                "run!",
+                "help!",
+                "behind me",
+                "behind you",
+                "get out",
+                "oh god",
+                "he's coming",
+                "she's coming",
+            ];
+            if panic_words.iter().any(|w| lower.contains(w)) {
+                tags.push("panic".to_string());
+            }
+            RawSignal {
+                center: kw.timestamp,
+                intensity,
+                source: SignalSource::Transcript,
+                tags,
+                transcript_snippet: Some(kw.context.clone()),
+                spike_delta: 0.0,
+            }
+        })
+        .collect()
 }
 
 pub fn generate_chat_candidates(chat_peaks: &[db::HighlightRow]) -> Vec<RawSignal> {
-    chat_peaks.iter().map(|ch| {
-        RawSignal { center: (ch.start_seconds + ch.end_seconds) / 2.0, intensity: ch.chat_score * 0.8 + 0.2, source: SignalSource::Chat, tags: vec!["chat-peak".to_string(), "reaction".to_string()], transcript_snippet: ch.transcript_snippet.clone(), spike_delta: 0.0 }
-    }).collect()
+    chat_peaks
+        .iter()
+        .map(|ch| RawSignal {
+            center: (ch.start_seconds + ch.end_seconds) / 2.0,
+            intensity: ch.chat_score * 0.8 + 0.2,
+            source: SignalSource::Chat,
+            tags: vec!["chat-peak".to_string(), "reaction".to_string()],
+            transcript_snippet: ch.transcript_snippet.clone(),
+            spike_delta: 0.0,
+        })
+        .collect()
 }
 
 /// Convert emote-burst windows into RawSignals. Emote bursts use shorter
@@ -357,17 +457,20 @@ pub fn generate_chat_candidates(chat_peaks: &[db::HighlightRow]) -> Vec<RawSigna
 /// `chat_score` on the input HighlightRow carries the normalized emote-density
 /// (peak / max_peak across the VOD), so it maps directly to intensity here.
 pub fn generate_emote_candidates(emote_peaks: &[db::HighlightRow]) -> Vec<RawSignal> {
-    emote_peaks.iter().map(|ch| {
-        RawSignal {
-            center: (ch.start_seconds + ch.end_seconds) / 2.0,
-            // Same shape as chat: floor at 0.2, scale up to 1.0 with the chat_score.
-            intensity: ch.chat_score * 0.8 + 0.2,
-            source: SignalSource::EmoteBurst,
-            tags: vec!["emote-burst".to_string(), "reaction".to_string()],
-            transcript_snippet: ch.transcript_snippet.clone(),
-            spike_delta: 0.0,
-        }
-    }).collect()
+    emote_peaks
+        .iter()
+        .map(|ch| {
+            RawSignal {
+                center: (ch.start_seconds + ch.end_seconds) / 2.0,
+                // Same shape as chat: floor at 0.2, scale up to 1.0 with the chat_score.
+                intensity: ch.chat_score * 0.8 + 0.2,
+                source: SignalSource::EmoteBurst,
+                tags: vec!["emote-burst".to_string(), "reaction".to_string()],
+                transcript_snippet: ch.transcript_snippet.clone(),
+                spike_delta: 0.0,
+            }
+        })
+        .collect()
 }
 
 /// Convert community-created Twitch clips into detection signals. Each clip's
@@ -381,34 +484,41 @@ pub fn generate_emote_candidates(emote_peaks: &[db::HighlightRow]) -> Vec<RawSig
 ///   200 views → 0.77
 ///   1k+ views → 1.0   (ceiling)
 pub fn generate_community_candidates(clips: &[CommunityClip]) -> Vec<RawSignal> {
-    clips.iter().map(|c| {
-        let view_intensity =
-            ((c.view_count as f64 + 1.0).ln() / 1000.0_f64.ln()).clamp(0.45, 1.0);
-        let provenance_boost = if c.is_streamer_created { 0.12 } else { 0.0 }
-            + if c.is_featured { 0.14 } else { 0.0 };
-        let mut tags = vec!["community-clip".to_string()];
-        tags.push(if c.is_streamer_created {
-            "streamer-created".to_string()
-        } else {
-            "viewer-created".to_string()
-        });
-        if c.is_featured {
-            tags.push("featured-clip".to_string());
-        }
-        if c.is_stream_marker {
-            tags.push("stream-marker".to_string());
-        }
-        RawSignal {
-            // Center the signal mid-clip so the fusion window catches nearby
-            // audio/chat/transcript peaks.
-            center: c.vod_offset_seconds + c.duration_seconds / 2.0,
-            intensity: (view_intensity + provenance_boost).min(1.0),
-            source: SignalSource::Community,
-            tags,
-            transcript_snippet: if c.title.is_empty() { None } else { Some(c.title.clone()) },
-            spike_delta: 0.0,
-        }
-    }).collect()
+    clips
+        .iter()
+        .map(|c| {
+            let view_intensity =
+                ((c.view_count as f64 + 1.0).ln() / 1000.0_f64.ln()).clamp(0.45, 1.0);
+            let provenance_boost = if c.is_streamer_created { 0.12 } else { 0.0 }
+                + if c.is_featured { 0.14 } else { 0.0 };
+            let mut tags = vec!["community-clip".to_string()];
+            tags.push(if c.is_streamer_created {
+                "streamer-created".to_string()
+            } else {
+                "viewer-created".to_string()
+            });
+            if c.is_featured {
+                tags.push("featured-clip".to_string());
+            }
+            if c.is_stream_marker {
+                tags.push("stream-marker".to_string());
+            }
+            RawSignal {
+                // Center the signal mid-clip so the fusion window catches nearby
+                // audio/chat/transcript peaks.
+                center: c.vod_offset_seconds + c.duration_seconds / 2.0,
+                intensity: (view_intensity + provenance_boost).min(1.0),
+                source: SignalSource::Community,
+                tags,
+                transcript_snippet: if c.title.is_empty() {
+                    None
+                } else {
+                    Some(c.title.clone())
+                },
+                spike_delta: 0.0,
+            }
+        })
+        .collect()
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -417,7 +527,11 @@ pub fn generate_community_candidates(clips: &[CommunityClip]) -> Vec<RawSignal> 
 
 pub fn fuse_signals(signals: &[RawSignal], merge_window: f64) -> Vec<FusedMoment> {
     let mut sorted = signals.to_vec();
-    sorted.sort_by(|a, b| a.center.partial_cmp(&b.center).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        a.center
+            .partial_cmp(&b.center)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut moments: Vec<FusedMoment> = Vec::new();
     let mut i = 0;
     while i < sorted.len() {
@@ -432,15 +546,32 @@ pub fn fuse_signals(signals: &[RawSignal], merge_window: f64) -> Vec<FusedMoment
         while j < sorted.len() && (sorted[j].center - anchor.center) < merge_window {
             let c = &sorted[j];
             tags.extend(c.tags.clone());
-            if c.intensity > best_intensity { best_intensity = c.intensity; center = c.center; }
-            if c.spike_delta > best_delta { best_delta = c.spike_delta; }
-            if !sources.contains(&c.source) { sources.push(c.source.clone()); }
-            if snippet.is_none() { snippet = c.transcript_snippet.clone(); }
+            if c.intensity > best_intensity {
+                best_intensity = c.intensity;
+                center = c.center;
+            }
+            if c.spike_delta > best_delta {
+                best_delta = c.spike_delta;
+            }
+            if !sources.contains(&c.source) {
+                sources.push(c.source.clone());
+            }
+            if snippet.is_none() {
+                snippet = c.transcript_snippet.clone();
+            }
             j += 1;
         }
         i = j;
-        tags.sort(); tags.dedup();
-        moments.push(FusedMoment { center, best_intensity, spike_delta: best_delta, signal_sources: sources, tags, transcript_snippet: snippet });
+        tags.sort();
+        tags.dedup();
+        moments.push(FusedMoment {
+            center,
+            best_intensity,
+            spike_delta: best_delta,
+            signal_sources: sources,
+            tags,
+            transcript_snippet: snippet,
+        });
     }
     moments
 }
@@ -450,12 +581,18 @@ pub fn fuse_signals(signals: &[RawSignal], merge_window: f64) -> Vec<FusedMoment
 // ═══════════════════════════════════════════════════════════════════════
 
 pub fn analyze_hook_strength(m: &FusedMoment, audio: Option<&AudioContext>) -> f64 {
-    let Some(a) = audio else { return 0.3 + m.best_intensity * 0.3 };
+    let Some(a) = audio else {
+        return 0.3 + m.best_intensity * 0.3;
+    };
     let hook_start = (m.center - 2.0).max(0.0);
     let hook_audio = a.intensity_in_range(hook_start, hook_start + 3.0);
     let ratio = hook_audio / a.avg_rms.max(0.001);
     let before = a.intensity_in_range((hook_start - 5.0).max(0.0), hook_start);
-    let delta_boost = if before < a.avg_rms * 0.7 && hook_audio > a.avg_rms * 1.5 { 0.25 } else { 0.0 };
+    let delta_boost = if before < a.avg_rms * 0.7 && hook_audio > a.avg_rms * 1.5 {
+        0.25
+    } else {
+        0.0
+    };
     ((ratio * 0.35) + delta_boost).min(1.0)
     // TODO(v2): visual first-frame saliency model
 }
@@ -463,26 +600,46 @@ pub fn analyze_hook_strength(m: &FusedMoment, audio: Option<&AudioContext>) -> f
 pub fn analyze_emotional_spike(m: &FusedMoment, audio: Option<&AudioContext>) -> f64 {
     let mut score = m.best_intensity * 0.45;
     let has = |tag: &str| m.tags.iter().any(|t| t == tag);
-    if has("jumpscare") || has("shock") || has("surprise") { score += 0.35; }
-    else if has("scream") || has("reaction") || has("frustration") || has("panic") { score += 0.25; }
-    else if has("hype") || has("excitement") { score += 0.15; }
-    if let Some(a) = audio { if a.intensity_in_range(m.center - 1.0, m.center + 2.0) > a.avg_rms * 2.0 { score += 0.10; } }
-    if m.transcript_snippet.is_some() { score += 0.03; }
+    if has("jumpscare") || has("shock") || has("surprise") {
+        score += 0.35;
+    } else if has("scream") || has("reaction") || has("frustration") || has("panic") {
+        score += 0.25;
+    } else if has("hype") || has("excitement") {
+        score += 0.15;
+    }
+    if let Some(a) = audio {
+        if a.intensity_in_range(m.center - 1.0, m.center + 2.0) > a.avg_rms * 2.0 {
+            score += 0.10;
+        }
+    }
+    if m.transcript_snippet.is_some() {
+        score += 0.03;
+    }
     // Community validation boost — viewers thought this was clip-worthy.
-    if has("community-clip") { score += 0.12; }
+    if has("community-clip") {
+        score += 0.12;
+    }
     score.min(1.0)
     // TODO(v2): facial expression recognition
 }
 
 pub fn analyze_payoff_clarity(m: &FusedMoment) -> f64 {
     let mut score = 0.25;
-    if m.transcript_snippet.is_some() { score += 0.10; }
+    if m.transcript_snippet.is_some() {
+        score += 0.10;
+    }
     score += (m.signal_sources.len() as f64 * 0.12).min(0.25);
     let has = |tag: &str| m.tags.iter().any(|t| t == tag);
-    if has("jumpscare") || has("scream") { score += 0.12; }
-    if has("shock") || has("panic") { score += 0.08; }
+    if has("jumpscare") || has("scream") {
+        score += 0.12;
+    }
+    if has("shock") || has("panic") {
+        score += 0.08;
+    }
     // Community signal implies a concrete payoff viewers recognized.
-    if has("community-clip") { score += 0.10; }
+    if has("community-clip") {
+        score += 0.10;
+    }
     score.min(1.0)
     // TODO(v2): game state detection (kill feeds, objectives)
 }
@@ -490,29 +647,55 @@ pub fn analyze_payoff_clarity(m: &FusedMoment) -> f64 {
 pub fn analyze_event_reaction_alignment(m: &FusedMoment) -> f64 {
     match m.signal_sources.len() {
         n if n >= 3 => 0.95,
-        2 => if m.signal_sources.contains(&SignalSource::Transcript) { 0.76 } else { 0.72 },
-        _ => if m.spike_delta > 0.0 { 0.35 + (m.spike_delta * 0.5).min(0.25) } else { 0.30 + m.best_intensity * 0.2 },
+        2 => {
+            if m.signal_sources.contains(&SignalSource::Transcript) {
+                0.76
+            } else {
+                0.72
+            }
+        }
+        _ => {
+            if m.spike_delta > 0.0 {
+                0.35 + (m.spike_delta * 0.5).min(0.25)
+            } else {
+                0.30 + m.best_intensity * 0.2
+            }
+        }
     }
     // TODO(v2): temporal alignment model
 }
 
 pub fn analyze_context_simplicity(m: &FusedMoment) -> f64 {
     let has = |tag: &str| m.tags.iter().any(|t| t == tag);
-    if has("jumpscare") || has("scream") || has("shock") || has("surprise") { 0.88 }
-    else if has("hype") || has("excitement") || has("panic") { 0.68 }
-    else if has("frustration") || has("chat-peak") { 0.55 }
-    else { 0.45 }
+    if has("jumpscare") || has("scream") || has("shock") || has("surprise") {
+        0.88
+    } else if has("hype") || has("excitement") || has("panic") {
+        0.68
+    } else if has("frustration") || has("chat-peak") {
+        0.55
+    } else {
+        0.45
+    }
     // TODO(v2): game identification for context requirements
 }
 
 pub fn analyze_replay_value(m: &FusedMoment) -> f64 {
     let mut score = m.best_intensity * 0.35;
     let has = |tag: &str| m.tags.iter().any(|t| t == tag);
-    if has("jumpscare") || has("surprise") { score += 0.40; }
-    else if has("shock") { score += 0.20; }
-    if has("scream") || has("panic") { score += 0.20; }
-    if m.transcript_snippet.is_some() { score += 0.05; }
-    if m.signal_sources.len() >= 2 { score += 0.10; }
+    if has("jumpscare") || has("surprise") {
+        score += 0.40;
+    } else if has("shock") {
+        score += 0.20;
+    }
+    if has("scream") || has("panic") {
+        score += 0.20;
+    }
+    if m.transcript_snippet.is_some() {
+        score += 0.05;
+    }
+    if m.signal_sources.len() >= 2 {
+        score += 0.10;
+    }
     score.min(1.0)
     // TODO(v2): audio loop analysis
 }
@@ -528,6 +711,13 @@ fn is_corroborated(c: &ClipCandidate) -> bool {
     c.signal_sources.len() >= 2 || c.signal_sources.contains(&SignalSource::Community)
 }
 
+fn apply_transcript_weight(signals: &mut [RawSignal], transcript_weight: f64) {
+    let weight = transcript_weight.clamp(0.0, 2.0);
+    for signal in signals {
+        signal.intensity = (signal.intensity * weight).clamp(0.0, 1.0);
+    }
+}
+
 fn transcript_context_for_window(
     transcript: Option<&TranscriptResult>,
     start: f64,
@@ -540,7 +730,11 @@ fn transcript_context_for_window(
         .iter()
         .filter(|segment| segment.end > start && segment.start < end)
     {
-        let clean = segment.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let clean = segment
+            .text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         if clean.is_empty() {
             continue;
         }
@@ -564,12 +758,11 @@ fn has_meaningful_transcript_context(candidate: &ClipCandidate) -> bool {
         return false;
     };
     const FILLER: &[&str] = &[
-        "a", "ah", "aha", "ahaha", "an", "and", "are", "bro", "but", "did", "do",
-        "does", "dude", "ha", "haha", "hahaha", "he", "hehe", "hmm", "i", "im",
-        "in", "is", "it", "lmao", "lol", "me", "mm", "my", "no", "of", "oh", "ok",
-        "okay", "on", "or", "rofl", "she", "so", "that", "the", "they", "this", "to",
-        "uh", "um", "was", "we", "were", "whoa", "with", "woo", "wow", "yeah", "yep",
-        "you", "your",
+        "a", "ah", "aha", "ahaha", "an", "and", "are", "bro", "but", "did", "do", "does", "dude",
+        "ha", "haha", "hahaha", "he", "hehe", "hmm", "i", "im", "in", "is", "it", "lmao", "lol",
+        "me", "mm", "my", "no", "of", "oh", "ok", "okay", "on", "or", "rofl", "she", "so", "that",
+        "the", "they", "this", "to", "uh", "um", "was", "we", "were", "whoa", "with", "woo", "wow",
+        "yeah", "yep", "you", "your",
     ];
     let words: Vec<String> = text
         .split(|ch: char| !ch.is_alphanumeric() && ch != '\'')
@@ -628,7 +821,11 @@ const UNCORROBORATED_BOOST_CAP: f64 = 0.12;
 /// (corroborated) spike earns the full lift, a bare loud spike at most the cap.
 fn audio_boost(local_z: f64, corroborated: bool) -> f64 {
     let base = (local_z / 4.0).clamp(0.0, 0.35);
-    if corroborated { base } else { base.min(UNCORROBORATED_BOOST_CAP) }
+    if corroborated {
+        base
+    } else {
+        base.min(UNCORROBORATED_BOOST_CAP)
+    }
 }
 
 fn is_unreliable_single_signal_shock(c: &ClipCandidate) -> bool {
@@ -667,7 +864,11 @@ pub fn score_clip_candidate(c: &mut ClipCandidate) {
         + (c.event_reaction_alignment * 0.15)
         + (c.context_simplicity * 0.10)
         + (c.replay_value * 0.05);
-    let bonus = match c.signal_sources.len() { n if n >= 3 => 0.10, 2 => 0.05, _ => 0.0 };
+    let bonus = match c.signal_sources.len() {
+        n if n >= 3 => 0.10,
+        2 => 0.05,
+        _ => 0.0,
+    };
     c.total_score = (c.total_score + bonus).min(0.99);
 
     // Phase A safety net: single-signal-with-shock-tag candidates capped at
@@ -682,43 +883,126 @@ pub fn score_clip_candidate(c: &mut ClipCandidate) {
 // Stage 4: Boundary optimization
 // ═══════════════════════════════════════════════════════════════════════
 
+const MAX_FORWARD_START_SNAP_SECONDS: f64 = 2.0;
+const SEMANTIC_BOUNDARY_PADDING_SECONDS: f64 = 2.0;
+const PAYOFF_SPEECH_GUARD_SECONDS: f64 = 6.0;
+
+fn transcript_has_speech(transcript: Option<&TranscriptResult>, start: f64, end: f64) -> bool {
+    end > start
+        && transcript.is_some_and(|transcript| {
+            transcript.segments.iter().any(|segment| {
+                !segment.text.trim().is_empty() && segment.end > start && segment.start < end
+            })
+        })
+}
+
+fn selector_duration_limits(
+    selector: &crate::game_config::SelectorConfig,
+    duration: f64,
+) -> (f64, f64) {
+    let available = duration.max(0.0);
+    if available <= f64::EPSILON {
+        return (0.0, 0.0);
+    }
+    let min_duration = (selector.min_clip_duration as f64).max(1.0).min(available);
+    let max_duration = (selector.max_clip_duration as f64)
+        .max(min_duration)
+        .min(available);
+    (min_duration, max_duration)
+}
+
+fn enforce_clip_duration(
+    c: &mut ClipCandidate,
+    duration: f64,
+    min_duration: f64,
+    max_duration: f64,
+    preserve_end: bool,
+) {
+    c.start_time = c.start_time.clamp(0.0, duration.max(0.0));
+    c.end_time = c.end_time.clamp(c.start_time, duration.max(c.start_time));
+
+    let clip_len = c.end_time - c.start_time;
+    if max_duration > 0.0 && clip_len > max_duration {
+        if preserve_end {
+            c.start_time = (c.end_time - max_duration).max(0.0);
+        } else {
+            c.end_time = (c.start_time + max_duration).min(duration);
+        }
+    }
+
+    let clip_len = c.end_time - c.start_time;
+    if min_duration > 0.0 && clip_len < min_duration {
+        c.start_time = (c.start_time - (min_duration - clip_len)).max(0.0);
+        if c.end_time - c.start_time < min_duration {
+            c.end_time = (c.start_time + min_duration).min(duration);
+        }
+    }
+}
+
+fn should_preserve_semantic_ending(
+    c: &ClipCandidate,
+    transcript: Option<&TranscriptResult>,
+) -> bool {
+    c.signal_sources.contains(&SignalSource::Semantic)
+        || transcript_has_speech(
+            transcript,
+            (c.end_time - PAYOFF_SPEECH_GUARD_SECONDS).max(c.start_time),
+            c.end_time,
+        )
+}
+
 /// Optimize clip start — snap to the first real action.
 /// Short-form rule: if the first frame isn't interesting, they swipe.
-fn optimize_clip_start(c: &mut ClipCandidate, a: &AudioContext) {
-    // Pass 1: scan forward up to 10s for the first above-average energy second.
-    // This trims all dead movement/wandering before the moment begins.
-    let search_end = (c.start_time + 10.0).min(c.end_time - 10.0);
+fn optimize_clip_start(
+    c: &mut ClipCandidate,
+    a: &AudioContext,
+    transcript: Option<&TranscriptResult>,
+) {
+    let original_start = c.start_time;
+    let latest_start = (original_start + MAX_FORWARD_START_SNAP_SECONDS).min(c.end_time - 10.0);
+
+    // Only remove a short amount of confirmed dead air. Longer forward jumps
+    // commonly remove the spoken setup that makes the reaction understandable.
+    let search_end = latest_start;
     if search_end > c.start_time {
         let s = c.start_time as usize;
-        let e = (search_end as usize).min(a.rms_per_second.len());
+        let e = (search_end.ceil() as usize).min(a.rms_per_second.len());
         if e > s {
-            // Find first second above 90% of average — tight threshold
-            if let Some(active) = (s..e).find(|&sec|
-                a.rms_per_second.get(sec).copied().unwrap_or(0.0) > a.avg_rms * 0.9
-            ) {
-                // Start right at the energy, no buffer — the action IS the hook
-                let new_start = (active as f64).max(c.start_time);
-                if c.end_time - new_start >= 12.0 { c.start_time = new_start; }
+            if let Some(active) = (s..e)
+                .find(|&sec| a.rms_per_second.get(sec).copied().unwrap_or(0.0) > a.avg_rms * 0.9)
+            {
+                let new_start = (active as f64).clamp(original_start, latest_start);
+                if c.end_time - new_start >= 12.0
+                    && !transcript_has_speech(transcript, original_start, new_start)
+                {
+                    c.start_time = new_start;
+                }
             }
         }
     }
 
-    // Pass 2: if first 1.5s are still quiet, jump directly to the loudest point
+    // If the opening remains quiet, look for a nearby spike but retain the same
+    // two-second ceiling and never skip over known speech.
     let hook_energy = a.intensity_in_range(c.start_time, c.start_time + 1.5);
-    if hook_energy < a.avg_rms * 0.85 {
-        let ss = c.start_time as usize;
-        let se = ((c.start_time + 10.0) as usize).min(a.rms_per_second.len());
+    if hook_energy < a.avg_rms * 0.85 && latest_start > original_start {
+        let ss = original_start as usize;
+        let se = ((latest_start + 1.0).ceil() as usize).min(a.rms_per_second.len());
         if se > ss {
             if let Some(spike) = (ss..se).max_by(|&x, &y| {
-                a.rms_per_second.get(x).unwrap_or(&0.0)
+                a.rms_per_second
+                    .get(x)
+                    .unwrap_or(&0.0)
                     .partial_cmp(a.rms_per_second.get(y).unwrap_or(&0.0))
                     .unwrap_or(std::cmp::Ordering::Equal)
             }) {
                 let spike_val = a.rms_per_second.get(spike).copied().unwrap_or(0.0);
                 if spike_val > hook_energy * 1.2 {
-                    // Start 0.5s before the spike — just enough context
-                    let new_start = (spike as f64 - 0.5).max(0.0);
-                    if c.end_time - new_start >= 12.0 { c.start_time = new_start; }
+                    let new_start = (spike as f64 - 0.5).clamp(original_start, latest_start);
+                    if c.end_time - new_start >= 12.0
+                        && !transcript_has_speech(transcript, original_start, new_start)
+                    {
+                        c.start_time = new_start;
+                    }
                 }
             }
         }
@@ -726,7 +1010,12 @@ fn optimize_clip_start(c: &mut ClipCandidate, a: &AudioContext) {
 }
 
 /// Optimize clip end to preserve reaction payoff and trim weak tail.
-fn optimize_clip_end(c: &mut ClipCandidate, a: &AudioContext, duration: f64) {
+fn optimize_clip_end(
+    c: &mut ClipCandidate,
+    a: &AudioContext,
+    transcript: Option<&TranscriptResult>,
+    duration: f64,
+) {
     let original_end = c.end_time;
 
     // Always extend by 5s as a speech-tail buffer. Reactions and replies
@@ -737,7 +1026,7 @@ fn optimize_clip_end(c: &mut ClipCandidate, a: &AudioContext, duration: f64) {
     // alone misses common speech tails. 5s is the empirical sweet spot:
     // catches most sentence-completion cases (3s frequently wasn't enough
     // for slower/longer sentences) without burning much benign tail when
-    // there's nothing to catch. The 45s hard cap in
+    // there's nothing to catch. The resolved per-game maximum in
     // optimize_clip_boundaries keeps this bounded.
     c.end_time = (c.end_time + 5.0).min(duration);
 
@@ -753,42 +1042,56 @@ fn optimize_clip_end(c: &mut ClipCandidate, a: &AudioContext, duration: f64) {
 
     log::info!(
         "[boundary] [{:.1}s..{:.1}s -> {:.1}s] (+{:.1}s, avg_rms={:.3})",
-        c.start_time, original_end, c.end_time, c.end_time - original_end, a.avg_rms,
+        c.start_time,
+        original_end,
+        c.end_time,
+        c.end_time - original_end,
+        a.avg_rms,
     );
 
-    // If the last 3s are dead air, trim the tail
+    // If the last 3s are dead air, trim the tail only when doing so cannot
+    // remove timed speech. Quiet dialogue is still payoff, especially when the
+    // game's audio makes the stream-wide RMS baseline unusually high.
     let tail_energy = a.intensity_in_range((c.end_time - 3.0).max(c.start_time), c.end_time);
-    if tail_energy < a.avg_rms * 0.5 && (c.end_time - c.start_time) > 15.0 {
+    if tail_energy < a.avg_rms * 0.5
+        && (c.end_time - c.start_time) > 15.0
+        && !transcript_has_speech(transcript, (c.end_time - 3.0).max(c.start_time), c.end_time)
+    {
         // Walk backwards to find where the energy drops off
         let mut cut = c.end_time as usize;
         let start_sec = c.start_time as usize + 10; // keep at least 10s
+        let mut proposed_end = None;
         while cut > start_sec {
             if a.rms_per_second.get(cut).copied().unwrap_or(0.0) > a.avg_rms * 0.8 {
-                c.end_time = (cut as f64 + 2.0).min(duration); // add 2s after last energy
+                proposed_end = Some((cut as f64 + 2.0).min(duration));
                 break;
             }
             cut -= 1;
+        }
+        if let Some(proposed_end) = proposed_end {
+            if !transcript_has_speech(transcript, proposed_end, c.end_time) {
+                c.end_time = proposed_end;
+            }
         }
     }
 }
 
 /// Full boundary optimization pipeline.
-pub fn optimize_clip_boundaries(c: &mut ClipCandidate, audio: Option<&AudioContext>, duration: f64) {
-    let Some(a) = audio else { return };
-
-    optimize_clip_start(c, a);
-    optimize_clip_end(c, a, duration);
-
-    // Enforce duration limits: 12–45s for short-form
-    let clip_len = c.end_time - c.start_time;
-    if clip_len > 45.0 { c.end_time = c.start_time + 45.0; }
-    if clip_len < 12.0 {
-        c.start_time = (c.start_time - (12.0 - clip_len)).max(0.0);
-        // Re-check after clamping — if still too short, extend end instead
-        if c.end_time - c.start_time < 12.0 {
-            c.end_time = (c.start_time + 12.0).min(duration);
-        }
+pub fn optimize_clip_boundaries(
+    c: &mut ClipCandidate,
+    audio: Option<&AudioContext>,
+    transcript: Option<&TranscriptResult>,
+    duration: f64,
+    min_duration: f64,
+    max_duration: f64,
+) {
+    if let Some(a) = audio {
+        optimize_clip_start(c, a, transcript);
+        optimize_clip_end(c, a, transcript, duration);
     }
+
+    let preserve_end = should_preserve_semantic_ending(c, transcript);
+    enforce_clip_duration(c, duration, min_duration, max_duration, preserve_end);
 
     // Re-score hook after boundary changes
     // TODO(v2): re-run full scoring after boundary optimization for accuracy
@@ -798,22 +1101,42 @@ pub fn optimize_clip_boundaries(c: &mut ClipCandidate, audio: Option<&AudioConte
 // Stage 5: Rejection
 // ═══════════════════════════════════════════════════════════════════════
 
-pub fn evaluate_rejection(c: &mut ClipCandidate, audio: Option<&AudioContext>, cfg: &CurationConfig) {
+pub fn evaluate_rejection(
+    c: &mut ClipCandidate,
+    audio: Option<&AudioContext>,
+    cfg: &CurationConfig,
+) {
     if c.hook_strength < cfg.min_hook {
-        c.rejection_reason = Some(format!("weak hook — first 3s have no energy ({:.0}% < {:.0}%)", c.hook_strength * 100.0, cfg.min_hook * 100.0)); return;
+        c.rejection_reason = Some(format!(
+            "weak hook — first 3s have no energy ({:.0}% < {:.0}%)",
+            c.hook_strength * 100.0,
+            cfg.min_hook * 100.0
+        ));
+        return;
     }
     if c.emotional_spike < cfg.min_emotion {
-        c.rejection_reason = Some(format!("no emotional spike — flat energy ({:.0}% < {:.0}%)", c.emotional_spike * 100.0, cfg.min_emotion * 100.0)); return;
+        c.rejection_reason = Some(format!(
+            "no emotional spike — flat energy ({:.0}% < {:.0}%)",
+            c.emotional_spike * 100.0,
+            cfg.min_emotion * 100.0
+        ));
+        return;
     }
     if let Some(a) = audio {
         let body_start = c.start_time + 3.0;
         let body_end = (c.end_time - 2.0).max(body_start + 1.0);
         if a.intensity_in_range(body_start, body_end) < a.avg_rms * 0.4 {
-            c.rejection_reason = Some("dead air — clip body is too quiet".into()); return;
+            c.rejection_reason = Some("dead air — clip body is too quiet".into());
+            return;
         }
     }
     if c.total_score < cfg.min_total_score {
-        c.rejection_reason = Some(format!("below viral threshold ({:.0}% < {:.0}%)", c.total_score * 100.0, cfg.min_total_score * 100.0)); return;
+        c.rejection_reason = Some(format!(
+            "below viral threshold ({:.0}% < {:.0}%)",
+            c.total_score * 100.0,
+            cfg.min_total_score * 100.0
+        ));
+        return;
     }
     if c.signal_sources.len() == 1 && c.transcript_excerpt.is_none() && c.payoff_clarity < 0.35 {
         c.rejection_reason = Some("vague event — single signal, no transcript".into());
@@ -823,9 +1146,17 @@ pub fn evaluate_rejection(c: &mut ClipCandidate, audio: Option<&AudioContext>, c
 /// The absolute no-noise quality gates (everything EXCEPT the score cliff). A
 /// candidate failing any of these is genuine noise / dead air and must never
 /// surface, regardless of sensitivity. This is the structural "no noise" floor.
-fn passes_quality_gates(c: &ClipCandidate, audio: Option<&AudioContext>, cfg: &CurationConfig) -> bool {
-    if c.hook_strength < cfg.min_hook { return false; }
-    if c.emotional_spike < cfg.min_emotion { return false; }
+fn passes_quality_gates(
+    c: &ClipCandidate,
+    audio: Option<&AudioContext>,
+    cfg: &CurationConfig,
+) -> bool {
+    if c.hook_strength < cfg.min_hook {
+        return false;
+    }
+    if c.emotional_spike < cfg.min_emotion {
+        return false;
+    }
     // Community-sourced clips were validated by a human (a viewer clipped the
     // moment on Twitch) — don't second-guess that with loudness/payoff heuristics.
     // A quiet viewer-clipped beat (deadpan banter, chat-reading, a pause before a
@@ -836,7 +1167,9 @@ fn passes_quality_gates(c: &ClipCandidate, audio: Option<&AudioContext>, cfg: &C
         if let Some(a) = audio {
             let body_start = c.start_time + 3.0;
             let body_end = (c.end_time - 2.0).max(body_start + 1.0);
-            if a.intensity_in_range(body_start, body_end) < a.avg_rms * 0.4 { return false; }
+            if a.intensity_in_range(body_start, body_end) < a.avg_rms * 0.4 {
+                return false;
+            }
         }
         if !has_local_contextual_support(c) {
             return false;
@@ -901,7 +1234,9 @@ fn is_scene_card_full(
     duration: f64,
 ) -> bool {
     let text = transcript
-        .and_then(|t| crate::commands::vod::extract_transcript_for_range(t, c.start_time, c.end_time))
+        .and_then(|t| {
+            crate::commands::vod::extract_transcript_for_range(t, c.start_time, c.end_time)
+        })
         .or_else(|| c.transcript_excerpt.clone());
     match text.as_deref() {
         Some(s) => is_scene_card_text(s, c.peak_time, duration),
@@ -967,7 +1302,11 @@ fn best_overlapping(
     moments
         .iter()
         .filter(|m| windows_overlap(start, end, m.start_sec, m.end_sec))
-        .max_by(|x, y| x.score.partial_cmp(&y.score).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|x, y| {
+            x.score
+                .partial_cmp(&y.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
 }
 
 /// Blend AI nominations into `candidates` and append AI-discovered moments the
@@ -988,25 +1327,36 @@ fn fuse_ai_moments(
     // Unmentioned candidates remain eligible on local evidence, but rank below
     // comparable AI-backed candidates.
     for c in candidates.iter_mut() {
-        if let Some(ai) =
-            best_overlapping(c.start_time, c.end_time, ai_moments).map(|m| m.score)
-        {
-            c.ai_score = Some(ai);
-            c.total_score =
-                (AI_WEIGHT * ai + SIGNAL_WEIGHT * c.total_score).min(0.99);
+        if let Some(ai) = best_overlapping(c.start_time, c.end_time, ai_moments) {
+            c.ai_score = Some(ai.score);
+            c.total_score = (AI_WEIGHT * ai.score + SIGNAL_WEIGHT * c.total_score).min(0.99);
+            c.start_time = c
+                .start_time
+                .min((ai.start_sec - SEMANTIC_BOUNDARY_PADDING_SECONDS).max(0.0));
+            c.end_time = c
+                .end_time
+                .max((ai.end_sec + SEMANTIC_BOUNDARY_PADDING_SECONDS).min(duration));
+            if !c.signal_sources.contains(&SignalSource::Semantic) {
+                c.signal_sources.push(SignalSource::Semantic);
+            }
         } else {
             c.total_score *= AI_UNMENTIONED_SCORE_MULTIPLIER;
         }
     }
     // 2. Rescue: AI moments overlapping NO signal candidate become candidates.
-    let existing: Vec<(f64, f64)> =
-        candidates.iter().map(|c| (c.start_time, c.end_time)).collect();
+    let existing: Vec<(f64, f64)> = candidates
+        .iter()
+        .map(|c| (c.start_time, c.end_time))
+        .collect();
     for m in ai_moments {
-        if existing.iter().any(|&(s, e)| windows_overlap(s, e, m.start_sec, m.end_sec)) {
+        if existing
+            .iter()
+            .any(|&(s, e)| windows_overlap(s, e, m.start_sec, m.end_sec))
+        {
             continue;
         }
-        let start = m.start_sec.max(0.0);
-        let end = m.end_sec.min(duration);
+        let start = (m.start_sec - SEMANTIC_BOUNDARY_PADDING_SECONDS).max(0.0);
+        let end = (m.end_sec + SEMANTIC_BOUNDARY_PADDING_SECONDS).min(duration);
         if end - start < 1.0 {
             continue;
         }
@@ -1171,8 +1521,7 @@ fn reviewed_window_match_score(
     peak: f64,
     review: &db::ReviewedMomentFeedbackRow,
 ) -> Option<f64> {
-    let (_, overlap_ratio, peak_delta) =
-        reviewed_window_overlap_metrics(start, end, peak, review)?;
+    let (_, overlap_ratio, peak_delta) = reviewed_window_overlap_metrics(start, end, peak, review)?;
     if overlap_ratio < REVIEW_MATCH_MIN_OVERLAP
         || peak_delta > REVIEW_MATCH_MAX_CENTER_DELTA_SECONDS
     {
@@ -1195,8 +1544,8 @@ fn reviewed_window_rejection_matches(
     };
     (overlap_ratio >= REVIEW_MATCH_MIN_OVERLAP
         && peak_delta <= REVIEW_MATCH_MAX_CENTER_DELTA_SECONDS)
-    || (overlap >= REVIEW_REJECTION_MIN_OVERLAP_SECONDS
-        && overlap_ratio >= REVIEW_REJECTION_MIN_OVERLAP)
+        || (overlap >= REVIEW_REJECTION_MIN_OVERLAP_SECONDS
+            && overlap_ratio >= REVIEW_REJECTION_MIN_OVERLAP)
 }
 
 fn matching_rejections<'a>(
@@ -1417,7 +1766,10 @@ fn pin_good_reviewed_moments(
     let mut pinned_review_ids = std::collections::HashSet::new();
     let mut pinned_count = 0usize;
 
-    for review in reviewed_moments.iter().filter(|review| review_is_good(review)) {
+    for review in reviewed_moments
+        .iter()
+        .filter(|review| review_is_good(review))
+    {
         if !pinned_review_ids.insert(review.highlight_id.clone()) {
             continue;
         }
@@ -1457,8 +1809,8 @@ fn pin_good_reviewed_moments(
             })
             .map(|(candidate, _)| candidate.clone());
 
-        let Some(mut pin) = best_evidence
-            .or_else(|| synthetic_good_candidate(review, transcript, duration))
+        let Some(mut pin) =
+            best_evidence.or_else(|| synthetic_good_candidate(review, transcript, duration))
         else {
             continue;
         };
@@ -1559,18 +1911,25 @@ fn apply_two_gate_selection(
     let display = crate::signal_calibration::DisplayCalibrator::default();
     // Diagnostic (for real-VOD tuning from the log): quality-gate pass count,
     // scene cards dropped, and the full display-score distribution entering the gate.
-    let qpass = candidates.iter().filter(|c| passes_quality_gates(c, audio, cfg)).count();
-    let scene_cards = candidates.iter().filter(|c| is_scene_card_full(c, transcript, duration)).count();
-    let mut dscores: Vec<f64> = candidates.iter().map(|c| display.to_display(c.total_score)).collect();
+    let qpass = candidates
+        .iter()
+        .filter(|c| passes_quality_gates(c, audio, cfg))
+        .count();
+    let scene_cards = candidates
+        .iter()
+        .filter(|c| is_scene_card_full(c, transcript, duration))
+        .count();
+    let mut dscores: Vec<f64> = candidates
+        .iter()
+        .map(|c| display.to_display(c.total_score))
+        .collect();
     dscores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
     log::info!("Clip selector: gate-A — {} of {} pass quality gates; {} scene card(s) dropped; floor={:.0}; display scores desc: {}",
         qpass, candidates.len(), scene_cards, cfg.min_display_score,
         dscores.iter().map(|d| format!("{:.0}", d)).collect::<Vec<_>>().join(","));
     let structurally_safe: Vec<ClipCandidate> = candidates
         .iter()
-        .filter(|candidate| {
-            passes_selection_structure(candidate, audio, transcript, duration, cfg)
-        })
+        .filter(|candidate| passes_selection_structure(candidate, audio, transcript, duration, cfg))
         .cloned()
         .collect();
     candidates.retain(|c| {
@@ -1591,11 +1950,7 @@ fn apply_two_gate_selection(
             .min(structurally_safe.len());
         let mut exploration_cfg = cfg.clone();
         exploration_cfg.max_clips = target;
-        selected = diversify_final_selection(
-            &structurally_safe,
-            duration,
-            &exploration_cfg,
-        );
+        selected = diversify_final_selection(&structurally_safe, duration, &exploration_cfg);
         for clip in &mut selected {
             if display.to_display(clip.total_score) < cfg.min_display_score {
                 exploration_count += 1;
@@ -1637,20 +1992,39 @@ fn compute_clip_similarity(a: &ClipCandidate, b: &ClipCandidate) -> f64 {
     // Timeline proximity is the primary dedup signal.
     // Two detections 20s apart are very likely the same moment.
     let time_gap = (a.peak_time - b.peak_time).abs();
-    if time_gap < 10.0 { sim += 0.60; }       // nearly identical
-    else if time_gap < 25.0 { sim += 0.40; }   // same sequence
-    else if time_gap < 45.0 { sim += 0.20; }   // overlapping clips
-    else if time_gap < 90.0 { sim += 0.05; }   // nearby but distinct
+    if time_gap < 10.0 {
+        sim += 0.60;
+    }
+    // nearly identical
+    else if time_gap < 25.0 {
+        sim += 0.40;
+    }
+    // same sequence
+    else if time_gap < 45.0 {
+        sim += 0.20;
+    }
+    // overlapping clips
+    else if time_gap < 90.0 {
+        sim += 0.05;
+    } // nearby but distinct
 
     // Tag overlap amplifies time-proximity — same moment + same tags = definite dup
     if time_gap < 60.0 {
         if !a.event_tags.is_empty() && !b.event_tags.is_empty() {
-            let shared: usize = a.event_tags.iter().filter(|t| b.event_tags.contains(t)).count();
+            let shared: usize = a
+                .event_tags
+                .iter()
+                .filter(|t| b.event_tags.contains(t))
+                .count();
             let total = a.event_tags.len().max(b.event_tags.len());
             sim += (shared as f64 / total as f64) * 0.20;
         }
         if !a.emotion_tags.is_empty() && !b.emotion_tags.is_empty() {
-            let shared: usize = a.emotion_tags.iter().filter(|t| b.emotion_tags.contains(t)).count();
+            let shared: usize = a
+                .emotion_tags
+                .iter()
+                .filter(|t| b.emotion_tags.contains(t))
+                .count();
             let total = a.emotion_tags.len().max(b.emotion_tags.len());
             sim += (shared as f64 / total as f64) * 0.10;
         }
@@ -1678,7 +2052,11 @@ fn is_near_duplicate(a: &ClipCandidate, b: &ClipCandidate) -> bool {
 /// Remove near-duplicate candidates, keeping the highest-scored version.
 fn suppress_duplicate_candidates(candidates: &mut Vec<ClipCandidate>) {
     // Sort by score descending — higher-scored clips survive
-    candidates.sort_by(|a, b| b.total_score.partial_cmp(&a.total_score).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.sort_by(|a, b| {
+        b.total_score
+            .partial_cmp(&a.total_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut kept: Vec<ClipCandidate> = Vec::new();
     let mut suppressed = 0;
@@ -1687,15 +2065,20 @@ fn suppress_duplicate_candidates(candidates: &mut Vec<ClipCandidate>) {
         let dominated = kept.iter().any(|existing| is_near_duplicate(c, existing));
         if dominated {
             suppressed += 1;
-            log::info!("Clip selector: suppressed duplicate at {:.0}s (sim to existing clip)",
-                c.peak_time);
+            log::info!(
+                "Clip selector: suppressed duplicate at {:.0}s (sim to existing clip)",
+                c.peak_time
+            );
         } else {
             kept.push(c.clone());
         }
     }
 
     if suppressed > 0 {
-        log::info!("Clip selector: suppressed {} near-duplicate clips", suppressed);
+        log::info!(
+            "Clip selector: suppressed {} near-duplicate clips",
+            suppressed
+        );
     }
     *candidates = kept;
 }
@@ -1712,14 +2095,18 @@ fn enforce_minimum_gap(candidates: &mut Vec<ClipCandidate>, min_gap_secs: f64) {
         let too_close = kept.iter().any(|k| {
             // Check peak-to-peak distance
             let peak_gap = (c.peak_time - k.peak_time).abs();
-            if peak_gap < min_gap_secs { return true; }
+            if peak_gap < min_gap_secs {
+                return true;
+            }
 
             // Check actual time overlap percentage
             let overlap_start = c.start_time.max(k.start_time);
             let overlap_end = c.end_time.min(k.end_time);
             if overlap_end > overlap_start {
                 let overlap_dur = overlap_end - overlap_start;
-                let shorter_dur = (c.end_time - c.start_time).min(k.end_time - k.start_time).max(1.0);
+                let shorter_dur = (c.end_time - c.start_time)
+                    .min(k.end_time - k.start_time)
+                    .max(1.0);
                 overlap_dur / shorter_dur > 0.50
             } else {
                 false
@@ -1736,7 +2123,10 @@ fn enforce_minimum_gap(candidates: &mut Vec<ClipCandidate>, min_gap_secs: f64) {
     }
 
     if dropped > 0 {
-        log::info!("Clip selector: dropped {} clips for minimum gap enforcement", dropped);
+        log::info!(
+            "Clip selector: dropped {} clips for minimum gap enforcement",
+            dropped
+        );
     }
     *candidates = kept;
 }
@@ -1747,59 +2137,87 @@ fn enforce_minimum_gap(candidates: &mut Vec<ClipCandidate>, min_gap_secs: f64) {
 
 /// Compute how novel a candidate is relative to already-selected clips.
 fn compute_novelty_score(candidate: &ClipCandidate, selected: &[ClipCandidate]) -> f64 {
-    if selected.is_empty() { return 1.0; }
+    if selected.is_empty() {
+        return 1.0;
+    }
 
     // Average dissimilarity to all selected clips
-    let avg_dissim: f64 = selected.iter()
+    let avg_dissim: f64 = selected
+        .iter()
         .map(|s| 1.0 - compute_clip_similarity(candidate, s))
-        .sum::<f64>() / selected.len() as f64;
+        .sum::<f64>()
+        / selected.len() as f64;
 
     avg_dissim
 }
 
 /// Compute diversity penalty — heavily penalizes repetition to force editorial variety.
-fn compute_diversity_penalty(candidate: &ClipCandidate, selected: &[ClipCandidate], duration: f64) -> f64 {
+fn compute_diversity_penalty(
+    candidate: &ClipCandidate,
+    selected: &[ClipCandidate],
+    duration: f64,
+) -> f64 {
     let mut penalty: f64 = 0.0;
 
     let sig = compute_similarity_fingerprint(candidate);
 
     // Same type penalty — steep escalation to favor the single best version
-    let same_type = selected.iter()
+    let same_type = selected
+        .iter()
         .filter(|s| compute_similarity_fingerprint(s) == sig)
         .count();
     match same_type {
-        0 => {},                     // novel type — welcome
-        1 => penalty += 0.30,        // one already exists — significant penalty
-        _ => penalty += 0.70,        // two+ exist — near-blocking, only extraordinary clips break through
+        0 => {}               // novel type — welcome
+        1 => penalty += 0.30, // one already exists — significant penalty
+        _ => penalty += 0.70, // two+ exist — near-blocking, only extraordinary clips break through
     }
 
     // Same primary event (even if emotion differs)
     let primary_event = candidate.event_tags.first().cloned().unwrap_or_default();
     if !primary_event.is_empty() {
-        let same_event = selected.iter()
-            .filter(|s| s.event_tags.first().map(|e| e == &primary_event).unwrap_or(false))
+        let same_event = selected
+            .iter()
+            .filter(|s| {
+                s.event_tags
+                    .first()
+                    .map(|e| e == &primary_event)
+                    .unwrap_or(false)
+            })
             .count();
-        if same_event >= 2 { penalty += 0.25; } // 2+ of the same event type is too many
-        else if same_event >= 1 { penalty += 0.10; }
+        if same_event >= 2 {
+            penalty += 0.25;
+        }
+        // 2+ of the same event type is too many
+        else if same_event >= 1 {
+            penalty += 0.10;
+        }
     }
 
     // Stream region saturation
     let region = stream_region(candidate.peak_time, duration);
-    let same_region = selected.iter()
+    let same_region = selected
+        .iter()
         .filter(|s| stream_region(s.peak_time, duration) == region)
         .count();
-    if same_region >= 3 { penalty += 0.35; }
-    else if same_region >= 2 { penalty += 0.15; }
+    if same_region >= 3 {
+        penalty += 0.35;
+    } else if same_region >= 2 {
+        penalty += 0.15;
+    }
 
     // Temporal clustering is now handled by check_temporal_cooldown().
     // This penalty only catches pairwise content similarity (not time-proximity).
 
     // Pairwise similarity to existing clips — if very similar to any one, penalize
-    let max_sim = selected.iter()
+    let max_sim = selected
+        .iter()
         .map(|s| compute_clip_similarity(candidate, s))
         .fold(0.0_f64, |a, b| a.max(b));
-    if max_sim > 0.5 { penalty += 0.25; }
-    else if max_sim > 0.3 { penalty += 0.10; }
+    if max_sim > 0.5 {
+        penalty += 0.25;
+    } else if max_sim > 0.3 {
+        penalty += 0.10;
+    }
 
     penalty.min(0.90_f64)
 }
@@ -1817,7 +2235,9 @@ fn check_temporal_cooldown(
 
     for existing in selected {
         let gap = (candidate.peak_time - existing.peak_time).abs();
-        if gap >= cfg.cooldown_window { continue; }
+        if gap >= cfg.cooldown_window {
+            continue;
+        }
 
         // Candidate is inside the cooldown window — check if it's distinct enough
         let sim = compute_clip_similarity(candidate, existing);
@@ -1835,7 +2255,9 @@ fn check_temporal_cooldown(
             / (1.0 - cfg.cooldown_distinctness_threshold); // normalized 0–1
 
         let penalty = cfg.cooldown_penalty * proximity_factor * (0.5 + 0.5 * similarity_factor);
-        if penalty > max_penalty { max_penalty = penalty; }
+        if penalty > max_penalty {
+            max_penalty = penalty;
+        }
 
         // Hard block if very close AND very similar
         if gap < cfg.cooldown_window * 0.3 && sim > 0.4 {
@@ -1864,7 +2286,9 @@ fn diversify_final_selection(
         for (i, c) in remaining.iter().enumerate() {
             // Cooldown check — may hard-block or apply penalty
             let (blocked, cooldown_penalty) = check_temporal_cooldown(c, &selected, cfg);
-            if blocked { continue; }
+            if blocked {
+                continue;
+            }
 
             let novelty = compute_novelty_score(c, &selected);
             let diversity_penalty = compute_diversity_penalty(c, &selected, duration);
@@ -1872,10 +2296,9 @@ fn diversify_final_selection(
             // SELECTION = quality * 0.55 + novelty * 0.25 + diversity * 0.20
             // minus cooldown penalty
             let diversity_benefit = (1.0 - diversity_penalty).max(0.0);
-            let selection_score = (c.total_score * 0.55)
-                + (novelty * 0.25)
-                + (diversity_benefit * 0.20)
-                - cooldown_penalty;
+            let selection_score =
+                (c.total_score * 0.55) + (novelty * 0.25) + (diversity_benefit * 0.20)
+                    - cooldown_penalty;
 
             if selection_score > best_selection_score {
                 best_selection_score = selection_score;
@@ -1886,7 +2309,9 @@ fn diversify_final_selection(
         // If the best remaining candidate was hard-blocked, remove it and retry
         if best_selection_score == f64::MIN {
             // All remaining were blocked by cooldown — try removing the worst
-            if !remaining.is_empty() { remaining.remove(0); }
+            if !remaining.is_empty() {
+                remaining.remove(0);
+            }
             continue;
         }
 
@@ -1894,18 +2319,25 @@ fn diversify_final_selection(
 
         // Hard cap: max N of same fingerprint
         let sig = compute_similarity_fingerprint(&chosen);
-        let same_count = selected.iter()
+        let same_count = selected
+            .iter()
             .filter(|s| compute_similarity_fingerprint(s) == sig)
             .count();
         if same_count >= cfg.max_same_type {
-            log::info!("Clip selector: hard-blocked [{:.0}s] — {}th '{}' clip refused",
-                chosen.peak_time, same_count + 1, sig);
+            log::info!(
+                "Clip selector: hard-blocked [{:.0}s] — {}th '{}' clip refused",
+                chosen.peak_time,
+                same_count + 1,
+                sig
+            );
             continue;
         }
 
         // Final cooldown gate — re-check after removal (in case of index shift)
         let (blocked, _) = check_temporal_cooldown(&chosen, &selected, cfg);
-        if blocked { continue; }
+        if blocked {
+            continue;
+        }
 
         chosen.novelty_score = compute_novelty_score(&chosen, &selected);
         chosen.diversity_penalty = compute_diversity_penalty(&chosen, &selected, duration);
@@ -1914,11 +2346,20 @@ fn diversify_final_selection(
         let region = stream_region(chosen.peak_time, duration);
         chosen.selected_reason = Some(format!(
             "quality={:.0}% novelty={:.0}% type={} region={}",
-            chosen.total_score * 100.0, chosen.novelty_score * 100.0, sig, region
+            chosen.total_score * 100.0,
+            chosen.novelty_score * 100.0,
+            sig,
+            region
         ));
 
-        log::info!("Clip selector: selected [{:.0}s] score={:.0}% sel={:.2} type={} region={}",
-            chosen.peak_time, chosen.total_score * 100.0, best_selection_score, sig, region);
+        log::info!(
+            "Clip selector: selected [{:.0}s] score={:.0}% sel={:.2} type={} region={}",
+            chosen.peak_time,
+            chosen.total_score * 100.0,
+            best_selection_score,
+            sig,
+            region
+        );
 
         selected.push(chosen);
     }
@@ -1946,8 +2387,7 @@ const COMMUNITY_ENRICHED_SCORE_CEIL: f64 = 0.99;
 const COMMUNITY_CONSENSUS_CENTER_WINDOW: f64 = 12.0;
 
 fn normalized_community_views(view_count: i64) -> f64 {
-    let frac = (((view_count.max(0) as f64) + 1.0).ln() / 1000.0_f64.ln())
-        .clamp(0.0, 1.0);
+    let frac = (((view_count.max(0) as f64) + 1.0).ln() / 1000.0_f64.ln()).clamp(0.0, 1.0);
     frac
 }
 
@@ -1994,7 +2434,11 @@ fn community_creator_key(clip: &CommunityClip) -> String {
     if !clip.creator_id.trim().is_empty() {
         return format!("user:{}", clip.creator_id.trim());
     }
-    if let Some(url) = clip.clip_url.as_deref().filter(|url| !url.trim().is_empty()) {
+    if let Some(url) = clip
+        .clip_url
+        .as_deref()
+        .filter(|url| !url.trim().is_empty())
+    {
         return format!("clip:{}", url.trim());
     }
     format!(
@@ -2034,11 +2478,12 @@ fn cluster_community_clips(clips: &[CommunityClip]) -> Vec<CommunityMoment<'_>> 
         let creator_key = community_creator_key(clip);
         let clip_start = clip.vod_offset_seconds;
         let clip_end = clip_start + clip.duration_seconds;
-        if let Some(moment) = moments.iter_mut().find(|moment| {
-            community_clips_share_moment(moment, clip_start, clip_end)
-        }) {
-            let prefer_clip = community_clip_preference(clip)
-                > community_clip_preference(moment.representative);
+        if let Some(moment) = moments
+            .iter_mut()
+            .find(|moment| community_clips_share_moment(moment, clip_start, clip_end))
+        {
+            let prefer_clip =
+                community_clip_preference(clip) > community_clip_preference(moment.representative);
             moment.clip_count += 1;
             if !moment.creator_keys.contains(&creator_key) {
                 moment.creator_keys.push(creator_key);
@@ -2100,20 +2545,25 @@ fn community_priority_score(moment: &CommunityMoment<'_>, locally_corroborated: 
     normalized_community_views(moment.total_views)
         + if moment.is_stream_marker { 1.10 } else { 0.0 }
         + if moment.is_featured { 0.90 } else { 0.0 }
-        + if moment.has_streamer_created { 0.70 } else { 0.0 }
+        + if moment.has_streamer_created {
+            0.70
+        } else {
+            0.0
+        }
         + ((moment.consensus_count().saturating_sub(1) as f64) * 0.22).min(0.66)
         + if locally_corroborated { 0.55 } else { 0.0 }
 }
 
-fn community_display_score(
-    moment: &CommunityMoment<'_>,
-    locally_corroborated: bool,
-) -> f64 {
+fn community_display_score(moment: &CommunityMoment<'_>, locally_corroborated: bool) -> f64 {
     let base = COMMUNITY_SCORE_FLOOR
         + normalized_community_views(moment.total_views)
             * (COMMUNITY_SCORE_CEIL - COMMUNITY_SCORE_FLOOR);
     let metadata_boost = if moment.is_featured { 0.04 } else { 0.0 }
-        + if moment.has_streamer_created { 0.03 } else { 0.0 }
+        + if moment.has_streamer_created {
+            0.03
+        } else {
+            0.0
+        }
         + if moment.is_stream_marker { 0.06 } else { 0.0 }
         + ((moment.consensus_count().saturating_sub(1) as f64) * 0.025).min(0.075)
         + if locally_corroborated { 0.04 } else { 0.0 };
@@ -2148,9 +2598,7 @@ fn merge_candidate_evidence(pin: &mut ClipCandidate, evidence: &ClipCandidate) {
             pin.transcript_excerpt = evidence.transcript_excerpt.clone();
         }
     }
-    if evidence.signal_sources.contains(&SignalSource::Semantic)
-        || pin.payoff_summary.is_none()
-    {
+    if evidence.signal_sources.contains(&SignalSource::Semantic) || pin.payoff_summary.is_none() {
         if evidence.payoff_summary.is_some() {
             pin.payoff_summary = evidence.payoff_summary.clone();
         }
@@ -2300,19 +2748,24 @@ fn pin_community_clips(
         }
         if moment.consensus_count() > 1 {
             event_tags.push("community-consensus".to_string());
-            event_tags.push(format!(
-                "community-consensus:{}",
-                moment.consensus_count()
-            ));
+            event_tags.push(format!("community-consensus:{}", moment.consensus_count()));
         }
         let mut pin = ClipCandidate {
             start_time: start,
             end_time: end,
             peak_time: (start + end) / 2.0, // midpoint of the viewer's exact span
-            transcript_excerpt: if cc.title.is_empty() { None } else { Some(cc.title.clone()) },
+            transcript_excerpt: if cc.title.is_empty() {
+                None
+            } else {
+                Some(cc.title.clone())
+            },
             event_tags,
             emotion_tags: Vec::new(),
-            payoff_summary: if cc.title.is_empty() { None } else { Some(cc.title.clone()) },
+            payoff_summary: if cc.title.is_empty() {
+                None
+            } else {
+                Some(cc.title.clone())
+            },
             outcome_label: None,
             signal_sources: vec![SignalSource::Community],
             // Dimensions kept strong/consistent with the score; they only feed
@@ -2405,7 +2858,13 @@ fn pin_community_clips(
 
 fn stream_region(time: f64, duration: f64) -> &'static str {
     let pct = time / duration.max(1.0);
-    if pct < 0.33 { "early" } else if pct < 0.66 { "mid" } else { "late" }
+    if pct < 0.33 {
+        "early"
+    } else if pct < 0.66 {
+        "mid"
+    } else {
+        "late"
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2594,14 +3053,18 @@ pub fn select_clips(
     duration: f64,
     sensitivity: &str,
     selector_config: &crate::game_config::SelectorConfig,
+    transcript_weight: f64,
     personalization: Option<&crate::personalization::PersonalizationProfile>,
     boundary_preferences: Option<&crate::boundary_learning::BoundaryPreferenceProfile>,
     reviewed_moments: &[db::ReviewedMomentFeedbackRow],
 ) -> (Vec<ClipCandidate>, DetectionStats) {
     let cfg = CurationConfig::for_duration(duration, sensitivity, selector_config);
+    let (min_clip_duration, max_clip_duration) =
+        selector_duration_limits(selector_config, duration);
     let personalization_samples = personalization.map_or(0, |profile| profile.sample_count());
     let personalization_confidence = personalization.map_or(0.0, |profile| profile.confidence());
-    let boundary_feedback_samples = boundary_preferences.map_or(0, |profile| profile.sample_count());
+    let boundary_feedback_samples =
+        boundary_preferences.map_or(0, |profile| profile.sample_count());
     let boundary_confidence = boundary_preferences.map_or(0.0, |profile| profile.confidence());
     let has_rejected_review = reviewed_moments.iter().any(review_rejects_moment);
     let mut avoided_review_ids = std::collections::HashSet::new();
@@ -2612,12 +3075,7 @@ pub fn select_clips(
         .filter(|clip| {
             let start = clip.vod_offset_seconds;
             let end = start + clip.duration_seconds;
-            let rejections = matching_rejections(
-                start,
-                end,
-                (start + end) / 2.0,
-                reviewed_moments,
-            );
+            let rejections = matching_rejections(start, end, (start + end) / 2.0, reviewed_moments);
             for review in &rejections {
                 avoided_review_ids.insert(review.highlight_id.clone());
             }
@@ -2637,19 +3095,27 @@ pub fn select_clips(
         all_signals.extend(s);
     }
     if let Some(t) = transcript {
-        let s = generate_transcript_candidates(&t.keywords_found);
+        let mut s = generate_transcript_candidates(&t.keywords_found);
+        apply_transcript_weight(&mut s, transcript_weight);
         log::info!("Clip selector: {} transcript candidates", s.len());
         all_signals.extend(s);
     }
     let cs = generate_chat_candidates(chat_peaks);
-    if !cs.is_empty() { log::info!("Clip selector: {} chat candidates", cs.len()); }
+    if !cs.is_empty() {
+        log::info!("Clip selector: {} chat candidates", cs.len());
+    }
     all_signals.extend(cs);
     let es = generate_emote_candidates(emote_peaks);
-    if !es.is_empty() { log::info!("Clip selector: {} emote-burst candidates", es.len()); }
+    if !es.is_empty() {
+        log::info!("Clip selector: {} emote-burst candidates", es.len());
+    }
     all_signals.extend(es);
     let community = generate_community_candidates(&eligible_community_clips);
     if !community.is_empty() {
-        log::info!("Clip selector: {} community clip candidates", community.len());
+        log::info!(
+            "Clip selector: {} community clip candidates",
+            community.len()
+        );
     }
     all_signals.extend(community);
     if all_signals.is_empty() {
@@ -2663,81 +3129,150 @@ pub fn select_clips(
     log::info!("Clip selector: {} fused moments", moments.len());
 
     // ── Stage 3: Score ──
-    let clip_len = 25.0_f64.min(duration * 0.10).max(15.0);
+    let clip_len = 25.0_f64
+        .min(duration * 0.10)
+        .max(min_clip_duration)
+        .min(max_clip_duration);
     // Baseline-relative audio calibration (per-second z over the RMS envelope),
     // computed once and reused below to lift moments that spike above the
     // stream's own rolling normal.
     let audio_z: Option<Vec<f64>> = audio.map(|a| a.z_envelope());
-    let mut candidates: Vec<ClipCandidate> = moments.iter().map(|m| {
-        let start = (m.center - clip_len * 0.3).max(0.0);
-        let end = (start + clip_len).min(duration);
+    let mut candidates: Vec<ClipCandidate> = moments
+        .iter()
+        .map(|m| {
+            let start = (m.center - clip_len * 0.3).max(0.0);
+            let end = (start + clip_len).min(duration);
 
-        let event_tags: Vec<String> = m.tags.iter().filter(|t| {
-            matches!(t.as_str(), "jumpscare"|"ambush"|"chase"|"encounter"|"skirmish"|"fight"|"kill"|"escape"|"death"|"save"|"interrupt"|"hook"|"scream"|"audio-spike")
-        }).cloned().collect();
-        let emotion_tags: Vec<String> = m.tags.iter().filter(|t| {
-            matches!(t.as_str(), "shock"|"surprise"|"panic"|"hype"|"frustration"|"rage"|"fear"|"reaction"|"relief")
-        }).cloned().collect();
-        let outcome_label = m.tags.iter().find(|t| {
-            matches!(t.as_str(), "escape"|"death"|"save"|"win"|"fail"|"clutch")
-        }).cloned();
+            let event_tags: Vec<String> = m
+                .tags
+                .iter()
+                .filter(|t| {
+                    matches!(
+                        t.as_str(),
+                        "jumpscare"
+                            | "ambush"
+                            | "chase"
+                            | "encounter"
+                            | "skirmish"
+                            | "fight"
+                            | "kill"
+                            | "escape"
+                            | "death"
+                            | "save"
+                            | "interrupt"
+                            | "hook"
+                            | "scream"
+                            | "audio-spike"
+                    )
+                })
+                .cloned()
+                .collect();
+            let emotion_tags: Vec<String> = m
+                .tags
+                .iter()
+                .filter(|t| {
+                    matches!(
+                        t.as_str(),
+                        "shock"
+                            | "surprise"
+                            | "panic"
+                            | "hype"
+                            | "frustration"
+                            | "rage"
+                            | "fear"
+                            | "reaction"
+                            | "relief"
+                    )
+                })
+                .cloned()
+                .collect();
+            let outcome_label = m
+                .tags
+                .iter()
+                .find(|t| {
+                    matches!(
+                        t.as_str(),
+                        "escape" | "death" | "save" | "win" | "fail" | "clutch"
+                    )
+                })
+                .cloned();
 
-        let transcript_excerpt = m
-            .transcript_snippet
-            .clone()
-            .or_else(|| transcript_context_for_window(transcript, start, end));
-        let mut c = ClipCandidate {
-            start_time: start, end_time: end, peak_time: m.center,
-            transcript_excerpt: transcript_excerpt.clone(),
-            event_tags, emotion_tags,
-            payoff_summary: transcript_excerpt,
-            outcome_label,
-            signal_sources: m.signal_sources.clone(),
-            hook_strength: analyze_hook_strength(m, audio),
-            emotional_spike: analyze_emotional_spike(m, audio),
-            payoff_clarity: analyze_payoff_clarity(m),
-            event_reaction_alignment: analyze_event_reaction_alignment(m),
-            context_simplicity: analyze_context_simplicity(m),
-            replay_value: analyze_replay_value(m),
-            total_score: 0.0,
-            ai_score: None,
-            similarity_fingerprint: String::new(),
-            novelty_score: 0.0, diversity_penalty: 0.0, selection_score: 0.0,
-            selected_reason: None, rejection_reason: None,
-            community_url: None,
-            preserved_review: None,
-        };
-        score_clip_candidate(&mut c);
-        // Baseline-relative boost: reward a moment that spikes above the stream's
-        // own rolling normal (z) — the loud-throughout-stream fix the global
-        // avg_rms can't see — but CAPPED for UNcorroborated spikes so a bare loud
-        // spike (ambient laughter) can't dominate the way a corroborated one can.
-        if let Some(z) = audio_z.as_deref() {
-            let sec = (c.peak_time as usize).min(z.len().saturating_sub(1));
-            let local_z = z.get(sec).copied().unwrap_or(0.0);
-            c.total_score = (c.total_score + audio_boost(local_z, is_corroborated(&c))).min(1.0);
-        }
-        c.similarity_fingerprint = compute_similarity_fingerprint(&c);
-        // Intro penalty: only for audio-only signals (music/overlays without speech).
-        // If transcript is present, the streamer is talking — likely real gameplay.
-        if c.peak_time < 150.0 && c.signal_sources.len() == 1 && c.signal_sources.contains(&SignalSource::Audio) {
-            let intro_factor = (c.peak_time / 150.0).max(0.3);
-            c.total_score *= intro_factor;
-            log::info!("Clip selector: intro penalty at {:.0}s (audio-only) — score reduced to {:.0}%",
-                c.peak_time, c.total_score * 100.0);
-        }
-        c
-    }).collect();
+            let transcript_excerpt = m
+                .transcript_snippet
+                .clone()
+                .or_else(|| transcript_context_for_window(transcript, start, end));
+            let mut c = ClipCandidate {
+                start_time: start,
+                end_time: end,
+                peak_time: m.center,
+                transcript_excerpt: transcript_excerpt.clone(),
+                event_tags,
+                emotion_tags,
+                payoff_summary: transcript_excerpt,
+                outcome_label,
+                signal_sources: m.signal_sources.clone(),
+                hook_strength: analyze_hook_strength(m, audio),
+                emotional_spike: analyze_emotional_spike(m, audio),
+                payoff_clarity: analyze_payoff_clarity(m),
+                event_reaction_alignment: analyze_event_reaction_alignment(m),
+                context_simplicity: analyze_context_simplicity(m),
+                replay_value: analyze_replay_value(m),
+                total_score: 0.0,
+                ai_score: None,
+                similarity_fingerprint: String::new(),
+                novelty_score: 0.0,
+                diversity_penalty: 0.0,
+                selection_score: 0.0,
+                selected_reason: None,
+                rejection_reason: None,
+                community_url: None,
+                preserved_review: None,
+            };
+            score_clip_candidate(&mut c);
+            // Baseline-relative boost: reward a moment that spikes above the stream's
+            // own rolling normal (z) — the loud-throughout-stream fix the global
+            // avg_rms can't see — but CAPPED for UNcorroborated spikes so a bare loud
+            // spike (ambient laughter) can't dominate the way a corroborated one can.
+            if let Some(z) = audio_z.as_deref() {
+                let sec = (c.peak_time as usize).min(z.len().saturating_sub(1));
+                let local_z = z.get(sec).copied().unwrap_or(0.0);
+                c.total_score =
+                    (c.total_score + audio_boost(local_z, is_corroborated(&c))).min(1.0);
+            }
+            c.similarity_fingerprint = compute_similarity_fingerprint(&c);
+            // Intro penalty: only for audio-only signals (music/overlays without speech).
+            // If transcript is present, the streamer is talking — likely real gameplay.
+            if c.peak_time < 150.0
+                && c.signal_sources.len() == 1
+                && c.signal_sources.contains(&SignalSource::Audio)
+            {
+                let intro_factor = (c.peak_time / 150.0).max(0.3);
+                c.total_score *= intro_factor;
+                log::info!(
+                    "Clip selector: intro penalty at {:.0}s (audio-only) — score reduced to {:.0}%",
+                    c.peak_time,
+                    c.total_score * 100.0
+                );
+            }
+            c
+        })
+        .collect();
 
     let candidates_found = candidates.len();
 
     // ── Stage 4: Optimize boundaries ──
-    for c in &mut candidates { optimize_clip_boundaries(c, audio, duration); }
-    let mut boundary_adjusted_candidates = apply_learned_boundaries(
-        &mut candidates,
-        boundary_preferences,
-        duration,
-    );
+    for c in &mut candidates {
+        optimize_clip_boundaries(
+            c,
+            audio,
+            transcript,
+            duration,
+            min_clip_duration,
+            max_clip_duration,
+        );
+    }
+    let mut boundary_adjusted_candidates =
+        apply_learned_boundaries(&mut candidates, boundary_preferences, duration);
     feedback_suppressed_candidates +=
         suppress_reviewed_candidates(&mut candidates, reviewed_moments, &mut avoided_review_ids);
 
@@ -2778,6 +3313,16 @@ pub fn select_clips(
         ai_judge_completed,
         duration,
     );
+    for candidate in &mut candidates {
+        let preserve_end = should_preserve_semantic_ending(candidate, transcript);
+        enforce_clip_duration(
+            candidate,
+            duration,
+            min_clip_duration,
+            max_clip_duration,
+            preserve_end,
+        );
+    }
     boundary_adjusted_candidates += apply_learned_boundaries(
         &mut candidates[before_ai_rescue..],
         boundary_preferences,
@@ -2818,19 +3363,16 @@ pub fn select_clips(
         cfg.max_clips,
     );
 
-    log::info!("Clip selector: final {} clips from {} candidates (scores: {})",
-        final_clips.len(), candidates_found,
-        final_clips.iter().map(|c| format!("{:.0}%", c.total_score * 100.0)).collect::<Vec<_>>().join(", "));
-
-    // NOTE: Per-game min/max clip-duration enforcement was attempted via a
-    // post-selection clamp (centered on peak_time) but it overwrote the
-    // audio-aware boundaries from optimize_clip_boundaries, producing clips
-    // that cut mid-sentence. Reverted for v1.3.11. The TOML knobs
-    // (selector.min_clip_duration / max_clip_duration) are documented but
-    // not enforced yet — v1.3.12 will integrate them with the audio-aware
-    // boundary logic instead of post-clamping.
-    let _ = selector_config.min_clip_duration;
-    let _ = selector_config.max_clip_duration;
+    log::info!(
+        "Clip selector: final {} clips from {} candidates (scores: {})",
+        final_clips.len(),
+        candidates_found,
+        final_clips
+            .iter()
+            .map(|c| format!("{:.0}%", c.total_score * 100.0))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 
     let stats = DetectionStats {
         candidates_found,
@@ -2861,21 +3403,29 @@ mod tests {
 
     fn build_test_candidate(sources: Vec<SignalSource>) -> ClipCandidate {
         ClipCandidate {
-            start_time: 100.0, end_time: 130.0, peak_time: 115.0,
+            start_time: 100.0,
+            end_time: 130.0,
+            peak_time: 115.0,
             transcript_excerpt: None,
             event_tags: Vec::new(),
             emotion_tags: Vec::new(),
             payoff_summary: None,
             outcome_label: None,
             signal_sources: sources,
-            hook_strength: 0.5, emotional_spike: 0.7625,
-            payoff_clarity: 0.55, event_reaction_alignment: 0.47,
-            context_simplicity: 0.88, replay_value: 0.5475,
+            hook_strength: 0.5,
+            emotional_spike: 0.7625,
+            payoff_clarity: 0.55,
+            event_reaction_alignment: 0.47,
+            context_simplicity: 0.88,
+            replay_value: 0.5475,
             total_score: 0.0,
             ai_score: None,
             similarity_fingerprint: String::new(),
-            novelty_score: 0.0, diversity_penalty: 0.0, selection_score: 0.0,
-            selected_reason: None, rejection_reason: None,
+            novelty_score: 0.0,
+            diversity_penalty: 0.0,
+            selection_score: 0.0,
+            selected_reason: None,
+            rejection_reason: None,
             community_url: None,
             preserved_review: None,
         }
@@ -2920,7 +3470,10 @@ mod tests {
         candidate.hook_strength = 1.0;
         candidate.total_score = 0.65;
 
-        assert_eq!(apply_personalization(std::slice::from_mut(&mut candidate), Some(&profile)), 1);
+        assert_eq!(
+            apply_personalization(std::slice::from_mut(&mut candidate), Some(&profile)),
+            1
+        );
         assert!(candidate.total_score <= 0.65);
     }
 
@@ -2941,6 +3494,101 @@ mod tests {
         }
     }
 
+    fn transcript_with_segment(start: f64, end: f64, text: &str) -> TranscriptResult {
+        TranscriptResult {
+            segments: vec![crate::commands::vod::TranscriptSegment {
+                start,
+                end,
+                text: text.to_string(),
+                words: Vec::new(),
+            }],
+            full_text: text.to_string(),
+            language: "en".to_string(),
+            keywords_found: Vec::new(),
+            recognition: None,
+        }
+    }
+
+    #[test]
+    fn transcript_weight_changes_signal_strength_without_exceeding_bounds() {
+        let mut signals = vec![RawSignal {
+            center: 12.0,
+            intensity: 0.6,
+            source: SignalSource::Transcript,
+            tags: vec!["speech".to_string()],
+            transcript_snippet: Some("a complete thought".to_string()),
+            spike_delta: 0.0,
+        }];
+
+        apply_transcript_weight(&mut signals, 1.5);
+        assert!((signals[0].intensity - 0.9).abs() < 1e-6);
+
+        apply_transcript_weight(&mut signals, 2.0);
+        assert_eq!(signals[0].intensity, 1.0);
+    }
+
+    #[test]
+    fn start_optimizer_never_skips_spoken_setup_or_advances_more_than_two_seconds() {
+        let mut rms = vec![1.0; 200];
+        rms[100] = 0.1;
+        rms[101] = 3.0;
+        let audio = AudioContext::new(rms, vec![101]);
+        let transcript = transcript_with_segment(100.0, 102.0, "wait for it");
+
+        let mut spoken = build_test_candidate(vec![SignalSource::Audio, SignalSource::Transcript]);
+        optimize_clip_start(&mut spoken, &audio, Some(&transcript));
+        assert_eq!(
+            spoken.start_time, 100.0,
+            "known setup speech must be retained"
+        );
+
+        let mut quiet = build_test_candidate(vec![SignalSource::Audio]);
+        optimize_clip_start(&mut quiet, &audio, None);
+        assert!(quiet.start_time > 100.0);
+        assert!(quiet.start_time <= 100.0 + MAX_FORWARD_START_SNAP_SECONDS);
+    }
+
+    #[test]
+    fn quiet_tail_is_not_trimmed_while_transcript_speech_remains() {
+        let mut rms = vec![1.0; 100];
+        rms[40..46].fill(0.0);
+        let audio = AudioContext::new(rms, Vec::new());
+        let transcript = transcript_with_segment(40.5, 44.5, "and that is the punchline");
+        let mut candidate =
+            build_test_candidate(vec![SignalSource::Audio, SignalSource::Transcript]);
+        candidate.start_time = 10.0;
+        candidate.end_time = 40.0;
+
+        optimize_clip_end(&mut candidate, &audio, Some(&transcript), 100.0);
+
+        assert_eq!(
+            candidate.end_time, 45.0,
+            "quiet spoken payoff must remain intact"
+        );
+    }
+
+    #[test]
+    fn duration_limits_preserve_semantic_ending_and_use_game_configuration() {
+        let selector = crate::game_config::SelectorConfig {
+            min_clip_duration: 15,
+            max_clip_duration: 20,
+            min_gap_between_clips: 30,
+        };
+        let (min_duration, max_duration) = selector_duration_limits(&selector, 500.0);
+        assert_eq!((min_duration, max_duration), (15.0, 20.0));
+
+        let mut candidate = build_test_candidate(vec![SignalSource::Semantic]);
+        candidate.start_time = 100.0;
+        candidate.end_time = 140.0;
+        enforce_clip_duration(&mut candidate, 500.0, min_duration, max_duration, true);
+
+        assert_eq!(candidate.start_time, 120.0);
+        assert_eq!(
+            candidate.end_time, 140.0,
+            "semantic payoff end must win the cap"
+        );
+    }
+
     #[test]
     fn good_review_is_preserved_with_feedback_and_consumes_a_normal_slot() {
         let mut selected = (0..4)
@@ -2953,10 +3601,8 @@ mod tests {
                 candidate
             })
             .collect::<Vec<_>>();
-        let mut evidence = build_test_candidate(vec![
-            SignalSource::Audio,
-            SignalSource::Transcript,
-        ]);
+        let mut evidence =
+            build_test_candidate(vec![SignalSource::Audio, SignalSource::Transcript]);
         evidence.start_time = 96.0;
         evidence.end_time = 134.0;
         evidence.peak_time = 115.0;
@@ -2964,17 +3610,15 @@ mod tests {
         let mut review = reviewed_moment("approved-1", 100.0, 130.0, Some("good"), None);
         review.note = Some("keep the full punchline".to_string());
 
-        let preserved = pin_good_reviewed_moments(
-            &mut selected,
-            &[evidence],
-            &[review],
-            None,
-            900.0,
-            3,
-        );
+        let preserved =
+            pin_good_reviewed_moments(&mut selected, &[evidence], &[review], None, 900.0, 3);
 
         assert_eq!(preserved, 1);
-        assert_eq!(selected.len(), 3, "a Good clip consumes a normal result slot");
+        assert_eq!(
+            selected.len(),
+            3,
+            "a Good clip consumes a normal result slot"
+        );
         let pin = selected
             .iter()
             .find(|candidate| candidate.preserved_review.is_some())
@@ -3176,11 +3820,17 @@ mod tests {
 
         pin_community_clips(&mut selected, &clips, None, 1000.0);
 
-        assert_eq!(selected.len(), 1, "one event should produce one output clip");
+        assert_eq!(
+            selected.len(),
+            1,
+            "one event should produce one output clip"
+        );
         let pinned = &selected[0];
         assert_eq!(pinned.start_time, 102.0, "streamer's exact span should win");
         assert_eq!(pinned.community_url.as_deref(), Some("streamer"));
-        assert!(pinned.event_tags.contains(&"community-consensus".to_string()));
+        assert!(pinned
+            .event_tags
+            .contains(&"community-consensus".to_string()));
         assert!(pinned
             .event_tags
             .contains(&"community-consensus:3".to_string()));
@@ -3228,13 +3878,23 @@ mod tests {
 
     #[test]
     fn sensitivity_presets_have_distinct_floors_and_caps() {
-        let sel = crate::game_config::SelectorConfig { min_clip_duration: 15, max_clip_duration: 60, min_gap_between_clips: 30 };
-        let low  = CurationConfig::for_duration(99.0 * 60.0, "low", &sel);
-        let med  = CurationConfig::for_duration(99.0 * 60.0, "medium", &sel);
+        let sel = crate::game_config::SelectorConfig {
+            min_clip_duration: 15,
+            max_clip_duration: 60,
+            min_gap_between_clips: 30,
+        };
+        let low = CurationConfig::for_duration(99.0 * 60.0, "low", &sel);
+        let med = CurationConfig::for_duration(99.0 * 60.0, "medium", &sel);
         let high = CurationConfig::for_duration(99.0 * 60.0, "high", &sel);
         // Floors must strictly differ across presets (the Med==High placebo bug).
-        assert!(low.min_display_score > med.min_display_score, "low floor must exceed medium");
-        assert!(med.min_display_score > high.min_display_score, "medium floor must exceed high");
+        assert!(
+            low.min_display_score > med.min_display_score,
+            "low floor must exceed medium"
+        );
+        assert!(
+            med.min_display_score > high.min_display_score,
+            "medium floor must exceed high"
+        );
         // Caps already differ; keep that property.
         assert!(low.max_clips < med.max_clips && med.max_clips < high.max_clips);
     }
@@ -3250,13 +3910,22 @@ mod tests {
     fn z_envelope_is_baseline_relative_across_loudness() {
         // Same-shape spike (delta 0.30) on a quiet vs loud steady stream must
         // produce comparable peak z — the loud-stream calibration property.
-        let qmax = AudioContext::new(envelope(0.20, 0.50), vec![]).z_envelope()
-            .into_iter().fold(f64::MIN, f64::max);
-        let lmax = AudioContext::new(envelope(0.50, 0.80), vec![]).z_envelope()
-            .into_iter().fold(f64::MIN, f64::max);
-        assert!(qmax > 1.0 && lmax > 1.0, "both spikes should register: q={qmax} l={lmax}");
-        assert!((qmax - lmax).abs() < qmax.max(lmax) * 0.5,
-            "same-shape spikes should give comparable peak z: q={qmax} l={lmax}");
+        let qmax = AudioContext::new(envelope(0.20, 0.50), vec![])
+            .z_envelope()
+            .into_iter()
+            .fold(f64::MIN, f64::max);
+        let lmax = AudioContext::new(envelope(0.50, 0.80), vec![])
+            .z_envelope()
+            .into_iter()
+            .fold(f64::MIN, f64::max);
+        assert!(
+            qmax > 1.0 && lmax > 1.0,
+            "both spikes should register: q={qmax} l={lmax}"
+        );
+        assert!(
+            (qmax - lmax).abs() < qmax.max(lmax) * 0.5,
+            "same-shape spikes should give comparable peak z: q={qmax} l={lmax}"
+        );
     }
 
     #[test]
@@ -3274,7 +3943,11 @@ mod tests {
         let windows = select_candidate_windows(Some(&audio), &[], &[], &[], duration);
 
         assert!(!windows.is_empty(), "should still produce windows");
-        assert!(windows.len() <= 60, "window count must be capped: {}", windows.len());
+        assert!(
+            windows.len() <= 60,
+            "window count must be capped: {}",
+            windows.len()
+        );
         let total: f64 = windows.iter().map(|(s, e)| e - s).sum();
         assert!(
             total <= duration * 0.85 + 1.0,
@@ -3305,45 +3978,66 @@ mod tests {
 
     #[test]
     fn two_gate_caps_a_healthy_set_not_one_not_all() {
-        let sel = crate::game_config::SelectorConfig { min_clip_duration: 15, max_clip_duration: 60, min_gap_between_clips: 30 };
+        let sel = crate::game_config::SelectorConfig {
+            min_clip_duration: 15,
+            max_clip_duration: 60,
+            min_gap_between_clips: 30,
+        };
         let cfg = CurationConfig::for_duration(99.0 * 60.0, "medium", &sel);
         // 35 well-separated candidates that pass the quality gates and score
         // above the Medium display floor — the bug VOD had 35 candidates collapse
         // to 1 under the old fixed cliff; the two-gate must cap, not collapse.
         let events = ["kill", "escape", "chase", "fight", "death"];
         let emotions = ["hype", "shock", "fear", "rage", "relief"];
-        let mut cands: Vec<ClipCandidate> = (0..35).map(|i| {
-            let mut c = build_test_candidate(vec![SignalSource::Audio, SignalSource::Chat]);
-            c.start_time = (i as f64) * 150.0;
-            c.end_time = c.start_time + 25.0;
-            c.peak_time = c.start_time + 10.0;
-            c.total_score = 0.70; // display ≈ 73, above the medium floor (55)
-            c.event_tags = vec![events[i % 5].to_string()];
-            c.emotion_tags = vec![emotions[i % 5].to_string()];
-            c.similarity_fingerprint = compute_similarity_fingerprint(&c);
-            c
-        }).collect();
+        let mut cands: Vec<ClipCandidate> = (0..35)
+            .map(|i| {
+                let mut c = build_test_candidate(vec![SignalSource::Audio, SignalSource::Chat]);
+                c.start_time = (i as f64) * 150.0;
+                c.end_time = c.start_time + 25.0;
+                c.peak_time = c.start_time + 10.0;
+                c.total_score = 0.70; // display ≈ 73, above the medium floor (55)
+                c.event_tags = vec![events[i % 5].to_string()];
+                c.emotion_tags = vec![emotions[i % 5].to_string()];
+                c.similarity_fingerprint = compute_similarity_fingerprint(&c);
+                c
+            })
+            .collect();
         let (kept, explored) =
             apply_two_gate_selection(&mut cands, None, None, 99.0 * 60.0, &cfg, false);
-        assert!(kept.len() >= 5, "must not collapse to ~1, got {}", kept.len());
-        assert!(kept.len() <= cfg.max_clips, "must respect the cap, got {} > {}", kept.len(), cfg.max_clips);
+        assert!(
+            kept.len() >= 5,
+            "must not collapse to ~1, got {}",
+            kept.len()
+        );
+        assert!(
+            kept.len() <= cfg.max_clips,
+            "must respect the cap, got {} > {}",
+            kept.len(),
+            cfg.max_clips
+        );
         assert_eq!(explored, 0);
     }
 
     #[test]
     fn two_gate_rejects_dead_air_as_noise() {
-        let sel = crate::game_config::SelectorConfig { min_clip_duration: 15, max_clip_duration: 60, min_gap_between_clips: 30 };
+        let sel = crate::game_config::SelectorConfig {
+            min_clip_duration: 15,
+            max_clip_duration: 60,
+            min_gap_between_clips: 30,
+        };
         let cfg = CurationConfig::for_duration(99.0 * 60.0, "medium", &sel);
         // Candidates that fail the absolute quality gates → zero clips (no noise).
-        let mut cands: Vec<ClipCandidate> = (0..10).map(|i| {
-            let mut c = build_test_candidate(vec![SignalSource::Audio]);
-            c.start_time = (i as f64) * 150.0;
-            c.end_time = c.start_time + 25.0;
-            c.hook_strength = 0.05;   // below min_hook
-            c.emotional_spike = 0.05; // below min_emotion
-            c.total_score = 0.05;
-            c
-        }).collect();
+        let mut cands: Vec<ClipCandidate> = (0..10)
+            .map(|i| {
+                let mut c = build_test_candidate(vec![SignalSource::Audio]);
+                c.start_time = (i as f64) * 150.0;
+                c.end_time = c.start_time + 25.0;
+                c.hook_strength = 0.05; // below min_hook
+                c.emotional_spike = 0.05; // below min_emotion
+                c.total_score = 0.05;
+                c
+            })
+            .collect();
         let (kept, explored) =
             apply_two_gate_selection(&mut cands, None, None, 99.0 * 60.0, &cfg, false);
         assert_eq!(kept.len(), 0, "dead-air candidates must yield no clips");
@@ -3367,28 +4061,15 @@ mod tests {
                 candidate.peak_time = candidate.start_time + 12.0;
                 candidate.total_score = 0.20 + i as f64 * 0.005;
                 candidate.event_tags = vec![format!("event-{i}")];
-                candidate.similarity_fingerprint =
-                    compute_similarity_fingerprint(&candidate);
+                candidate.similarity_fingerprint = compute_similarity_fingerprint(&candidate);
                 candidate
             })
             .collect();
 
-        let (without_feedback, without_count) = apply_two_gate_selection(
-            &mut cands.clone(),
-            None,
-            None,
-            60.0 * 60.0,
-            &cfg,
-            false,
-        );
-        let (with_feedback, exploration_count) = apply_two_gate_selection(
-            &mut cands,
-            None,
-            None,
-            60.0 * 60.0,
-            &cfg,
-            true,
-        );
+        let (without_feedback, without_count) =
+            apply_two_gate_selection(&mut cands.clone(), None, None, 60.0 * 60.0, &cfg, false);
+        let (with_feedback, exploration_count) =
+            apply_two_gate_selection(&mut cands, None, None, 60.0 * 60.0, &cfg, true);
 
         assert!(without_feedback.is_empty());
         assert_eq!(without_count, 0);
@@ -3410,7 +4091,9 @@ mod tests {
         let dur = 5940.0;
         let mut rms = vec![0.45f64; dur as usize];
         for s in (500usize..5600).step_by(500) {
-            for k in 0..4 { rms[s + k] = 0.90; }
+            for k in 0..4 {
+                rms[s + k] = 0.90;
+            }
         }
         let audio = AudioContext::new(rms, vec![]);
         let transcript = TranscriptResult {
@@ -3426,12 +4109,34 @@ mod tests {
             full_text: String::new(),
             language: "en".to_string(),
             keywords_found: Vec::new(),
+            recognition: None,
         };
-        let sel = crate::game_config::SelectorConfig { min_clip_duration: 15, max_clip_duration: 60, min_gap_between_clips: 30 };
+        let sel = crate::game_config::SelectorConfig {
+            min_clip_duration: 15,
+            max_clip_duration: 60,
+            min_gap_between_clips: 30,
+        };
         let (clips, _stats) = select_clips(
-            Some(&audio), Some(&transcript), &[], &[], &[], &[], false, dur, "medium", &sel, None, None, &[],
+            Some(&audio),
+            Some(&transcript),
+            &[],
+            &[],
+            &[],
+            &[],
+            false,
+            dur,
+            "medium",
+            &sel,
+            1.0,
+            None,
+            None,
+            &[],
         );
-        assert!(clips.len() >= 4, "loud stream with many real spikes should yield a healthy set, got {}", clips.len());
+        assert!(
+            clips.len() >= 4,
+            "loud stream with many real spikes should yield a healthy set, got {}",
+            clips.len()
+        );
     }
 
     #[test]
@@ -3442,13 +4147,33 @@ mod tests {
         assert!(is_scene_card_text("(upbeat music)", 141.0, dur));
         assert!(is_scene_card_text("(upbeat music)", 735.0, dur));
         // Music annotation in the outro band, even with idle chatter → ending card.
-        assert!(is_scene_card_text("Come on, the SD-screen. Yes. [Piano music] I'm doing it.", 5666.0, dur));
-        assert!(is_scene_card_text("I have to have some fabric next to me. [Piano music] yeah", 5758.0, dur));
+        assert!(is_scene_card_text(
+            "Come on, the SD-screen. Yes. [Piano music] I'm doing it.",
+            5666.0,
+            dur
+        ));
+        assert!(is_scene_card_text(
+            "I have to have some fabric next to me. [Piano music] yeah",
+            5758.0,
+            dur
+        ));
         // Real speech, no music annotation → kept (the genuine clips).
-        assert!(!is_scene_card_text("(Laughter) (Laughter) Oh, yeah. I just added that.", 1922.0, dur));
-        assert!(!is_scene_card_text("If he hits you, then he can see Harby's.", 2061.0, dur));
+        assert!(!is_scene_card_text(
+            "(Laughter) (Laughter) Oh, yeah. I just added that.",
+            1922.0,
+            dur
+        ));
+        assert!(!is_scene_card_text(
+            "If he hits you, then he can see Harby's.",
+            2061.0,
+            dur
+        ));
         // Background music WITH speech mid-gameplay (not edge) → kept.
-        assert!(!is_scene_card_text("got him (upbeat music) lets go", 3000.0, dur));
+        assert!(!is_scene_card_text(
+            "got him (upbeat music) lets go",
+            3000.0,
+            dur
+        ));
         // No transcript and no excerpt → not flagged (other gates handle audio-only).
         let mut audio_only = build_test_candidate(vec![SignalSource::Audio]);
         audio_only.transcript_excerpt = None;
@@ -3458,7 +4183,9 @@ mod tests {
     #[test]
     fn is_music_only_text_detects_scene_cards() {
         assert!(is_music_only_text("(upbeat music)"));
-        assert!(is_music_only_text("(upbeat music) (upbeat music) (upbeat music)"));
+        assert!(is_music_only_text(
+            "(upbeat music) (upbeat music) (upbeat music)"
+        ));
         assert!(is_music_only_text("[Piano music]"));
         assert!(!is_music_only_text("Come on. [Piano music] I'm doing it.")); // speech present
         assert!(!is_music_only_text("(Laughter) oh yeah")); // no music annotation
@@ -3474,7 +4201,10 @@ mod tests {
         // A SMALL spike (z=0.4 → base 0.10) sits UNDER the cap → passes through
         // unchanged. This is what spares single-signal talky VODs from re-starving.
         let small = (0.4f64 / 4.0).clamp(0.0, 0.35);
-        assert!((audio_boost(0.4, false) - small).abs() < 1e-6, "small boost passes through uncapped");
+        assert!(
+            (audio_boost(0.4, false) - small).abs() < 1e-6,
+            "small boost passes through uncapped"
+        );
         assert!((audio_boost(0.4, true) - small).abs() < 1e-6);
     }
 
@@ -3524,14 +4254,16 @@ mod tests {
             Some("come heal me and then immediately stab me again".to_string());
         assert!(passes_quality_gates(&coherent, None, &cfg));
 
-        let corroborated =
-            build_test_candidate(vec![SignalSource::Audio, SignalSource::Chat]);
+        let corroborated = build_test_candidate(vec![SignalSource::Audio, SignalSource::Chat]);
         assert!(passes_quality_gates(&corroborated, None, &cfg));
     }
 
     fn judged(s: f64, e: f64, score: f64) -> crate::clip_judge::JudgedMoment {
         crate::clip_judge::JudgedMoment {
-            start_sec: s, end_sec: e, category: "banter".into(), score,
+            start_sec: s,
+            end_sec: e,
+            category: "banter".into(),
+            score,
             reason: "savage deadpan roast".into(),
         }
     }
@@ -3570,44 +4302,80 @@ mod tests {
     #[test]
     fn fusion_blends_flagged_and_penalizes_unmentioned_without_vetoing() {
         let mut c0 = build_test_candidate(vec![SignalSource::Chat]);
-        c0.start_time = 100.0; c0.end_time = 130.0; c0.total_score = 0.6;
+        c0.start_time = 100.0;
+        c0.end_time = 130.0;
+        c0.total_score = 0.6;
         let mut c1 = build_test_candidate(vec![SignalSource::Audio]);
-        c1.start_time = 500.0; c1.end_time = 530.0; c1.total_score = 0.6;
+        c1.start_time = 500.0;
+        c1.end_time = 530.0;
+        c1.total_score = 0.6;
         let mut cands = vec![c0, c1];
         // One AI moment overlapping c0 only.
         fuse_ai_moments(&mut cands, &[judged(105.0, 125.0, 0.9)], true, 600.0);
         // flagged: 0.65*0.9 + 0.35*0.6 = 0.795
         assert!((cands[0].total_score - 0.795).abs() < 1e-6);
         assert!((cands[0].ai_score.unwrap() - 0.9).abs() < 1e-9);
+        assert!(cands[0].signal_sources.contains(&SignalSource::Semantic));
         // Unmentioned: modest ranking penalty, but local quality gates still apply.
         assert!((cands[1].total_score - 0.51).abs() < 1e-6);
         assert!(cands[1].ai_score.is_none());
     }
 
     #[test]
+    fn fusion_preserves_overlapping_ai_boundaries_with_guarded_context() {
+        let mut candidate = build_test_candidate(vec![SignalSource::Audio]);
+        candidate.start_time = 100.0;
+        candidate.end_time = 130.0;
+        candidate.total_score = 0.6;
+        let mut candidates = vec![candidate];
+
+        fuse_ai_moments(&mut candidates, &[judged(96.0, 134.0, 0.9)], true, 600.0);
+
+        assert_eq!(candidates[0].start_time, 94.0);
+        assert_eq!(candidates[0].end_time, 136.0);
+        assert!(candidates[0]
+            .signal_sources
+            .contains(&SignalSource::Semantic));
+    }
+
+    #[test]
     fn fusion_rescues_unmatched_ai_moment_as_semantic() {
         let mut cands = vec![build_test_candidate(vec![SignalSource::Audio])];
-        cands[0].start_time = 100.0; cands[0].end_time = 130.0;
+        cands[0].start_time = 100.0;
+        cands[0].end_time = 130.0;
         fuse_ai_moments(&mut cands, &[judged(800.0, 825.0, 0.85)], true, 1000.0);
         assert_eq!(cands.len(), 2, "unmatched AI moment becomes a candidate");
-        let rescued = cands.iter().find(|c| c.signal_sources == vec![SignalSource::Semantic]).unwrap();
-        assert!((rescued.start_time - 800.0).abs() < 1e-9);
+        let rescued = cands
+            .iter()
+            .find(|c| c.signal_sources == vec![SignalSource::Semantic])
+            .unwrap();
+        assert!((rescued.start_time - 798.0).abs() < 1e-9);
+        assert!((rescued.end_time - 827.0).abs() < 1e-9);
         // rescue: 0.65*0.85 + 0.35*0.40 = 0.6925
         assert!((rescued.total_score - 0.6925).abs() < 1e-6);
-        assert_eq!(rescued.transcript_excerpt.as_deref(), Some("savage deadpan roast"));
+        assert_eq!(
+            rescued.transcript_excerpt.as_deref(),
+            Some("savage deadpan roast")
+        );
     }
 
     #[test]
     fn score_clip_candidate_overrides_dimensions_for_transcript_only() {
         let mut c = build_test_candidate(vec![SignalSource::Transcript]);
-        c.emotion_tags = vec!["shock".to_string()];  // Phase A amendment: tag triggers override
+        c.emotion_tags = vec!["shock".to_string()]; // Phase A amendment: tag triggers override
         score_clip_candidate(&mut c);
 
         // After scoring, the dimensions should reflect the override.
-        assert!((c.context_simplicity - 0.50).abs() < 1e-6,
-            "context_simplicity should be 0.50, got {}", c.context_simplicity);
-        assert!((c.emotional_spike - 0.40).abs() < 1e-6,
-            "emotional_spike should be 0.40, got {}", c.emotional_spike);
+        assert!(
+            (c.context_simplicity - 0.50).abs() < 1e-6,
+            "context_simplicity should be 0.50, got {}",
+            c.context_simplicity
+        );
+        assert!(
+            (c.emotional_spike - 0.40).abs() < 1e-6,
+            "emotional_spike should be 0.40, got {}",
+            c.emotional_spike
+        );
     }
 
     #[test]
@@ -3619,10 +4387,14 @@ mod tests {
         score_clip_candidate(&mut c);
 
         // Audio-only clips keep their original dimension values.
-        assert!((c.context_simplicity - original_context).abs() < 1e-6,
-            "context_simplicity should be unchanged for audio-only");
-        assert!((c.emotional_spike - original_emotion).abs() < 1e-6,
-            "emotional_spike should be unchanged for audio-only");
+        assert!(
+            (c.context_simplicity - original_context).abs() < 1e-6,
+            "context_simplicity should be unchanged for audio-only"
+        );
+        assert!(
+            (c.emotional_spike - original_emotion).abs() < 1e-6,
+            "emotional_spike should be unchanged for audio-only"
+        );
     }
 
     #[test]
@@ -3646,7 +4418,7 @@ mod tests {
         // and emotion=0.4, plus extreme other dims, total approaches the
         // pre-cap ceiling (0.99). The cap should clamp it to 0.65.
         let mut c = build_test_candidate(vec![SignalSource::Transcript]);
-        c.emotion_tags = vec!["shock".to_string()];  // Phase A amendment: tag triggers override
+        c.emotion_tags = vec!["shock".to_string()]; // Phase A amendment: tag triggers override
         c.hook_strength = 0.99;
         c.payoff_clarity = 0.99;
         c.event_reaction_alignment = 0.99;
@@ -3655,8 +4427,11 @@ mod tests {
 
         score_clip_candidate(&mut c);
 
-        assert!(c.total_score <= 0.65 + 1e-6,
-            "transcript-only total_score should be capped at 0.65, got {}", c.total_score);
+        assert!(
+            c.total_score <= 0.65 + 1e-6,
+            "transcript-only total_score should be capped at 0.65, got {}",
+            c.total_score
+        );
     }
 
     #[test]
@@ -3671,8 +4446,11 @@ mod tests {
 
         score_clip_candidate(&mut c);
 
-        assert!(c.total_score > 0.65,
-            "multi-signal total_score should not be capped, got {}", c.total_score);
+        assert!(
+            c.total_score > 0.65,
+            "multi-signal total_score should not be capped, got {}",
+            c.total_score
+        );
     }
 
     #[test]
@@ -3684,19 +4462,21 @@ mod tests {
         // total_score ≈ 0.70. After the fix, the override + cap should
         // bring total_score below 0.65.
         let mut c = build_test_candidate(vec![SignalSource::Transcript]);
-        c.emotion_tags = vec!["shock".to_string()];  // Phase A amendment: tag triggers override
-        c.hook_strength = 0.69;          // Phase B: "Drainage channel" hook
-        c.emotional_spike = 0.7625;      // boilerplate value
+        c.emotion_tags = vec!["shock".to_string()]; // Phase A amendment: tag triggers override
+        c.hook_strength = 0.69; // Phase B: "Drainage channel" hook
+        c.emotional_spike = 0.7625; // boilerplate value
         c.payoff_clarity = 0.55;
         c.event_reaction_alignment = 0.47;
-        c.context_simplicity = 0.88;     // boilerplate value
+        c.context_simplicity = 0.88; // boilerplate value
         c.replay_value = 0.5475;
 
         score_clip_candidate(&mut c);
 
-        assert!(c.total_score < 0.65,
+        assert!(
+            c.total_score < 0.65,
             "Phase B boilerplate fingerprint should score below 0.65 after fix, got {}",
-            c.total_score);
+            c.total_score
+        );
         // Also verify the dimensions were overridden as expected.
         assert!((c.context_simplicity - 0.50).abs() < 1e-6);
         assert!((c.emotional_spike - 0.40).abs() < 1e-6);
@@ -3713,10 +4493,16 @@ mod tests {
 
         score_clip_candidate(&mut c);
 
-        assert!((c.context_simplicity - 0.50).abs() < 1e-6,
-            "context_simplicity should be 0.50 for audio-only-with-shock-tag, got {}", c.context_simplicity);
-        assert!((c.emotional_spike - 0.40).abs() < 1e-6,
-            "emotional_spike should be 0.40, got {}", c.emotional_spike);
+        assert!(
+            (c.context_simplicity - 0.50).abs() < 1e-6,
+            "context_simplicity should be 0.50 for audio-only-with-shock-tag, got {}",
+            c.context_simplicity
+        );
+        assert!(
+            (c.emotional_spike - 0.40).abs() < 1e-6,
+            "emotional_spike should be 0.40, got {}",
+            c.emotional_spike
+        );
     }
 
     #[test]
@@ -3730,8 +4516,11 @@ mod tests {
 
         score_clip_candidate(&mut c);
 
-        assert!((c.context_simplicity - original_context).abs() < 1e-6,
-            "audio-only without shock-family tag should keep context, got {}", c.context_simplicity);
+        assert!(
+            (c.context_simplicity - original_context).abs() < 1e-6,
+            "audio-only without shock-family tag should keep context, got {}",
+            c.context_simplicity
+        );
         assert!((c.emotional_spike - original_emotion).abs() < 1e-6);
     }
 
@@ -3747,8 +4536,11 @@ mod tests {
 
         score_clip_candidate(&mut c);
 
-        assert!(c.total_score <= 0.65 + 1e-6,
-            "audio-only-with-shock-tag total_score should be capped at 0.65, got {}", c.total_score);
+        assert!(
+            c.total_score <= 0.65 + 1e-6,
+            "audio-only-with-shock-tag total_score should be capped at 0.65, got {}",
+            c.total_score
+        );
     }
 
     #[test]
@@ -3771,6 +4563,9 @@ mod tests {
         assert_eq!(signals[0].center, 140.0);
         assert!(signals[0].tags.iter().any(|tag| tag == "stream-marker"));
         assert!(signals[0].tags.iter().any(|tag| tag == "streamer-created"));
-        assert_eq!(signals[0].transcript_snippet.as_deref(), Some("Marked clutch"));
+        assert_eq!(
+            signals[0].transcript_snippet.as_deref(),
+            Some("Marked clutch")
+        );
     }
 }

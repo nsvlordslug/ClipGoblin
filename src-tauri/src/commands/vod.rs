@@ -8,19 +8,18 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::clip_selector;
+use crate::commands::auth::try_refresh_twitch_token;
+use crate::commands::captions::{
+    build_highlight_explanation, compute_confidence, count_active_signals,
+};
 use crate::db;
-use crate::DbConn;
 use crate::error::AppError;
 use crate::hardware::HardwareInfo;
-use crate::twitch;
 use crate::report_error;
-use crate::commands::auth::try_refresh_twitch_token;
-use crate::clip_selector;
+use crate::twitch;
 use crate::whisper;
-use crate::commands::captions::{
-    compute_confidence,
-    build_highlight_explanation, count_active_signals,
-};
+use crate::DbConn;
 
 static ANALYSIS_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 static ACTIVE_VOD_DOWNLOADS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
@@ -31,8 +30,8 @@ struct VodDownloadLease {
 
 impl Drop for VodDownloadLease {
     fn drop(&mut self) {
-        let downloads = ACTIVE_VOD_DOWNLOADS
-            .get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+        let downloads =
+            ACTIVE_VOD_DOWNLOADS.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
         match downloads.lock() {
             Ok(mut active) => {
                 active.remove(&self.vod_id);
@@ -45,11 +44,11 @@ impl Drop for VodDownloadLease {
 }
 
 fn acquire_vod_download_lease(vod_id: &str) -> Result<VodDownloadLease, String> {
-    let downloads = ACTIVE_VOD_DOWNLOADS
-        .get_or_init(|| Mutex::new(std::collections::HashSet::new()));
-    let mut active = downloads
-        .lock()
-        .map_err(|_| "Download state is unavailable. Restart ClipGoblin and try again.".to_string())?;
+    let downloads =
+        ACTIVE_VOD_DOWNLOADS.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    let mut active = downloads.lock().map_err(|_| {
+        "Download state is unavailable. Restart ClipGoblin and try again.".to_string()
+    })?;
     if !active.insert(vod_id.to_string()) {
         return Err("This VOD is already downloading.".to_string());
     }
@@ -62,9 +61,7 @@ fn analysis_semaphore() -> Arc<Semaphore> {
     Arc::clone(ANALYSIS_SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(1))))
 }
 
-fn try_acquire_analysis_slot(
-    semaphore: Arc<Semaphore>,
-) -> Result<OwnedSemaphorePermit, String> {
+fn try_acquire_analysis_slot(semaphore: Arc<Semaphore>) -> Result<OwnedSemaphorePermit, String> {
     semaphore
         .try_acquire_owned()
         .map_err(|_| "Another VOD analysis is already using transcription resources.".to_string())
@@ -80,7 +77,10 @@ struct StderrTail {
 
 impl StderrTail {
     fn new(cap: usize) -> Self {
-        Self { cap, lines: std::collections::VecDeque::with_capacity(cap) }
+        Self {
+            cap,
+            lines: std::collections::VecDeque::with_capacity(cap),
+        }
     }
     fn push(&mut self, line: String) {
         if self.lines.len() == self.cap {
@@ -99,6 +99,14 @@ impl StderrTail {
 /// (pending/etc.) keep the legitimate position-heuristic fallback.
 fn should_block_position_fallback(download_status: &str) -> bool {
     download_status == "failed"
+}
+
+fn default_detected_gameplay_layout(aspect_ratio: &str) -> &'static str {
+    if aspect_ratio == "9:16" {
+        "context_fit"
+    } else {
+        "none"
+    }
 }
 
 // â”€â”€ AudioProfile struct (local to this module) â”€â”€
@@ -155,10 +163,14 @@ fn ensure_proper_mp4(path: &std::path::Path) -> Result<(), String> {
     let tmp = path.with_extension("remuxing.mp4");
 
     let mut cmd = std::process::Command::new(&ffmpeg);
-    cmd.arg("-i").arg(path)
-       .arg("-c").arg("copy")
-       .arg("-movflags").arg("+faststart")
-       .arg("-y").arg(&tmp);
+    cmd.arg("-i")
+        .arg(path)
+        .arg("-c")
+        .arg("copy")
+        .arg("-movflags")
+        .arg("+faststart")
+        .arg("-y")
+        .arg(&tmp);
 
     #[cfg(windows)]
     {
@@ -166,17 +178,12 @@ fn ensure_proper_mp4(path: &std::path::Path) -> Result<(), String> {
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
 
-    let status = cmd
-        .status()
-        .map_err(|e| format!("ffmpeg spawn: {}", e))?;
+    let status = cmd.status().map_err(|e| format!("ffmpeg spawn: {}", e))?;
 
     if !status.success() {
         // Best-effort cleanup of partial output
         let _ = std::fs::remove_file(&tmp);
-        return Err(format!(
-            "ffmpeg exit code: {:?}",
-            status.code()
-        ));
+        return Err(format!("ffmpeg exit code: {:?}", status.code()));
     }
 
     // Atomic-ish replace. On Windows this fails if the destination is open
@@ -211,7 +218,10 @@ fn download_community_clip(url: &str) -> Option<String> {
     let ytdlp = match find_ytdlp() {
         Ok(p) => p,
         Err(e) => {
-            log::warn!("[community-clip] yt-dlp not found, skipping download: {}", e);
+            log::warn!(
+                "[community-clip] yt-dlp not found, skipping download: {}",
+                e
+            );
             return None;
         }
     };
@@ -243,16 +253,27 @@ fn download_community_clip(url: &str) -> Option<String> {
         });
     let safe_id: String = raw_id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
 
     let out_path = out_dir.join(format!("{}.mp4", safe_id));
 
     // Reuse an already-downloaded (non-empty) file — don't re-download.
     if out_path.exists()
-        && std::fs::metadata(&out_path).map(|m| m.len() > 0).unwrap_or(false)
+        && std::fs::metadata(&out_path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
     {
-        log::info!("[community-clip] reusing cached file: {}", out_path.display());
+        log::info!(
+            "[community-clip] reusing cached file: {}",
+            out_path.display()
+        );
         return Some(out_path.to_string_lossy().to_string());
     }
 
@@ -264,7 +285,8 @@ fn download_community_clip(url: &str) -> Option<String> {
     let mut cmd = std::process::Command::new(&ytdlp);
     cmd.arg("--force-overwrites")
         .arg("--no-color")
-        .arg("--remux-video").arg("mp4")
+        .arg("--remux-video")
+        .arg("mp4")
         .arg("-o")
         .arg(&output_template)
         .arg(url)
@@ -295,7 +317,9 @@ fn download_community_clip(url: &str) -> Option<String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         log::warn!(
             "[community-clip] yt-dlp exited {:?} for {} — {}",
-            output.status.code(), url, stderr.trim()
+            output.status.code(),
+            url,
+            stderr.trim()
         );
         return None;
     }
@@ -307,7 +331,9 @@ fn download_community_clip(url: &str) -> Option<String> {
     } else {
         std::fs::read_dir(&out_dir).ok().and_then(|entries| {
             entries.flatten().map(|e| e.path()).find(|p| {
-                p.file_stem().map(|s| s.to_string_lossy() == safe_id.as_str()).unwrap_or(false)
+                p.file_stem()
+                    .map(|s| s.to_string_lossy() == safe_id.as_str())
+                    .unwrap_or(false)
                     && !p.to_string_lossy().ends_with(".part")
                     && !p.to_string_lossy().ends_with(".remuxing.mp4")
             })
@@ -316,7 +342,10 @@ fn download_community_clip(url: &str) -> Option<String> {
     let actual = match actual {
         Some(p) => p,
         None => {
-            log::warn!("[community-clip] download reported success but no output file for {}", url);
+            log::warn!(
+                "[community-clip] download reported success but no output file for {}",
+                url
+            );
             return None;
         }
     };
@@ -324,10 +353,17 @@ fn download_community_clip(url: &str) -> Option<String> {
     // Same post-yt-dlp remux as the VOD path: guarantee a webview-playable MP4
     // (faststart, no lingering MPEG-TS packetization). Non-fatal on failure.
     if let Err(e) = ensure_proper_mp4(&actual) {
-        log::warn!("[community-clip] remux failed (file may not play in webview): {}", e);
+        log::warn!(
+            "[community-clip] remux failed (file may not play in webview): {}",
+            e
+        );
     }
 
-    log::info!("[community-clip] downloaded {} -> {}", url, actual.display());
+    log::info!(
+        "[community-clip] downloaded {} -> {}",
+        url,
+        actual.display()
+    );
     Some(actual.to_string_lossy().to_string())
 }
 
@@ -394,7 +430,11 @@ fn validate_download_output(
 
 /// Download a VOD using yt-dlp with real-time progress tracking.
 #[tauri::command]
-pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>) -> Result<(), String> {
+pub async fn download_vod(
+    vod_id: String,
+    app: AppHandle,
+    db: State<'_, DbConn>,
+) -> Result<(), String> {
     let ytdlp = find_ytdlp().map_err(|e| report_error(&app, e))?;
     let download_lease = acquire_vod_download_lease(&vod_id)?;
 
@@ -449,7 +489,9 @@ pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>)
         let vod_id_status = vod_id_bg;
 
         let result = tokio::task::spawn_blocking(move || {
-            let progress_conn = db::db_path().ok().and_then(|p| rusqlite::Connection::open(p).ok());
+            let progress_conn = db::db_path()
+                .ok()
+                .and_then(|p| rusqlite::Connection::open(p).ok());
 
             let mut cmd = std::process::Command::new(&ytdlp);
             cmd.arg("--continue")
@@ -458,7 +500,8 @@ pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>)
                 .arg("--no-color")
                 .arg("--print")
                 .arg(format!("after_move:{YTDLP_OUTPUT_PREFIX}%(filepath)s"))
-                .arg("--remux-video").arg("mp4")
+                .arg("--remux-video")
+                .arg("mp4")
                 .arg("-o")
                 .arg(&output_template)
                 .arg(&vod_url)
@@ -506,10 +549,17 @@ pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>)
                         reported_output = Some(std::path::PathBuf::from(path.trim()));
                     }
                     if let Some(pct) = parse_ytdlp_progress(&line) {
-                        if pct != last_reported && (pct >= last_reported.saturating_add(2) || pct == 100) {
+                        if pct != last_reported
+                            && (pct >= last_reported.saturating_add(2) || pct == 100)
+                        {
                             last_reported = pct;
                             if let Some(ref conn) = progress_conn {
-                                db::update_vod_download_progress(conn, &vod_id_progress, pct as i64).ok();
+                                db::update_vod_download_progress(
+                                    conn,
+                                    &vod_id_progress,
+                                    pct as i64,
+                                )
+                                .ok();
                             }
                         }
                     }
@@ -593,7 +643,8 @@ pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>)
                 };
                 log::error!("[download_vod] failed for {}: {}", vod_id_status, reason);
                 if let Ok(conn) = db.lock() {
-                    db::update_vod_download_status(&conn, &vod_id_status, "failed", None, None).ok();
+                    db::update_vod_download_status(&conn, &vod_id_status, "failed", None, None)
+                        .ok();
                 }
                 use tauri::Emitter;
                 let _ = app_handle.emit(
@@ -616,7 +667,10 @@ pub async fn download_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>)
 /// not-downloaded leftovers are filtered out here — mirroring `get_vods` so this
 /// polling/fallback path can't re-surface what `get_vods` hides.
 #[tauri::command]
-pub fn get_cached_vods(channel_id: String, db: State<'_, DbConn>) -> Result<Vec<db::VodRow>, String> {
+pub fn get_cached_vods(
+    channel_id: String,
+    db: State<'_, DbConn>,
+) -> Result<Vec<db::VodRow>, String> {
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
     let result: Vec<db::VodRow> = db::get_all_vods(&conn)
         .map_err(|e| format!("DB error: {}", e))?
@@ -645,7 +699,9 @@ pub async fn ensure_vod_thumbnail(
             _ => None,
         }
     };
-    let Some(local_path) = local_path else { return Ok(None) };
+    let Some(local_path) = local_path else {
+        return Ok(None);
+    };
     if !std::path::Path::new(&local_path).exists() {
         return Ok(None);
     }
@@ -659,7 +715,10 @@ pub async fn ensure_vod_thumbnail(
     let thumb_str = thumb_path.to_string_lossy().to_string();
 
     // Reuse an already-extracted frame.
-    if std::fs::metadata(&thumb_path).map(|m| m.len() > 0).unwrap_or(false) {
+    if std::fs::metadata(&thumb_path)
+        .map(|m| m.len() > 0)
+        .unwrap_or(false)
+    {
         return Ok(Some(thumb_str));
     }
 
@@ -671,11 +730,16 @@ pub async fn ensure_vod_thumbnail(
         for seek in ["60", "3"] {
             let mut cmd = std::process::Command::new(&ffmpeg);
             cmd.arg("-y")
-                .arg("-ss").arg(seek)
-                .arg("-i").arg(&lp)
-                .arg("-frames:v").arg("1")
-                .arg("-vf").arg("scale=640:-2")
-                .arg("-q:v").arg("4")
+                .arg("-ss")
+                .arg(seek)
+                .arg("-i")
+                .arg(&lp)
+                .arg("-frames:v")
+                .arg("1")
+                .arg("-vf")
+                .arg("scale=640:-2")
+                .arg("-q:v")
+                .arg("4")
                 .arg(&tp);
             #[cfg(windows)]
             {
@@ -718,22 +782,25 @@ fn analyze_audio_intensity(
 
     // Escape the path for ffmpeg filter syntax â€” colons in Windows drive letters
     // (e.g. C:\...) conflict with ffmpeg's filter parameter separator (:)
-    let escaped_path = temp_file.to_string_lossy()
+    let escaped_path = temp_file
+        .to_string_lossy()
         .replace('\\', "/")
         .replace(':', "\\:");
 
     let mut cmd = std::process::Command::new(ffmpeg);
-    cmd.arg("-i").arg(vod_path)
-       .arg("-af")
-       .arg(format!(
-           "astats=metadata=1:reset=1,ametadata=mode=print:file='{}'",
-           escaped_path
-       ))
-       .arg("-vn")
-       .arg("-f").arg("null")
-       .arg("-")
-       .stdout(Stdio::null())
-       .stderr(Stdio::null());
+    cmd.arg("-i")
+        .arg(vod_path)
+        .arg("-af")
+        .arg(format!(
+            "astats=metadata=1:reset=1,ametadata=mode=print:file='{}'",
+            escaped_path
+        ))
+        .arg("-vn")
+        .arg("-f")
+        .arg("null")
+        .arg("-")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
 
     #[cfg(windows)]
     {
@@ -741,10 +808,14 @@ fn analyze_audio_intensity(
         cmd.creation_flags(0x08000000);
     }
 
-    let status = cmd.status().map_err(|e| AppError::Ffmpeg(format!("Audio analysis launch failed: {e}")))?;
+    let status = cmd
+        .status()
+        .map_err(|e| AppError::Ffmpeg(format!("Audio analysis launch failed: {e}")))?;
     if !status.success() {
         std::fs::remove_file(&temp_file).ok();
-        return Err(AppError::Ffmpeg("Audio analysis exited with an error".into()));
+        return Err(AppError::Ffmpeg(
+            "Audio analysis exited with an error".into(),
+        ));
     }
 
     // Parse the astats output file for RMS levels per frame
@@ -768,7 +839,9 @@ fn analyze_audio_intensity(
             // Each frame line contains pts_time
             if let Some(pts_pos) = line.find("pts_time:") {
                 let pts_str = &line[pts_pos + 9..];
-                if let Some(end) = pts_str.find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-') {
+                if let Some(end) =
+                    pts_str.find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-')
+                {
                     if let Ok(t) = pts_str[..end].parse::<f64>() {
                         current_time = Some(t);
                     }
@@ -821,15 +894,25 @@ fn analyze_audio_intensity(
     // component continues to scale with the VOD's actual audio level so we
     // don't fire on quiet content. Floor + dynamic = best of both.
     let spike_threshold = (avg * 1.5).max(audio_config.spike_threshold);
-    let spike_seconds: Vec<usize> = rms_values.iter().enumerate()
+    let spike_seconds: Vec<usize> = rms_values
+        .iter()
+        .enumerate()
         .filter(|(_, &v)| v > spike_threshold)
         .map(|(i, _)| i)
         .collect();
 
-    log::info!("Audio analysis: {} seconds, {} spikes detected (avg={:.3}, threshold={:.3})",
-        rms_values.len(), spike_seconds.len(), avg, spike_threshold);
+    log::info!(
+        "Audio analysis: {} seconds, {} spikes detected (avg={:.3}, threshold={:.3})",
+        rms_values.len(),
+        spike_seconds.len(),
+        avg,
+        spike_threshold
+    );
 
-    Ok(AudioProfile { rms_per_second: rms_values, spike_seconds })
+    Ok(AudioProfile {
+        rms_per_second: rms_values,
+        spike_seconds,
+    })
 }
 
 /// Generate a single thumbnail frame from a video at the given timestamp.
@@ -841,15 +924,20 @@ pub(crate) fn generate_thumbnail(
 ) -> Result<(), AppError> {
     let mut cmd = std::process::Command::new(ffmpeg);
     // Input-seeking (-ss before -i) is fast and accurate for MP4 files
-    cmd.arg("-ss").arg(format!("{}", timestamp_secs))
-       .arg("-i").arg(vod_path)
-       .arg("-vframes").arg("1")
-       .arg("-vf").arg("scale=640:-1")
-       .arg("-q:v").arg("5")
-       .arg("-y")
-       .arg(output_path.to_string_lossy().as_ref())
-       .stdout(Stdio::null())
-       .stderr(Stdio::null());
+    cmd.arg("-ss")
+        .arg(format!("{}", timestamp_secs))
+        .arg("-i")
+        .arg(vod_path)
+        .arg("-vframes")
+        .arg("1")
+        .arg("-vf")
+        .arg("scale=640:-1")
+        .arg("-q:v")
+        .arg("5")
+        .arg("-y")
+        .arg(output_path.to_string_lossy().as_ref())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
 
     #[cfg(windows)]
     {
@@ -857,9 +945,15 @@ pub(crate) fn generate_thumbnail(
         cmd.creation_flags(0x08000000);
     }
 
-    let status = cmd.status().map_err(|e| AppError::Ffmpeg(format!("Thumbnail launch failed: {e}")))?;
+    let status = cmd
+        .status()
+        .map_err(|e| AppError::Ffmpeg(format!("Thumbnail launch failed: {e}")))?;
     // ffmpeg may return non-zero (e.g. 69 for MPEG-TS near end) but still write the file
-    if output_path.exists() && std::fs::metadata(output_path).map(|m| m.len() > 0).unwrap_or(false) {
+    if output_path.exists()
+        && std::fs::metadata(output_path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+    {
         Ok(())
     } else if status.success() {
         Ok(())
@@ -900,6 +994,8 @@ pub struct TranscriptResult {
     pub full_text: String,
     pub language: String,
     pub keywords_found: Vec<TranscriptKeyword>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recognition: Option<whisper::RecognitionProvenance>,
 }
 
 // â”€â”€ Keyword patterns for transcript scanning â”€â”€
@@ -912,8 +1008,14 @@ pub struct TranscriptResult {
 // + multi-signal bonus, not via this keyword path.
 // See docs/superpowers/specs/2026-05-07-phase-a-scoring-fix-design.md §7a.2
 const TRANSCRIPT_KEYWORDS: &[&str] = &[
-    "no way", "oh my god", "holy", "clutch", "rage",
-    "noooo", "nooo", "oh no",
+    "no way",
+    "oh my god",
+    "holy",
+    "clutch",
+    "rage",
+    "noooo",
+    "nooo",
+    "oh no",
 ];
 
 /// Detects whether the transcript segment at `idx` is part of a run of
@@ -961,18 +1063,30 @@ fn is_hallucinated_segment(segments: &[TranscriptSegment], idx: usize) -> bool {
 /// Convert whisper-rs TranscriptResult into the vod.rs TranscriptResult
 /// expected by clip_selector and downstream pipeline.
 fn convert_whisper_result(wr: &whisper::TranscriptResult) -> TranscriptResult {
-    let segments: Vec<TranscriptSegment> = wr.segments.iter().map(|s| TranscriptSegment {
-        start: s.start,
-        end: s.end,
-        text: s.text.clone(),
-        words: s.words.iter().map(|word| TranscriptWord {
-            word: word.word.clone(),
-            start: word.start,
-            end: word.end,
-        }).collect(),
-    }).collect();
+    let segments: Vec<TranscriptSegment> = wr
+        .segments
+        .iter()
+        .map(|s| TranscriptSegment {
+            start: s.start,
+            end: s.end,
+            text: s.text.clone(),
+            words: s
+                .words
+                .iter()
+                .map(|word| TranscriptWord {
+                    word: word.word.clone(),
+                    start: word.start,
+                    end: word.end,
+                })
+                .collect(),
+        })
+        .collect();
 
-    let full_text = segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
+    let full_text = segments
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
 
     // Phase A: skip segments inside hallucination runs (4+ identical
     // consecutive lines, typically whisper noise on background music).
@@ -1000,10 +1114,137 @@ fn convert_whisper_result(wr: &whisper::TranscriptResult) -> TranscriptResult {
         full_text,
         language: wr.language.clone(),
         keywords_found,
+        recognition: Some(wr.recognition.clone()),
     }
 }
 
-fn resolve_whisper_runtime_settings() -> (whisper::WhisperModel, bool) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecognitionPurpose {
+    Detection,
+    FinalCaption,
+}
+
+#[derive(Debug, Clone)]
+struct WhisperRuntimeSettings {
+    model: whisper::WhisperModel,
+    use_gpu: bool,
+    language: whisper::RecognitionLanguage,
+    prompt: String,
+    automatic_prompt_terms: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecognitionPrompt {
+    text: String,
+    automatic_terms: Vec<String>,
+}
+
+fn prompt_term(value: &str) -> Option<String> {
+    let normalized = value
+        .replace('\0', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(48)
+        .collect::<String>();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn recognition_prompt(
+    purpose: RecognitionPurpose,
+    conn: Option<&rusqlite::Connection>,
+    vod_id: Option<&str>,
+    game_override: Option<&str>,
+) -> RecognitionPrompt {
+    let vod_context: Option<(Option<String>, Option<String>)> =
+        conn.zip(vod_id).and_then(|(connection, vod_id)| {
+            connection
+                .query_row(
+                    "SELECT v.game_name, c.twitch_login
+                       FROM vods v
+                       LEFT JOIN twitch_channels c ON c.id = v.channel_id
+                      WHERE v.id = ?1",
+                    [vod_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .ok()
+        });
+    let game = game_override.and_then(prompt_term).or_else(|| {
+        vod_context
+            .as_ref()
+            .and_then(|(game, _)| game.as_deref().and_then(prompt_term))
+    });
+    let channel = vod_context
+        .as_ref()
+        .and_then(|(_, channel)| channel.as_deref())
+        .and_then(prompt_term);
+
+    let mut vocabulary = Vec::new();
+    if let Some(connection) = conn {
+        if let Ok(Some(configured)) = db::get_setting(connection, "transcription_glossary") {
+            vocabulary.extend(
+                configured
+                    .split(|character| matches!(character, ',' | ';' | '\n' | '\r'))
+                    .filter_map(prompt_term)
+                    .take(24),
+            );
+        }
+        if db::transcription_correction_learning_enabled(connection) {
+            if let Ok(learned) = db::get_learned_transcription_terms(connection, 16) {
+                vocabulary.extend(learned.into_iter().filter_map(|term| prompt_term(&term)));
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    vocabulary.retain(|term| seen.insert(term.to_lowercase()));
+    vocabulary.truncate(32);
+
+    build_recognition_prompt(purpose, game, channel, vocabulary)
+}
+
+fn build_recognition_prompt(
+    purpose: RecognitionPurpose,
+    game: Option<String>,
+    channel: Option<String>,
+    vocabulary: Vec<String>,
+) -> RecognitionPrompt {
+    let automatic_terms = game.iter().cloned().collect();
+    let mut context = Vec::new();
+    if let Some(game) = game {
+        context.push(format!("Game: {game}."));
+    }
+    if purpose == RecognitionPurpose::Detection {
+        if let Some(channel) = channel {
+            context.push(format!("Creator: {channel}."));
+        }
+    }
+    if !vocabulary.is_empty() {
+        context.push(format!("Vocabulary: {}.", vocabulary.join(", ")));
+    }
+    RecognitionPrompt {
+        text: context.join(" "),
+        automatic_terms,
+    }
+}
+
+fn recognition_model_for_purpose(
+    purpose: RecognitionPurpose,
+    configured_model: whisper::WhisperModel,
+    configured_model_available: bool,
+) -> whisper::WhisperModel {
+    match purpose {
+        RecognitionPurpose::Detection => whisper::WhisperModel::Base,
+        RecognitionPurpose::FinalCaption if configured_model_available => configured_model,
+        RecognitionPurpose::FinalCaption => whisper::WhisperModel::Base,
+    }
+}
+
+fn resolve_whisper_runtime_settings(
+    purpose: RecognitionPurpose,
+    vod_id: Option<&str>,
+    game_override: Option<&str>,
+) -> WhisperRuntimeSettings {
     let conn = db::db_path()
         .ok()
         .and_then(|path| rusqlite::Connection::open(path).ok());
@@ -1011,10 +1252,21 @@ fn resolve_whisper_runtime_settings() -> (whisper::WhisperModel, bool) {
         .as_ref()
         .and_then(|connection| db::get_setting(connection, "whisper_model").ok().flatten())
         .unwrap_or_else(|| "base".to_string());
-    let model = match model_name.as_str() {
+    let configured_model = match model_name.as_str() {
         "medium" => whisper::WhisperModel::Medium,
         _ => whisper::WhisperModel::Base,
     };
+    let configured_model_available = whisper::is_model_downloaded(configured_model);
+    let model =
+        recognition_model_for_purpose(purpose, configured_model, configured_model_available);
+    if purpose == RecognitionPurpose::FinalCaption
+        && configured_model == whisper::WhisperModel::Medium
+        && !configured_model_available
+    {
+        log::warn!(
+            "[Captions] Local Quality model is unavailable; falling back to the local Base model"
+        );
+    }
     let ui_json = conn
         .as_ref()
         .and_then(|connection| db::get_setting(connection, "ui_settings").ok().flatten())
@@ -1023,7 +1275,76 @@ fn resolve_whisper_runtime_settings() -> (whisper::WhisperModel, bool) {
         .ok()
         .and_then(|value| value.get("useGpu").and_then(|enabled| enabled.as_bool()))
         .unwrap_or(true);
-    (model, use_gpu)
+    let language = conn
+        .as_ref()
+        .and_then(|connection| {
+            db::get_setting(connection, "transcription_language")
+                .ok()
+                .flatten()
+        })
+        .map(|value| whisper::RecognitionLanguage::from_setting(&value))
+        .unwrap_or(whisper::RecognitionLanguage::English);
+    let prompt = recognition_prompt(purpose, conn.as_ref(), vod_id, game_override);
+    WhisperRuntimeSettings {
+        model,
+        use_gpu,
+        language,
+        prompt: prompt.text,
+        automatic_prompt_terms: prompt.automatic_terms,
+    }
+}
+
+fn detection_options(
+    settings: &WhisperRuntimeSettings,
+    windows: Option<&[(f64, f64)]>,
+) -> whisper::RecognitionOptions {
+    let scope = windows
+        .map(whisper::scope_fingerprint_for_windows)
+        .unwrap_or_else(|| "full-vod-v1".to_string());
+    whisper::RecognitionOptions::detection(settings.language, settings.prompt.clone(), scope)
+}
+
+fn caption_options(
+    settings: &WhisperRuntimeSettings,
+    clip_start: f64,
+    clip_end: f64,
+) -> whisper::RecognitionOptions {
+    let mut options =
+        whisper::RecognitionOptions::final_caption(settings.language, settings.prompt.clone())
+            .with_automatic_prompt_terms(settings.automatic_prompt_terms.clone());
+    options.scope_fingerprint = whisper::scope_fingerprint_for_windows(&[(clip_start, clip_end)]);
+    options
+}
+
+fn expected_detection_recognition_native(
+    vod_path: &str,
+    vod_id: Option<&str>,
+    windows: Option<&[(f64, f64)]>,
+) -> Result<whisper::RecognitionProvenance, AppError> {
+    let settings = resolve_whisper_runtime_settings(RecognitionPurpose::Detection, vod_id, None);
+    let options = detection_options(&settings, windows);
+    whisper::expected_file_recognition(vod_path, settings.model, &options)
+        .map_err(AppError::Transcription)
+}
+
+fn transcript_cache_matches(
+    transcript: &TranscriptResult,
+    expected: &whisper::RecognitionProvenance,
+) -> bool {
+    transcript.recognition.as_ref().is_some_and(|cached| {
+        cached.pipeline_version == whisper::RECOGNITION_PIPELINE_VERSION
+            && cached.signature == expected.signature
+    })
+}
+
+fn load_current_transcript_cache(
+    path: &std::path::Path,
+    expected: &whisper::RecognitionProvenance,
+) -> Option<TranscriptResult> {
+    let transcript = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|json| serde_json::from_str::<TranscriptResult>(&json).ok())?;
+    transcript_cache_matches(&transcript, expected).then_some(transcript)
 }
 
 /// Run native whisper-rs transcription on a video file.
@@ -1036,7 +1357,10 @@ pub(crate) fn run_transcription_native(
     // Resolve model + GPU preference from DB (both read from the same conn).
     // useGpu default is true (honor hardware CUDA support); users can flip it
     // off via Settings → Detection → "Use GPU (CUDA)".
-    let (model, use_gpu) = resolve_whisper_runtime_settings();
+    let settings = resolve_whisper_runtime_settings(RecognitionPurpose::Detection, vod_id, None);
+    let model = settings.model;
+    let use_gpu = settings.use_gpu;
+    let options = detection_options(&settings, None);
 
     // Check model is downloaded
     if !whisper::is_model_downloaded(model) {
@@ -1054,13 +1378,14 @@ pub(crate) fn run_transcription_native(
 
     // Run transcription with progress reporting
     let vod_id_owned = vod_id.map(|s| s.to_string());
-    let result = whisper::transcribe(vod_path, model, use_gpu, move |pct| {
+    let result = whisper::transcribe(vod_path, model, use_gpu, options, move |pct| {
         // Map whisper progress (0-100) to analysis progress (20-38%)
         if let Some(ref vid) = vod_id_owned {
             let mapped = 20 + (pct as i64 * 18 / 100).min(17);
             set_analysis_progress(vid, mapped);
         }
-    }).map_err(|e| AppError::Transcription(e))?;
+    })
+    .map_err(|e| AppError::Transcription(e))?;
 
     // Convert to vod.rs format
     let transcript = convert_whisper_result(&result);
@@ -1072,8 +1397,11 @@ pub(crate) fn run_transcription_native(
         }
     }
 
-    log::info!("[Transcription] Complete: {} segments, {} keywords found",
-        transcript.segments.len(), transcript.keywords_found.len());
+    log::info!(
+        "[Transcription] Complete: {} segments, {} keywords found",
+        transcript.segments.len(),
+        transcript.keywords_found.len()
+    );
 
     Ok(transcript)
 }
@@ -1094,7 +1422,10 @@ pub(crate) fn run_windowed_transcription_native(
     vod_id: Option<&str>,
 ) -> Result<TranscriptResult, AppError> {
     // Resolve model + GPU preference identically to the full-VOD path.
-    let (model, use_gpu) = resolve_whisper_runtime_settings();
+    let settings = resolve_whisper_runtime_settings(RecognitionPurpose::Detection, vod_id, None);
+    let model = settings.model;
+    let use_gpu = settings.use_gpu;
+    let options = detection_options(&settings, Some(windows));
 
     if !whisper::is_model_downloaded(model) {
         return Err(AppError::Transcription(format!(
@@ -1114,14 +1445,22 @@ pub(crate) fn run_windowed_transcription_native(
 
     let vod_id_owned = vod_id.map(|s| s.to_string());
     let windows_owned: Vec<(f64, f64)> = windows.to_vec();
-    let result = whisper::transcribe_windows(vod_path, &windows_owned, model, use_gpu, move |pct| {
-        // Map whisper progress (0-100) to analysis progress (20-38%) — same
-        // range as the full-VOD path so frontend bar moves at a familiar pace.
-        if let Some(ref vid) = vod_id_owned {
-            let mapped = 20 + (pct as i64 * 18 / 100).min(17);
-            set_analysis_progress(vid, mapped);
-        }
-    }).map_err(|e| AppError::Transcription(e))?;
+    let result = whisper::transcribe_windows(
+        vod_path,
+        &windows_owned,
+        model,
+        use_gpu,
+        options,
+        move |pct| {
+            // Map whisper progress (0-100) to analysis progress (20-38%) — same
+            // range as the full-VOD path so frontend bar moves at a familiar pace.
+            if let Some(ref vid) = vod_id_owned {
+                let mapped = 20 + (pct as i64 * 18 / 100).min(17);
+                set_analysis_progress(vid, mapped);
+            }
+        },
+    )
+    .map_err(AppError::Transcription)?;
 
     let transcript = convert_whisper_result(&result);
 
@@ -1142,12 +1481,32 @@ pub(crate) fn run_windowed_transcription_native(
 
 /// Transcribe only one clip range for subtitle generation. Returned timestamps
 /// are relative to the beginning of the clip, not the source VOD.
+pub(crate) fn expected_clip_recognition_native(
+    vod_path: &str,
+    clip_start: f64,
+    clip_end: f64,
+    audio_mode: &str,
+    vod_id: Option<&str>,
+    game: Option<&str>,
+) -> Result<whisper::RecognitionProvenance, AppError> {
+    let settings = resolve_whisper_runtime_settings(RecognitionPurpose::FinalCaption, vod_id, game);
+    let options = caption_options(&settings, clip_start, clip_end);
+    whisper::expected_clip_recognition(vod_path, settings.model, &options, audio_mode)
+        .map_err(AppError::Transcription)
+}
+
 pub(crate) fn run_clip_transcription_native(
     vod_path: &str,
     clip_start: f64,
     clip_end: f64,
+    audio_mode: &str,
+    vod_id: Option<&str>,
+    game: Option<&str>,
 ) -> Result<TranscriptResult, AppError> {
-    let (model, use_gpu) = resolve_whisper_runtime_settings();
+    let settings = resolve_whisper_runtime_settings(RecognitionPurpose::FinalCaption, vod_id, game);
+    let model = settings.model;
+    let use_gpu = settings.use_gpu;
+    let options = caption_options(&settings, clip_start, clip_end);
     if !whisper::is_model_downloaded(model) {
         return Err(AppError::Transcription(format!(
             "Whisper model '{}' is not downloaded. Go to Settings -> Transcription Model to download it.",
@@ -1168,6 +1527,8 @@ pub(crate) fn run_clip_transcription_native(
         clip_end,
         model,
         use_gpu,
+        audio_mode,
+        options,
         |_| {},
     )
     .map_err(AppError::Transcription)?;
@@ -1184,7 +1545,13 @@ pub(crate) fn find_python() -> Result<std::path::PathBuf, AppError> {
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
         for ver in &["Python312", "Python313", "Python311", "Python310"] {
-            candidates.push(std::path::PathBuf::from(&local).join("Programs").join("Python").join(ver).join("python.exe"));
+            candidates.push(
+                std::path::PathBuf::from(&local)
+                    .join("Programs")
+                    .join("Python")
+                    .join(ver)
+                    .join("python.exe"),
+            );
         }
     }
     candidates.push(std::path::PathBuf::from(r"C:\Python312\python.exe"));
@@ -1195,34 +1562,51 @@ pub(crate) fn find_python() -> Result<std::path::PathBuf, AppError> {
         }
     }
     // Try PATH
-    which::which("python").or_else(|_| which::which("python3"))
-        .map_err(|_| AppError::Transcription("Python not found. Install Python 3.10+ to enable speech-to-text.".into()))
+    which::which("python")
+        .or_else(|_| which::which("python3"))
+        .map_err(|_| {
+            AppError::Transcription(
+                "Python not found. Install Python 3.10+ to enable speech-to-text.".into(),
+            )
+        })
 }
 
 /// Run faster-whisper transcription on a video file.
 /// Returns transcript JSON and saves to disk.
 // Replaced by run_transcription_native() â€” kept for potential fallback
 #[allow(dead_code)]
-pub(crate) fn run_transcription(vod_path: &str, output_path: &str, hw: &HardwareInfo, vod_id: Option<&str>) -> Result<TranscriptResult, AppError> {
+pub(crate) fn run_transcription(
+    vod_path: &str,
+    output_path: &str,
+    hw: &HardwareInfo,
+    vod_id: Option<&str>,
+) -> Result<TranscriptResult, AppError> {
     let python = find_python()?;
     let device = if hw.use_cuda { "cuda" } else { "cpu" };
 
     // Locate transcribe.py
     let script = find_transcribe_script()?;
 
-    log::info!("Transcription: python={} script={} device={}", python.display(), script.display(), device);
+    log::info!(
+        "Transcription: python={} script={} device={}",
+        python.display(),
+        script.display(),
+        device
+    );
 
     // Quick diagnostic: check if faster-whisper is importable
     let mut py_cmd = std::process::Command::new(&python);
-    py_cmd.args(["-c", "import faster_whisper; print(faster_whisper.__version__)"]);
+    py_cmd.args([
+        "-c",
+        "import faster_whisper; print(faster_whisper.__version__)",
+    ]);
     py_cmd.env("CUDA_VISIBLE_DEVICES", "");
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         py_cmd.creation_flags(0x08000000);
     }
-    if let Ok(check) = py_cmd.output()
-    {
+    if let Ok(check) = py_cmd.output() {
         if check.status.success() {
             let ver = String::from_utf8_lossy(&check.stdout);
             log::info!("faster-whisper version: {}", ver.trim());
@@ -1231,7 +1615,8 @@ pub(crate) fn run_transcription(vod_path: &str, output_path: &str, hw: &Hardware
             log::warn!("faster-whisper import failed: {}", err.trim());
             return Err(AppError::Transcription(format!(
                 "faster-whisper is not installed for {}. Run: {} -m pip install faster-whisper",
-                python.display(), python.display()
+                python.display(),
+                python.display()
             )));
         }
     }
@@ -1240,12 +1625,16 @@ pub(crate) fn run_transcription(vod_path: &str, output_path: &str, hw: &Hardware
     match run_transcription_with_script(&python, &script, vod_path, output_path, device, vod_id) {
         Ok(result) => Ok(result),
         Err(first_err) if device == "cuda" => {
-            log::warn!("CUDA transcription failed ({}), retrying on CPU...", first_err.detail());
+            log::warn!(
+                "CUDA transcription failed ({}), retrying on CPU...",
+                first_err.detail()
+            );
             run_transcription_with_script(&python, &script, vod_path, output_path, "cpu", vod_id)
                 .map_err(|cpu_err| {
                     AppError::Transcription(format!(
                         "Failed on both CUDA and CPU. CUDA: {} | CPU: {}",
-                        first_err.detail(), cpu_err.detail()
+                        first_err.detail(),
+                        cpu_err.detail()
                     ))
                 })
         }
@@ -1258,7 +1647,10 @@ pub(crate) fn run_transcription(vod_path: &str, output_path: &str, hw: &Hardware
 #[allow(dead_code)]
 fn find_transcribe_script() -> Result<std::path::PathBuf, AppError> {
     let exe = std::env::current_exe().unwrap_or_default();
-    let mut dir = exe.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+    let mut dir = exe
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
 
     // Walk up from the executable directory (handles dev + release layouts)
     for _ in 0..5 {
@@ -1297,16 +1689,25 @@ fn run_transcription_with_script(
     device: &str,
     vod_id: Option<&str>,
 ) -> Result<TranscriptResult, AppError> {
-    log::info!("Running transcription: {} {} --device {} --output {}", script.display(), vod_path, device, output_path);
+    log::info!(
+        "Running transcription: {} {} --device {} --output {}",
+        script.display(),
+        vod_path,
+        device,
+        output_path
+    );
 
     let mut cmd = std::process::Command::new(python);
     cmd.arg(script)
-       .arg(vod_path)
-       .arg("--model").arg("small")
-       .arg("--device").arg(device)
-       .arg("--output").arg(output_path)
-       .stdout(Stdio::piped())
-       .stderr(Stdio::piped());
+        .arg(vod_path)
+        .arg("--model")
+        .arg("small")
+        .arg("--device")
+        .arg(device)
+        .arg("--output")
+        .arg(output_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     // When running in CPU mode, prevent CUDA library loading entirely.
     // faster-whisper (via CTranslate2) probes for cuBLAS at import time,
@@ -1324,7 +1725,8 @@ fn run_transcription_with_script(
 
     // Spawn as a child process so we can read heartbeats from stderr
     // and enforce a timeout if the process truly hangs.
-    let mut child = cmd.spawn()
+    let mut child = cmd
+        .spawn()
         .map_err(|e| AppError::Transcription(format!("Failed to launch Python: {e}")))?;
 
     // Read stderr in a background thread to capture heartbeats + error output.
@@ -1352,10 +1754,22 @@ fn run_transcription_with_script(
 
                         // Try to parse heartbeat JSON for progress % update
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
-                            if json.get("heartbeat").and_then(|v| v.as_bool()).unwrap_or(false) {
-                                let pct = json.get("approx_pct").and_then(|v| v.as_i64()).unwrap_or(0);
-                                let segs = json.get("segments_so_far").and_then(|v| v.as_i64()).unwrap_or(0);
-                                log::info!("Transcription heartbeat: ~{}% done, {} segments", pct, segs);
+                            if json
+                                .get("heartbeat")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false)
+                            {
+                                let pct =
+                                    json.get("approx_pct").and_then(|v| v.as_i64()).unwrap_or(0);
+                                let segs = json
+                                    .get("segments_so_far")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0);
+                                log::info!(
+                                    "Transcription heartbeat: ~{}% done, {} segments",
+                                    pct,
+                                    segs
+                                );
                                 // Update analysis progress (20-38% range maps to transcription)
                                 if let Some(ref vid) = vod_id_for_thread {
                                     let mapped = 20 + (pct as i64 * 18 / 100).min(17);
@@ -1393,20 +1807,25 @@ fn run_transcription_with_script(
                     last_activity = std::time::Instant::now();
                 }
                 if last_activity.elapsed() > no_heartbeat_timeout {
-                    log::error!("Transcription stalled â€” no heartbeat for {}s, killing process",
-                        no_heartbeat_timeout.as_secs());
+                    log::error!(
+                        "Transcription stalled â€” no heartbeat for {}s, killing process",
+                        no_heartbeat_timeout.as_secs()
+                    );
                     child.kill().ok();
                     child.wait().ok();
-                    return Err(AppError::Transcription(
-                        format!("Transcription stalled after {} minutes with no progress on {}. \
+                    return Err(AppError::Transcription(format!(
+                        "Transcription stalled after {} minutes with no progress on {}. \
                             The process may have hung or run out of memory.",
-                            no_heartbeat_timeout.as_secs() / 60, device)
-                    ));
+                        no_heartbeat_timeout.as_secs() / 60,
+                        device
+                    )));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
             Err(e) => {
-                return Err(AppError::Transcription(format!("Failed to wait for transcription process: {e}")));
+                return Err(AppError::Transcription(format!(
+                    "Failed to wait for transcription process: {e}"
+                )));
             }
         }
     };
@@ -1422,8 +1841,12 @@ fn run_transcription_with_script(
     if !status.success() {
         let stderr = String::from_utf8_lossy(&stderr_buf);
         let stdout = String::from_utf8_lossy(&stdout_buf);
-        log::error!("Transcription script failed (exit {}). stderr: {} stdout: {}",
-            status.code().unwrap_or(-1), stderr.trim(), stdout.trim());
+        log::error!(
+            "Transcription script failed (exit {}). stderr: {} stdout: {}",
+            status.code().unwrap_or(-1),
+            stderr.trim(),
+            stdout.trim()
+        );
 
         // Parse structured error from stdout if the script managed to output JSON
         // (stdout may contain multiple JSON lines â€” check each)
@@ -1439,7 +1862,8 @@ fn run_transcription_with_script(
         let err_str = stderr.trim();
         if err_str.contains("unrecognized arguments") {
             return Err(AppError::Transcription(
-                "Transcription script version mismatch. Update transcribe.py from ai_engine/.".into()
+                "Transcription script version mismatch. Update transcribe.py from ai_engine/."
+                    .into(),
             ));
         }
         return Err(AppError::Transcription(format!("Script failed: {err_str}")));
@@ -1458,46 +1882,97 @@ pub(crate) fn generate_srt_for_clip(
     clip_start: f64,
     clip_end: f64,
     output_path: &std::path::Path,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let mut srt = String::new();
-    let mut index = 1;
+    let words = normalized_caption_words(transcript, clip_start, clip_end);
+    for (index, word) in words.iter().enumerate() {
+        append_srt_word(&mut srt, index + 1, word, clip_start);
+    }
 
-    for seg in &transcript.segments {
-        // Only include segments that overlap with clip range
-        if seg.end <= clip_start || seg.start >= clip_end {
+    std::fs::write(output_path, srt).map_err(|e| format!("Failed to write SRT: {}", e))?;
+    Ok(words.len())
+}
+
+fn normalized_caption_token(text: &str) -> String {
+    text.chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn normalized_caption_words(
+    transcript: &TranscriptResult,
+    clip_start: f64,
+    clip_end: f64,
+) -> Vec<TranscriptWord> {
+    if !clip_start.is_finite() || !clip_end.is_finite() || clip_end <= clip_start {
+        return Vec::new();
+    }
+
+    let mut words = Vec::new();
+    for segment in &transcript.segments {
+        if segment.end <= clip_start || segment.start >= clip_end {
             continue;
         }
-
-        let estimated_words;
-        let words: Vec<&TranscriptWord> = if seg.words.is_empty() {
-            estimated_words = estimate_segment_words(seg);
-            estimated_words.iter().collect()
+        let segment_words = if segment.words.is_empty() {
+            estimate_segment_words(segment)
         } else {
-            seg.words.iter().collect()
+            segment.words.clone()
         };
+        words.extend(segment_words.into_iter().filter(|word| {
+            is_spoken_caption_token(&word.word)
+                && word.start.is_finite()
+                && word.end.is_finite()
+                && word.end > clip_start
+                && word.start < clip_end
+        }));
+    }
 
-        let spoken_words: Vec<&TranscriptWord> = words
-            .into_iter()
-            .filter(|word| is_spoken_caption_token(&word.word))
-            .collect();
+    words.sort_by(|left, right| {
+        left.start
+            .total_cmp(&right.start)
+            .then_with(|| left.end.total_cmp(&right.end))
+    });
 
-        for (word_index, word) in spoken_words.iter().enumerate() {
-            if word.end <= clip_start || word.start >= clip_end {
-                continue;
-            }
-            let next_word_start = spoken_words.get(word_index + 1).map(|next| next.start);
-            append_srt_word(
-                &mut srt,
-                &mut index,
-                word,
-                next_word_start,
-                clip_start,
-                clip_end,
-            );
+    let mut deduplicated: Vec<TranscriptWord> = Vec::new();
+    for word in words {
+        let token = normalized_caption_token(&word.word);
+        let duplicate = deduplicated.iter().rev().take(8).any(|previous| {
+            normalized_caption_token(&previous.word) == token
+                && (word.start - previous.start).abs() <= 0.18
+                && word.start < previous.end + 0.04
+        });
+        if !token.is_empty() && !duplicate {
+            deduplicated.push(word);
         }
     }
 
-    std::fs::write(output_path, srt).map_err(|e| format!("Failed to write SRT: {}", e))
+    let ordered = deduplicated.clone();
+    deduplicated
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, mut word)| {
+            let text = word.word.trim();
+            let start = word.start.max(clip_start);
+            let next_start = ordered
+                .get(index + 1)
+                .map(|next| next.start.max(start))
+                .unwrap_or(f64::INFINITY);
+            let end = word
+                .end
+                .max(word.start + 0.22)
+                .min(word.start + word_visible_duration(text))
+                .min(next_start)
+                .min(clip_end);
+            if text.is_empty() || end <= start {
+                return None;
+            }
+            word.start = start;
+            word.end = end;
+            word.word = text.to_string();
+            Some(word)
+        })
+        .collect()
 }
 
 fn estimate_segment_words(segment: &TranscriptSegment) -> Vec<TranscriptWord> {
@@ -1508,7 +1983,12 @@ fn estimate_segment_words(segment: &TranscriptSegment) -> Vec<TranscriptWord> {
 
     let weights: Vec<usize> = words
         .iter()
-        .map(|word| word.chars().filter(|character| character.is_alphanumeric()).count().max(2))
+        .map(|word| {
+            word.chars()
+                .filter(|character| character.is_alphanumeric())
+                .count()
+                .max(2)
+        })
         .collect();
     let total_weight: usize = weights.iter().sum();
     let duration = segment.end - segment.start;
@@ -1558,46 +2038,36 @@ fn is_spoken_caption_token(text: &str) -> bool {
         .collect();
     !matches!(
         marker.as_str(),
-        "blankaudio" | "music" | "applause" | "laughter" | "laughing" | "cough" | "crying" | "silence"
+        "blankaudio"
+            | "music"
+            | "applause"
+            | "laughter"
+            | "laughing"
+            | "cough"
+            | "crying"
+            | "silence"
     ) || !(trimmed.starts_with('(') && trimmed.ends_with(')'))
 }
 
-fn append_srt_word(
-    srt: &mut String,
-    index: &mut usize,
-    word: &TranscriptWord,
-    next_word_start: Option<f64>,
-    clip_start: f64,
-    clip_end: f64,
-) {
+fn append_srt_word(srt: &mut String, index: usize, word: &TranscriptWord, clip_start: f64) {
     let text = word.word.trim();
     if text.is_empty() {
         return;
     }
 
-    let absolute_start = word.start.max(clip_start);
-    // Whisper can assign a word's end to the next token after a long pause.
-    // Cap that hold so silence is rendered as silence instead of sticky text.
-    let absolute_end = word
-        .end
-        .max(word.start + 0.22)
-        .min(word.start + word_visible_duration(text))
-        .min(next_word_start.unwrap_or(f64::INFINITY))
-        .min(clip_end);
-    let start_time = (absolute_start - clip_start).max(0.0);
-    let end_time = (absolute_end - clip_start).max(0.0);
+    let start_time = (word.start - clip_start).max(0.0);
+    let end_time = (word.end - clip_start).max(0.0);
     if end_time <= start_time {
         return;
     }
 
-    srt.push_str(&format!("{}\n", *index));
+    srt.push_str(&format!("{}\n", index));
     srt.push_str(&format!(
         "{} --> {}\n",
         format_srt_time(start_time),
         format_srt_time(end_time)
     ));
     srt.push_str(&format!("{}\n\n", text));
-    *index += 1;
 }
 
 fn format_srt_time(seconds: f64) -> String {
@@ -1612,8 +2082,14 @@ fn format_srt_time(seconds: f64) -> String {
 /// Extract the full dialogue text from transcript segments that overlap a clip's time range.
 /// Concatenates all segment text into a single string â€” used to save a richer
 /// `transcript_snippet` in the highlights table so Claude gets more context.
-pub(crate) fn extract_transcript_for_range(transcript: &TranscriptResult, start: f64, end: f64) -> Option<String> {
-    let texts: Vec<&str> = transcript.segments.iter()
+pub(crate) fn extract_transcript_for_range(
+    transcript: &TranscriptResult,
+    start: f64,
+    end: f64,
+) -> Option<String> {
+    let texts: Vec<&str> = transcript
+        .segments
+        .iter()
         .filter(|seg| seg.end >= start && seg.start <= end)
         .map(|seg| seg.text.as_str())
         .collect();
@@ -1628,7 +2104,9 @@ fn keyword_boost_for_range(transcript: &TranscriptResult, start: f64, end: f64) 
     if transcript.keywords_found.is_empty() {
         return 0.0;
     }
-    let keywords_in_range: Vec<&TranscriptKeyword> = transcript.keywords_found.iter()
+    let keywords_in_range: Vec<&TranscriptKeyword> = transcript
+        .keywords_found
+        .iter()
         .filter(|kw| kw.timestamp >= start && kw.end_timestamp <= end)
         .collect();
     if keywords_in_range.is_empty() {
@@ -1642,7 +2120,12 @@ fn keyword_boost_for_range(transcript: &TranscriptResult, start: f64, end: f64) 
 /// Uses local signal analysis (audio + transcript + chat) when ffmpeg + downloaded VOD are available.
 /// Falls back to position heuristics otherwise. No external API calls are made.
 #[tauri::command]
-pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, hw: State<'_, HardwareInfo>) -> Result<(), String> {
+pub async fn analyze_vod(
+    vod_id: String,
+    app: AppHandle,
+    db: State<'_, DbConn>,
+    hw: State<'_, HardwareInfo>,
+) -> Result<(), String> {
     let analysis_permit = try_acquire_analysis_slot(analysis_semaphore())?;
 
     // Atomic check-and-set: read status, validate, and update in a single lock scope
@@ -1675,6 +2158,12 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
     };
 
     let vod_id_bg = vod_id.clone();
+    let requested_stream_style =
+        crate::game_config::StreamStyle::from_str_or_default(&vod.stream_style);
+    let analysis_stream_style_key = crate::game_config::stream_style_analysis_key(
+        vod.game_name.as_deref(),
+        requested_stream_style,
+    );
     let vod_clone = vod.clone();
     let hw_info = hw.inner().clone();
 
@@ -1692,25 +2181,32 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
         // Cascading analysis: signal-driven (local) â†’ position heuristic.
         let has_local_file = vod_clone.local_path.is_some();
 
-        let mut result: Result<Vec<db::HighlightRow>, String> = Err("No analysis method available".into());
+        let mut result: Result<Vec<db::HighlightRow>, String> =
+            Err("No analysis method available".into());
 
         // ── Twitch chat replay (used by both tiers) ──
         // Hits Twitch GQL directly. yt-dlp's `--write-subs --sub-lang
         // live_chat` doesn't work for Twitch (YouTube-only) so we bypass
         // it. Fetched once here in async context, passed into both tiers
         // via spawn_blocking. Failures are non-fatal.
-        let chat_messages = match crate::twitch_chat_replay::fetch_chat_replay(
-            &vod_clone.twitch_video_id,
-        ).await {
-            Ok(msgs) => {
-                log::info!("[chat-replay] {} message(s) for VOD {}", msgs.len(), vod_id_bg);
-                msgs
-            }
-            Err(e) => {
-                log::warn!("[chat-replay] fetch failed: {} — continuing without chat", e);
-                Vec::new()
-            }
-        };
+        let chat_messages =
+            match crate::twitch_chat_replay::fetch_chat_replay(&vod_clone.twitch_video_id).await {
+                Ok(msgs) => {
+                    log::info!(
+                        "[chat-replay] {} message(s) for VOD {}",
+                        msgs.len(),
+                        vod_id_bg
+                    );
+                    msgs
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[chat-replay] fetch failed: {} — continuing without chat",
+                        e
+                    );
+                    Vec::new()
+                }
+            };
 
         // Tier 1: Signal-driven (audio + transcript + chat) â€” fully local
         if has_ffmpeg && has_local_file {
@@ -1722,12 +2218,17 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
             let mut community_clips = fetch_community_clips_for_vod(&db, &vod_clone, &app).await;
             if let Ok(conn) = db.lock() {
                 if let Ok(markers) = db::get_stream_markers_for_vod(&conn, &vod_clone) {
-                    if let Ok(stream_start) = chrono::DateTime::parse_from_rfc3339(&vod_clone.stream_date) {
+                    if let Ok(stream_start) =
+                        chrono::DateTime::parse_from_rfc3339(&vod_clone.stream_date)
+                    {
                         for marker in markers {
-                            let Ok(marked_at) = chrono::DateTime::parse_from_rfc3339(&marker.recorded_at) else {
+                            let Ok(marked_at) =
+                                chrono::DateTime::parse_from_rfc3339(&marker.recorded_at)
+                            else {
                                 continue;
                             };
-                            let offset = (marked_at - stream_start).num_milliseconds() as f64 / 1000.0;
+                            let offset =
+                                (marked_at - stream_start).num_milliseconds() as f64 / 1000.0;
                             if offset < 0.0 || offset >= vod_clone.duration_seconds as f64 {
                                 continue;
                             }
@@ -1750,21 +2251,37 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
                                 is_featured: false,
                                 is_stream_marker: true,
                             });
-                            let _ = db::mark_stream_marker_matched(&conn, &marker.id, &vod_clone.id);
+                            let _ =
+                                db::mark_stream_marker_matched(&conn, &marker.id, &vod_clone.id);
                         }
                     }
                 }
             }
             if !community_clips.is_empty() {
-                log::info!("[community-clips] {} clips feeding into selector", community_clips.len());
+                log::info!(
+                    "[community-clips] {} clips feeding into selector",
+                    community_clips.len()
+                );
             }
 
             let vod_for_sync = vod_clone.clone();
             let hw_for_sync = hw_info.clone();
             let sens = sensitivity.clone();
             let chat_for_sync = chat_messages.clone();
-            match tokio::task::spawn_blocking(move || run_analysis_signals(&vod_for_sync, &hw_for_sync, &sens, &community_clips, &chat_for_sync)).await {
-                Ok(Ok(highlights)) => { result = Ok(highlights); }
+            match tokio::task::spawn_blocking(move || {
+                run_analysis_signals(
+                    &vod_for_sync,
+                    &hw_for_sync,
+                    &sens,
+                    &community_clips,
+                    &chat_for_sync,
+                )
+            })
+            .await
+            {
+                Ok(Ok(highlights)) => {
+                    result = Ok(highlights);
+                }
                 Ok(Err(e)) => {
                     log::warn!("Signal analysis failed, falling back to position heuristic: {e}");
                 }
@@ -1798,16 +2315,26 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
 
         // Tier 2: Position heuristic (always available)
         if result.is_err() {
-            log::info!("Running position fallback for VOD {} (ffmpeg={}, downloaded={})",
-                vod_id_bg, has_ffmpeg, has_local_file);
+            log::info!(
+                "Running position fallback for VOD {} (ffmpeg={}, downloaded={})",
+                vod_id_bg,
+                has_ffmpeg,
+                has_local_file
+            );
             if let Ok(conn) = db.lock() {
                 db::update_vod_analysis_progress(&conn, &vod_id_bg, 10).ok();
             }
             let vod_for_sync = vod_clone.clone();
             let chat_for_sync = chat_messages.clone();
-            match tokio::task::spawn_blocking(move || run_analysis(&vod_for_sync, &chat_for_sync)).await {
-                Ok(r) => { result = r; }
-                Err(e) => { result = Err(format!("Task error: {e}")); }
+            match tokio::task::spawn_blocking(move || run_analysis(&vod_for_sync, &chat_for_sync))
+                .await
+            {
+                Ok(r) => {
+                    result = r;
+                }
+                Err(e) => {
+                    result = Err(format!("Task error: {e}"));
+                }
             }
         };
 
@@ -1853,36 +2380,57 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
 
                 for h in &highlights {
                     let clip_id = uuid::Uuid::new_v4().to_string();
+                    let aspect_ratio = "9:16";
                     let srt_path = captions_dir.join(format!("{}.srt", h.id));
                     let srt_exists = srt_path.exists();
                     let auto_captions = srt_exists
                         .then(|| std::fs::read_to_string(&srt_path).ok())
-                        .flatten();
-                    let auto_captions_path = srt_exists
+                        .flatten()
+                        .filter(|text| !text.trim().is_empty() && text.contains("-->"));
+                    let auto_captions_path = auto_captions
+                        .is_some()
                         .then(|| srt_path.to_string_lossy().to_string());
 
                     let clip = db::ClipRow {
                         id: clip_id.clone(),
                         highlight_id: h.id.clone(),
                         vod_id: h.vod_id.clone(),
-                        title: h.description.clone().unwrap_or_else(|| "Highlight".to_string()),
+                        title: h
+                            .description
+                            .clone()
+                            .unwrap_or_else(|| "Highlight".to_string()),
                         start_seconds: h.start_seconds,
                         end_seconds: h.end_seconds,
-                        aspect_ratio: "9:16".to_string(),
+                        aspect_ratio: aspect_ratio.to_string(),
                         crop_x: None,
                         crop_y: None,
                         crop_width: None,
                         crop_height: None,
-                        captions_enabled: 1,
+                        captions_enabled: i32::from(auto_captions.is_some()),
                         captions_text: auto_captions.clone(),
                         captions_position: "bottom".to_string(),
                         caption_style: "clean".to_string(),
                         caption_font_scale: 1.0,
+                        caption_card_scale: db::DEFAULT_CAPTION_CARD_SCALE,
                         caption_y_offset: 0.0,
                         captions_source_start: auto_captions.as_ref().map(|_| {
-                            if h.community_clip_mp4_path.is_some() { 0.0 } else { h.start_seconds }
+                            if h.community_clip_mp4_path.is_some() {
+                                0.0
+                            } else {
+                                h.start_seconds
+                            }
                         }),
-                        facecam_layout: "none".to_string(),
+                        captions_provenance: if auto_captions.is_some() {
+                            "analysis-draft".to_string()
+                        } else {
+                            "none".to_string()
+                        },
+                        captions_pipeline_version: 0,
+                        caption_audio_mode: "mixed".to_string(),
+                        captions_recognition_signature: None,
+                        captions_language: None,
+                        caption_audio_stream: None,
+                        facecam_layout: default_detected_gameplay_layout(aspect_ratio).to_string(),
                         facecam_settings: None,
                         context_background_path: None,
                         context_background_mode: "blur".to_string(),
@@ -1921,34 +2469,35 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
                     });
                 }
 
-                auto_ship_candidates.sort_by(|a, b| {
-                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                });
+                auto_ship_candidates
+                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 let candidate_ids: Vec<String> = auto_ship_candidates
                     .iter()
                     .map(|(id, _)| id.clone())
                     .collect();
 
                 let persistence_result: Result<Option<AutoShipReport>, String> = match db.lock() {
-                    Ok(mut conn) => match db::replace_analysis_results(
-                        &mut conn,
-                        &vod_id_bg,
-                        &analysis_rows,
-                    ) {
-                        Ok(()) => {
-                            db::update_vod_analysis_progress(&conn, &vod_id_bg, 88).ok();
-                            let report = match run_auto_ship_for_vod(&conn, &vod_id_bg, &candidate_ids) {
-                                Ok(report) if report.clips_queued > 0 => Some(report),
-                                Ok(_) => None,
-                                Err(e) => {
-                                    log::warn!("[auto-ship] failed non-fatally: {}", e);
-                                    None
-                                }
-                            };
-                            Ok(report)
+                    Ok(mut conn) => {
+                        match db::replace_analysis_results(&mut conn, &vod_id_bg, &analysis_rows) {
+                            Ok(()) => {
+                                db::update_vod_analysis_progress(&conn, &vod_id_bg, 88).ok();
+                                let report = match run_auto_ship_for_vod(
+                                    &conn,
+                                    &vod_id_bg,
+                                    &candidate_ids,
+                                ) {
+                                    Ok(report) if report.clips_queued > 0 => Some(report),
+                                    Ok(_) => None,
+                                    Err(e) => {
+                                        log::warn!("[auto-ship] failed non-fatally: {}", e);
+                                        None
+                                    }
+                                };
+                                Ok(report)
+                            }
+                            Err(e) => Err(format!("Could not save analysis results: {e}")),
                         }
-                        Err(e) => Err(format!("Could not save analysis results: {e}")),
-                    },
+                    }
                     Err(e) => Err(format!("Could not lock the database to save analysis: {e}")),
                 };
 
@@ -1976,7 +2525,9 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
                     use tauri::Emitter;
                     log::info!(
                         "[auto-ship] queued {} clips across {:?} · next publish {:?}",
-                        report.clips_queued, report.platforms, report.next_publish_at,
+                        report.clips_queued,
+                        report.platforms,
+                        report.next_publish_at,
                     );
                     let _ = app.emit("auto-ship-queued", &report);
                 }
@@ -1990,7 +2541,9 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
                             .join("thumbnails");
                         std::fs::create_dir_all(&thumb_dir).ok();
 
-                        if let Ok(thumb_conn) = db::db_path().and_then(|p| rusqlite::Connection::open(p).map_err(|e| e.to_string())) {
+                        if let Ok(thumb_conn) = db::db_path()
+                            .and_then(|p| rusqlite::Connection::open(p).map_err(|e| e.to_string()))
+                        {
                             let total_thumbs = clip_thumb_info.len();
                             for (idx, (clip_id, start_secs)) in clip_thumb_info.iter().enumerate() {
                                 let thumb_path = thumb_dir.join(format!("{}.jpg", clip_id));
@@ -2004,13 +2557,19 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
                                 let min_thumb_size = 3000u64;
                                 let mut saved = false;
                                 for ts in &candidates {
-                                    if generate_thumbnail(&ffmpeg_path, vod_path, *ts, &thumb_path).is_ok() {
-                                        let sz = std::fs::metadata(&thumb_path).map(|m| m.len()).unwrap_or(0);
+                                    if generate_thumbnail(&ffmpeg_path, vod_path, *ts, &thumb_path)
+                                        .is_ok()
+                                    {
+                                        let sz = std::fs::metadata(&thumb_path)
+                                            .map(|m| m.len())
+                                            .unwrap_or(0);
                                         if sz >= min_thumb_size {
                                             db::update_clip_thumbnail(
-                                                &thumb_conn, clip_id,
+                                                &thumb_conn,
+                                                clip_id,
                                                 Some(&thumb_path.to_string_lossy()),
-                                            ).ok();
+                                            )
+                                            .ok();
                                             saved = true;
                                             break;
                                         }
@@ -2019,15 +2578,23 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
                                 if !saved {
                                     if thumb_path.exists() {
                                         db::update_clip_thumbnail(
-                                            &thumb_conn, clip_id,
+                                            &thumb_conn,
+                                            clip_id,
                                             Some(&thumb_path.to_string_lossy()),
-                                        ).ok();
+                                        )
+                                        .ok();
                                     }
                                 }
                                 // Update progress per thumbnail
                                 if total_thumbs > 0 {
-                                    let thumb_progress = 88 + ((idx + 1) as i64 * 10 / total_thumbs as i64);
-                                    db::update_vod_analysis_progress(&thumb_conn, &vod_id_bg, thumb_progress).ok();
+                                    let thumb_progress =
+                                        88 + ((idx + 1) as i64 * 10 / total_thumbs as i64);
+                                    db::update_vod_analysis_progress(
+                                        &thumb_conn,
+                                        &vod_id_bg,
+                                        thumb_progress,
+                                    )
+                                    .ok();
                                 }
                             }
                         }
@@ -2036,6 +2603,12 @@ pub async fn analyze_vod(vod_id: String, app: AppHandle, db: State<'_, DbConn>, 
 
                 // Mark complete
                 if let Ok(conn) = db.lock() {
+                    db::update_vod_analyzed_stream_style(
+                        &conn,
+                        &vod_id_bg,
+                        Some(&analysis_stream_style_key),
+                    )
+                    .ok();
                     db::update_vod_analysis_status(&conn, &vod_id_bg, "completed").ok();
                     db::update_vod_analysis_progress(&conn, &vod_id_bg, 100).ok();
                 }
@@ -2187,6 +2760,16 @@ fn run_auto_ship_for_vod(
                 visibility: "public".to_string(),
                 clip_id: (*clip_id).clone(),
                 force: false,
+                artifact_path: None,
+                artifact_revision: None,
+                artifact_aspect_ratio: Some(
+                    if *platform == "youtube" {
+                        "16:9"
+                    } else {
+                        "9:16"
+                    }
+                    .to_string(),
+                ),
                 disable_comment: false,
                 disable_duet: false,
                 disable_stitch: false,
@@ -2266,11 +2849,14 @@ async fn fetch_community_clips_for_vod(
             Err(_) => return Vec::new(),
         };
         let use_community = db::get_setting(&conn, "use_twitch_community_clips")
-            .ok().flatten()
+            .ok()
+            .flatten()
             .map(|v| v != "false")
             .unwrap_or(true);
         let token = db::get_setting(&conn, "twitch_user_access_token")
-            .ok().flatten().unwrap_or_default();
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         let broadcaster_id = db::get_all_channels(&conn)
             .ok()
             .and_then(|cs| cs.into_iter().find(|c| c.id == vod.channel_id))
@@ -2295,23 +2881,22 @@ async fn fetch_community_clips_for_vod(
         .map(|dt| (dt + chrono::Duration::hours(48)).to_rfc3339())
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
-    let fetch_result = crate::twitch::fetch_community_clips(
-        &token,
-        &broadcaster_id,
-        &started_at,
-        &ended_at,
-    ).await;
+    let fetch_result =
+        crate::twitch::fetch_community_clips(&token, &broadcaster_id, &started_at, &ended_at).await;
 
     let fetch_result = match fetch_result {
         Err(error) if error.contains("401") => {
             log::warn!("[community-clips] access token rejected; refreshing and retrying once");
             match try_refresh_twitch_token(db.inner(), &token).await {
-                Ok(refreshed_token) => crate::twitch::fetch_community_clips(
-                    &refreshed_token,
-                    &broadcaster_id,
-                    &started_at,
-                    &ended_at,
-                ).await,
+                Ok(refreshed_token) => {
+                    crate::twitch::fetch_community_clips(
+                        &refreshed_token,
+                        &broadcaster_id,
+                        &started_at,
+                        &ended_at,
+                    )
+                    .await
+                }
                 Err(refresh_error) => {
                     log::warn!(
                         "[community-clips] token refresh failed (non-fatal): {}",
@@ -2329,41 +2914,48 @@ async fn fetch_community_clips_for_vod(
         Ok(clips) => {
             let this_vod = vod.twitch_video_id.clone();
             let raw = clips.len();
-            let matching: Vec<_> = clips.into_iter()
+            let matching: Vec<_> = clips
+                .into_iter()
                 .filter(|c| c.video_id.as_deref() == Some(this_vod.as_str()))
                 .collect();
             log::info!(
                 "[community-clips] broadcaster={}: fetched {} total, {} matched this VOD ({})",
-                broadcaster_id, raw, matching.len(), this_vod,
+                broadcaster_id,
+                raw,
+                matching.len(),
+                this_vod,
             );
-            matching.into_iter().filter_map(|c| {
-                // Prefer Helix's clip page `url`; fall back to building it from the
-                // slug `id` so yt-dlp still has something to download. Empty/blank →
-                // None (no download attempted; export uses the VOD cut).
-                let clip_url = {
-                    let u = c.url.trim();
-                    if !u.is_empty() {
-                        Some(u.to_string())
-                    } else if !c.id.trim().is_empty() {
-                        Some(format!("https://clips.twitch.tv/{}", c.id.trim()))
-                    } else {
-                        None
-                    }
-                };
-                c.vod_offset.map(|off| clip_selector::CommunityClip {
-                    vod_offset_seconds: off as f64,
-                    duration_seconds: c.duration,
-                    view_count: c.view_count,
-                    title: c.title,
-                    clip_url,
-                    is_streamer_created: !c.creator_id.is_empty()
-                        && c.creator_id == broadcaster_id,
-                    creator_name: c.creator_name,
-                    creator_id: c.creator_id,
-                    is_featured: c.is_featured,
-                    is_stream_marker: false,
+            matching
+                .into_iter()
+                .filter_map(|c| {
+                    // Prefer Helix's clip page `url`; fall back to building it from the
+                    // slug `id` so yt-dlp still has something to download. Empty/blank →
+                    // None (no download attempted; export uses the VOD cut).
+                    let clip_url = {
+                        let u = c.url.trim();
+                        if !u.is_empty() {
+                            Some(u.to_string())
+                        } else if !c.id.trim().is_empty() {
+                            Some(format!("https://clips.twitch.tv/{}", c.id.trim()))
+                        } else {
+                            None
+                        }
+                    };
+                    c.vod_offset.map(|off| clip_selector::CommunityClip {
+                        vod_offset_seconds: off as f64,
+                        duration_seconds: c.duration,
+                        view_count: c.view_count,
+                        title: c.title,
+                        clip_url,
+                        is_streamer_created: !c.creator_id.is_empty()
+                            && c.creator_id == broadcaster_id,
+                        creator_name: c.creator_name,
+                        creator_id: c.creator_id,
+                        is_featured: c.is_featured,
+                        is_stream_marker: false,
+                    })
                 })
-            }).collect()
+                .collect()
         }
         Err(e) => {
             if e.contains("401") {
@@ -2393,7 +2985,9 @@ fn emit_twitch_reconnect_warning(app: &AppHandle, vod_id: &str) {
 /// places to keep the column readable at human-debug time without losing
 /// meaningful precision.
 fn serialize_scoring_dimensions(c: &clip_selector::ClipCandidate) -> String {
-    fn r(x: f64) -> f64 { (x * 10000.0).round() / 10000.0 }
+    fn r(x: f64) -> f64 {
+        (x * 10000.0).round() / 10000.0
+    }
     serde_json::json!({
         "hook": r(c.hook_strength),
         "emotion": r(c.emotional_spike),
@@ -2401,20 +2995,24 @@ fn serialize_scoring_dimensions(c: &clip_selector::ClipCandidate) -> String {
         "align": r(c.event_reaction_alignment),
         "context": r(c.context_simplicity),
         "replay": r(c.replay_value),
-    }).to_string()
+    })
+    .to_string()
 }
 
 /// Serialize a ClipCandidate's signal_sources Vec<SignalSource> to a JSON
 /// array of lowercase string identifiers, e.g. `["audio","chat","transcript"]`.
 fn serialize_signal_sources(sources: &[clip_selector::SignalSource]) -> String {
-    let names: Vec<&'static str> = sources.iter().map(|s| match s {
-        clip_selector::SignalSource::Audio => "audio",
-        clip_selector::SignalSource::Chat => "chat",
-        clip_selector::SignalSource::EmoteBurst => "emote_burst",
-        clip_selector::SignalSource::Transcript => "transcript",
-        clip_selector::SignalSource::Community => "community",
-        clip_selector::SignalSource::Semantic => "ai",
-    }).collect();
+    let names: Vec<&'static str> = sources
+        .iter()
+        .map(|s| match s {
+            clip_selector::SignalSource::Audio => "audio",
+            clip_selector::SignalSource::Chat => "chat",
+            clip_selector::SignalSource::EmoteBurst => "emote_burst",
+            clip_selector::SignalSource::Transcript => "transcript",
+            clip_selector::SignalSource::Community => "community",
+            clip_selector::SignalSource::Semantic => "ai",
+        })
+        .collect();
     serde_json::json!(names).to_string()
 }
 
@@ -2437,8 +3035,12 @@ fn run_ai_judge(
     duration: f64,
     reviewed_moments: &[db::ReviewedMomentFeedbackRow],
 ) -> AiJudgeOutcome {
-    let Some(t) = transcript else { return AiJudgeOutcome::default() };
-    let Ok(db_path) = db::db_path() else { return AiJudgeOutcome::default() };
+    let Some(t) = transcript else {
+        return AiJudgeOutcome::default();
+    };
+    let Ok(db_path) = db::db_path() else {
+        return AiJudgeOutcome::default();
+    };
     let Ok(conn) = rusqlite::Connection::open(&db_path) else {
         return AiJudgeOutcome::default();
     };
@@ -2465,11 +3067,8 @@ fn run_ai_judge(
         .iter()
         .filter(|review| review.rating.as_deref() == Some("good"))
         .filter_map(|review| {
-            let transcript = extract_transcript_for_range(
-                t,
-                review.start_seconds,
-                review.end_seconds,
-            )?;
+            let transcript =
+                extract_transcript_for_range(t, review.start_seconds, review.end_seconds)?;
             Some(crate::clip_judge::ApprovedMomentExample {
                 start_sec: review.start_seconds,
                 end_sec: review.end_seconds,
@@ -2489,7 +3088,11 @@ fn run_ai_judge(
             approved_examples.len(),
         );
     }
-    log::info!("AI clip detection: judging via {:?} {}", resolved.provider, resolved.model);
+    log::info!(
+        "AI clip detection: judging via {:?} {}",
+        resolved.provider,
+        resolved.model
+    );
     let fut = crate::clip_judge::judge(
         resolved.provider,
         &resolved.api_key,
@@ -2517,7 +3120,9 @@ fn run_ai_judge(
             );
             log::info!(
                 "AI clip detection: {} clip-worthy moments (tokens {}+{})",
-                moments.len(), tin, tout
+                moments.len(),
+                tin,
+                tout
             );
             // Optional cheap Sonnet final-pass: re-rank/curate only the top
             // survivors (their snippets, not the VOD) for near-Sonnet taste at
@@ -2533,7 +3138,10 @@ fn run_ai_judge(
             }
         }
         Err(e) => {
-            log::warn!("AI clip detection failed — falling back to signal-only: {}", e);
+            log::warn!(
+                "AI clip detection failed — falling back to signal-only: {}",
+                e
+            );
             AiJudgeOutcome::default()
         }
     }
@@ -2558,7 +3166,11 @@ fn run_final_pass(
 
     // Rank by the judge's score and take the top N as final-pass candidates.
     let mut ranked = haiku_moments.clone();
-    ranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let top: Vec<crate::clip_judge::JudgedMoment> =
         ranked.into_iter().take(FINAL_PASS_TOP_N).collect();
 
@@ -2596,7 +3208,9 @@ fn run_final_pass(
                 },
             );
             if final_moments.is_empty() {
-                log::info!("AI clip detection: final-pass returned nothing — keeping Haiku ranking");
+                log::info!(
+                    "AI clip detection: final-pass returned nothing — keeping Haiku ranking"
+                );
                 return haiku_moments;
             }
             // Use the final-pass (re-scored, re-ordered) set as the head, then
@@ -2605,21 +3219,26 @@ fn run_final_pass(
             let mut out = final_moments;
             let covered: Vec<(f64, f64)> = out.iter().map(|m| (m.start_sec, m.end_sec)).collect();
             for m in haiku_moments {
-                let dup = covered.iter().any(|(s, e)| {
-                    (s - m.start_sec).abs() < 0.5 && (e - m.end_sec).abs() < 0.5
-                });
+                let dup = covered
+                    .iter()
+                    .any(|(s, e)| (s - m.start_sec).abs() < 0.5 && (e - m.end_sec).abs() < 0.5);
                 if !dup {
                     out.push(m);
                 }
             }
             log::info!(
                 "AI clip detection: Sonnet final-pass → {} moments (tokens {}+{})",
-                out.len(), tin, tout
+                out.len(),
+                tin,
+                tout
             );
             out
         }
         Err(e) => {
-            log::warn!("AI clip detection: final-pass failed — keeping Haiku ranking: {}", e);
+            log::warn!(
+                "AI clip detection: final-pass failed — keeping Haiku ranking: {}",
+                e
+            );
             haiku_moments
         }
     }
@@ -2633,8 +3252,7 @@ fn run_analysis_signals(
     chat_messages: &[crate::twitch_chat_replay::ChatMessage],
 ) -> Result<Vec<db::HighlightRow>, String> {
     let ffmpeg = find_ffmpeg()?;
-    let vod_path = vod.local_path.clone()
-        .ok_or("VOD not downloaded")?;
+    let vod_path = vod.local_path.clone().ok_or("VOD not downloaded")?;
     let duration = vod.duration_seconds as f64;
     let vod_id = &vod.id;
     let now = chrono::Utc::now().to_rfc3339();
@@ -2642,17 +3260,23 @@ fn run_analysis_signals(
     // Resolve per-game detection config. Walks 4 layers:
     //   default.toml -> _<genre>.toml -> <game_name>.toml -> sensitivity multiplier
     // See game_config.rs for the resolver and docs/superpowers/specs/ for design.
-    let game_config = crate::game_config::ResolvedConfig::resolve(
-        vod.game_name.as_deref(),
-        crate::game_config::Sensitivity::from_str_or_default(sensitivity),
-    );
+    let requested_stream_style =
+        crate::game_config::StreamStyle::from_str_or_default(&vod.stream_style);
+    let (game_config, effective_stream_style) =
+        crate::game_config::ResolvedConfig::resolve_for_stream_style(
+            vod.game_name.as_deref(),
+            crate::game_config::Sensitivity::from_str_or_default(sensitivity),
+            requested_stream_style,
+        );
 
     log::info!(
-        "[game-config] Resolved for {:?}: \
+        "[game-config] Resolved for {:?} with requested style '{}' (effective '{}'): \
          audio.spike={:.2} chat.emote_burst={} chat.rate_min_msgs={} \
          transcript.weight={:.2} selector.min_clip={} max_clip={} min_gap={} \
          titles.preferred={:?} titles.disabled={:?}",
         vod.game_name.as_deref().unwrap_or("(unknown game)"),
+        requested_stream_style.as_str(),
+        effective_stream_style.as_str(),
         game_config.audio.spike_threshold,
         game_config.chat.emote_burst_threshold,
         game_config.chat.rate_min_msgs_per_window,
@@ -2693,7 +3317,11 @@ fn run_analysis_signals(
                 (r.rate_peaks, r.emote_peaks)
             }
             Err(e) => {
-                log::info!("Chat analysis skipped: {} ({} messages available)", e, chat_messages.len());
+                log::info!(
+                    "Chat analysis skipped: {} ({} messages available)",
+                    e,
+                    chat_messages.len()
+                );
                 (Vec::new(), Vec::new())
             }
         };
@@ -2715,7 +3343,11 @@ fn run_analysis_signals(
         duration,
     );
     let total_window_secs: f64 = candidate_windows.iter().map(|(s, e)| e - s).sum();
-    let coverage_pct = if duration > 0.0 { (total_window_secs / duration) * 100.0 } else { 0.0 };
+    let coverage_pct = if duration > 0.0 {
+        (total_window_secs / duration) * 100.0
+    } else {
+        0.0
+    };
     log::info!(
         "Signal analysis: pre-selected {} candidate window(s) covering {:.1}s of {:.1}s ({:.1}%)",
         candidate_windows.len(),
@@ -2736,12 +3368,23 @@ fn run_analysis_signals(
         .join("transcripts");
     std::fs::create_dir_all(&transcript_dir).ok();
     let transcript_path = transcript_dir.join(format!("{}.json", vod_id));
-    let transcript: Option<TranscriptResult> = if transcript_path.exists() {
-        log::info!("Signal analysis: loading cached transcript");
+    let expected_recognition = expected_detection_recognition_native(
+        &vod_path,
+        Some(vod_id),
+        (!candidate_windows.is_empty()).then_some(candidate_windows.as_slice()),
+    )
+    .ok();
+    let cached_transcript = expected_recognition
+        .as_ref()
+        .and_then(|expected| load_current_transcript_cache(&transcript_path, expected));
+    let transcript: Option<TranscriptResult> = if let Some(cached) = cached_transcript {
+        log::info!("Signal analysis: loading current generated transcript cache");
         set_analysis_progress(vod_id, 35);
-        std::fs::read_to_string(&transcript_path).ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
+        Some(cached)
     } else if candidate_windows.is_empty() {
+        if transcript_path.exists() {
+            log::info!("Signal analysis: generated transcript cache is stale; rebuilding it");
+        }
         // No audio/chat/emote signals fired anywhere in the VOD — fall back
         // to full-VOD transcription so we still get transcript-derived
         // candidates from "quiet narrative" content.
@@ -2756,7 +3399,10 @@ fn run_analysis_signals(
                 Some(result)
             }
             Err(e) => {
-                log::warn!("Native transcription failed: {}. Continuing without transcript.", e.detail());
+                log::warn!(
+                    "Native transcription failed: {}. Continuing without transcript.",
+                    e.detail()
+                );
                 None
             }
         }
@@ -2770,7 +3416,10 @@ fn run_analysis_signals(
                 Some(result)
             }
             Err(e) => {
-                log::warn!("Windowed transcription failed: {}. Continuing without transcript.", e.detail());
+                log::warn!(
+                    "Windowed transcription failed: {}. Continuing without transcript.",
+                    e.detail()
+                );
                 None
             }
         }
@@ -2832,21 +3481,25 @@ fn run_analysis_signals(
         duration,
         &reviewed_moments,
     );
-    let (selected, detection_stats): (Vec<clip_selector::ClipCandidate>, _) = clip_selector::select_clips(
-        audio_ctx.as_ref(),
-        transcript.as_ref(),
-        &chat_peaks,
-        &emote_peaks,
-        community_clips,
-        &ai_judge.moments,
-        ai_judge.completed,
-        duration,
-        sensitivity,
-        &game_config.selector,
-        personalization_profile.is_active().then_some(&personalization_profile),
-        boundary_profile.is_active().then_some(&boundary_profile),
-        &reviewed_moments,
-    );
+    let (selected, detection_stats): (Vec<clip_selector::ClipCandidate>, _) =
+        clip_selector::select_clips(
+            audio_ctx.as_ref(),
+            transcript.as_ref(),
+            &chat_peaks,
+            &emote_peaks,
+            community_clips,
+            &ai_judge.moments,
+            ai_judge.completed,
+            duration,
+            sensitivity,
+            &game_config.selector,
+            game_config.transcript.weight,
+            personalization_profile
+                .is_active()
+                .then_some(&personalization_profile),
+            boundary_profile.is_active().then_some(&boundary_profile),
+            &reviewed_moments,
+        );
     set_analysis_progress(vod_id, 60);
 
     // Persist detection stats for the VOD page to display
@@ -2865,7 +3518,9 @@ fn run_analysis_signals(
             );
             return Ok(Vec::new());
         }
-        log::warn!("Signal analysis: selector returned no clips, falling back to position heuristic");
+        log::warn!(
+            "Signal analysis: selector returned no clips, falling back to position heuristic"
+        );
         set_analysis_progress(vod_id, 55);
         return run_analysis(vod, chat_messages);
     }
@@ -2886,7 +3541,11 @@ fn run_analysis_signals(
 
     for (i, c) in selected.iter().enumerate() {
         let all_tags: Vec<String> = [&c.event_tags[..], &c.emotion_tags[..]].concat();
-        let tag_str = if all_tags.is_empty() { "auto".to_string() } else { all_tags.join(",") };
+        let tag_str = if all_tags.is_empty() {
+            "auto".to_string()
+        } else {
+            all_tags.join(",")
+        };
 
         let title = crate::commands::captions::save_path_heuristic_title(
             c.transcript_excerpt.as_deref(),
@@ -2916,8 +3575,8 @@ fn run_analysis_signals(
             c.event_tags.iter().any(|t| tag_check(t.as_str()))
                 || c.emotion_tags.iter().any(|t| tag_check(t.as_str()))
         };
-        let is_unreliable_single_signal_at_persist = c.signal_sources.len() == 1
-            && has_shock_family_tag_at_persist;
+        let is_unreliable_single_signal_at_persist =
+            c.signal_sources.len() == 1 && has_shock_family_tag_at_persist;
         let raw_score = if is_unreliable_single_signal_at_persist {
             (c.total_score + kw_boost).min(0.65)
         } else {
@@ -2925,21 +3584,30 @@ fn run_analysis_signals(
         };
         let audio = c.hook_strength;
         let visual = c.emotional_spike;
-        let chat = if c.signal_sources.contains(&clip_selector::SignalSource::Chat) {
+        let chat = if c
+            .signal_sources
+            .contains(&clip_selector::SignalSource::Chat)
+        {
             c.event_reaction_alignment
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         let has_transcript = c.transcript_excerpt.is_some();
         let sig_count = count_active_signals(audio, visual, chat, has_transcript);
 
         let event_summary = crate::post_captions::generate_event_summary_from_parts(
             &all_tags,
             c.transcript_excerpt.as_deref(),
-            audio, visual, 0.0, c.start_time,
+            audio,
+            visual,
+            0.0,
+            c.start_time,
         );
 
         // Use full transcript for the clip range if available; fall back to
         // the single-sentence excerpt from signal fusion.
-        let full_range_transcript = transcript.as_ref()
+        let full_range_transcript = transcript
+            .as_ref()
             .and_then(|t| extract_transcript_for_range(t, c.start_time, c.end_time))
             .or_else(|| c.transcript_excerpt.clone());
 
@@ -2950,24 +3618,24 @@ fn run_analysis_signals(
         // fallback (export still works off vod_path + start/end). We're inside
         // spawn_blocking here, so the blocking download is safe.
         let community_clip_mp4_path = match c.community_url.as_deref() {
-            Some(clip_url) if !clip_url.is_empty() => {
-                match download_community_clip(clip_url) {
-                    Some(path) => {
-                        log::info!(
-                            "[community-clip] [{:.0}s..{:.0}s] using downloaded clip MP4: {}",
-                            c.start_time, c.end_time, path
-                        );
-                        Some(path)
-                    }
-                    None => {
-                        log::warn!(
+            Some(clip_url) if !clip_url.is_empty() => match download_community_clip(clip_url) {
+                Some(path) => {
+                    log::info!(
+                        "[community-clip] [{:.0}s..{:.0}s] using downloaded clip MP4: {}",
+                        c.start_time,
+                        c.end_time,
+                        path
+                    );
+                    Some(path)
+                }
+                None => {
+                    log::warn!(
                             "[community-clip] [{:.0}s..{:.0}s] download failed for {} — falling back to VOD cut",
                             c.start_time, c.end_time, clip_url
                         );
-                        None
-                    }
+                    None
                 }
-            }
+            },
             _ => None,
         };
 
@@ -2990,7 +3658,12 @@ fn run_analysis_signals(
             thumbnail_path: None,
             created_at: now.clone(),
             confidence_score: Some(compute_confidence(raw_score, sig_count)),
-            explanation: Some(build_highlight_explanation(audio, visual, chat, has_transcript)),
+            explanation: Some(build_highlight_explanation(
+                audio,
+                visual,
+                chat,
+                has_transcript,
+            )),
             event_summary: Some(event_summary),
             scoring_dimensions: Some(serialize_scoring_dimensions(c)),
             signal_sources: Some(serialize_signal_sources(&c.signal_sources)),
@@ -3043,8 +3716,18 @@ fn run_analysis_signals(
         let mut srt_count = 0;
         for h in &highlights {
             let srt_path = captions_dir.join(format!("{}.srt", h.id));
-            if generate_srt_for_clip(t, h.start_seconds, h.end_seconds, &srt_path).is_ok() {
-                srt_count += 1;
+            match generate_srt_for_clip(t, h.start_seconds, h.end_seconds, &srt_path) {
+                Ok(cue_count) if cue_count > 0 => srt_count += 1,
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&srt_path);
+                }
+                Err(error) => {
+                    log::warn!(
+                        "Signal analysis: could not write captions for {}: {}",
+                        h.id,
+                        error
+                    );
+                }
             }
         }
         if srt_count > 0 {
@@ -3073,9 +3756,10 @@ fn run_analysis(
     // the user's sensitivity here (run_analysis is invoked from contexts
     // without it threaded), so default to Medium — the fallback path is rare
     // and a Medium baseline is the safest choice.
-    let game_config = crate::game_config::ResolvedConfig::resolve(
+    let (game_config, _) = crate::game_config::ResolvedConfig::resolve_for_stream_style(
         vod.game_name.as_deref(),
         crate::game_config::Sensitivity::Medium,
+        crate::game_config::StreamStyle::from_str_or_default(&vod.stream_style),
     );
     if let Ok(r) = analyze_via_chat(chat_messages, duration, vod_id, &game_config.chat) {
         let mut combined = r.rate_peaks;
@@ -3110,9 +3794,9 @@ fn run_analysis(
             // dimension scores or fused source set. Stays None permanently.
             scoring_dimensions: None,
             signal_sources: None,
-            review_rating: None,       // user-set via Review UI
-            review_note: None,         // user-set via Review UI
-            review_issues: None,       // user-set edit-quality feedback
+            review_rating: None,           // user-set via Review UI
+            review_note: None,             // user-set via Review UI
+            review_issues: None,           // user-set edit-quality feedback
             community_clip_mp4_path: None, // position-fallback — no Twitch clip file
         });
     } else {
@@ -3120,13 +3804,21 @@ fn run_analysis(
         let positions: Vec<(f64, f64)> = if duration < 300.0 {
             vec![(0.05, 0.85), (0.45, 0.78), (0.80, 0.82)]
         } else {
-            vec![(0.03, 0.80), (0.20, 0.75), (0.40, 0.82), (0.60, 0.78), (0.85, 0.88)]
+            vec![
+                (0.03, 0.80),
+                (0.20, 0.75),
+                (0.40, 0.82),
+                (0.60, 0.78),
+                (0.85, 0.88),
+            ]
         };
 
         for (frac, score) in positions {
             let start = (duration * frac).max(0.0);
             let end = (start + clip_duration).min(duration);
-            if end - start < 5.0 { continue; }
+            if end - start < 5.0 {
+                continue;
+            }
 
             let mins = (start as u32) / 60;
             let secs = (start as u32) % 60;
@@ -3152,9 +3844,9 @@ fn run_analysis(
                 // dimension scores or fused source set. Stays None permanently.
                 scoring_dimensions: None,
                 signal_sources: None,
-                review_rating: None,       // user-set via Review UI
-                review_note: None,         // user-set via Review UI
-                review_issues: None,       // user-set edit-quality feedback
+                review_rating: None,           // user-set via Review UI
+                review_note: None,             // user-set via Review UI
+                review_issues: None,           // user-set edit-quality feedback
                 community_clip_mp4_path: None, // chat/position fallback — no Twitch clip file
             });
         }
@@ -3232,7 +3924,9 @@ fn analyze_via_chat(
     // don't false-positive on slow chats where the floor would otherwise
     // catch ambient activity. Floor + dynamic = best of both.
     let rate_threshold = (rate_avg * 1.3).max(chat_config.rate_min_msgs_per_window as f64);
-    let mut rate_peak_idxs: Vec<(usize, u32)> = rate_counts.iter().enumerate()
+    let mut rate_peak_idxs: Vec<(usize, u32)> = rate_counts
+        .iter()
+        .enumerate()
         .filter(|(_, &count)| count as f64 > rate_threshold)
         .map(|(i, &count)| (i, count))
         .collect();
@@ -3259,20 +3953,27 @@ fn analyze_via_chat(
                 visual_score: virality * 0.85,
                 chat_score,
                 transcript_snippet: Some(format!("{} chat messages in this window", count)),
-                description: Some(format!("Chat spike ({} msgs) at {}:{:02}", count, mins, secs)),
+                description: Some(format!(
+                    "Chat spike ({} msgs) at {}:{:02}",
+                    count, mins, secs
+                )),
                 tags: Some("chat-peak,reaction,auto".to_string()),
                 thumbnail_path: None,
                 created_at: now.clone(),
                 confidence_score: Some(compute_confidence(virality, 1)),
-                explanation: Some(format!("1 signal — chat {:.0}% ({} messages)", chat_score * 100.0, count)),
+                explanation: Some(format!(
+                    "1 signal — chat {:.0}% ({} messages)",
+                    chat_score * 100.0,
+                    count
+                )),
                 event_summary: Some(format!("chat went off with {} messages", count)),
                 // Intermediate signal event (not a ClipCandidate) — no per-clip
                 // dimension scores or fused source set. Stays None permanently.
                 scoring_dimensions: None,
                 signal_sources: None,
-                review_rating: None,       // user-set via Review UI
-                review_note: None,         // user-set via Review UI
-                review_issues: None,       // user-set edit-quality feedback
+                review_rating: None,           // user-set via Review UI
+                review_note: None,             // user-set via Review UI
+                review_issues: None,           // user-set edit-quality feedback
                 community_clip_mp4_path: None, // chat/position fallback — no Twitch clip file
             });
         }
@@ -3291,7 +3992,9 @@ fn analyze_via_chat(
         // Dynamic component (avg*2) scales with the VOD's chat density so we
         // don't fire on relatively-quiet chats. Floor + dynamic = best of both.
         let threshold = (emote_avg * 2.0).max(chat_config.emote_burst_threshold as f64);
-        let mut emote_peak_idxs: Vec<(usize, u32)> = emote_counts.iter().enumerate()
+        let mut emote_peak_idxs: Vec<(usize, u32)> = emote_counts
+            .iter()
+            .enumerate()
             .filter(|(_, &count)| count as f64 > threshold)
             .map(|(i, &count)| (i, count))
             .collect();
@@ -3316,21 +4019,31 @@ fn analyze_via_chat(
                     audio_score: virality * 0.85,
                     visual_score: virality * 0.85,
                     chat_score,
-                    transcript_snippet: Some(format!("{} emote occurrences in this 10s window", count)),
-                    description: Some(format!("Emote burst ({} emotes) at {}:{:02}", count, mins, secs)),
+                    transcript_snippet: Some(format!(
+                        "{} emote occurrences in this 10s window",
+                        count
+                    )),
+                    description: Some(format!(
+                        "Emote burst ({} emotes) at {}:{:02}",
+                        count, mins, secs
+                    )),
                     tags: Some("emote-burst,reaction,auto".to_string()),
                     thumbnail_path: None,
                     created_at: now.clone(),
                     confidence_score: Some(compute_confidence(virality, 1)),
-                    explanation: Some(format!("1 signal — emote burst {:.0}% ({} emotes)", chat_score * 100.0, count)),
+                    explanation: Some(format!(
+                        "1 signal — emote burst {:.0}% ({} emotes)",
+                        chat_score * 100.0,
+                        count
+                    )),
                     event_summary: Some(format!("chat hit with {} emotes in 10s", count)),
                     // Intermediate signal event (not a ClipCandidate) — no per-clip
                     // dimension scores or fused source set. Stays None permanently.
                     scoring_dimensions: None,
                     signal_sources: None,
-                    review_rating: None,       // user-set via Review UI
-                    review_note: None,         // user-set via Review UI
-                    review_issues: None,       // user-set edit-quality feedback
+                    review_rating: None,           // user-set via Review UI
+                    review_note: None,             // user-set via Review UI
+                    review_issues: None,           // user-set edit-quality feedback
                     community_clip_mp4_path: None, // emote/position fallback — no Twitch clip file
                 });
             }
@@ -3341,7 +4054,10 @@ fn analyze_via_chat(
         return Err("No engagement peaks found".to_string());
     }
 
-    Ok(ChatAnalysisResult { rate_peaks, emote_peaks })
+    Ok(ChatAnalysisResult {
+        rate_peaks,
+        emote_peaks,
+    })
 }
 
 // â”€â”€ VOD info / list commands â”€â”€
@@ -3394,7 +4110,11 @@ pub async fn get_vods(
         return Err("Not logged in. Please log in with Twitch first.".into());
     }
 
-    log::info!("[get_vods] Fetching VODs for twitch_user_id={}, token_len={}", twitch_user_id, access_token.len());
+    log::info!(
+        "[get_vods] Fetching VODs for twitch_user_id={}, token_len={}",
+        twitch_user_id,
+        access_token.len()
+    );
 
     // Try fetching VODs; if 401, refresh token and retry
     let videos = match twitch::get_vods(&access_token, &twitch_user_id).await {
@@ -3430,7 +4150,8 @@ pub async fn get_vods(
                 title: v.title.clone(),
                 duration_seconds: twitch::parse_duration(&v.duration),
                 stream_date: v.created_at.clone(),
-                thumbnail_url: v.thumbnail_url
+                thumbnail_url: v
+                    .thumbnail_url
                     .replace("%{width}", "640")
                     .replace("%{height}", "360"),
                 vod_url: v.url.clone(),
@@ -3442,6 +4163,9 @@ pub async fn get_vods(
                 download_progress: Some(0),
                 analysis_progress: 0,
                 game_name: None,
+                stream_style: "auto".to_string(),
+                detected_stream_style: "mixed".to_string(),
+                analyzed_stream_style: None,
                 cam_region_norm: None,
             }
         })
@@ -3454,7 +4178,11 @@ pub async fn get_vods(
             db::upsert_vod(&conn, vod).map_err(|e| format!("DB error: {}", e))?;
             upsert_count += 1;
         }
-        log::info!("[get_vods] Upserted {} VODs to database for channel_id={}", upsert_count, channel_id);
+        log::info!(
+            "[get_vods] Upserted {} VODs to database for channel_id={}",
+            upsert_count,
+            channel_id
+        );
     }
 
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
@@ -3470,7 +4198,11 @@ pub async fn get_vods(
         let live_ids: std::collections::HashSet<String> =
             videos.iter().map(|v| v.id.clone()).collect();
         match db::purge_expired_vods(&conn, &channel_id, &live_ids) {
-            Ok(n) if n > 0 => log::info!("[get_vods] purged {} expired-on-Twitch VOD(s) (channel_id={})", n, channel_id),
+            Ok(n) if n > 0 => log::info!(
+                "[get_vods] purged {} expired-on-Twitch VOD(s) (channel_id={})",
+                n,
+                channel_id
+            ),
             Ok(_) => {}
             Err(e) => log::warn!("[get_vods] purge_expired_vods failed: {}", e),
         }
@@ -3486,7 +4218,11 @@ pub async fn get_vods(
         .into_iter()
         .filter(|v| v.channel_id == channel_id || v.download_status == "downloaded")
         .collect();
-    log::info!("[get_vods] returning {} VODs for channel {} (active account + downloads)", result.len(), channel_id);
+    log::info!(
+        "[get_vods] returning {} VODs for channel {} (active account + downloads)",
+        result.len(),
+        channel_id
+    );
     Ok(result)
 }
 
@@ -3516,10 +4252,13 @@ pub fn delete_clip(clip_id: String, db: State<'_, DbConn>) -> Result<(), String>
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
 
     // Get the vod_id before deleting so we can check remaining clips
-    let clip_source: Option<(String, String)> = conn.query_row(
-        "SELECT vod_id, source_kind FROM clips WHERE id = ?1", rusqlite::params![clip_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).ok();
+    let clip_source: Option<(String, String)> = conn
+        .query_row(
+            "SELECT vod_id, source_kind FROM clips WHERE id = ?1",
+            rusqlite::params![clip_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok();
 
     let metadata = serde_json::json!({
         "sourceKind": clip_source.as_ref().map(|(_, source)| source.as_str()).unwrap_or("unknown")
@@ -3542,16 +4281,24 @@ pub fn delete_clip(clip_id: String, db: State<'_, DbConn>) -> Result<(), String>
     db::delete_clip(&conn, &clip_id).map_err(|e| format!("DB error: {}", e))?;
 
     // If no clips remain for this VOD, reset analysis_status so user can re-analyze
-    if let Some((vid, _)) = clip_source.filter(|(_, source)| source == "twitch_vod" || source == "twitch_community") {
-        let remaining: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM clips WHERE vod_id = ?1", rusqlite::params![vid],
-            |row| row.get(0),
-        ).unwrap_or(0);
+    if let Some((vid, _)) =
+        clip_source.filter(|(_, source)| source == "twitch_vod" || source == "twitch_community")
+    {
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM clips WHERE vod_id = ?1",
+                rusqlite::params![vid],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
 
         if remaining == 0 {
             db::update_vod_analysis_status(&conn, &vid, "pending")
                 .map_err(|e| format!("DB error: {}", e))?;
-            log::info!("All clips deleted for VOD {} â€” reset analysis_status to pending", vid);
+            log::info!(
+                "All clips deleted for VOD {} â€” reset analysis_status to pending",
+                vid
+            );
         }
     }
 
@@ -3582,34 +4329,42 @@ pub async fn refresh_vod_metadata(
 
     // Fetch fresh video data from Twitch via curl fallback â€” retry with refreshed token on 401
     let url = format!("https://api.twitch.tv/helix/videos?id={}", twitch_video_id);
-    let mut body = twitch::curl_twitch_get(&url, &access_token).await
+    let mut body = twitch::curl_twitch_get(&url, &access_token)
+        .await
         .map_err(|e| format!("Twitch API error: {}", e))?;
 
     // Check for 401 in the response body (curl doesn't give us HTTP status codes directly)
     if body.contains("\"status\":401") || body.contains("\"status\": 401") {
         // Token expired â€” try refreshing
         access_token = try_refresh_twitch_token(&db, &access_token).await?;
-        body = twitch::curl_twitch_get(&url, &access_token).await
+        body = twitch::curl_twitch_get(&url, &access_token)
+            .await
             .map_err(|e| format!("Twitch API error: {}", e))?;
     }
 
     // Check for other API errors
     if let Ok(err_val) = serde_json::from_str::<serde_json::Value>(&body) {
         if let Some(status) = err_val.get("status") {
-            let msg = err_val.get("message").and_then(|m| m.as_str()).unwrap_or("");
+            let msg = err_val
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("");
             return Err(format!("Twitch API {}: {}", status, msg));
         }
     }
 
-    let resp_json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| format!("Parse error: {}", e))?;
+    let resp_json: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("Parse error: {}", e))?;
 
-    let video = resp_json["data"].as_array()
+    let video = resp_json["data"]
+        .as_array()
         .and_then(|arr| arr.first())
         .ok_or("Video not found on Twitch")?;
 
     let title = video["title"].as_str().unwrap_or("").to_string();
-    let thumbnail_url = video["thumbnail_url"].as_str().unwrap_or("")
+    let thumbnail_url = video["thumbnail_url"]
+        .as_str()
+        .unwrap_or("")
         .replace("%{width}", "640")
         .replace("%{height}", "360");
 
@@ -3620,9 +4375,13 @@ pub async fn refresh_vod_metadata(
         conn.execute(
             "UPDATE vods SET title = ?1, thumbnail_url = ?2 WHERE id = ?3",
             rusqlite::params![title, thumbnail_url, vod_id],
-        ).map_err(|e| format!("DB error: {}", e))?;
+        )
+        .map_err(|e| format!("DB error: {}", e))?;
 
-        log::info!("[refresh_vod_metadata] Updated title/thumbnail for VOD {}", vod_id);
+        log::info!(
+            "[refresh_vod_metadata] Updated title/thumbnail for VOD {}",
+            vod_id
+        );
     }
 
     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
@@ -3633,22 +4392,32 @@ pub async fn refresh_vod_metadata(
 
 /// Set the game on a single clip (lightweight â€” used for auto-save after subtitle inference).
 #[tauri::command]
-pub fn set_clip_game(clip_id: String, game: Option<String>, db: State<'_, DbConn>) -> Result<(), String> {
+pub fn set_clip_game(
+    clip_id: String,
+    game: Option<String>,
+    db: State<'_, DbConn>,
+) -> Result<(), String> {
     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
     let g = game.as_deref().filter(|s| !s.is_empty());
     log::info!("[set_clip_game] Setting clip {} game to: {:?}", clip_id, g);
-    db::update_clip_game(&conn, &clip_id, g)
-        .map_err(|e| format!("DB error: {}", e))
+    db::update_clip_game(&conn, &clip_id, g).map_err(|e| format!("DB error: {}", e))
 }
 
 /// Set the title on a single clip (lightweight â€” used for auto-save on blur).
 #[tauri::command]
-pub fn set_clip_title(clip_id: String, title: Option<String>, db: State<'_, DbConn>) -> Result<(), String> {
+pub fn set_clip_title(
+    clip_id: String,
+    title: Option<String>,
+    db: State<'_, DbConn>,
+) -> Result<(), String> {
     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
     let t = title.as_deref().filter(|s| !s.is_empty());
-    log::info!("[set_clip_title] Setting clip {} title to: {:?}", clip_id, t);
-    db::update_clip_title(&conn, &clip_id, t)
-        .map_err(|e| format!("DB error: {}", e))
+    log::info!(
+        "[set_clip_title] Setting clip {} title to: {:?}",
+        clip_id,
+        t
+    );
+    db::update_clip_title(&conn, &clip_id, t).map_err(|e| format!("DB error: {}", e))
 }
 
 /// Save publish description and hashtags on a clip (auto-save on blur / after generation).
@@ -3662,7 +4431,12 @@ pub fn set_clip_publish_meta(
     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
     let desc = description.as_deref().filter(|s| !s.is_empty());
     let tags = hashtags.as_deref().filter(|s| !s.is_empty());
-    log::info!("[set_clip_publish_meta] clip {} desc_len={:?} tags={:?}", clip_id, desc.map(|d| d.len()), tags);
+    log::info!(
+        "[set_clip_publish_meta] clip {} desc_len={:?} tags={:?}",
+        clip_id,
+        desc.map(|d| d.len()),
+        tags
+    );
     if let Some(d) = desc {
         println!("[CLIPGOBLIN DEBUG] Publish description saved: \"{}\"", d);
     }
@@ -3673,26 +4447,87 @@ pub fn set_clip_publish_meta(
 /// Manually set the game name on a VOD and propagate to all its clips.
 /// Used as a manual fallback when auto-detection doesn't work.
 #[tauri::command]
-pub fn set_vod_game(vod_id: String, game_name: Option<String>, db: State<'_, DbConn>) -> Result<(), String> {
+pub fn set_vod_game(
+    vod_id: String,
+    game_name: Option<String>,
+    db: State<'_, DbConn>,
+) -> Result<(), String> {
     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
     let gn = game_name.as_deref().filter(|s| !s.is_empty());
+    let previous = db::get_vod_by_id(&conn, &vod_id)
+        .map_err(|e| format!("DB error: {}", e))?
+        .ok_or_else(|| "VOD not found".to_string())?;
+    if previous.game_name.as_deref() != gn
+        && previous.analysis_status == "completed"
+        && previous.analyzed_stream_style.is_none()
+    {
+        let previous_requested =
+            crate::game_config::StreamStyle::from_str_or_default(&previous.stream_style);
+        let previous_key = crate::game_config::stream_style_analysis_key(
+            previous.game_name.as_deref(),
+            previous_requested,
+        );
+        db::update_vod_analyzed_stream_style(&conn, &vod_id, Some(&previous_key))
+            .map_err(|e| format!("DB error: {}", e))?;
+    }
     log::info!("[set_vod_game] Setting VOD {} game to: {:?}", vod_id, gn);
-    db::update_vod_game_name(&conn, &vod_id, gn)
-        .map_err(|e| format!("DB error: {}", e))?;
+    db::update_vod_game_name(&conn, &vod_id, gn).map_err(|e| format!("DB error: {}", e))?;
     // Propagate to all clips from this VOD (overwrite all, since user explicitly set it)
     if let Some(name) = gn {
         conn.execute(
             "UPDATE clips SET game = ?1 WHERE vod_id = ?2",
             rusqlite::params![name, vod_id],
-        ).map_err(|e| format!("DB error: {}", e))?;
-        log::info!("[set_vod_game] Propagated game to all clips for VOD {}", vod_id);
+        )
+        .map_err(|e| format!("DB error: {}", e))?;
+        log::info!(
+            "[set_vod_game] Propagated game to all clips for VOD {}",
+            vod_id
+        );
     } else {
         conn.execute(
             "UPDATE clips SET game = NULL WHERE vod_id = ?1",
             rusqlite::params![vod_id],
-        ).map_err(|e| format!("DB error: {}", e))?;
+        )
+        .map_err(|e| format!("DB error: {}", e))?;
     }
     Ok(())
+}
+
+/// Store a per-VOD stream-style correction. Completed VODs keep a marker for
+/// the detector profile that produced their current clips, so the UI can offer
+/// an explicit re-analysis instead of silently replacing results.
+#[tauri::command]
+pub fn set_vod_stream_style(
+    vod_id: String,
+    stream_style: String,
+    db: State<'_, DbConn>,
+) -> Result<db::VodRow, String> {
+    let requested = crate::game_config::StreamStyle::parse(&stream_style)
+        .ok_or_else(|| format!("Unknown stream style: {}", stream_style))?;
+    let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+    let previous = db::get_vod_by_id(&conn, &vod_id)
+        .map_err(|e| format!("DB error: {}", e))?
+        .ok_or_else(|| "VOD not found".to_string())?;
+
+    if previous.stream_style != requested.as_str()
+        && previous.analysis_status == "completed"
+        && previous.analyzed_stream_style.is_none()
+    {
+        let previous_requested =
+            crate::game_config::StreamStyle::from_str_or_default(&previous.stream_style);
+        let previous_key = crate::game_config::stream_style_analysis_key(
+            previous.game_name.as_deref(),
+            previous_requested,
+        );
+        db::update_vod_analyzed_stream_style(&conn, &vod_id, Some(&previous_key))
+            .map_err(|e| format!("DB error: {}", e))?;
+    }
+
+    db::update_vod_stream_style(&conn, &vod_id, requested.as_str())
+        .map_err(|e| format!("DB error: {}", e))?;
+    db::get_vod_by_id(&conn, &vod_id)
+        .map_err(|e| format!("DB error: {}", e))?
+        .ok_or_else(|| "VOD not found after update".to_string())
 }
 
 /// Delete a VOD's video file only (keeps clips and metadata)
@@ -3731,7 +4566,10 @@ pub fn delete_vod_and_clips(vod_id: String, db: State<'_, DbConn>) -> Result<u64
     let vod = db::get_vod_by_id(&conn, &vod_id)
         .map_err(|e| format!("DB error: {}", e))?
         .ok_or("VOD not found")?;
-    println!("[delete_vod_and_clips] Found VOD: twitch_video_id={}", vod.twitch_video_id);
+    println!(
+        "[delete_vod_and_clips] Found VOD: twitch_video_id={}",
+        vod.twitch_video_id
+    );
 
     let mut freed: u64 = 0;
 
@@ -3768,26 +4606,34 @@ pub fn delete_vod_and_clips(vod_id: String, db: State<'_, DbConn>) -> Result<u64
     conn.execute(
         "DELETE FROM highlights WHERE vod_id = ?1",
         rusqlite::params![vod_id],
-    ).ok();
-    db::delete_vod(&conn, &vod_id)
-        .map_err(|e| format!("DB error deleting vod: {}", e))?;
+    )
+    .ok();
+    db::delete_vod(&conn, &vod_id).map_err(|e| format!("DB error deleting vod: {}", e))?;
 
     // Verify the VOD is gone and the twitch_video_id is in deleted_vods
     let still_exists = db::get_vod_by_id(&conn, &vod_id).ok().flatten().is_some();
-    println!("[delete_vod_and_clips] DONE vod_id={} freed={} still_in_db={}", vod_id, freed, still_exists);
+    println!(
+        "[delete_vod_and_clips] DONE vod_id={} freed={} still_in_db={}",
+        vod_id, freed, still_exists
+    );
 
     Ok(freed)
 }
 
 /// Get VOD disk usage info (for delete confirmation dialog).
 #[tauri::command]
-pub fn get_vod_disk_usage(vod_id: String, db: State<'_, DbConn>) -> Result<serde_json::Value, String> {
+pub fn get_vod_disk_usage(
+    vod_id: String,
+    db: State<'_, DbConn>,
+) -> Result<serde_json::Value, String> {
     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
     let vod = db::get_vod_by_id(&conn, &vod_id)
         .map_err(|e| format!("DB error: {}", e))?
         .ok_or("VOD not found")?;
 
-    let vod_size: u64 = vod.local_path.as_ref()
+    let vod_size: u64 = vod
+        .local_path
+        .as_ref()
         .and_then(|p| std::fs::metadata(p).ok())
         .map(|m| m.len())
         .unwrap_or(0);
@@ -3824,10 +4670,13 @@ pub fn get_vod_detail(vod_id: String, db: State<'_, DbConn>) -> Result<db::VodRo
 
 /// Set a VOD's analysis status (used by frontend to mark stale analyses as failed).
 #[tauri::command]
-pub fn set_vod_analysis_status(vod_id: String, status: String, db: State<'_, DbConn>) -> Result<(), String> {
+pub fn set_vod_analysis_status(
+    vod_id: String,
+    status: String,
+    db: State<'_, DbConn>,
+) -> Result<(), String> {
     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-    db::update_vod_analysis_status(&conn, &vod_id, &status)
-        .map_err(|e| format!("DB error: {}", e))
+    db::update_vod_analysis_status(&conn, &vod_id, &status).map_err(|e| format!("DB error: {}", e))
 }
 
 /// Save clip performance metrics for analytics.
@@ -3846,14 +4695,26 @@ pub fn save_clip_performance(
 ) -> Result<(), String> {
     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
     db::insert_clip_performance(
-        &conn, &clip_id, &platform, views, likes, comments, shares,
-        retention_rate, first_3s_hold_rate, completion_rate,
-    ).map_err(|e| format!("DB error: {}", e))
+        &conn,
+        &clip_id,
+        &platform,
+        views,
+        likes,
+        comments,
+        shares,
+        retention_rate,
+        first_3s_hold_rate,
+        completion_rate,
+    )
+    .map_err(|e| format!("DB error: {}", e))
 }
 
 /// Get clip performance data by clip ID.
 #[tauri::command]
-pub fn get_clip_performance(clip_id: String, db: State<'_, DbConn>) -> Result<Vec<db::ClipPerformanceRow>, String> {
+pub fn get_clip_performance(
+    clip_id: String,
+    db: State<'_, DbConn>,
+) -> Result<Vec<db::ClipPerformanceRow>, String> {
     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
     db::get_clip_performance(&conn, &clip_id).map_err(|e| format!("DB error: {}", e))
 }
@@ -3870,36 +4731,40 @@ pub fn get_creator_profile(db: State<'_, DbConn>) -> Result<db::CreatorProfileRo
 #[tauri::command]
 pub fn update_scoring_from_performance(db: State<'_, DbConn>) -> Result<String, String> {
     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-    let mut profile = db::get_or_create_creator_profile(&conn)
-        .map_err(|e| format!("DB error: {}", e))?;
+    let mut profile =
+        db::get_or_create_creator_profile(&conn).map_err(|e| format!("DB error: {}", e))?;
 
     // Get all clips with performance data
-    let mut stmt = conn.prepare(
-        "SELECT c.id, h.virality_score, h.audio_score, h.visual_score, h.chat_score, h.tags,
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.id, h.virality_score, h.audio_score, h.visual_score, h.chat_score, h.tags,
                 p.retention_rate, p.first_3s_hold_rate, p.completion_rate, p.views, p.shares
          FROM clips c
          JOIN highlights h ON h.id = c.highlight_id
          JOIN clip_performance p ON p.clip_id = c.id
          WHERE p.views > 0
-         ORDER BY p.retention_rate DESC"
-    ).map_err(|e| format!("DB error: {}", e))?;
+         ORDER BY p.retention_rate DESC",
+        )
+        .map_err(|e| format!("DB error: {}", e))?;
 
-    let perf_data: Vec<(f64, f64, f64, f64, String, f64, f64, f64, i64, i64)> = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, f64>(1)?,  // virality
-            row.get::<_, f64>(2)?,  // audio
-            row.get::<_, f64>(3)?,  // visual
-            row.get::<_, f64>(4)?,  // chat
-            row.get::<_, String>(5).unwrap_or_default(),  // tags
-            row.get::<_, f64>(6)?,  // retention
-            row.get::<_, f64>(7)?,  // 3s hold
-            row.get::<_, f64>(8)?,  // completion
-            row.get::<_, i64>(9)?,  // views
-            row.get::<_, i64>(10)?, // shares
-        ))
-    }).map_err(|e| format!("DB error: {}", e))?
-    .filter_map(|r| r.ok())
-    .collect();
+    let perf_data: Vec<(f64, f64, f64, f64, String, f64, f64, f64, i64, i64)> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, f64>(1)?,                       // virality
+                row.get::<_, f64>(2)?,                       // audio
+                row.get::<_, f64>(3)?,                       // visual
+                row.get::<_, f64>(4)?,                       // chat
+                row.get::<_, String>(5).unwrap_or_default(), // tags
+                row.get::<_, f64>(6)?,                       // retention
+                row.get::<_, f64>(7)?,                       // 3s hold
+                row.get::<_, f64>(8)?,                       // completion
+                row.get::<_, i64>(9)?,                       // views
+                row.get::<_, i64>(10)?,                      // shares
+            ))
+        })
+        .map_err(|e| format!("DB error: {}", e))?
+        .filter_map(|r| r.ok())
+        .collect();
 
     if perf_data.len() < 3 {
         return Ok("Not enough performance data yet (need at least 3 clips with metrics). Keep creating and tracking clips!".to_string());
@@ -3937,22 +4802,28 @@ pub fn update_scoring_from_performance(db: State<'_, DbConn>) -> Result<String, 
     }
     let mut sorted_tags: Vec<(String, usize)> = tag_counts.into_iter().collect();
     sorted_tags.sort_by(|a, b| b.1.cmp(&a.1));
-    let top_tags: Vec<String> = sorted_tags.iter().take(10).map(|(t, _)| t.clone()).collect();
+    let top_tags: Vec<String> = sorted_tags
+        .iter()
+        .take(10)
+        .map(|(t, _)| t.clone())
+        .collect();
     profile.top_performing_tags = Some(top_tags.join(","));
 
     profile.total_clips_tracked = perf_data.len() as i64;
 
     // Normalize weights to sum to 1.0
-    let sum = profile.avg_hook_weight + profile.avg_emotional_weight + profile.avg_payoff_weight
-        + profile.avg_loop_weight + profile.avg_context_weight;
+    let sum = profile.avg_hook_weight
+        + profile.avg_emotional_weight
+        + profile.avg_payoff_weight
+        + profile.avg_loop_weight
+        + profile.avg_context_weight;
     profile.avg_hook_weight /= sum;
     profile.avg_emotional_weight /= sum;
     profile.avg_payoff_weight /= sum;
     profile.avg_loop_weight /= sum;
     profile.avg_context_weight /= sum;
 
-    db::update_creator_profile(&conn, &profile)
-        .map_err(|e| format!("DB error: {}", e))?;
+    db::update_creator_profile(&conn, &profile).map_err(|e| format!("DB error: {}", e))?;
 
     Ok(format!(
         "Scoring weights updated from {} clips! Hook: {:.0}%, Emotional: {:.0}%, Payoff: {:.0}%, Loop: {:.0}%, Context: {:.0}%. Top tags: {}",
@@ -3968,7 +4839,11 @@ pub fn update_scoring_from_performance(db: State<'_, DbConn>) -> Result<String, 
 
 /// Get transcript for a VOD (run transcription if not cached)
 #[tauri::command]
-pub async fn get_transcript(vod_id: String, db: State<'_, DbConn>, _hw: State<'_, HardwareInfo>) -> Result<serde_json::Value, String> {
+pub async fn get_transcript(
+    vod_id: String,
+    db: State<'_, DbConn>,
+    _hw: State<'_, HardwareInfo>,
+) -> Result<serde_json::Value, String> {
     let vod = {
         let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
         db::get_vod_by_id(&conn, &vod_id)
@@ -3985,21 +4860,23 @@ pub async fn get_transcript(vod_id: String, db: State<'_, DbConn>, _hw: State<'_
     std::fs::create_dir_all(&transcript_dir).ok();
     let output_path = transcript_dir.join(format!("{}.json", vod_id));
 
-    // Return cached transcript if it exists
-    if output_path.exists() {
-        let json_str = std::fs::read_to_string(&output_path)
-            .map_err(|e| format!("Read error: {}", e))?;
-        let val: serde_json::Value = serde_json::from_str(&json_str)
-            .map_err(|e| format!("Parse error: {}", e))?;
-        return Ok(val);
+    // Generated caches are reused only when the complete local recognition
+    // recipe still matches. Older cache files remain readable but are stale.
+    if let Ok(expected) = expected_detection_recognition_native(&vod_path, Some(&vod_id), None) {
+        if let Some(cached) = load_current_transcript_cache(&output_path, &expected) {
+            return serde_json::to_value(cached).map_err(|e| format!("Serialize: {e}"));
+        }
     }
 
     // Run native whisper-rs transcription
     let output_str = output_path.to_string_lossy().to_string();
     let vod_path_clone = vod_path.clone();
+    let vod_id_for_task = vod_id.clone();
     let result = tokio::task::spawn_blocking(move || {
-        run_transcription_native(&vod_path_clone, &output_str, None)
-    }).await.map_err(|e| format!("Task error: {}", e))??;
+        run_transcription_native(&vod_path_clone, &output_str, Some(&vod_id_for_task))
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))??;
 
     // Save path to VOD record
     {
@@ -4018,10 +4895,12 @@ pub async fn get_transcript(vod_id: String, db: State<'_, DbConn>, _hw: State<'_
 ///   2345678901  (bare ID)
 fn parse_twitch_vod_id(input: &str) -> Option<String> {
     let trimmed = input.trim();
-    if trimmed.is_empty() { return None }
+    if trimmed.is_empty() {
+        return None;
+    }
     // Bare numeric ID
     if trimmed.chars().all(|c| c.is_ascii_digit()) {
-        return Some(trimmed.to_string())
+        return Some(trimmed.to_string());
     }
     // Find "videos/" segment and take following digits
     let lower = trimmed.to_lowercase();
@@ -4030,7 +4909,7 @@ fn parse_twitch_vod_id(input: &str) -> Option<String> {
         let tail = &trimmed[start + marker.len()..];
         let id: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
         if !id.is_empty() {
-            return Some(id)
+            return Some(id);
         }
     }
     None
@@ -4040,10 +4919,7 @@ fn parse_twitch_vod_id(input: &str) -> Option<String> {
 /// creates/updates the channel row if needed, and upserts the VOD.
 /// Returns the resulting VodRow (caller should refresh the VODs list after).
 #[tauri::command]
-pub async fn import_vod_by_url(
-    url: String,
-    db: State<'_, DbConn>,
-) -> Result<db::VodRow, String> {
+pub async fn import_vod_by_url(url: String, db: State<'_, DbConn>) -> Result<db::VodRow, String> {
     // ── Dev-only command ──
     // Importing arbitrary public Twitch VODs is allowed in `cargo tauri dev`
     // (so we can test signal pipelines on chatty/popular streamer chats), but
@@ -4061,14 +4937,21 @@ pub async fn import_vod_by_url(
     // If this VOD was already imported, return it as-is (idempotent)
     {
         let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-        let existing: Option<db::VodRow> = conn.query_row(
-            "SELECT id FROM vods WHERE twitch_video_id = ?1",
-            rusqlite::params![twitch_video_id],
-            |row| row.get::<_, String>(0),
-        ).ok().and_then(|id| db::get_vod_by_id(&conn, &id).ok().flatten());
+        let existing: Option<db::VodRow> = conn
+            .query_row(
+                "SELECT id FROM vods WHERE twitch_video_id = ?1",
+                rusqlite::params![twitch_video_id],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|id| db::get_vod_by_id(&conn, &id).ok().flatten());
         if let Some(v) = existing {
-            log::info!("[import_vod_by_url] VOD {} already imported ({})", twitch_video_id, v.id);
-            return Ok(v)
+            log::info!(
+                "[import_vod_by_url] VOD {} already imported ({})",
+                twitch_video_id,
+                v.id
+            );
+            return Ok(v);
         }
     }
 
@@ -4085,28 +4968,41 @@ pub async fn import_vod_by_url(
 
     // Fetch video metadata — retry once on 401 with refreshed token
     let api_url = format!("https://api.twitch.tv/helix/videos?id={}", twitch_video_id);
-    let mut body = twitch::curl_twitch_get(&api_url, &access_token).await
+    let mut body = twitch::curl_twitch_get(&api_url, &access_token)
+        .await
         .map_err(|e| format!("Twitch API error: {}", e))?;
     if body.contains("\"status\":401") || body.contains("\"status\": 401") {
         access_token = try_refresh_twitch_token(&db, &access_token).await?;
-        body = twitch::curl_twitch_get(&api_url, &access_token).await
+        body = twitch::curl_twitch_get(&api_url, &access_token)
+            .await
             .map_err(|e| format!("Twitch API error: {}", e))?;
     }
 
-    let resp: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| format!("Parse error: {}", e))?;
+    let resp: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("Parse error: {}", e))?;
 
     if let Some(status) = resp.get("status") {
         let msg = resp.get("message").and_then(|m| m.as_str()).unwrap_or("");
         return Err(format!("Twitch API {}: {}", status, msg));
     }
 
-    let video = resp["data"].as_array()
+    let video = resp["data"]
+        .as_array()
         .and_then(|arr| arr.first())
-        .ok_or_else(|| format!("VOD {} not found on Twitch (deleted, private, or sub-only)", twitch_video_id))?;
+        .ok_or_else(|| {
+            format!(
+                "VOD {} not found on Twitch (deleted, private, or sub-only)",
+                twitch_video_id
+            )
+        })?;
 
-    let title = video["title"].as_str().unwrap_or("Untitled VOD").to_string();
-    let thumbnail_url = video["thumbnail_url"].as_str().unwrap_or("")
+    let title = video["title"]
+        .as_str()
+        .unwrap_or("Untitled VOD")
+        .to_string();
+    let thumbnail_url = video["thumbnail_url"]
+        .as_str()
+        .unwrap_or("")
         .replace("%{width}", "640")
         .replace("%{height}", "360");
     let duration_str = video["duration"].as_str().unwrap_or("0s");
@@ -4115,7 +5011,10 @@ pub async fn import_vod_by_url(
     let vod_url = video["url"].as_str().unwrap_or(&url).to_string();
     let user_id = video["user_id"].as_str().unwrap_or("").to_string();
     let user_login = video["user_login"].as_str().unwrap_or("").to_string();
-    let user_name = video["user_name"].as_str().unwrap_or(&user_login).to_string();
+    let user_name = video["user_name"]
+        .as_str()
+        .unwrap_or(&user_login)
+        .to_string();
 
     if user_id.is_empty() {
         return Err("Twitch response missing channel info".into());
@@ -4124,8 +5023,7 @@ pub async fn import_vod_by_url(
     // Find-or-create channel row
     let channel_id = {
         let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-        let channels = db::get_all_channels(&conn)
-            .map_err(|e| format!("DB error: {}", e))?;
+        let channels = db::get_all_channels(&conn).map_err(|e| format!("DB error: {}", e))?;
         if let Some(ch) = channels.into_iter().find(|c| c.twitch_user_id == user_id) {
             ch.id
         } else {
@@ -4133,7 +5031,11 @@ pub async fn import_vod_by_url(
             let new_id = uuid::Uuid::new_v4().to_string();
             db::insert_channel(&conn, &new_id, &user_id, &user_login, &user_name, "")
                 .map_err(|e| format!("DB error: {}", e))?;
-            log::info!("[import_vod_by_url] Created stub channel for @{} ({})", user_login, user_id);
+            log::info!(
+                "[import_vod_by_url] Created stub channel for @{} ({})",
+                user_login,
+                user_id
+            );
             new_id
         }
     };
@@ -4156,12 +5058,20 @@ pub async fn import_vod_by_url(
         download_progress: Some(0),
         analysis_progress: 0,
         game_name: None,
+        stream_style: "auto".to_string(),
+        detected_stream_style: "mixed".to_string(),
+        analyzed_stream_style: None,
         cam_region_norm: None,
     };
     {
         let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
         db::upsert_vod(&conn, &vod_row).map_err(|e| format!("DB error: {}", e))?;
-        log::info!("[import_vod_by_url] Imported VOD {} ({}) from @{}", twitch_video_id, vod_row.id, user_login);
+        log::info!(
+            "[import_vod_by_url] Imported VOD {} ({}) from @{}",
+            twitch_video_id,
+            vod_row.id,
+            user_login
+        );
     }
 
     // Re-read so we return any DB-side defaults that may have been applied
@@ -4192,9 +5102,10 @@ pub async fn get_stream_status(
 ) -> Result<StreamStatus, String> {
     let (twitch_user_id, mut access_token) = {
         let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-        let channels = db::get_all_channels(&conn)
-            .map_err(|e| format!("DB error: {}", e))?;
-        let channel = channels.into_iter().find(|c| c.id == channel_id)
+        let channels = db::get_all_channels(&conn).map_err(|e| format!("DB error: {}", e))?;
+        let channel = channels
+            .into_iter()
+            .find(|c| c.id == channel_id)
             .ok_or("Channel not found")?;
         let token = db::get_setting(&conn, "twitch_user_access_token")
             .map_err(|e| format!("DB error: {}", e))?
@@ -4212,17 +5123,22 @@ pub async fn get_stream_status(
         });
     }
 
-    let url = format!("https://api.twitch.tv/helix/streams?user_id={}", twitch_user_id);
-    let mut body = twitch::curl_twitch_get(&url, &access_token).await
+    let url = format!(
+        "https://api.twitch.tv/helix/streams?user_id={}",
+        twitch_user_id
+    );
+    let mut body = twitch::curl_twitch_get(&url, &access_token)
+        .await
         .map_err(|e| format!("Twitch API error: {}", e))?;
     if body.contains("\"status\":401") || body.contains("\"status\": 401") {
         access_token = try_refresh_twitch_token(&db, &access_token).await?;
-        body = twitch::curl_twitch_get(&url, &access_token).await
+        body = twitch::curl_twitch_get(&url, &access_token)
+            .await
             .map_err(|e| format!("Twitch API error: {}", e))?;
     }
 
-    let resp: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| format!("Parse error: {}", e))?;
+    let resp: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("Parse error: {}", e))?;
 
     // When the user is offline, Twitch returns { data: [] } — not an error.
     let stream = resp["data"].as_array().and_then(|arr| arr.first());
@@ -4237,8 +5153,14 @@ pub async fn get_stream_status(
         Some(s) => Ok(StreamStatus {
             is_live: true,
             viewer_count: s["viewer_count"].as_i64().unwrap_or(0),
-            game_name: s["game_name"].as_str().map(|x| x.to_string()).filter(|x| !x.is_empty()),
-            title: s["title"].as_str().map(|x| x.to_string()).filter(|x| !x.is_empty()),
+            game_name: s["game_name"]
+                .as_str()
+                .map(|x| x.to_string())
+                .filter(|x| !x.is_empty()),
+            title: s["title"]
+                .as_str()
+                .map(|x| x.to_string())
+                .filter(|x| !x.is_empty()),
             started_at: s["started_at"].as_str().map(|x| x.to_string()),
         }),
     }
@@ -4247,6 +5169,79 @@ pub async fn get_stream_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_caption_prompt_omits_creator_but_keeps_game_and_user_vocabulary() {
+        let final_prompt = build_recognition_prompt(
+            RecognitionPurpose::FinalCaption,
+            Some("Dead by Daylight".into()),
+            Some("example_creator".into()),
+            vec!["Meg Thomas".into(), "Pallet stun".into()],
+        );
+
+        assert!(final_prompt.text.contains("Game: Dead by Daylight."));
+        assert!(final_prompt
+            .text
+            .contains("Vocabulary: Meg Thomas, Pallet stun."));
+        assert!(!final_prompt.text.contains("example_creator"));
+        assert_eq!(final_prompt.automatic_terms, vec!["Dead by Daylight"]);
+
+        let detection_prompt = build_recognition_prompt(
+            RecognitionPurpose::Detection,
+            Some("Dead by Daylight".into()),
+            Some("example_creator".into()),
+            Vec::new(),
+        );
+        assert!(detection_prompt.text.contains("Creator: example_creator."));
+    }
+
+    #[test]
+    fn saved_name_glossary_reaches_final_caption_prompt_for_real_clip_phrase() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::run_migrations(&conn).unwrap();
+        db::save_transcription_glossary(&mut conn, "Slug, Slug's").unwrap();
+
+        let prompt = recognition_prompt(
+            RecognitionPurpose::FinalCaption,
+            Some(&conn),
+            None,
+            Some("Dead by Daylight"),
+        );
+        assert!(prompt.text.contains("Vocabulary: Slug, Slug's."));
+        assert_eq!(prompt.automatic_terms, vec!["Dead by Daylight"]);
+
+        let regression_phrase = "Me and Slug's ping goes hard";
+        assert!(regression_phrase.contains("Slug's"));
+        assert!(!prompt.text.contains("shlex"));
+    }
+
+    #[test]
+    fn detection_stays_base_while_final_captions_can_use_local_medium() {
+        assert_eq!(
+            recognition_model_for_purpose(
+                RecognitionPurpose::Detection,
+                whisper::WhisperModel::Medium,
+                true,
+            ),
+            whisper::WhisperModel::Base,
+        );
+        assert_eq!(
+            recognition_model_for_purpose(
+                RecognitionPurpose::FinalCaption,
+                whisper::WhisperModel::Medium,
+                true,
+            ),
+            whisper::WhisperModel::Medium,
+        );
+        assert_eq!(
+            recognition_model_for_purpose(
+                RecognitionPurpose::FinalCaption,
+                whisper::WhisperModel::Medium,
+                false,
+            ),
+            whisper::WhisperModel::Base,
+        );
+    }
 
     #[test]
     fn vod_download_lease_blocks_duplicates_and_releases_after_drop() {
@@ -4296,6 +5291,12 @@ mod tests {
         assert!(try_acquire_analysis_slot(semaphore).is_ok());
     }
 
+    #[test]
+    fn detected_vertical_gameplay_defaults_to_context_fit() {
+        assert_eq!(default_detected_gameplay_layout("9:16"), "context_fit");
+        assert_eq!(default_detected_gameplay_layout("16:9"), "none");
+    }
+
     fn seg(start: f64, end: f64, text: &str) -> TranscriptSegment {
         TranscriptSegment {
             start,
@@ -4303,6 +5304,34 @@ mod tests {
             text: text.to_string(),
             words: Vec::new(),
         }
+    }
+
+    #[test]
+    fn generated_transcript_cache_requires_the_exact_current_recipe() {
+        let mut transcript = TranscriptResult {
+            segments: Vec::new(),
+            full_text: String::new(),
+            language: "en".to_string(),
+            keywords_found: Vec::new(),
+            recognition: None,
+        };
+        let expected = whisper::RecognitionProvenance {
+            pipeline_version: whisper::RECOGNITION_PIPELINE_VERSION,
+            signature: "current-recipe".to_string(),
+            ..Default::default()
+        };
+
+        assert!(!transcript_cache_matches(&transcript, &expected));
+
+        transcript.recognition = Some(expected.clone());
+        assert!(transcript_cache_matches(&transcript, &expected));
+
+        transcript.recognition.as_mut().unwrap().signature = "different-recipe".to_string();
+        assert!(!transcript_cache_matches(&transcript, &expected));
+
+        transcript.recognition.as_mut().unwrap().signature = expected.signature.clone();
+        transcript.recognition.as_mut().unwrap().pipeline_version -= 1;
+        assert!(!transcript_cache_matches(&transcript, &expected));
     }
 
     #[test]
@@ -4369,14 +5398,14 @@ mod tests {
             seg(5.0, 6.0, "noise"),
             seg(6.0, 7.0, "Done."),
         ];
-        assert!(!is_hallucinated_segment(&segs, 0));  // "Real." standalone
-        // Indices 1-5 are all inside the 5-run.
+        assert!(!is_hallucinated_segment(&segs, 0)); // "Real." standalone
+                                                     // Indices 1-5 are all inside the 5-run.
         assert!(is_hallucinated_segment(&segs, 1));
         assert!(is_hallucinated_segment(&segs, 2));
         assert!(is_hallucinated_segment(&segs, 3));
         assert!(is_hallucinated_segment(&segs, 4));
         assert!(is_hallucinated_segment(&segs, 5));
-        assert!(!is_hallucinated_segment(&segs, 6));  // "Done." standalone
+        assert!(!is_hallucinated_segment(&segs, 6)); // "Done." standalone
     }
 
     #[test]
@@ -4388,22 +5417,59 @@ mod tests {
         let wr = whisper::TranscriptResult {
             language: "en".to_string(),
             duration: 6.0,
+            recognition: whisper::RecognitionProvenance::default(),
             segments: vec![
-                whisper::TranscriptSegment { start: 0.0, end: 1.0, text: "oh my god dance sound".to_string(), words: Vec::new() },
-                whisper::TranscriptSegment { start: 1.0, end: 2.0, text: "oh my god dance sound".to_string(), words: Vec::new() },
-                whisper::TranscriptSegment { start: 2.0, end: 3.0, text: "oh my god dance sound".to_string(), words: Vec::new() },
-                whisper::TranscriptSegment { start: 3.0, end: 4.0, text: "oh my god dance sound".to_string(), words: Vec::new() },
-                whisper::TranscriptSegment { start: 4.0, end: 5.0, text: "oh my god dance sound".to_string(), words: Vec::new() },
-                whisper::TranscriptSegment { start: 5.0, end: 6.0, text: "no way that worked".to_string(), words: Vec::new() },
+                whisper::TranscriptSegment {
+                    start: 0.0,
+                    end: 1.0,
+                    text: "oh my god dance sound".to_string(),
+                    words: Vec::new(),
+                },
+                whisper::TranscriptSegment {
+                    start: 1.0,
+                    end: 2.0,
+                    text: "oh my god dance sound".to_string(),
+                    words: Vec::new(),
+                },
+                whisper::TranscriptSegment {
+                    start: 2.0,
+                    end: 3.0,
+                    text: "oh my god dance sound".to_string(),
+                    words: Vec::new(),
+                },
+                whisper::TranscriptSegment {
+                    start: 3.0,
+                    end: 4.0,
+                    text: "oh my god dance sound".to_string(),
+                    words: Vec::new(),
+                },
+                whisper::TranscriptSegment {
+                    start: 4.0,
+                    end: 5.0,
+                    text: "oh my god dance sound".to_string(),
+                    words: Vec::new(),
+                },
+                whisper::TranscriptSegment {
+                    start: 5.0,
+                    end: 6.0,
+                    text: "no way that worked".to_string(),
+                    words: Vec::new(),
+                },
             ],
         };
 
         let result = convert_whisper_result(&wr);
 
-        let has_oh_my_god = result.keywords_found.iter().any(|k| k.keyword == "oh my god");
+        let has_oh_my_god = result
+            .keywords_found
+            .iter()
+            .any(|k| k.keyword == "oh my god");
         let has_no_way = result.keywords_found.iter().any(|k| k.keyword == "no way");
 
-        assert!(!has_oh_my_god, "Hallucinated 'oh my god' should have been filtered out");
+        assert!(
+            !has_oh_my_god,
+            "Hallucinated 'oh my god' should have been filtered out"
+        );
         assert!(has_no_way, "Real 'no way' should still be detected");
     }
 
@@ -4412,19 +5478,35 @@ mod tests {
         // Phase A amendment: words that appear in calm gaming chat ("let's go",
         // "what the", "run", etc.) used to trigger kw_boost on boring moments.
         // The list now keeps only exclamation-shaped reaction words.
-        let conversational = ["what the", "let's go", "lets go", "run", "help",
-                              "behind", "dead", "done", "yes", "dude", "bro"];
+        let conversational = [
+            "what the", "let's go", "lets go", "run", "help", "behind", "dead", "done", "yes",
+            "dude", "bro",
+        ];
         for word in &conversational {
-            assert!(!TRANSCRIPT_KEYWORDS.contains(word),
-                "Conversational word {:?} should NOT be in TRANSCRIPT_KEYWORDS", word);
+            assert!(
+                !TRANSCRIPT_KEYWORDS.contains(word),
+                "Conversational word {:?} should NOT be in TRANSCRIPT_KEYWORDS",
+                word
+            );
         }
 
         // Verify the genuinely-emotional keepers are still present.
-        let kept = ["no way", "oh my god", "holy", "clutch", "rage",
-                    "noooo", "nooo", "oh no"];
+        let kept = [
+            "no way",
+            "oh my god",
+            "holy",
+            "clutch",
+            "rage",
+            "noooo",
+            "nooo",
+            "oh no",
+        ];
         for word in &kept {
-            assert!(TRANSCRIPT_KEYWORDS.contains(word),
-                "Emotional word {:?} should still be in TRANSCRIPT_KEYWORDS", word);
+            assert!(
+                TRANSCRIPT_KEYWORDS.contains(word),
+                "Emotional word {:?} should still be in TRANSCRIPT_KEYWORDS",
+                word
+            );
         }
     }
 
@@ -4478,18 +5560,29 @@ mod tests {
             full_text: String::new(),
             language: "en".to_string(),
             keywords_found: Vec::new(),
+            recognition: None,
         };
-        let path = std::env::temp_dir().join(format!("clipviral-srt-test-{}.srt", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("clipviral-srt-test-{}.srt", uuid::Uuid::new_v4()));
 
         generate_srt_for_clip(&transcript, 10.0, 14.0, &path).unwrap();
         let srt = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(path);
-        let blocks: Vec<&str> = srt.split("\n\n").filter(|block| !block.trim().is_empty()).collect();
+        let blocks: Vec<&str> = srt
+            .split("\n\n")
+            .filter(|block| !block.trim().is_empty())
+            .collect();
 
         assert_eq!(blocks.len(), 8);
         assert!(blocks[0].contains("00:00:00,000 --> 00:00:00,400"));
         assert!(blocks.iter().all(|block| {
-            block.lines().last().unwrap_or_default().split_whitespace().count() == 1
+            block
+                .lines()
+                .last()
+                .unwrap_or_default()
+                .split_whitespace()
+                .count()
+                == 1
         }));
     }
 
@@ -4516,6 +5609,7 @@ mod tests {
             full_text: String::new(),
             language: "en".to_string(),
             keywords_found: Vec::new(),
+            recognition: None,
         };
         let path = std::env::temp_dir().join(format!(
             "clipviral-srt-pause-test-{}.srt",
@@ -4538,15 +5632,32 @@ mod tests {
                 end: 1.5,
                 text: "- [BLANK_AUDIO] *cough* hello".to_string(),
                 words: vec![
-                    TranscriptWord { word: "-".to_string(), start: 0.0, end: 0.1 },
-                    TranscriptWord { word: "[BLANK_AUDIO]".to_string(), start: 0.2, end: 0.4 },
-                    TranscriptWord { word: "*cough*".to_string(), start: 0.5, end: 0.8 },
-                    TranscriptWord { word: "hello".to_string(), start: 1.0, end: 1.3 },
+                    TranscriptWord {
+                        word: "-".to_string(),
+                        start: 0.0,
+                        end: 0.1,
+                    },
+                    TranscriptWord {
+                        word: "[BLANK_AUDIO]".to_string(),
+                        start: 0.2,
+                        end: 0.4,
+                    },
+                    TranscriptWord {
+                        word: "*cough*".to_string(),
+                        start: 0.5,
+                        end: 0.8,
+                    },
+                    TranscriptWord {
+                        word: "hello".to_string(),
+                        start: 1.0,
+                        end: 1.3,
+                    },
                 ],
             }],
             full_text: String::new(),
             language: "en".to_string(),
             keywords_found: Vec::new(),
+            recognition: None,
         };
         let path = std::env::temp_dir().join(format!(
             "clipviral-srt-artifact-test-{}.srt",
@@ -4571,13 +5682,22 @@ mod tests {
                 end: 10.9,
                 text: "my turn".to_string(),
                 words: vec![
-                    TranscriptWord { word: "my".to_string(), start: 10.0, end: 10.04 },
-                    TranscriptWord { word: "turn".to_string(), start: 10.5, end: 10.9 },
+                    TranscriptWord {
+                        word: "my".to_string(),
+                        start: 10.0,
+                        end: 10.04,
+                    },
+                    TranscriptWord {
+                        word: "turn".to_string(),
+                        start: 10.5,
+                        end: 10.9,
+                    },
                 ],
             }],
             full_text: String::new(),
             language: "en".to_string(),
             keywords_found: Vec::new(),
+            recognition: None,
         };
         let path = std::env::temp_dir().join(format!(
             "clipviral-srt-short-word-test-{}.srt",
@@ -4603,17 +5723,28 @@ mod tests {
             full_text: String::new(),
             language: "en".to_string(),
             keywords_found: Vec::new(),
+            recognition: None,
         };
-        let path = std::env::temp_dir().join(format!("clipviral-srt-test-{}.srt", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("clipviral-srt-test-{}.srt", uuid::Uuid::new_v4()));
 
         generate_srt_for_clip(&transcript, 0.0, 12.0, &path).unwrap();
         let srt = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(path);
-        let blocks: Vec<&str> = srt.split("\n\n").filter(|block| !block.trim().is_empty()).collect();
+        let blocks: Vec<&str> = srt
+            .split("\n\n")
+            .filter(|block| !block.trim().is_empty())
+            .collect();
 
         assert_eq!(blocks.len(), 11);
         assert!(blocks.iter().all(|block| {
-            block.lines().last().unwrap_or_default().split_whitespace().count() == 1
+            block
+                .lines()
+                .last()
+                .unwrap_or_default()
+                .split_whitespace()
+                .count()
+                == 1
         }));
     }
 }

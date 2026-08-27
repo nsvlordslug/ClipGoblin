@@ -140,12 +140,7 @@ impl PersonalizationProfile {
         self.confidence
     }
 
-    pub fn score_adjustment(
-        &self,
-        dimensions: [f64; 6],
-        tags: &[String],
-        sources: &[&str],
-    ) -> f64 {
+    pub fn score_adjustment(&self, dimensions: [f64; 6], tags: &[String], sources: &[&str]) -> f64 {
         if !self.is_active() {
             return 0.0;
         }
@@ -354,7 +349,9 @@ fn normalize_label(value: &str) -> String {
 }
 
 fn parse_tags(value: Option<&str>) -> Vec<String> {
-    let Some(value) = value else { return Vec::new() };
+    let Some(value) = value else {
+        return Vec::new();
+    };
     serde_json::from_str::<Vec<String>>(value)
         .unwrap_or_else(|_| value.split(',').map(str::to_string).collect())
         .into_iter()
@@ -364,7 +361,9 @@ fn parse_tags(value: Option<&str>) -> Vec<String> {
 }
 
 fn parse_sources(value: Option<&str>) -> Vec<String> {
-    let Some(value) = value else { return Vec::new() };
+    let Some(value) = value else {
+        return Vec::new();
+    };
     serde_json::from_str::<Vec<String>>(value)
         .unwrap_or_else(|_| value.split(',').map(str::to_string).collect())
         .into_iter()
@@ -388,9 +387,7 @@ fn weighted_correlation(
     let covariance = samples
         .iter()
         .map(|sample| {
-            sample.weight
-                * (feature(sample) - feature_mean)
-                * (sample.target - target_mean)
+            sample.weight * (feature(sample) - feature_mean) * (sample.target - target_mean)
         })
         .sum::<f64>()
         / total_weight;
@@ -540,11 +537,8 @@ mod tests {
         for id in 10..20 {
             feedback.push(row(id, "boring", 0.1, "idle", "Valorant"));
         }
-        let profile = PersonalizationProfile::from_feedback(
-            &feedback,
-            Some("creator-1"),
-            Some("Valorant"),
-        );
+        let profile =
+            PersonalizationProfile::from_feedback(&feedback, Some("creator-1"), Some("Valorant"));
         assert!(profile.is_active());
 
         let liked = profile.score_adjustment(
@@ -558,7 +552,10 @@ mod tests {
             &["audio", "transcript"],
         );
         assert!(liked > 0.0, "liked candidate should receive a boost");
-        assert!(disliked < 0.0, "disliked candidate should receive a penalty");
+        assert!(
+            disliked < 0.0,
+            "disliked candidate should receive a penalty"
+        );
         assert!(liked > disliked);
     }
 
@@ -571,16 +568,9 @@ mod tests {
         for id in 20..40 {
             feedback.push(row(id, "boring", 0.0, "idle", "Valorant"));
         }
-        let profile = PersonalizationProfile::from_feedback(
-            &feedback,
-            Some("creator-1"),
-            Some("Valorant"),
-        );
-        let adjustment = profile.score_adjustment(
-            [1.0; 6],
-            &["clutch".to_string()],
-            &["audio"],
-        );
+        let profile =
+            PersonalizationProfile::from_feedback(&feedback, Some("creator-1"), Some("Valorant"));
+        let adjustment = profile.score_adjustment([1.0; 6], &["clutch".to_string()], &["audio"]);
         assert!(adjustment.abs() <= MAX_SCORE_ADJUSTMENT + f64::EPSILON);
     }
 

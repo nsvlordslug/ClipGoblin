@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Result as SqliteResult, params};
+use rusqlite::{params, Connection, Result as SqliteResult};
 use std::path::PathBuf;
 
 use crate::crypto;
@@ -11,8 +11,13 @@ pub fn db_path() -> std::result::Result<PathBuf, String> {
     let data_dir = dirs::data_dir()
         .ok_or_else(|| "Could not determine your system data directory. Ensure your OS user profile is set up correctly.".to_string())?
         .join("clipviral");
-    std::fs::create_dir_all(&data_dir)
-        .map_err(|e| format!("Failed to create data directory at {}: {}", data_dir.display(), e))?;
+    std::fs::create_dir_all(&data_dir).map_err(|e| {
+        format!(
+            "Failed to create data directory at {}: {}",
+            data_dir.display(),
+            e
+        )
+    })?;
     Ok(data_dir.join("clipviral.db"))
 }
 
@@ -126,8 +131,11 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
     .ok();
     conn.execute("ALTER TABLE clips ADD COLUMN facecam_settings TEXT", [])
         .ok();
-    conn.execute("ALTER TABLE clips ADD COLUMN context_background_path TEXT", [])
-        .ok();
+    conn.execute(
+        "ALTER TABLE clips ADD COLUMN context_background_path TEXT",
+        [],
+    )
+    .ok();
     conn.execute(
         "ALTER TABLE clips ADD COLUMN context_background_mode TEXT DEFAULT 'blur'",
         [],
@@ -209,9 +217,23 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
         [],
     )
     .ok();
+    conn.execute(
+        "ALTER TABLE clips ADD COLUMN caption_card_scale REAL DEFAULT 0.75",
+        [],
+    )
+    .ok();
 
     // Game metadata: captured from Twitch API or set manually
     conn.execute("ALTER TABLE vods ADD COLUMN game_name TEXT", [])
+        .ok();
+    // Per-VOD stream style: requested selector value plus the exact detector
+    // profile marker used by the last successful analysis.
+    conn.execute(
+        "ALTER TABLE vods ADD COLUMN stream_style TEXT NOT NULL DEFAULT 'auto'",
+        [],
+    )
+    .ok();
+    conn.execute("ALTER TABLE vods ADD COLUMN analyzed_stream_style TEXT", [])
         .ok();
     conn.execute("ALTER TABLE clips ADD COLUMN game TEXT", [])
         .ok();
@@ -471,6 +493,36 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
         [],
     )
     .ok();
+    conn.execute(
+        "ALTER TABLE clips ADD COLUMN captions_provenance TEXT NOT NULL DEFAULT 'legacy'",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "ALTER TABLE clips ADD COLUMN captions_pipeline_version INTEGER NOT NULL DEFAULT 0",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "ALTER TABLE clips ADD COLUMN caption_audio_mode TEXT NOT NULL DEFAULT 'mixed'",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "ALTER TABLE clips ADD COLUMN captions_recognition_signature TEXT",
+        [],
+    )
+    .ok();
+    conn.execute("ALTER TABLE clips ADD COLUMN captions_language TEXT", [])
+        .ok();
+    conn.execute("ALTER TABLE clips ADD COLUMN caption_audio_stream TEXT", [])
+        .ok();
+    conn.execute(
+        "UPDATE clips
+            SET captions_provenance = 'none', captions_pipeline_version = 0
+          WHERE captions_text IS NULL OR TRIM(captions_text) = ''",
+        [],
+    )?;
     // Older subtitle files did not record which source timestamp maps to SRT
     // time zero. Recover the best available origin from the linked highlight;
     // standalone community clips are always transcribed from their own 0:00.
@@ -550,6 +602,19 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
             ON detection_feedback(channel_id);
         CREATE INDEX IF NOT EXISTS idx_detection_feedback_game
             ON detection_feedback(game_name);",
+    )?;
+
+    // Local-only recognition vocabulary learned from repeated manual subtitle
+    // corrections. Corrected terms are prompt context, never replacement rules.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS transcription_corrections (
+            source_word TEXT NOT NULL,
+            corrected_word TEXT NOT NULL,
+            occurrences INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(source_word, corrected_word)
+        )",
+        [],
     )?;
 
     // Durable edit-quality feedback is intentionally separate from moment
@@ -724,6 +789,12 @@ pub struct VodRow {
     pub download_progress: Option<i64>,
     pub analysis_progress: i64,
     pub game_name: Option<String>,
+    /// User selection: auto, action, cozy, story, talking, or mixed.
+    pub stream_style: String,
+    /// Broad style inferred from game metadata for the Auto selector label.
+    pub detected_stream_style: String,
+    /// Stable profile marker used by the last successful analysis.
+    pub analyzed_stream_style: Option<String>,
     /// JSON-encoded `{"x":f32,"y":f32,"w":f32,"h":f32}` in normalized 0..1 source-frame coords.
     /// NULL/absent = no region set; export falls back to dup-source.
     #[serde(default)]
@@ -846,6 +917,18 @@ pub(crate) fn normalize_caption_font_scale(value: f64) -> f64 {
     }
 }
 
+pub(crate) const MIN_CAPTION_CARD_SCALE: f64 = 0.5;
+pub(crate) const MAX_CAPTION_CARD_SCALE: f64 = 1.0;
+pub(crate) const DEFAULT_CAPTION_CARD_SCALE: f64 = 0.75;
+
+pub(crate) fn normalize_caption_card_scale(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(MIN_CAPTION_CARD_SCALE, MAX_CAPTION_CARD_SCALE)
+    } else {
+        DEFAULT_CAPTION_CARD_SCALE
+    }
+}
+
 pub(crate) const MIN_CAPTION_Y_OFFSET: f64 = -20.0;
 pub(crate) const MAX_CAPTION_Y_OFFSET: f64 = 20.0;
 
@@ -859,6 +942,35 @@ pub(crate) fn normalize_caption_y_offset(value: f64) -> f64 {
 
 fn default_caption_font_scale() -> f64 {
     1.0
+}
+
+fn default_caption_card_scale() -> f64 {
+    DEFAULT_CAPTION_CARD_SCALE
+}
+
+fn default_captions_provenance() -> String {
+    "legacy".to_string()
+}
+
+pub(crate) fn normalize_captions_provenance(value: &str) -> &str {
+    match value {
+        "none" => "none",
+        "analysis-draft" => "analysis-draft",
+        "aligned" => "aligned",
+        "edited" => "edited",
+        _ => "legacy",
+    }
+}
+
+fn default_caption_audio_mode() -> String {
+    "mixed".to_string()
+}
+
+pub(crate) fn normalize_caption_audio_mode(value: &str) -> &str {
+    match value {
+        "microphone" => "microphone",
+        _ => "mixed",
+    }
 }
 
 fn default_context_blur_strength() -> f64 {
@@ -932,6 +1044,9 @@ pub struct ClipRow {
     pub caption_style: String,
     #[serde(default = "default_caption_font_scale")]
     pub caption_font_scale: f64,
+    /// Independent scale for Cardboard's persistent torn-card placard.
+    #[serde(default = "default_caption_card_scale")]
+    pub caption_card_scale: f64,
     /// Fine vertical adjustment in percentage points relative to the selected
     /// top/center/bottom caption anchor.
     #[serde(default)]
@@ -939,6 +1054,24 @@ pub struct ClipRow {
     /// Absolute source-media timestamp represented by SRT time 0:00.
     #[serde(default)]
     pub captions_source_start: Option<f64>,
+    /// Origin and edit-safety state for the current caption text.
+    #[serde(default = "default_captions_provenance")]
+    pub captions_provenance: String,
+    /// Version of the local alignment pipeline that generated the captions.
+    #[serde(default)]
+    pub captions_pipeline_version: i64,
+    /// Audio source used by accurate local transcription.
+    #[serde(default = "default_caption_audio_mode")]
+    pub caption_audio_mode: String,
+    /// Deterministic recipe for the generated recognition result.
+    #[serde(default)]
+    pub captions_recognition_signature: Option<String>,
+    /// Language resolved by Whisper (`en`, another ISO code, or `und`).
+    #[serde(default)]
+    pub captions_language: Option<String>,
+    /// Human-readable selected source track, without the source path.
+    #[serde(default)]
+    pub caption_audio_stream: Option<String>,
     pub facecam_layout: String,
     /// JSON-serialized editor geometry for Split and Picture in Picture.
     #[serde(default)]
@@ -1061,7 +1194,11 @@ fn encrypt_for_storage(key: &str, value: &str) -> SqliteResult<String> {
         return Ok(value.to_string());
     }
     crypto::encrypt_sensitive(value).map_err(|e| {
-        log::error!("Refusing to store sensitive setting '{}' in plaintext — encryption failed: {}", key, e);
+        log::error!(
+            "Refusing to store sensitive setting '{}' in plaintext — encryption failed: {}",
+            key,
+            e
+        );
         rusqlite::Error::ToSqlConversionFailure(
             format!("encrypt failed for '{}': {}", key, e).into(),
         )
@@ -1074,7 +1211,11 @@ fn decrypt_from_storage(key: &str, value: &str) -> String {
         return value.to_string();
     }
     crypto::decrypt_sensitive(value).unwrap_or_else(|e| {
-        log::warn!("Failed to decrypt setting '{}': {} — returning raw value", key, e);
+        log::warn!(
+            "Failed to decrypt setting '{}': {} — returning raw value",
+            key,
+            e
+        );
         value.to_string()
     })
 }
@@ -1091,12 +1232,114 @@ pub fn save_setting(conn: &Connection, key: &str, value: &str) -> SqliteResult<(
     Ok(())
 }
 
+pub(crate) fn normalize_transcription_glossary(value: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    value
+        .split(|character| matches!(character, ',' | ';' | '\n' | '\r'))
+        .filter_map(|term| {
+            let normalized = term
+                .replace('\0', " ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(48)
+                .collect::<String>();
+            if normalized.is_empty() || !seen.insert(normalized.to_lowercase()) {
+                None
+            } else {
+                Some(normalized)
+            }
+        })
+        .take(24)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub fn save_transcription_glossary(conn: &mut Connection, value: &str) -> SqliteResult<usize> {
+    let normalized = normalize_transcription_glossary(value);
+    let previous = get_setting(conn, "transcription_glossary")?
+        .map(|value| normalize_transcription_glossary(&value))
+        .unwrap_or_default();
+    if previous == normalized {
+        save_setting(conn, "transcription_glossary", &normalized)?;
+        return Ok(0);
+    }
+
+    let transaction = conn.transaction()?;
+    save_setting(&transaction, "transcription_glossary", &normalized)?;
+    let invalidated = transaction.execute(
+        "UPDATE clips
+            SET captions_pipeline_version = 0,
+                captions_recognition_signature = NULL,
+                render_status = 'pending',
+                output_path = NULL
+          WHERE captions_provenance IN ('analysis-draft', 'aligned')",
+        [],
+    )?;
+    transaction.commit()?;
+    Ok(invalidated)
+}
+
 pub fn get_setting(conn: &Connection, key: &str) -> SqliteResult<Option<String>> {
     let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
     let mut rows = stmt.query_map(params![key], |row| row.get::<_, String>(0))?;
     match rows.next() {
         Some(val) => Ok(Some(decrypt_from_storage(key, &val?))),
         None => Ok(None),
+    }
+}
+
+pub fn record_transcription_corrections(
+    conn: &Connection,
+    corrections: &[(String, String)],
+) -> SqliteResult<usize> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut recorded = 0usize;
+    for (source_word, corrected_word) in corrections.iter().take(64) {
+        if source_word == corrected_word
+            || source_word.is_empty()
+            || corrected_word.is_empty()
+            || source_word.len() > 64
+            || corrected_word.len() > 64
+        {
+            continue;
+        }
+        conn.execute(
+            "INSERT INTO transcription_corrections
+                 (source_word, corrected_word, occurrences, updated_at)
+             VALUES (?1, ?2, 1, ?3)
+             ON CONFLICT(source_word, corrected_word) DO UPDATE SET
+                 occurrences = MIN(transcription_corrections.occurrences + 1, 1000),
+                 updated_at = excluded.updated_at",
+            params![source_word, corrected_word, now],
+        )?;
+        recorded += 1;
+    }
+    Ok(recorded)
+}
+
+pub fn get_learned_transcription_terms(
+    conn: &Connection,
+    limit: usize,
+) -> SqliteResult<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT corrected_word, SUM(occurrences) AS total
+           FROM transcription_corrections
+          WHERE occurrences >= 2
+          GROUP BY corrected_word
+          ORDER BY total DESC, corrected_word COLLATE NOCASE ASC
+          LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([limit.min(40) as i64], |row| row.get::<_, String>(0))?;
+    rows.collect()
+}
+
+pub fn transcription_correction_learning_enabled(conn: &Connection) -> bool {
+    match get_setting(conn, "transcription_learn_corrections") {
+        Ok(Some(value)) => !value.trim().eq_ignore_ascii_case("false"),
+        Ok(None) => true,
+        Err(_) => false,
     }
 }
 
@@ -1159,8 +1402,8 @@ pub fn upsert_vod(conn: &Connection, vod: &VodRow) -> SqliteResult<()> {
     // suppressed here. (The old `deleted_vods` suppression was always undone by
     // `restore_deleted_vods` before every fetch anyway — a dead contradiction.)
     conn.execute(
-        "INSERT INTO vods (id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress, game_name)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+        "INSERT INTO vods (id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress, game_name, stream_style, analyzed_stream_style)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
          ON CONFLICT(twitch_video_id) DO UPDATE SET
             channel_id = excluded.channel_id,
             title = excluded.title,
@@ -1173,6 +1416,7 @@ pub fn upsert_vod(conn: &Connection, vod: &VodRow) -> SqliteResult<()> {
             vod.duration_seconds, vod.stream_date, vod.thumbnail_url, vod.vod_url,
             vod.download_status, vod.local_path, vod.file_size_bytes, vod.analysis_status,
             vod.created_at, vod.download_progress, vod.analysis_progress, vod.game_name,
+            vod.stream_style, vod.analyzed_stream_style,
         ],
     )?;
     Ok(())
@@ -1211,28 +1455,11 @@ pub fn purge_expired_vods(
 }
 
 pub fn get_vods_by_channel(conn: &Connection, channel_id: &str) -> SqliteResult<Vec<VodRow>> {
-    let mut stmt = conn.prepare(&format!("{} WHERE channel_id = ?1 ORDER BY stream_date DESC", VOD_SELECT))?;
-    let rows = stmt.query_map(params![channel_id], |row| {
-        Ok(VodRow {
-            id: row.get(0)?,
-            channel_id: row.get(1)?,
-            twitch_video_id: row.get(2)?,
-            title: row.get(3)?,
-            duration_seconds: row.get(4)?,
-            stream_date: row.get(5)?,
-            thumbnail_url: row.get(6)?,
-            vod_url: row.get(7)?,
-            download_status: row.get(8)?,
-            local_path: row.get(9)?,
-            file_size_bytes: row.get(10)?,
-            analysis_status: row.get(11)?,
-            created_at: row.get(12)?,
-            download_progress: row.get(13)?,
-            analysis_progress: row.get::<_, Option<i64>>(14)?.unwrap_or(0),
-            game_name: row.get(15)?,
-            cam_region_norm: row.get(16)?,
-        })
-    })?;
+    let mut stmt = conn.prepare(&format!(
+        "{} WHERE channel_id = ?1 ORDER BY stream_date DESC",
+        VOD_SELECT
+    ))?;
+    let rows = stmt.query_map(params![channel_id], read_vod_row)?;
     rows.collect()
 }
 
@@ -1243,53 +1470,13 @@ pub fn get_vods_by_channel(conn: &Connection, channel_id: &str) -> SqliteResult<
 /// Single-user desktop app — there's no privacy concern about cross-channel listing.
 pub fn get_all_vods(conn: &Connection) -> SqliteResult<Vec<VodRow>> {
     let mut stmt = conn.prepare(&format!("{} ORDER BY stream_date DESC", VOD_SELECT))?;
-    let rows = stmt.query_map([], |row| {
-        Ok(VodRow {
-            id: row.get(0)?,
-            channel_id: row.get(1)?,
-            twitch_video_id: row.get(2)?,
-            title: row.get(3)?,
-            duration_seconds: row.get(4)?,
-            stream_date: row.get(5)?,
-            thumbnail_url: row.get(6)?,
-            vod_url: row.get(7)?,
-            download_status: row.get(8)?,
-            local_path: row.get(9)?,
-            file_size_bytes: row.get(10)?,
-            analysis_status: row.get(11)?,
-            created_at: row.get(12)?,
-            download_progress: row.get(13)?,
-            analysis_progress: row.get::<_, Option<i64>>(14)?.unwrap_or(0),
-            game_name: row.get(15)?,
-            cam_region_norm: row.get(16)?,
-        })
-    })?;
+    let rows = stmt.query_map([], read_vod_row)?;
     rows.collect()
 }
 
 pub fn get_vod_by_id(conn: &Connection, id: &str) -> SqliteResult<Option<VodRow>> {
     let mut stmt = conn.prepare(&format!("{} WHERE id = ?1", VOD_SELECT))?;
-    let mut rows = stmt.query_map(params![id], |row| {
-        Ok(VodRow {
-            id: row.get(0)?,
-            channel_id: row.get(1)?,
-            twitch_video_id: row.get(2)?,
-            title: row.get(3)?,
-            duration_seconds: row.get(4)?,
-            stream_date: row.get(5)?,
-            thumbnail_url: row.get(6)?,
-            vod_url: row.get(7)?,
-            download_status: row.get(8)?,
-            local_path: row.get(9)?,
-            file_size_bytes: row.get(10)?,
-            analysis_status: row.get(11)?,
-            created_at: row.get(12)?,
-            download_progress: row.get(13)?,
-            analysis_progress: row.get::<_, Option<i64>>(14)?.unwrap_or(0),
-            game_name: row.get(15)?,
-            cam_region_norm: row.get(16)?,
-        })
-    })?;
+    let mut rows = stmt.query_map(params![id], read_vod_row)?;
     match rows.next() {
         Some(row) => Ok(Some(row?)),
         None => Ok(None),
@@ -1310,7 +1497,11 @@ pub fn update_vod_download_status(
     Ok(())
 }
 
-pub fn update_vod_download_progress(conn: &Connection, id: &str, progress: i64) -> SqliteResult<()> {
+pub fn update_vod_download_progress(
+    conn: &Connection,
+    id: &str,
+    progress: i64,
+) -> SqliteResult<()> {
     conn.execute(
         "UPDATE vods SET download_progress = ?1 WHERE id = ?2",
         params![progress, id],
@@ -1326,7 +1517,11 @@ pub fn update_vod_analysis_status(conn: &Connection, id: &str, status: &str) -> 
     Ok(())
 }
 
-pub fn update_vod_analysis_progress(conn: &Connection, id: &str, progress: i64) -> SqliteResult<()> {
+pub fn update_vod_analysis_progress(
+    conn: &Connection,
+    id: &str,
+    progress: i64,
+) -> SqliteResult<()> {
     conn.execute(
         "UPDATE vods SET analysis_progress = ?1 WHERE id = ?2",
         params![progress, id],
@@ -1413,6 +1608,22 @@ pub fn set_clip_review(
     note: Option<&str>,
     issues: Option<&str>,
 ) -> SqliteResult<()> {
+    set_clip_review_with_bounds(conn, highlight_id, rating, note, issues, None)
+}
+
+pub fn set_clip_review_with_bounds(
+    conn: &mut Connection,
+    highlight_id: &str,
+    rating: Option<&str>,
+    note: Option<&str>,
+    issues: Option<&str>,
+    approved_bounds: Option<(f64, f64)>,
+) -> SqliteResult<()> {
+    let approved_bounds = approved_bounds.filter(|(start, end)| {
+        rating == Some("good") && start.is_finite() && end.is_finite() && end > start
+    });
+    let approved_start = approved_bounds.map(|(start, _)| start);
+    let approved_end = approved_bounds.map(|(_, end)| end);
     let tx = conn.transaction()?;
     let updated = tx.execute(
         "UPDATE highlights
@@ -1431,8 +1642,9 @@ pub fn set_clip_review(
                 (highlight_id, vod_id, channel_id, game_name, start_seconds,
                  end_seconds, rating, note, scoring_dimensions, signal_sources,
                  tags, created_at, updated_at)
-             SELECT h.id, h.vod_id, v.channel_id, v.game_name, h.start_seconds,
-                    h.end_seconds, ?2, ?3, h.scoring_dimensions,
+             SELECT h.id, h.vod_id, v.channel_id, v.game_name,
+                    COALESCE(?5, h.start_seconds), COALESCE(?6, h.end_seconds),
+                    ?2, ?3, h.scoring_dimensions,
                     h.signal_sources, h.tags, COALESCE(h.created_at, ?4), ?4
              FROM highlights h
              LEFT JOIN vods v ON v.id = h.vod_id
@@ -1449,7 +1661,14 @@ pub fn set_clip_review(
                 signal_sources = excluded.signal_sources,
                 tags = excluded.tags,
                 updated_at = excluded.updated_at",
-            params![highlight_id, rating, note, now],
+            params![
+                highlight_id,
+                rating,
+                note,
+                now,
+                approved_start,
+                approved_end
+            ],
         )?;
         if inserted == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
@@ -1791,8 +2010,8 @@ pub fn get_clip_edit_feedback(conn: &Connection) -> SqliteResult<Vec<ClipEditFee
 
 pub fn insert_clip(conn: &Connection, c: &ClipRow) -> SqliteResult<()> {
     conn.execute(
-        "INSERT INTO clips (id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, render_status, output_path, thumbnail_path, created_at, game, community_clip_mp4_path, caption_font_scale, source_kind, source_media_path, source_fingerprint, source_recorded_at, context_background_path, context_background_mode, context_blur_strength, context_video_y, full_frame_scale, facecam_settings, caption_y_offset, captions_source_start)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35)
+        "INSERT INTO clips (id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, render_status, output_path, thumbnail_path, created_at, game, community_clip_mp4_path, caption_font_scale, source_kind, source_media_path, source_fingerprint, source_recorded_at, context_background_path, context_background_mode, context_blur_strength, context_video_y, full_frame_scale, facecam_settings, caption_y_offset, captions_source_start, captions_provenance, captions_pipeline_version, caption_audio_mode, captions_recognition_signature, captions_language, caption_audio_stream, caption_card_scale)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42)
          ON CONFLICT(id) DO UPDATE SET
            highlight_id = excluded.highlight_id,
            vod_id = excluded.vod_id,
@@ -1826,8 +2045,15 @@ pub fn insert_clip(conn: &Connection, c: &ClipRow) -> SqliteResult<()> {
            full_frame_scale = excluded.full_frame_scale,
            facecam_settings = excluded.facecam_settings,
            caption_y_offset = excluded.caption_y_offset,
-           captions_source_start = excluded.captions_source_start",
-        params![c.id, c.highlight_id, c.vod_id, c.title, c.start_seconds, c.end_seconds, c.aspect_ratio, c.crop_x, c.crop_y, c.crop_width, c.crop_height, c.captions_enabled, c.captions_text, c.captions_position, c.caption_style, c.facecam_layout, c.render_status, c.output_path, c.thumbnail_path, c.created_at, c.game, c.community_clip_mp4_path, normalize_caption_font_scale(c.caption_font_scale), c.source_kind, c.source_media_path, c.source_fingerprint, c.source_recorded_at, c.context_background_path, normalize_context_background_mode(&c.context_background_mode), normalize_context_blur_strength(c.context_blur_strength), normalize_context_video_y(c.context_video_y), normalize_full_frame_scale(c.full_frame_scale), c.facecam_settings, normalize_caption_y_offset(c.caption_y_offset), c.captions_source_start.filter(|value| value.is_finite()).map(|value| value.max(0.0))],
+           captions_source_start = excluded.captions_source_start,
+           captions_provenance = excluded.captions_provenance,
+           captions_pipeline_version = excluded.captions_pipeline_version,
+           caption_audio_mode = excluded.caption_audio_mode,
+           captions_recognition_signature = excluded.captions_recognition_signature,
+           captions_language = excluded.captions_language,
+           caption_audio_stream = excluded.caption_audio_stream,
+           caption_card_scale = excluded.caption_card_scale",
+        params![c.id, c.highlight_id, c.vod_id, c.title, c.start_seconds, c.end_seconds, c.aspect_ratio, c.crop_x, c.crop_y, c.crop_width, c.crop_height, c.captions_enabled, c.captions_text, c.captions_position, c.caption_style, c.facecam_layout, c.render_status, c.output_path, c.thumbnail_path, c.created_at, c.game, c.community_clip_mp4_path, normalize_caption_font_scale(c.caption_font_scale), c.source_kind, c.source_media_path, c.source_fingerprint, c.source_recorded_at, c.context_background_path, normalize_context_background_mode(&c.context_background_mode), normalize_context_blur_strength(c.context_blur_strength), normalize_context_video_y(c.context_video_y), normalize_full_frame_scale(c.full_frame_scale), c.facecam_settings, normalize_caption_y_offset(c.caption_y_offset), c.captions_source_start.filter(|value| value.is_finite()).map(|value| value.max(0.0)), normalize_captions_provenance(&c.captions_provenance), c.captions_pipeline_version.max(0), normalize_caption_audio_mode(&c.caption_audio_mode), c.captions_recognition_signature, c.captions_language, c.caption_audio_stream, normalize_caption_card_scale(c.caption_card_scale)],
     )?;
     Ok(())
 }
@@ -1902,9 +2128,15 @@ fn read_clip_row(row: &rusqlite::Row) -> rusqlite::Result<ClipRow> {
         crop_height: row.get(10)?,
         captions_enabled: row.get(11)?,
         captions_text: row.get(12)?,
-        captions_position: row.get::<_, Option<String>>(13)?.unwrap_or_else(|| "bottom".to_string()),
-        caption_style: row.get::<_, Option<String>>(14)?.unwrap_or_else(|| "clean".to_string()),
-        facecam_layout: row.get::<_, Option<String>>(15)?.unwrap_or_else(|| "none".to_string()),
+        captions_position: row
+            .get::<_, Option<String>>(13)?
+            .unwrap_or_else(|| "bottom".to_string()),
+        caption_style: row
+            .get::<_, Option<String>>(14)?
+            .unwrap_or_else(|| "clean".to_string()),
+        facecam_layout: row
+            .get::<_, Option<String>>(15)?
+            .unwrap_or_else(|| "none".to_string()),
         render_status: row.get(16)?,
         output_path: row.get(17)?,
         thumbnail_path: row.get(18)?,
@@ -1927,40 +2159,98 @@ fn read_clip_row(row: &rusqlite::Row) -> rusqlite::Result<ClipRow> {
         source_recorded_at: row.get(30)?,
         context_background_path: row.get(31)?,
         context_background_mode: normalize_context_background_mode(
-            row.get::<_, Option<String>>(32)?.as_deref().unwrap_or("blur"),
+            row.get::<_, Option<String>>(32)?
+                .as_deref()
+                .unwrap_or("blur"),
         )
         .to_string(),
         context_blur_strength: normalize_context_blur_strength(
-            row.get::<_, Option<f64>>(33)?.unwrap_or_else(default_context_blur_strength),
+            row.get::<_, Option<f64>>(33)?
+                .unwrap_or_else(default_context_blur_strength),
         ),
         context_video_y: normalize_context_video_y(
-            row.get::<_, Option<f64>>(34)?.unwrap_or_else(default_context_video_y),
+            row.get::<_, Option<f64>>(34)?
+                .unwrap_or_else(default_context_video_y),
         ),
         full_frame_scale: normalize_full_frame_scale(
             row.get::<_, Option<f64>>(35)?
                 .unwrap_or_else(default_full_frame_scale),
         ),
         facecam_settings: row.get(36)?,
-        caption_y_offset: normalize_caption_y_offset(
-            row.get::<_, Option<f64>>(37)?.unwrap_or(0.0),
-        ),
+        caption_y_offset: normalize_caption_y_offset(row.get::<_, Option<f64>>(37)?.unwrap_or(0.0)),
         captions_source_start: row
             .get::<_, Option<f64>>(38)?
             .filter(|value| value.is_finite())
             .map(|value| value.max(0.0)),
+        captions_provenance: normalize_captions_provenance(
+            row.get::<_, Option<String>>(39)?
+                .as_deref()
+                .unwrap_or("legacy"),
+        )
+        .to_string(),
+        captions_pipeline_version: row.get::<_, Option<i64>>(40)?.unwrap_or(0).max(0),
+        caption_audio_mode: normalize_caption_audio_mode(
+            row.get::<_, Option<String>>(41)?
+                .as_deref()
+                .unwrap_or("mixed"),
+        )
+        .to_string(),
+        captions_recognition_signature: row.get(42)?,
+        captions_language: row.get(43)?,
+        caption_audio_stream: row.get(44)?,
+        caption_card_scale: normalize_caption_card_scale(
+            row.get::<_, Option<f64>>(45)?
+                .unwrap_or(DEFAULT_CAPTION_CARD_SCALE),
+        ),
+    })
+}
+
+fn read_vod_row(row: &rusqlite::Row) -> rusqlite::Result<VodRow> {
+    let game_name: Option<String> = row.get(15)?;
+    let requested_style = crate::game_config::StreamStyle::from_str_or_default(
+        row.get::<_, Option<String>>(16)?
+            .as_deref()
+            .unwrap_or("auto"),
+    );
+    Ok(VodRow {
+        id: row.get(0)?,
+        channel_id: row.get(1)?,
+        twitch_video_id: row.get(2)?,
+        title: row.get(3)?,
+        duration_seconds: row.get(4)?,
+        stream_date: row.get(5)?,
+        thumbnail_url: row.get(6)?,
+        vod_url: row.get(7)?,
+        download_status: row.get(8)?,
+        local_path: row.get(9)?,
+        file_size_bytes: row.get(10)?,
+        analysis_status: row.get(11)?,
+        created_at: row.get(12)?,
+        download_progress: row.get(13)?,
+        analysis_progress: row.get::<_, Option<i64>>(14)?.unwrap_or(0),
+        game_name: game_name.clone(),
+        stream_style: requested_style.as_str().to_string(),
+        detected_stream_style: crate::game_config::detected_stream_style(game_name.as_deref())
+            .as_str()
+            .to_string(),
+        analyzed_stream_style: row
+            .get::<_, Option<String>>(17)?
+            .filter(|value| !value.trim().is_empty()),
+        cam_region_norm: row.get(18)?,
     })
 }
 
 /// Full SELECT column list for the `vods` table. Centralized so that adding a
-/// column to `VodRow` only requires updating this string plus the row-binding
-/// closures (one per get_vods_* function). Order MUST match the fields in
-/// `VodRow` so positional `row.get(idx)?` calls stay in sync.
-const VOD_SELECT: &str = "SELECT id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress, game_name, cam_region_norm FROM vods";
+/// column to `VodRow` only requires updating this string and `read_vod_row`.
+const VOD_SELECT: &str = "SELECT id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, local_path, file_size_bytes, analysis_status, created_at, download_progress, analysis_progress, game_name, stream_style, analyzed_stream_style, cam_region_norm FROM vods";
 
-const CLIP_SELECT: &str = "SELECT id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, render_status, output_path, thumbnail_path, created_at, game, publish_description, publish_hashtags, cam_region_norm_override, cam_fit_mode, community_clip_mp4_path, caption_font_scale, source_kind, source_media_path, source_fingerprint, source_recorded_at, context_background_path, context_background_mode, context_blur_strength, context_video_y, full_frame_scale, facecam_settings, caption_y_offset, captions_source_start FROM clips";
+const CLIP_SELECT: &str = "SELECT id, highlight_id, vod_id, title, start_seconds, end_seconds, aspect_ratio, crop_x, crop_y, crop_width, crop_height, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, render_status, output_path, thumbnail_path, created_at, game, publish_description, publish_hashtags, cam_region_norm_override, cam_fit_mode, community_clip_mp4_path, caption_font_scale, source_kind, source_media_path, source_fingerprint, source_recorded_at, context_background_path, context_background_mode, context_blur_strength, context_video_y, full_frame_scale, facecam_settings, caption_y_offset, captions_source_start, captions_provenance, captions_pipeline_version, caption_audio_mode, captions_recognition_signature, captions_language, caption_audio_stream, caption_card_scale FROM clips";
 
 pub fn get_all_clips(conn: &Connection) -> SqliteResult<Vec<ClipRow>> {
-    let mut stmt = conn.prepare(&format!("{} ORDER BY created_at DESC, start_seconds ASC", CLIP_SELECT))?;
+    let mut stmt = conn.prepare(&format!(
+        "{} ORDER BY created_at DESC, start_seconds ASC",
+        CLIP_SELECT
+    ))?;
     let rows = stmt.query_map([], |row| read_clip_row(row))?;
     rows.collect()
 }
@@ -1986,6 +2276,7 @@ pub fn update_clip_settings(
     captions_position: &str,
     caption_style: &str,
     caption_font_scale: f64,
+    caption_card_scale: f64,
     caption_y_offset: f64,
     facecam_layout: &str,
     facecam_settings: Option<&str>,
@@ -1995,10 +2286,13 @@ pub fn update_clip_settings(
     context_video_y: f64,
     full_frame_scale: f64,
     game: Option<&str>,
+    captions_provenance: &str,
+    captions_pipeline_version: i64,
+    caption_audio_mode: &str,
 ) -> SqliteResult<()> {
     conn.execute(
-        "UPDATE clips SET title = ?1, start_seconds = ?2, end_seconds = ?3, aspect_ratio = ?4, captions_enabled = ?5, captions_text = ?6, captions_position = ?7, caption_style = ?8, facecam_layout = ?9, game = ?10, caption_font_scale = ?11, context_background_path = ?12, context_background_mode = ?13, context_blur_strength = ?14, context_video_y = ?15, full_frame_scale = ?16, facecam_settings = ?17, caption_y_offset = ?18, render_status = 'pending' WHERE id = ?19",
-        params![title, start_seconds, end_seconds, aspect_ratio, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, game, normalize_caption_font_scale(caption_font_scale), context_background_path, normalize_context_background_mode(context_background_mode), normalize_context_blur_strength(context_blur_strength), normalize_context_video_y(context_video_y), normalize_full_frame_scale(full_frame_scale), facecam_settings, normalize_caption_y_offset(caption_y_offset), clip_id],
+        "UPDATE clips SET title = ?1, start_seconds = ?2, end_seconds = ?3, aspect_ratio = ?4, captions_enabled = ?5, captions_text = ?6, captions_position = ?7, caption_style = ?8, facecam_layout = ?9, game = ?10, caption_font_scale = ?11, context_background_path = ?12, context_background_mode = ?13, context_blur_strength = ?14, context_video_y = ?15, full_frame_scale = ?16, facecam_settings = ?17, caption_y_offset = ?18, captions_provenance = ?19, captions_pipeline_version = ?20, caption_audio_mode = ?21, caption_card_scale = ?22, render_status = 'pending' WHERE id = ?23",
+        params![title, start_seconds, end_seconds, aspect_ratio, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, game, normalize_caption_font_scale(caption_font_scale), context_background_path, normalize_context_background_mode(context_background_mode), normalize_context_blur_strength(context_blur_strength), normalize_context_video_y(context_video_y), normalize_full_frame_scale(full_frame_scale), facecam_settings, normalize_caption_y_offset(caption_y_offset), normalize_captions_provenance(captions_provenance), captions_pipeline_version.max(0), normalize_caption_audio_mode(caption_audio_mode), normalize_caption_card_scale(caption_card_scale), clip_id],
     )?;
     Ok(())
 }
@@ -2052,7 +2346,11 @@ pub fn update_clip_render_status(
     Ok(())
 }
 
-pub fn update_clip_thumbnail(conn: &Connection, clip_id: &str, thumbnail_path: Option<&str>) -> SqliteResult<()> {
+pub fn update_clip_thumbnail(
+    conn: &Connection,
+    clip_id: &str,
+    thumbnail_path: Option<&str>,
+) -> SqliteResult<()> {
     conn.execute(
         "UPDATE clips SET thumbnail_path = ?1 WHERE id = ?2",
         params![thumbnail_path, clip_id],
@@ -2061,7 +2359,11 @@ pub fn update_clip_thumbnail(conn: &Connection, clip_id: &str, thumbnail_path: O
 }
 
 /// Update just the game_name on a VOD.
-pub fn update_vod_game_name(conn: &Connection, vod_id: &str, game_name: Option<&str>) -> SqliteResult<()> {
+pub fn update_vod_game_name(
+    conn: &Connection,
+    vod_id: &str,
+    game_name: Option<&str>,
+) -> SqliteResult<()> {
     conn.execute(
         "UPDATE vods SET game_name = ?1 WHERE id = ?2",
         params![game_name, vod_id],
@@ -2111,7 +2413,11 @@ pub fn update_clip_fit_mode(
 }
 
 /// Backfill the game field on all clips for a given VOD that don't already have a game set.
-pub fn backfill_clips_game(conn: &Connection, vod_id: &str, game_name: &str) -> SqliteResult<usize> {
+pub fn backfill_clips_game(
+    conn: &Connection,
+    vod_id: &str,
+    game_name: &str,
+) -> SqliteResult<usize> {
     let updated = conn.execute(
         "UPDATE clips SET game = ?1 WHERE vod_id = ?2 AND (game IS NULL OR game = '')",
         params![game_name, vod_id],
@@ -2131,10 +2437,16 @@ pub fn delete_vod(conn: &Connection, vod_id: &str) -> SqliteResult<()> {
         )
         .ok();
 
-    println!("[delete_vod] vod_id={} twitch_video_id={:?}", vod_id, twitch_vid_id);
+    println!(
+        "[delete_vod] vod_id={} twitch_video_id={:?}",
+        vod_id, twitch_vid_id
+    );
 
     let rows_deleted = conn.execute("DELETE FROM vods WHERE id = ?1", params![vod_id])?;
-    println!("[delete_vod] rows deleted from vods table: {}", rows_deleted);
+    println!(
+        "[delete_vod] rows deleted from vods table: {}",
+        rows_deleted
+    );
 
     // Record the deletion so upsert_vod won't re-insert this VOD
     if let Some(ref tvid) = twitch_vid_id {
@@ -2143,7 +2455,10 @@ pub fn delete_vod(conn: &Connection, vod_id: &str) -> SqliteResult<()> {
             "INSERT OR IGNORE INTO deleted_vods (twitch_video_id, deleted_at) VALUES (?1, ?2)",
             params![tvid, now],
         )?;
-        println!("[delete_vod] recorded in deleted_vods: twitch_video_id={} rows_inserted={}", tvid, inserted);
+        println!(
+            "[delete_vod] recorded in deleted_vods: twitch_video_id={} rows_inserted={}",
+            tvid, inserted
+        );
     } else {
         println!("[delete_vod] WARNING: no twitch_video_id found for vod_id={}, cannot prevent re-insertion", vod_id);
     }
@@ -2152,7 +2467,10 @@ pub fn delete_vod(conn: &Connection, vod_id: &str) -> SqliteResult<()> {
 
 /// Get all clips for a given VOD.
 pub fn get_clips_by_vod(conn: &Connection, vod_id: &str) -> SqliteResult<Vec<ClipRow>> {
-    let mut stmt = conn.prepare(&format!("{} WHERE vod_id = ?1 ORDER BY start_seconds ASC", CLIP_SELECT))?;
+    let mut stmt = conn.prepare(&format!(
+        "{} WHERE vod_id = ?1 ORDER BY start_seconds ASC",
+        CLIP_SELECT
+    ))?;
     let rows = stmt.query_map(params![vod_id], |row| read_clip_row(row))?;
     rows.collect()
 }
@@ -2193,7 +2511,11 @@ pub fn update_clip_game(conn: &Connection, clip_id: &str, game: Option<&str>) ->
 }
 
 /// Update just the title field on a single clip (lightweight — used for auto-save on blur).
-pub fn update_clip_title(conn: &Connection, clip_id: &str, title: Option<&str>) -> SqliteResult<()> {
+pub fn update_clip_title(
+    conn: &Connection,
+    clip_id: &str,
+    title: Option<&str>,
+) -> SqliteResult<()> {
     conn.execute(
         "UPDATE clips SET title = ?1 WHERE id = ?2",
         params![title, clip_id],
@@ -2218,9 +2540,18 @@ pub fn update_clip_publish_meta(
 
 // ── Performance tracking helpers ──
 
-pub fn insert_clip_performance(conn: &Connection, clip_id: &str, platform: &str,
-    views: i64, likes: i64, comments: i64, shares: i64,
-    retention: f64, hold_3s: f64, completion: f64) -> SqliteResult<()> {
+pub fn insert_clip_performance(
+    conn: &Connection,
+    clip_id: &str,
+    platform: &str,
+    views: i64,
+    likes: i64,
+    comments: i64,
+    shares: i64,
+    retention: f64,
+    hold_3s: f64,
+    completion: f64,
+) -> SqliteResult<()> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
@@ -2246,7 +2577,10 @@ pub struct ClipPerformanceRow {
     pub recorded_at: String,
 }
 
-pub fn get_clip_performance(conn: &Connection, clip_id: &str) -> SqliteResult<Vec<ClipPerformanceRow>> {
+pub fn get_clip_performance(
+    conn: &Connection,
+    clip_id: &str,
+) -> SqliteResult<Vec<ClipPerformanceRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, clip_id, platform, views, likes, comments, shares, retention_rate, first_3s_hold_rate, completion_rate, recorded_at
          FROM clip_performance WHERE clip_id = ?1 ORDER BY recorded_at DESC"
@@ -2278,7 +2612,7 @@ pub fn get_avg_performance_by_tags(conn: &Connection) -> SqliteResult<Vec<(Strin
          JOIN highlights h ON h.id = c.highlight_id
          WHERE p.views > 0
          GROUP BY h.tags
-         ORDER BY avg_retention DESC"
+         ORDER BY avg_retention DESC",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
@@ -2803,6 +3137,30 @@ pub fn get_due_scheduled_uploads(
     rows.collect()
 }
 
+pub fn update_vod_stream_style(
+    conn: &Connection,
+    vod_id: &str,
+    stream_style: &str,
+) -> SqliteResult<()> {
+    conn.execute(
+        "UPDATE vods SET stream_style = ?1 WHERE id = ?2",
+        params![stream_style, vod_id],
+    )?;
+    Ok(())
+}
+
+pub fn update_vod_analyzed_stream_style(
+    conn: &Connection,
+    vod_id: &str,
+    analyzed_stream_style: Option<&str>,
+) -> SqliteResult<()> {
+    conn.execute(
+        "UPDATE vods SET analyzed_stream_style = ?1 WHERE id = ?2",
+        params![analyzed_stream_style, vod_id],
+    )?;
+    Ok(())
+}
+
 /// Atomically move one due upload from pending to uploading. The status and
 /// due-time predicates make a stale queue snapshot harmless if another worker
 /// claimed the row first.
@@ -2856,14 +3214,7 @@ pub fn recover_interrupted_scheduled_uploads(conn: &Connection) -> SqliteResult<
                 )?;
             }
             None => {
-                update_scheduled_upload_status(
-                    conn,
-                    &upload.id,
-                    "pending",
-                    None,
-                    None,
-                    None,
-                )?;
+                update_scheduled_upload_status(conn, &upload.id, "pending", None, None, None)?;
             }
             Some(_) => {
                 update_scheduled_upload_status(
@@ -3013,6 +3364,135 @@ mod tests {
         conn
     }
 
+    #[test]
+    fn glossary_change_invalidates_generated_captions_but_preserves_edits() {
+        let mut conn = fresh_db();
+        conn.execute(
+            "INSERT INTO clips
+                (id, title, captions_text, captions_provenance,
+                 captions_pipeline_version, captions_recognition_signature,
+                 render_status, output_path)
+             VALUES
+                ('generated', 'is that legal', 'shlex pings go hard', 'aligned',
+                 3, 'old-signature', 'completed', 'generated.mp4'),
+                ('edited', 'manual correction', 'Slug ping goes hard', 'edited',
+                 3, 'edited-signature', 'completed', 'edited.mp4')",
+            [],
+        )
+        .unwrap();
+
+        let invalidated = save_transcription_glossary(&mut conn, " Slug ; Slug's ; slug ")
+            .expect("glossary save");
+        assert_eq!(invalidated, 1);
+        assert_eq!(
+            get_setting(&conn, "transcription_glossary").unwrap(),
+            Some("Slug, Slug's".to_string())
+        );
+
+        let generated: (i64, Option<String>, String, Option<String>, String) = conn
+            .query_row(
+                "SELECT captions_pipeline_version, captions_recognition_signature,
+                        render_status, output_path, captions_text
+                   FROM clips WHERE id = 'generated'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            generated,
+            (
+                0,
+                None,
+                "pending".into(),
+                None,
+                "shlex pings go hard".into()
+            )
+        );
+
+        let edited: (i64, Option<String>, String, Option<String>, String) = conn
+            .query_row(
+                "SELECT captions_pipeline_version, captions_recognition_signature,
+                        render_status, output_path, captions_text
+                   FROM clips WHERE id = 'edited'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            edited,
+            (
+                3,
+                Some("edited-signature".into()),
+                "completed".into(),
+                Some("edited.mp4".into()),
+                "Slug ping goes hard".into(),
+            )
+        );
+
+        conn.execute(
+            "UPDATE clips SET captions_pipeline_version = 3 WHERE id = 'generated'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            save_transcription_glossary(&mut conn, "Slug, Slug's").unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT captions_pipeline_version FROM clips WHERE id = 'generated'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn vod_stream_style_defaults_and_round_trips() {
+        let conn = fresh_db();
+        conn.execute(
+            "INSERT INTO vods
+                (id, channel_id, twitch_video_id, title, duration_seconds, stream_date,
+                 thumbnail_url, vod_url, download_status, analysis_status, created_at,
+                 analysis_progress, game_name)
+             VALUES
+                ('v1', 'c1', 't1', 'Cozy stream', 3600, '2026-08-26T00:00:00Z',
+                 '', '', 'downloaded', 'completed', '2026-08-26T00:00:00Z', 100,
+                 'Stardew Valley')",
+            [],
+        )
+        .unwrap();
+
+        let initial = get_vod_by_id(&conn, "v1").unwrap().unwrap();
+        assert_eq!(initial.stream_style, "auto");
+        assert_eq!(initial.detected_stream_style, "cozy");
+        assert_eq!(initial.analyzed_stream_style, None);
+
+        update_vod_stream_style(&conn, "v1", "talking").unwrap();
+        update_vod_analyzed_stream_style(&conn, "v1", Some("talking")).unwrap();
+        let updated = get_vod_by_id(&conn, "v1").unwrap().unwrap();
+        assert_eq!(updated.stream_style, "talking");
+        assert_eq!(updated.analyzed_stream_style.as_deref(), Some("talking"));
+    }
+
     fn test_highlight(id: &str, vod_id: &str) -> HighlightRow {
         HighlightRow {
             id: id.to_string(),
@@ -3062,8 +3542,15 @@ mod tests {
             captions_position: "bottom".to_string(),
             caption_style: "clean".to_string(),
             caption_font_scale: 1.0,
+            caption_card_scale: DEFAULT_CAPTION_CARD_SCALE,
             caption_y_offset: 0.0,
             captions_source_start: None,
+            captions_provenance: "none".to_string(),
+            captions_pipeline_version: 0,
+            caption_audio_mode: "mixed".to_string(),
+            captions_recognition_signature: None,
+            captions_language: None,
+            caption_audio_stream: None,
             facecam_layout: "none".to_string(),
             facecam_settings: None,
             context_background_path: None,
@@ -3182,7 +3669,12 @@ mod tests {
         assert_eq!(rows[0].video_url.as_deref(), Some("https://youtu.be/xyz"));
     }
 
-    fn scheduled_row(id: &str, clip_id: &str, status: &str, scheduled_time: &str) -> ScheduledUploadRow {
+    fn scheduled_row(
+        id: &str,
+        clip_id: &str,
+        status: &str,
+        scheduled_time: &str,
+    ) -> ScheduledUploadRow {
         ScheduledUploadRow {
             id: id.to_string(),
             clip_id: clip_id.to_string(),
@@ -3207,19 +3699,15 @@ mod tests {
     fn scheduled_upload_claim_is_atomic_and_requires_a_due_pending_row() {
         let conn = fresh_db();
         conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
-        insert_scheduled_upload(&conn, &scheduled_row(
-            "due",
-            "clip-due",
-            "pending",
-            "2026-08-20T00:00:00Z",
-        ))
+        insert_scheduled_upload(
+            &conn,
+            &scheduled_row("due", "clip-due", "pending", "2026-08-20T00:00:00Z"),
+        )
         .unwrap();
-        insert_scheduled_upload(&conn, &scheduled_row(
-            "future",
-            "clip-future",
-            "pending",
-            "2026-08-22T00:00:00Z",
-        ))
+        insert_scheduled_upload(
+            &conn,
+            &scheduled_row("future", "clip-future", "pending", "2026-08-22T00:00:00Z"),
+        )
         .unwrap();
 
         let now = "2026-08-21T00:00:00Z";
@@ -3262,13 +3750,7 @@ mod tests {
             begin_upload(&conn, "clip-processing", "tiktok", false).unwrap(),
             UploadClaim::Acquired
         );
-        mark_upload_processing(
-            &conn,
-            "clip-processing",
-            "tiktok",
-            "publish-processing",
-        )
-        .unwrap();
+        mark_upload_processing(&conn, "clip-processing", "tiktok", "publish-processing").unwrap();
         assert_eq!(
             begin_upload(&conn, "clip-uncertain", "tiktok", false).unwrap(),
             UploadClaim::Acquired
@@ -3425,14 +3907,7 @@ mod tests {
         let mut conn = fresh_db();
         insert_test_highlight(&conn, "h1", "v1");
 
-        set_clip_review(
-            &mut conn,
-            "h1",
-            Some("good"),
-            Some("nice banter"),
-            None,
-        )
-        .unwrap();
+        set_clip_review(&mut conn, "h1", Some("good"), Some("nice banter"), None).unwrap();
 
         let highlights = get_highlights_by_vod(&conn, "v1").unwrap();
         assert_eq!(highlights.len(), 1);
@@ -3448,6 +3923,27 @@ mod tests {
         assert_eq!(reviewed[0].end_seconds, 30.0);
         assert_eq!(reviewed[0].rating.as_deref(), Some("good"));
         assert_eq!(reviewed[0].note.as_deref(), Some("nice banter"));
+    }
+
+    #[test]
+    fn good_review_uses_exact_edited_clip_boundaries() {
+        let mut conn = fresh_db();
+        insert_test_highlight(&conn, "h1", "v1");
+
+        set_clip_review_with_bounds(
+            &mut conn,
+            "h1",
+            Some("good"),
+            Some("this edit has the full setup and payoff"),
+            None,
+            Some((4.25, 27.75)),
+        )
+        .unwrap();
+
+        let reviewed = get_reviewed_moments_for_vod(&conn, "v1").unwrap();
+        assert_eq!(reviewed.len(), 1);
+        assert_eq!(reviewed[0].start_seconds, 4.25);
+        assert_eq!(reviewed[0].end_seconds, 27.75);
     }
 
     #[test]
@@ -3668,8 +4164,15 @@ mod tests {
             captions_position: "bottom".to_string(),
             caption_style: "comic-pop".to_string(),
             caption_font_scale: 99.0,
+            caption_card_scale: 99.0,
             caption_y_offset: 0.0,
             captions_source_start: Some(10.0),
+            captions_provenance: "aligned".to_string(),
+            captions_pipeline_version: 1,
+            caption_audio_mode: "mixed".to_string(),
+            captions_recognition_signature: None,
+            captions_language: None,
+            caption_audio_stream: None,
             facecam_layout: "none".to_string(),
             facecam_settings: None,
             context_background_path: None,
@@ -3701,6 +4204,13 @@ mod tests {
                 .caption_font_scale,
             MAX_CAPTION_FONT_SCALE
         );
+        assert_eq!(
+            get_clip_by_id(&conn, &clip.id)
+                .unwrap()
+                .unwrap()
+                .caption_card_scale,
+            MAX_CAPTION_CARD_SCALE
+        );
 
         update_clip_settings(
             &conn,
@@ -3714,6 +4224,7 @@ mod tests {
             &clip.captions_position,
             &clip.caption_style,
             0.1,
+            0.1,
             99.0,
             &clip.facecam_layout,
             None,
@@ -3723,6 +4234,9 @@ mod tests {
             0.5,
             1.0,
             None,
+            "aligned",
+            1,
+            "mixed",
         )
         .unwrap();
         assert_eq!(
@@ -3736,6 +4250,13 @@ mod tests {
             get_clip_by_id(&conn, &clip.id)
                 .unwrap()
                 .unwrap()
+                .caption_card_scale,
+            MIN_CAPTION_CARD_SCALE
+        );
+        assert_eq!(
+            get_clip_by_id(&conn, &clip.id)
+                .unwrap()
+                .unwrap()
                 .caption_y_offset,
             MAX_CAPTION_Y_OFFSET
         );
@@ -3744,7 +4265,11 @@ mod tests {
     #[test]
     fn context_fit_and_full_frame_settings_round_trip_and_clamp_at_the_database_boundary() {
         let conn = fresh_db();
-        let mut clip = test_clip("clip-context-fit", "highlight-context-fit", "vod-context-fit");
+        let mut clip = test_clip(
+            "clip-context-fit",
+            "highlight-context-fit",
+            "vod-context-fit",
+        );
         clip.context_background_path = Some("branding/original.gif".to_string());
         clip.context_background_mode = "unsupported".to_string();
         clip.context_blur_strength = 4.0;
@@ -3753,7 +4278,10 @@ mod tests {
 
         insert_clip(&conn, &clip).unwrap();
         let inserted = get_clip_by_id(&conn, &clip.id).unwrap().unwrap();
-        assert_eq!(inserted.context_background_path.as_deref(), Some("branding/original.gif"));
+        assert_eq!(
+            inserted.context_background_path.as_deref(),
+            Some("branding/original.gif")
+        );
         assert_eq!(inserted.context_background_mode, "blur");
         assert_eq!(inserted.context_blur_strength, 1.0);
         assert_eq!(inserted.context_video_y, 0.0);
@@ -3771,6 +4299,7 @@ mod tests {
             &clip.captions_position,
             &clip.caption_style,
             clip.caption_font_scale,
+            clip.caption_card_scale,
             -99.0,
             &clip.facecam_layout,
             Some(r#"{"pipX":8,"pipY":12,"pipW":30,"pipH":25,"splitRatio":0.7,"cropX":0,"cropY":0.6,"cropW":0.4,"cropH":0.4}"#),
@@ -3780,11 +4309,17 @@ mod tests {
             0.82,
             0.86,
             None,
+            "none",
+            0,
+            "mixed",
         )
         .unwrap();
 
         let updated = get_clip_by_id(&conn, &clip.id).unwrap().unwrap();
-        assert_eq!(updated.context_background_path.as_deref(), Some("branding/replacement.png"));
+        assert_eq!(
+            updated.context_background_path.as_deref(),
+            Some("branding/replacement.png")
+        );
         assert_eq!(updated.context_background_mode, "branding");
         assert!((updated.context_blur_strength - 0.4).abs() < f64::EPSILON);
         assert!((updated.context_video_y - 0.82).abs() < f64::EPSILON);
@@ -3799,7 +4334,11 @@ mod tests {
     #[test]
     fn context_fit_black_background_mode_round_trips() {
         let conn = fresh_db();
-        let mut clip = test_clip("clip-context-black", "highlight-context-black", "vod-context-black");
+        let mut clip = test_clip(
+            "clip-context-black",
+            "highlight-context-black",
+            "vod-context-black",
+        );
         clip.facecam_layout = "context_fit".to_string();
         clip.context_background_mode = "black".to_string();
 
@@ -3898,11 +4437,17 @@ mod tests {
             download_progress: Some(100),
             analysis_progress: 0,
             game_name: Some("Test Game".to_string()),
+            stream_style: "auto".to_string(),
+            detected_stream_style: "mixed".to_string(),
+            analyzed_stream_style: None,
             cam_region_norm: None,
         };
 
         let matched = get_stream_markers_for_vod(&conn, &vod).unwrap();
-        let ids = matched.iter().map(|marker| marker.id.as_str()).collect::<Vec<_>>();
+        let ids = matched
+            .iter()
+            .map(|marker| marker.id.as_str())
+            .collect::<Vec<_>>();
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&"inside"));
         assert!(ids.contains(&"channel-agnostic"));
@@ -3917,6 +4462,62 @@ mod tests {
 
         let mut invalid = vod;
         invalid.stream_date = "not-a-date".to_string();
-        assert!(get_stream_markers_for_vod(&conn, &invalid).unwrap().is_empty());
+        assert!(get_stream_markers_for_vod(&conn, &invalid)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn recognition_metadata_and_repeated_correction_context_are_local_and_durable() {
+        let conn = fresh_db();
+        assert!(transcription_correction_learning_enabled(&conn));
+        save_setting(&conn, "transcription_learn_corrections", "false").unwrap();
+        assert!(!transcription_correction_learning_enabled(&conn));
+        save_setting(&conn, "transcription_learn_corrections", "true").unwrap();
+
+        conn.execute(
+            "INSERT INTO vods
+                (id, channel_id, twitch_video_id, title, duration_seconds, stream_date,
+                 thumbnail_url, vod_url, download_status, analysis_status, created_at,
+                 analysis_progress)
+             VALUES
+                ('recognition-vod', 'channel-a', 'twitch-recognition', 'Recognition test',
+                 120, '2026-08-26T00:00:00Z', '', '', 'downloaded', 'completed',
+                 '2026-08-26T00:00:00Z', 100)",
+            [],
+        )
+        .unwrap();
+        insert_test_highlight(&conn, "recognition-highlight", "recognition-vod");
+        let mut clip = test_clip(
+            "recognition-clip",
+            "recognition-highlight",
+            "recognition-vod",
+        );
+        clip.captions_recognition_signature = Some("recipe-signature".to_string());
+        clip.captions_language = Some("en".to_string());
+        clip.caption_audio_stream = Some("Track 1: All Audio".to_string());
+        insert_clip(&conn, &clip).unwrap();
+
+        let stored = get_clip_by_id(&conn, &clip.id).unwrap().unwrap();
+        assert_eq!(
+            stored.captions_recognition_signature.as_deref(),
+            Some("recipe-signature")
+        );
+        assert_eq!(stored.captions_language.as_deref(), Some("en"));
+        assert_eq!(
+            stored.caption_audio_stream.as_deref(),
+            Some("Track 1: All Audio")
+        );
+
+        let correction = vec![("stacy".to_string(), "Stacie".to_string())];
+        record_transcription_corrections(&conn, &correction).unwrap();
+        assert!(get_learned_transcription_terms(&conn, 10)
+            .unwrap()
+            .is_empty());
+        record_transcription_corrections(&conn, &correction).unwrap();
+        assert_eq!(
+            get_learned_transcription_terms(&conn, 10).unwrap(),
+            vec!["Stacie".to_string()]
+        );
     }
 }

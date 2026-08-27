@@ -43,14 +43,16 @@ pub fn detect_hardware() -> HardwareInfo {
     // Query GPU name and total memory in one call using csv format.
     // --query-gpu=name,memory.total returns e.g. "NVIDIA GeForce RTX 4070, 12282 MiB"
     let mut smi_cmd = Command::new("nvidia-smi");
-    smi_cmd.args(["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"]);
+    smi_cmd.args([
+        "--query-gpu=name,memory.total",
+        "--format=csv,noheader,nounits",
+    ]);
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         smi_cmd.creation_flags(0x08000000);
     }
-    let output = match smi_cmd.output()
-    {
+    let output = match smi_cmd.output() {
         Ok(output) if output.status.success() => output,
         Ok(_) => {
             // nvidia-smi exists but returned a non-zero exit code.
@@ -100,7 +102,11 @@ pub fn detect_hardware() -> HardwareInfo {
 
     log::info!(
         "Detected GPU: {gpu_name} with {vram_mb} MB VRAM (CUDA {})",
-        if use_cuda { "enabled" } else { "disabled — below threshold" }
+        if use_cuda {
+            "enabled"
+        } else {
+            "disabled — below threshold"
+        }
     );
 
     HardwareInfo {

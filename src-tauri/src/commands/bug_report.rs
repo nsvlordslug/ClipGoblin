@@ -40,9 +40,7 @@ fn log_dir() -> Option<PathBuf> {
     }
     #[cfg(target_os = "macos")]
     {
-        dirs::home_dir().map(|d| {
-            d.join("Library/Logs/com.clipgoblin.desktop")
-        })
+        dirs::home_dir().map(|d| d.join("Library/Logs/com.clipgoblin.desktop"))
     }
     #[cfg(target_os = "linux")]
     {
@@ -71,9 +69,7 @@ fn tail_latest_log(n: usize) -> String {
         })
         .collect();
 
-    logs.sort_by_key(|e| {
-        std::cmp::Reverse(e.metadata().ok().and_then(|m| m.modified().ok()))
-    });
+    logs.sort_by_key(|e| std::cmp::Reverse(e.metadata().ok().and_then(|m| m.modified().ok())));
 
     let path = match logs.first() {
         Some(e) => e.path(),
@@ -149,7 +145,9 @@ pub async fn submit_bug_report(
         return Ok(BugReportResult {
             success: false,
             issue_url: None,
-            error: Some("Rate limit reached (5 reports per day). Please try again tomorrow.".into()),
+            error: Some(
+                "Rate limit reached (5 reports per day). Please try again tomorrow.".into(),
+            ),
         });
     }
 
@@ -223,8 +221,7 @@ pub async fn submit_bug_report(
     {
         let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
         let new_count = (current_count + 1).to_string();
-        db::save_setting(&conn, &rl_key, &new_count)
-            .map_err(|e| format!("DB: {}", e))?;
+        db::save_setting(&conn, &rl_key, &new_count).map_err(|e| format!("DB: {}", e))?;
     }
 
     log::info!("[BugReport] Submitted: {}", report.title);

@@ -149,3 +149,16 @@ impl AuthProxy {
             .map_err(|e| format!("Failed to parse proxy response: {e}"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn production_proxy_remains_the_default() {
+        assert_eq!(
+            PROXY_BASE,
+            "https://clipgoblin-auth-proxy.lordslug.workers.dev"
+        );
+    }
+}

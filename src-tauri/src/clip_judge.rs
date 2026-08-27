@@ -43,7 +43,9 @@ pub struct ApprovedMomentExample {
 fn normalize_for_dedup(text: &str) -> String {
     let lowered = text.to_lowercase();
     let collapsed = lowered.split_whitespace().collect::<Vec<_>>().join(" ");
-    collapsed.trim_matches(|c: char| !c.is_alphanumeric()).to_string()
+    collapsed
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_string()
 }
 
 /// True if a segment is a whisper artifact carrying no real dialogue: empty after
@@ -86,8 +88,10 @@ pub fn clean_segments(segs: &[TranscriptSegment]) -> Vec<TranscriptSegment> {
     const MIN_LOOP_RUN: usize = 3;
 
     // Pass 1: drop artifacts, keeping original order/timing.
-    let kept: Vec<&TranscriptSegment> =
-        segs.iter().filter(|s| !is_artifact_segment(&s.text)).collect();
+    let kept: Vec<&TranscriptSegment> = segs
+        .iter()
+        .filter(|s| !is_artifact_segment(&s.text))
+        .collect();
 
     // Pass 2: collapse runs of identical normalized text.
     let mut out: Vec<TranscriptSegment> = Vec::with_capacity(kept.len());
@@ -261,10 +265,7 @@ fn validated_moment(value: &serde_json::Value, duration: f64) -> Option<JudgedMo
     if start >= duration || end - start < 1.0 {
         return None;
     }
-    let raw = value
-        .get("score")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(50.0);
+    let raw = value.get("score").and_then(|v| v.as_f64()).unwrap_or(50.0);
     let score = (raw / 100.0).clamp(0.0, 1.0);
     let category = value
         .get("category")
@@ -418,7 +419,9 @@ async fn call_llm(
                 .map_err(|e| AppError::Api(format!("Claude response parse: {e}")))?;
             let text = j["content"][0]["text"].as_str().unwrap_or("").to_string();
             let tin = j["usage"]["input_tokens"].as_u64().unwrap_or(est);
-            let tout = j["usage"]["output_tokens"].as_u64().unwrap_or((text.len() / 4) as u64);
+            let tout = j["usage"]["output_tokens"]
+                .as_u64()
+                .unwrap_or((text.len() / 4) as u64);
             Ok((text, tin, tout))
         }
         Provider::OpenAI => {
@@ -444,9 +447,14 @@ async fn call_llm(
                 .json()
                 .await
                 .map_err(|e| AppError::Api(format!("OpenAI response parse: {e}")))?;
-            let text = j["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
+            let text = j["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
             let tin = j["usage"]["prompt_tokens"].as_u64().unwrap_or(est);
-            let tout = j["usage"]["completion_tokens"].as_u64().unwrap_or((text.len() / 4) as u64);
+            let tout = j["usage"]["completion_tokens"]
+                .as_u64()
+                .unwrap_or((text.len() / 4) as u64);
             Ok((text, tin, tout))
         }
         Provider::Gemini => {
@@ -478,7 +486,9 @@ async fn call_llm(
                 .as_str()
                 .unwrap_or("")
                 .to_string();
-            let tin = j["usageMetadata"]["promptTokenCount"].as_u64().unwrap_or(est);
+            let tin = j["usageMetadata"]["promptTokenCount"]
+                .as_u64()
+                .unwrap_or(est);
             let tout = j["usageMetadata"]["candidatesTokenCount"]
                 .as_u64()
                 .unwrap_or((text.len() / 4) as u64);
@@ -537,12 +547,7 @@ pub async fn judge(
     let before_exclusions = moments.len();
     moments.retain(|moment| {
         !reserved_windows.iter().any(|(start, end)| {
-            meaningfully_overlaps_excluded_window(
-                moment.start_sec,
-                moment.end_sec,
-                *start,
-                *end,
-            )
+            meaningfully_overlaps_excluded_window(moment.start_sec, moment.end_sec, *start, *end)
         })
     });
     if moments.len() < before_exclusions {
@@ -664,7 +669,11 @@ pub async fn final_pass(
     );
     let (response, tin, tout) = call_llm(provider, api_key, model, &prompt).await?;
     let moments = parse_final_pass(&response, candidates);
-    log::info!("clip_judge: final-pass selected {} of {} moments", moments.len(), candidates.len());
+    log::info!(
+        "clip_judge: final-pass selected {} of {} moments",
+        moments.len(),
+        candidates.len()
+    );
     Ok((moments, tin, tout))
 }
 
@@ -674,16 +683,26 @@ mod tests {
     use crate::commands::vod::TranscriptSegment;
 
     fn seg(start: f64, end: f64, text: &str) -> TranscriptSegment {
-        TranscriptSegment { start, end, text: text.to_string(), words: Vec::new() }
+        TranscriptSegment {
+            start,
+            end,
+            text: text.to_string(),
+            words: Vec::new(),
+        }
     }
 
     fn transcript(segs: Vec<TranscriptSegment>) -> TranscriptResult {
-        let full = segs.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
+        let full = segs
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
         TranscriptResult {
             segments: segs,
             full_text: full,
             language: "en".to_string(),
             keywords_found: Vec::new(),
+            recognition: None,
         }
     }
 
@@ -766,16 +785,10 @@ mod tests {
     #[test]
     fn rejected_tail_overlap_is_meaningful_even_when_centers_are_far_apart() {
         assert!(meaningfully_overlaps_excluded_window(
-            1243.12,
-            1298.75,
-            1197.0,
-            1257.0,
+            1243.12, 1298.75, 1197.0, 1257.0,
         ));
         assert!(!meaningfully_overlaps_excluded_window(
-            1258.0,
-            1298.75,
-            1197.0,
-            1257.0,
+            1258.0, 1298.75, 1197.0, 1257.0,
         ));
     }
 
@@ -810,7 +823,10 @@ mod tests {
         ]}"#;
         let m = parse_judge_response(json, 600.0).unwrap();
         assert_eq!(m.len(), 1, "only the clamped-end moment survives");
-        assert!((m[0].end_sec - 600.0).abs() < 1e-6, "end clamped to duration");
+        assert!(
+            (m[0].end_sec - 600.0).abs() < 1e-6,
+            "end clamped to duration"
+        );
     }
 
     #[test]

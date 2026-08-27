@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { usePlatformStore, PLATFORM_INFO } from '../stores/platformStore'
 import { Link2, Unlink, Loader2 } from 'lucide-react'
 import Tooltip from './Tooltip'
+import { describeTikTokIdentity } from '../lib/tiktokIdentity'
 
 export default function ConnectedAccounts() {
   const { accounts, loading, load, connect, disconnect } = usePlatformStore()
@@ -43,6 +44,9 @@ export default function ConnectedAccounts() {
         const info = PLATFORM_INFO[key]
         const account = accounts[key]
         const isLoading = loading[key] ?? false
+        const tiktokIdentity = key === 'tiktok' && account
+          ? describeTikTokIdentity(account.account_handle, account.account_name)
+          : null
 
         return (
           <div key={key} className="v4-setting-row">
@@ -57,26 +61,40 @@ export default function ConnectedAccounts() {
                   {isLoading
                     ? 'Connecting...'
                     : account
-                      ? <>@{account.account_name}</>
+                      ? key === 'tiktok'
+                        ? tiktokIdentity?.primary
+                        : <>@{account.account_name}</>
                       : info.available
                         ? 'Not connected'
                         : 'Coming soon · planned v2'}
                 </div>
                 {key === 'tiktok' && account && (
-                  <div className="flex items-center gap-1 mt-1">
-                    <Tooltip text="Your TikTok username — used for View on TikTok links" position="right">
-                      <span className="text-[10px] text-slate-500">@</span>
-                    </Tooltip>
-                    <input
-                      type="text"
-                      value={tiktokHandle}
-                      onChange={e => setTiktokHandle(e.target.value.replace(/^@/, ''))}
-                      onBlur={e => saveTiktokHandle(e.target.value)}
-                      onKeyDown={e => e.key === 'Enter' && saveTiktokHandle((e.target as HTMLInputElement).value)}
-                      placeholder="your_handle"
-                      className="bg-transparent text-[10px] text-slate-300 border-b border-surface-600 focus:border-violet-500 outline-none w-24 py-0.5"
-                    />
-                    {handleSaved && <span className="text-[9px] text-emerald-400">saved</span>}
+                  <div className="mt-1 space-y-1">
+                    {tiktokIdentity?.secondary && (
+                      <div className="text-[10px] text-slate-500">
+                        Display name: {tiktokIdentity.secondary}
+                      </div>
+                    )}
+                    {!tiktokIdentity?.verified && (
+                      <div className="text-[10px] text-amber-300">
+                        Reconnect TikTok to verify the account handle.
+                      </div>
+                    )}
+                    <div className="flex items-center gap-1">
+                      <Tooltip text="Profile-link fallback — TikTok account verification uses the API-returned handle" position="right">
+                        <span className="text-[10px] text-slate-500">@</span>
+                      </Tooltip>
+                      <input
+                        type="text"
+                        value={tiktokHandle}
+                        onChange={e => setTiktokHandle(e.target.value.replace(/^@/, ''))}
+                        onBlur={e => saveTiktokHandle(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && saveTiktokHandle((e.target as HTMLInputElement).value)}
+                        placeholder="profile_link"
+                        className="bg-transparent text-[10px] text-slate-300 border-b border-surface-600 focus:border-violet-500 outline-none w-24 py-0.5"
+                      />
+                      {handleSaved && <span className="text-[9px] text-emerald-400">saved</span>}
+                    </div>
                   </div>
                 )}
               </div>

@@ -18,7 +18,12 @@ pub struct RegionInput {
 
 impl RegionInput {
     fn to_region(&self) -> Option<CamRegion> {
-        let r = CamRegion { x: self.x, y: self.y, w: self.w, h: self.h };
+        let r = CamRegion {
+            x: self.x,
+            y: self.y,
+            w: self.w,
+            h: self.h,
+        };
         // Round-trip through the parser to apply clamping + MIN_REGION_DIM rejection.
         CamRegion::parse_norm_json(&r.to_norm_json())
     }
@@ -32,24 +37,19 @@ pub async fn set_vod_cam_region(
     region: RegionInput,
     db: State<'_, DbConn>,
 ) -> Result<(), String> {
-    let r = region.to_region().ok_or_else(|| {
-        "Region rejected: out of range or smaller than 5% x 5%".to_string()
-    })?;
+    let r = region
+        .to_region()
+        .ok_or_else(|| "Region rejected: out of range or smaller than 5% x 5%".to_string())?;
     let json = r.to_norm_json();
     let conn = db.lock().map_err(|e| format!("DB lock: {e}"))?;
-    db::update_vod_cam_region(&conn, &vod_id, Some(&json))
-        .map_err(|e| format!("DB error: {e}"))
+    db::update_vod_cam_region(&conn, &vod_id, Some(&json)).map_err(|e| format!("DB error: {e}"))
 }
 
 /// Clear the VOD-level cam region (NULL it out). Falls back to dup-source export.
 #[tauri::command]
-pub async fn clear_vod_cam_region(
-    vod_id: String,
-    db: State<'_, DbConn>,
-) -> Result<(), String> {
+pub async fn clear_vod_cam_region(vod_id: String, db: State<'_, DbConn>) -> Result<(), String> {
     let conn = db.lock().map_err(|e| format!("DB lock: {e}"))?;
-    db::update_vod_cam_region(&conn, &vod_id, None)
-        .map_err(|e| format!("DB error: {e}"))
+    db::update_vod_cam_region(&conn, &vod_id, None).map_err(|e| format!("DB error: {e}"))
 }
 
 /// Set a per-clip cam region override. Only honored when the
@@ -60,9 +60,9 @@ pub async fn set_clip_cam_region_override(
     region: RegionInput,
     db: State<'_, DbConn>,
 ) -> Result<(), String> {
-    let r = region.to_region().ok_or_else(|| {
-        "Region rejected: out of range or smaller than 5% x 5%".to_string()
-    })?;
+    let r = region
+        .to_region()
+        .ok_or_else(|| "Region rejected: out of range or smaller than 5% x 5%".to_string())?;
     let json = r.to_norm_json();
     let conn = db.lock().map_err(|e| format!("DB lock: {e}"))?;
     db::update_clip_cam_region_override(&conn, &clip_id, Some(&json))
@@ -77,8 +77,7 @@ pub async fn clear_clip_cam_region_override(
     db: State<'_, DbConn>,
 ) -> Result<(), String> {
     let conn = db.lock().map_err(|e| format!("DB lock: {e}"))?;
-    db::update_clip_cam_region_override(&conn, &clip_id, None)
-        .map_err(|e| format!("DB error: {e}"))
+    db::update_clip_cam_region_override(&conn, &clip_id, None).map_err(|e| format!("DB error: {e}"))
 }
 
 /// Set the per-clip fit mode. Accepts 'fit', 'fill', or 'stretch'.
@@ -112,9 +111,7 @@ pub async fn set_allow_per_clip_override(
 /// Read the global setting. Frontend calls this once on Editor mount to know
 /// whether to render the per-clip override sub-row.
 #[tauri::command]
-pub async fn get_allow_per_clip_override(
-    db: State<'_, DbConn>,
-) -> Result<bool, String> {
+pub async fn get_allow_per_clip_override(db: State<'_, DbConn>) -> Result<bool, String> {
     let conn = db.lock().map_err(|e| format!("DB lock: {e}"))?;
     let val = db::get_setting(&conn, "allow_per_clip_cam_region_override")
         .map_err(|e| format!("DB error: {e}"))?;
@@ -128,21 +125,36 @@ mod tests {
     #[test]
     fn region_input_round_trips_through_clamp() {
         // Valid region passes through.
-        let r = RegionInput { x: 0.1, y: 0.7, w: 0.25, h: 0.25 };
+        let r = RegionInput {
+            x: 0.1,
+            y: 0.7,
+            w: 0.25,
+            h: 0.25,
+        };
         assert!(r.to_region().is_some());
     }
 
     #[test]
     fn region_input_below_min_dim_returns_none() {
         // 4% width should be rejected.
-        let r = RegionInput { x: 0.0, y: 0.0, w: 0.04, h: 0.5 };
+        let r = RegionInput {
+            x: 0.0,
+            y: 0.0,
+            w: 0.04,
+            h: 0.5,
+        };
         assert!(r.to_region().is_none());
     }
 
     #[test]
     fn region_input_out_of_range_clamps_then_rejects_if_too_small() {
         // Negative h clamps to 0 then rejects (below 5% min).
-        let r = RegionInput { x: 0.0, y: 0.0, w: 0.5, h: -0.1 };
+        let r = RegionInput {
+            x: 0.0,
+            y: 0.0,
+            w: 0.5,
+            h: -0.1,
+        };
         assert!(r.to_region().is_none());
     }
 }

@@ -4,8 +4,8 @@ use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::db;
-use crate::DbConn;
 use crate::social::{self, ConnectedAccount, UploadMeta, UploadResult};
+use crate::DbConn;
 
 /// Connect a social platform (YouTube, TikTok, Instagram) via OAuth.
 ///
@@ -63,10 +63,7 @@ pub async fn connect_platform(
 
 /// Disconnect a social platform (removes stored tokens/channel info).
 #[tauri::command]
-pub fn disconnect_platform(
-    platform: String,
-    db: State<'_, DbConn>,
-) -> Result<(), String> {
+pub fn disconnect_platform(platform: String, db: State<'_, DbConn>) -> Result<(), String> {
     let adapter = social::get_adapter(&platform).map_err(|e| e.to_string())?;
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
     adapter.disconnect(&conn).map_err(|e| e.to_string())?;
@@ -86,9 +83,7 @@ pub fn get_connected_account(
 
 /// Get all connected social accounts across all platforms.
 #[tauri::command]
-pub fn get_all_connected_accounts(
-    db: State<'_, DbConn>,
-) -> Result<Vec<ConnectedAccount>, String> {
+pub fn get_all_connected_accounts(db: State<'_, DbConn>) -> Result<Vec<ConnectedAccount>, String> {
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
     social::get_all_accounts(&conn).map_err(|e| e.to_string())
 }
@@ -112,9 +107,8 @@ pub async fn upload_to_platform(
         let clip = db::get_clip_by_id(&conn, &meta.clip_id)
             .map_err(|e| format!("DB error: {}", e))?
             .ok_or_else(|| format!("Clip '{}' not found", meta.clip_id))?;
-        social::validate_export_file(clip.output_path.as_deref())
+        social::resolve_upload_artifact(&platform, &meta, clip.output_path.as_deref())
             .map_err(|e| e.to_string())?
-            .to_string()
     };
 
     // Upload: adapter.upload_video takes the shared DbConn and locks internally
@@ -207,8 +201,7 @@ pub fn get_upload_status(
     db: State<'_, DbConn>,
 ) -> Result<Option<db::UploadHistoryRow>, String> {
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
-    db::get_upload_for_clip(&conn, &clip_id, &platform)
-        .map_err(|e| format!("DB error: {}", e))
+    db::get_upload_for_clip(&conn, &clip_id, &platform).map_err(|e| format!("DB error: {}", e))
 }
 
 /// Get ALL upload history entries for a clip (all platforms).
@@ -218,17 +211,20 @@ pub fn get_clip_upload_history(
     db: State<'_, DbConn>,
 ) -> Result<Vec<db::UploadHistoryRow>, String> {
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
-    db::get_uploads_for_clip(&conn, &clip_id)
-        .map_err(|e| format!("DB error: {}", e))
+    db::get_uploads_for_clip(&conn, &clip_id).map_err(|e| format!("DB error: {}", e))
 }
 
 /// Clear the deleted_vods table so Twitch API re-fetch can re-insert all VODs.
 #[tauri::command]
 pub fn restore_deleted_vods(db: State<'_, DbConn>) -> Result<u64, String> {
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
-    let count = conn.execute("DELETE FROM deleted_vods", [])
+    let count = conn
+        .execute("DELETE FROM deleted_vods", [])
         .map_err(|e| format!("DB error: {}", e))?;
-    log::info!("[restore_deleted_vods] Cleared {} entries from deleted_vods table", count);
+    log::info!(
+        "[restore_deleted_vods] Cleared {} entries from deleted_vods table",
+        count
+    );
     Ok(count as u64)
 }
 
@@ -270,8 +266,8 @@ pub async fn refresh_upload_stats(db: State<'_, DbConn>) -> Result<RefreshStatsS
             // 2. Cache each platform's access token once per refresh so we don't
             //    hammer the refresh endpoint per upload.
             let has_youtube = uploads.iter().any(|u| u.platform == "youtube");
-            let has_tiktok = tiktok::video_stats_enabled()
-                && uploads.iter().any(|u| u.platform == "tiktok");
+            let has_tiktok =
+                tiktok::video_stats_enabled() && uploads.iter().any(|u| u.platform == "tiktok");
 
             let yt_token: Option<String> = if has_youtube {
                 match youtube::ensure_fresh_access_token(&*db).await {

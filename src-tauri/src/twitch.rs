@@ -1,25 +1,23 @@
+use crate::auth_proxy::AuthProxy;
+use once_cell::sync::Lazy;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
-use std::time::{Duration, Instant};
 use std::sync::Mutex;
-use once_cell::sync::Lazy;
-use crate::auth_proxy::AuthProxy;
+use std::time::{Duration, Instant};
 
 /// Embedded Twitch Client ID — compiled into the binary.
 /// Override with TWITCH_CLIENT_ID env var for development.
 const DEFAULT_TWITCH_CLIENT_ID: &str = "i734ser5qcdf8grvlllx6yzprwegfr";
 
-static CLIENT_ID: Lazy<String> = Lazy::new(|| {
-    match std::env::var("TWITCH_CLIENT_ID") {
-        Ok(val) if !val.is_empty() => {
-            log::info!("Twitch CLIENT_ID loaded from env (len={})", val.len());
-            val
-        }
-        _ => {
-            log::info!("Using embedded Twitch CLIENT_ID");
-            DEFAULT_TWITCH_CLIENT_ID.to_string()
-        }
+static CLIENT_ID: Lazy<String> = Lazy::new(|| match std::env::var("TWITCH_CLIENT_ID") {
+    Ok(val) if !val.is_empty() => {
+        log::info!("Twitch CLIENT_ID loaded from env (len={})", val.len());
+        val
+    }
+    _ => {
+        log::info!("Using embedded Twitch CLIENT_ID");
+        DEFAULT_TWITCH_CLIENT_ID.to_string()
     }
 });
 
@@ -97,7 +95,11 @@ pub fn get_auth_url() -> String {
         state,
     );
 
-    log::info!("[Twitch Auth] Auth URL built: client_id={}, redirect_uri={}", client_id(), REDIRECT_URI);
+    log::info!(
+        "[Twitch Auth] Auth URL built: client_id={}, redirect_uri={}",
+        client_id(),
+        REDIRECT_URI
+    );
 
     url
 }
@@ -239,9 +241,7 @@ fn send_html_response(stream: &std::net::TcpStream, body_content: &str) {
 }
 
 /// Refresh an expired access token using the auth proxy.
-pub async fn refresh_access_token(
-    refresh_token: &str,
-) -> Result<TokenResponse, String> {
+pub async fn refresh_access_token(refresh_token: &str) -> Result<TokenResponse, String> {
     log::info!("[Twitch Refresh] Refreshing token via auth proxy");
 
     let proxy = AuthProxy::new()?;
@@ -254,25 +254,32 @@ pub async fn refresh_access_token(
         return Err(format!("Token refresh failed: {} — {}", err, desc));
     }
 
-    let access_token = proxy_resp.access_token
+    let access_token = proxy_resp
+        .access_token
         .ok_or_else(|| "Proxy response missing access_token".to_string())?;
 
-    log::info!("[Twitch Refresh] Success — new token len={}", access_token.len());
+    log::info!(
+        "[Twitch Refresh] Success — new token len={}",
+        access_token.len()
+    );
 
     Ok(TokenResponse {
         access_token,
         expires_in: proxy_resp.expires_in.unwrap_or(0),
-        token_type: proxy_resp.token_type.unwrap_or_else(|| "bearer".to_string()),
+        token_type: proxy_resp
+            .token_type
+            .unwrap_or_else(|| "bearer".to_string()),
         refresh_token: proxy_resp.refresh_token,
     })
 }
 
 /// Exchange an authorization code for an access token via the auth proxy.
-pub async fn exchange_code(
-    code: &str,
-) -> Result<TokenResponse, String> {
-    log::info!("[Twitch Token] Exchanging code via auth proxy (code={}..., redirect_uri={})",
-        &code[..code.len().min(8)], REDIRECT_URI);
+pub async fn exchange_code(code: &str) -> Result<TokenResponse, String> {
+    log::info!(
+        "[Twitch Token] Exchanging code via auth proxy (code={}..., redirect_uri={})",
+        &code[..code.len().min(8)],
+        REDIRECT_URI
+    );
 
     let proxy = AuthProxy::new()?;
     let proxy_resp = proxy.twitch_token_exchange(code, REDIRECT_URI).await?;
@@ -284,17 +291,26 @@ pub async fn exchange_code(
         return Err(format!("Token exchange failed: {} — {}", err, desc));
     }
 
-    let access_token = proxy_resp.access_token
+    let access_token = proxy_resp
+        .access_token
         .ok_or_else(|| "Proxy response missing access_token".to_string())?;
 
-    log::info!("[Twitch Token] Got access_token (len={}), refresh_token={}",
+    log::info!(
+        "[Twitch Token] Got access_token (len={}), refresh_token={}",
         access_token.len(),
-        if proxy_resp.refresh_token.is_some() { "present" } else { "MISSING" });
+        if proxy_resp.refresh_token.is_some() {
+            "present"
+        } else {
+            "MISSING"
+        }
+    );
 
     Ok(TokenResponse {
         access_token,
         expires_in: proxy_resp.expires_in.unwrap_or(0),
-        token_type: proxy_resp.token_type.unwrap_or_else(|| "bearer".to_string()),
+        token_type: proxy_resp
+            .token_type
+            .unwrap_or_else(|| "bearer".to_string()),
         refresh_token: proxy_resp.refresh_token,
     })
 }
@@ -325,7 +341,9 @@ pub async fn curl_twitch_get(url: &str, access_token: &str) -> Result<String, St
         .map_err(|e| format!("Failed to fetch: {}", e))?;
 
     let status = resp.status();
-    let text = resp.text().await
+    let text = resp
+        .text()
+        .await
         .map_err(|e| format!("Failed to read response: {}", e))?;
 
     if !status.is_success() {
@@ -336,10 +354,12 @@ pub async fn curl_twitch_get(url: &str, access_token: &str) -> Result<String, St
 }
 
 /// Get the authenticated user's info using their user access token.
-pub async fn get_authenticated_user(
-    access_token: &str,
-) -> Result<TwitchUser, String> {
-    log::info!("[Twitch User] Fetching user info with token (len={}), client_id={}", access_token.len(), client_id());
+pub async fn get_authenticated_user(access_token: &str) -> Result<TwitchUser, String> {
+    log::info!(
+        "[Twitch User] Fetching user info with token (len={}), client_id={}",
+        access_token.len(),
+        client_id()
+    );
 
     let url = format!("{}/users", TWITCH_API_URL);
     let body = curl_twitch_get(&url, access_token).await.map_err(|e| {
@@ -349,16 +369,18 @@ pub async fn get_authenticated_user(
 
     log::info!("[Twitch User] Response status: 200 OK");
 
-    let users_resp: UsersResponse = serde_json::from_str(&body)
-        .map_err(|e| {
-            log::error!("[Twitch User] JSON parse failed: {}", e);
-            format!("Failed to parse user response: {}", e)
-        })?;
+    let users_resp: UsersResponse = serde_json::from_str(&body).map_err(|e| {
+        log::error!("[Twitch User] JSON parse failed: {}", e);
+        format!("Failed to parse user response: {}", e)
+    })?;
 
     // Check for API error in response
     if let Ok(err_val) = serde_json::from_str::<serde_json::Value>(&body) {
         if let Some(status) = err_val.get("status") {
-            let msg = err_val.get("message").and_then(|m| m.as_str()).unwrap_or("");
+            let msg = err_val
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("");
             log::error!("[Twitch User] Fetch FAILED ({}): {}", status, msg);
             return Err(format!("User lookup failed ({}): {}", status, msg));
         }
@@ -366,7 +388,12 @@ pub async fn get_authenticated_user(
 
     match users_resp.data.into_iter().next() {
         Some(user) => {
-            log::info!("[Twitch User] Success: id={}, login={}, display_name={}", user.id, user.login, user.display_name);
+            log::info!(
+                "[Twitch User] Success: id={}, login={}, display_name={}",
+                user.id,
+                user.login,
+                user.display_name
+            );
             Ok(user)
         }
         None => {
@@ -377,10 +404,7 @@ pub async fn get_authenticated_user(
 }
 
 /// Get VODs (archive videos) for a user. Paginates to fetch all available VODs.
-pub async fn get_vods(
-    access_token: &str,
-    user_id: &str,
-) -> Result<Vec<TwitchVideo>, String> {
+pub async fn get_vods(access_token: &str, user_id: &str) -> Result<Vec<TwitchVideo>, String> {
     let mut all_videos = Vec::new();
     let mut cursor: Option<String> = None;
 
@@ -398,7 +422,10 @@ pub async fn get_vods(
         // Check for API error
         if let Ok(err_val) = serde_json::from_str::<serde_json::Value>(&body) {
             if let Some(status) = err_val.get("status") {
-                let msg = err_val.get("message").and_then(|m| m.as_str()).unwrap_or("");
+                let msg = err_val
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("");
                 return Err(format!("VODs request failed ({}): {}", status, msg));
             }
         }
@@ -445,12 +472,15 @@ pub async fn get_channel_info(
     access_token: &str,
     broadcaster_id: &str,
 ) -> Result<Option<ChannelInfo>, String> {
-    let url = format!("{}/channels?broadcaster_id={}", TWITCH_API_URL, broadcaster_id);
+    let url = format!(
+        "{}/channels?broadcaster_id={}",
+        TWITCH_API_URL, broadcaster_id
+    );
 
     let body = curl_twitch_get(&url, access_token).await?;
 
-    let info: ChannelInfoResponse = serde_json::from_str(&body)
-        .map_err(|e| format!("Failed to parse channel info: {}", e))?;
+    let info: ChannelInfoResponse =
+        serde_json::from_str(&body).map_err(|e| format!("Failed to parse channel info: {}", e))?;
 
     Ok(info.data.into_iter().next())
 }
@@ -551,11 +581,12 @@ pub async fn fetch_community_clips(
             url.push_str(&format!("&after={}", urlencoding::encode(c)));
         }
 
-        let body = curl_twitch_get(&url, access_token).await
+        let body = curl_twitch_get(&url, access_token)
+            .await
             .map_err(|e| format!("helix/clips: {}", e))?;
 
-        let resp: serde_json::Value = serde_json::from_str(&body)
-            .map_err(|e| format!("helix/clips parse: {}", e))?;
+        let resp: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| format!("helix/clips parse: {}", e))?;
 
         if let Some(status) = resp.get("status") {
             let msg = resp.get("message").and_then(|m| m.as_str()).unwrap_or("");
@@ -574,7 +605,9 @@ pub async fn fetch_community_clips(
         }
 
         cursor = resp["pagination"]["cursor"].as_str().map(|s| s.to_string());
-        if cursor.is_none() || cursor.as_deref() == Some("") { break; }
+        if cursor.is_none() || cursor.as_deref() == Some("") {
+            break;
+        }
     }
 
     Ok(all)

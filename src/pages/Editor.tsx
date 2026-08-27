@@ -16,7 +16,12 @@ import CaptionPreview, { MaterialCaptionText } from '../components/CaptionPrevie
 import type { TimelineMarker } from '../components/TrimTimeline'
 import { analyzeEmphasis, getEmphasisSummary } from '../lib/captionEmphasis'
 import type { CaptionToken } from '../lib/captionEmphasis'
-import { clampCaptionFontScale, fitCaptionFontSize } from '../lib/captionSizing'
+import {
+  clampCaptionCardScale,
+  clampCaptionFontScale,
+  DEFAULT_CAPTION_CARD_SCALE,
+  fitCaptionFontSize,
+} from '../lib/captionSizing'
 import ThumbnailSelector from '../components/ThumbnailSelector'
 import LayoutPicker from '../components/LayoutPicker'
 import CamRegionRow from '../components/CamRegionRow'
@@ -27,7 +32,7 @@ import FacecamEditor, { DraggablePipOverlay, DraggableSplitDivider } from '../co
 import { DEFAULT_FACECAM, computeSubtitleCollision, parseFacecamSettings } from '../lib/facecam'
 import type { FacecamSettings } from '../lib/facecam'
 import SubtitleEditor from '../components/SubtitleEditor'
-import { parseSrt, serializeSrt, findActiveSegment, shiftSubtitleSegments, splitSubtitleSegmentsByWord } from '../lib/subtitleUtils'
+import { findActiveSegment, normalizeSubtitleSegments, parseSrt, serializeSrt, shiftSubtitleSegments, splitSubtitleSegmentsByWord } from '../lib/subtitleUtils'
 import type { SubtitleSegment } from '../lib/subtitleUtils'
 import { usePlaybackStore } from '../stores/playbackStore'
 import { usePlatformStore, PLATFORM_INFO } from '../stores/platformStore'
@@ -46,6 +51,7 @@ import { useEditorHistory } from '../hooks/useEditorHistory'
 import type { EditorSnapshot } from '../hooks/useEditorHistory'
 import ExportProgressBar from '../components/ExportProgressBar'
 import { useTemplateStore } from '../stores/templateStore'
+import { useAppStore } from '../stores/appStore'
 import type { ClipTemplate } from '../stores/templateStore'
 import { generateStandaloneTitle } from '../lib/publishCopyGenerator'
 import type { ClipContext } from '../lib/publishCopyGenerator'
@@ -72,6 +78,37 @@ import {
   fullFrameZoomOutPercent,
   normalizeFullFrameScale,
 } from '../lib/fullFrame'
+import { artifactUploadFields, renderSnapshotKey, saveThenRender } from '../lib/exportArtifacts'
+import type { RenderedArtifact } from '../lib/exportArtifacts'
+import { speechModelLabel } from '../lib/speechModelSelection'
+
+type CaptionProvenance = 'none' | 'analysis-draft' | 'aligned' | 'edited' | 'legacy'
+type CaptionAudioMode = 'mixed' | 'microphone'
+
+interface CaptionAlignmentResult {
+  srt: string | null
+  cueCount: number
+  provenance: CaptionProvenance
+  pipelineVersion: number
+  sourceStart: number | null
+  captionsEnabled: boolean
+  audioMode: CaptionAudioMode
+  language: string | null
+  audioStream: string | null
+  modelUsed: string | null
+  changed: boolean
+  message: string | null
+}
+
+function normalizedCaptionDocument(text: string): { text: string; segments: SubtitleSegment[] } {
+  const segments = normalizeSubtitleSegments(
+    splitSubtitleSegmentsByWord(parseSrt(text)),
+  )
+  return {
+    text: segments.length > 0 ? serializeSrt(segments) : text,
+    segments,
+  }
+}
 
 function formatTime(seconds: number) {
   const m = Math.floor(seconds / 60)
@@ -119,14 +156,15 @@ function PillGroup<T extends string>({ value, options, onChange }: {
 }
 
 /** Action buttons — extracted so platform hooks are called at component level */
-function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, exportDone, exportError, mediaAvailable, exportPreset, onSave, onExportForFormat, publishMeta, clipTitle, uploadHistory, onUploadHistoryChange }: {
+function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, exportDone, exportError, mediaAvailable, exportPreset, onSave, onExportForFormat, tiktokPreviewReady, publishMeta, clipTitle, uploadHistory, onUploadHistoryChange }: {
   clipId: string; clip: Clip | null; saving: boolean; saved: boolean
   exporting: boolean; exportProgress: number; exportDone: boolean; exportError: string | null
   mediaAvailable: boolean
   exportPreset: { id: string; aspectRatio: string; name: string }
-  onSave: () => void
+  onSave: () => Promise<void>
   /** Export with a specific aspect ratio override (for multi-platform re-export) */
-  onExportForFormat: (aspectRatio: string) => Promise<void>
+  onExportForFormat: (aspectRatio: string) => Promise<RenderedArtifact>
+  tiktokPreviewReady: boolean
   publishMeta?: { title: string; description: string; hashtags: string[]; visibility: string }
   /** The main clip title from the editor (single source of truth for upload title) */
   clipTitle: string
@@ -271,9 +309,10 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
     && platformStates.tiktok.draftHandoff === true
   const tiktokProcessing = platformStates.tiktok?.status === 'processing'
   const tiktokPreviouslyAccepted = platformStates.tiktok?.status === 'duplicate'
+  const tiktokNeedsPreview = selectedPlatforms.includes('tiktok') && !tiktokPreviewReady
 
   // Build upload metadata — includes title from main field, caption, and hashtags
-  const buildUploadMeta = (platform: string, force = false) => {
+  const buildUploadMeta = (platform: string, force = false, artifact?: RenderedArtifact) => {
     const baseDesc = publishMeta?.description || ''
     const tags = publishMeta?.hashtags || []
     const hashtagSuffix = tags.length > 0 ? tags.map(t => `#${t}`).join(' ') : ''
@@ -294,6 +333,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
         ? tiktokCompliance.privacyLevel
         : (platformVisibilities[platform] || getDefaultVisibility(platform)),
       force,
+      ...(artifact ? artifactUploadFields(artifact) : {}),
       ...(isTikTok ? {
         disable_comment: tiktokCompliance.disableComment,
         disable_duet: tiktokCompliance.disableDuet,
@@ -306,7 +346,11 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
   }
 
   // Upload to a single platform
-  const uploadToPlatform = async (platform: string, force = false): Promise<PlatformUploadState> => {
+  const uploadToPlatform = async (
+    platform: string,
+    force = false,
+    artifact?: RenderedArtifact,
+  ): Promise<PlatformUploadState> => {
     const adapterPlatform = platform === 'youtube_shorts' ? 'youtube' : platform
     try {
       if (!isConnected(adapterPlatform)) {
@@ -314,7 +358,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
       }
       const result = await invoke<UploadResult>('upload_to_platform', {
         platform: adapterPlatform,
-        meta: buildUploadMeta(platform, force),
+        meta: buildUploadMeta(platform, force, artifact),
       })
       if (result.status.status === 'complete') {
         const url = result.status.video_url
@@ -409,9 +453,6 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
       ? selectedPlatforms.filter(platform => forcePlatforms.has(platform))
       : selectedPlatforms
 
-    // Save first
-    onSave()
-
     // Group platforms by required aspect ratio
     const groups: Record<string, string[]> = {}
     for (const platform of platformsForRun) {
@@ -431,8 +472,15 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
         setPlatformStates(prev => ({ ...prev, [p]: { status: 'exporting', progress: 0 } }))
       }
       try {
-        await onExportForFormat(aspectRatio)
-        await new Promise(r => setTimeout(r, 500))
+        const artifact = await onExportForFormat(aspectRatio)
+        for (const platform of platforms) {
+          setPlatformStates(prev => ({
+            ...prev,
+            [platform]: { status: 'uploading', progress: 0 },
+          }))
+          const result = await uploadToPlatform(platform, forcePlatforms.has(platform), artifact)
+          setPlatformStates(prev => ({ ...prev, [platform]: result }))
+        }
       } catch (error: unknown) {
         for (const p of platforms) {
           setPlatformStates(prev => ({
@@ -441,15 +489,6 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
           }))
         }
         continue
-      }
-
-      for (const platform of platforms) {
-        setPlatformStates(prev => ({
-          ...prev,
-          [platform]: { status: 'uploading', progress: 0 },
-        }))
-        const result = await uploadToPlatform(platform, forcePlatforms.has(platform))
-        setPlatformStates(prev => ({ ...prev, [platform]: result }))
       }
     }
 
@@ -460,9 +499,6 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
   const handleScheduleUpload = async () => {
     if (!clipId || selectedPlatforms.length === 0 || !scheduleTime) return
     setScheduling(true)
-
-    // Save first
-    onSave()
 
     // Export before scheduling (so the file is ready when the schedule fires)
     const groups: Record<string, string[]> = {}
@@ -475,25 +511,23 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
 
     for (const [aspectRatio, platforms] of Object.entries(groups)) {
       try {
-        await onExportForFormat(aspectRatio)
-        await new Promise(r => setTimeout(r, 500))
+        const artifact = await onExportForFormat(aspectRatio)
+        const isoTime = new Date(scheduleTime).toISOString()
+        for (const platform of platforms) {
+          const adapterPlatform = platform === 'youtube_shorts' ? 'youtube' : platform
+          const meta = buildUploadMeta(platform, false, artifact)
+          const metaJson = JSON.stringify(meta)
+          try {
+            const id = await scheduleUpload(clipId, adapterPlatform, isoTime, metaJson)
+            setScheduledUploads(prev => [...prev, { id, platform: adapterPlatform, scheduled_time: isoTime }])
+          } catch (error: unknown) {
+            console.error(`[Schedule] Failed to schedule ${platform}:`, error)
+          }
+        }
       } catch (error: unknown) {
         console.error('[Schedule] Export failed:', error)
         setScheduling(false)
         return
-      }
-
-      const isoTime = new Date(scheduleTime).toISOString()
-      for (const platform of platforms) {
-        const adapterPlatform = platform === 'youtube_shorts' ? 'youtube' : platform
-        const meta = buildUploadMeta(platform, false)
-        const metaJson = JSON.stringify(meta)
-        try {
-          const id = await scheduleUpload(clipId, adapterPlatform, isoTime, metaJson)
-          setScheduledUploads(prev => [...prev, { id, platform: adapterPlatform, scheduled_time: isoTime }])
-        } catch (error: unknown) {
-          console.error(`[Schedule] Failed to schedule ${platform}:`, error)
-        }
       }
     }
 
@@ -553,13 +587,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
               setDownloading(true)
               setDownloadResult(null)
               try {
-                // Save settings first
-                onSave()
-                // Export if not already exported
-                const fresh = await invoke<Clip>('get_clip_detail', { clipId })
-                if (fresh.render_status !== 'completed') {
-                  await onExportForFormat(exportPreset.aspectRatio)
-                }
+                await onExportForFormat(exportPreset.aspectRatio)
                 // Save to configured folder (or prompt to pick one)
                 const savedPath = await invoke<string | null>('save_clip_to_disk', { clipId })
                 if (savedPath) {
@@ -653,6 +681,12 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
             onValidityChange={setTiktokComplianceValid}
             clipDurationSec={clipDuration}
           />
+          )}
+
+        {tiktokNeedsPreview && (
+          <div role="status" className="border-l-2 border-violet-400 bg-violet-500/5 px-3 py-2 text-[11px] leading-relaxed text-violet-100">
+            Prepare the exact 9:16 preview on the left before sending this video to TikTok.
+          </div>
         )}
 
         {tiktokProcessing && (
@@ -711,7 +745,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
             {scheduleMode ? (
               <button
                 onClick={handleScheduleUpload}
-                disabled={scheduling || !scheduleTime || !mediaAvailable || (selectedPlatforms.includes('tiktok') && !tiktokComplianceValid)}
+                disabled={scheduling || !scheduleTime || !mediaAvailable || tiktokNeedsPreview || (selectedPlatforms.includes('tiktok') && !tiktokComplianceValid)}
                 className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors cursor-pointer border bg-amber-600/80 text-white border-amber-500 hover:bg-amber-500 disabled:opacity-60"
               >
                 {scheduling ? (
@@ -725,7 +759,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
             ) : (
               <button
                 onClick={() => void handleMultiUpload(new Set(forcedReuploadPlatforms))}
-                disabled={anyUploading || !mediaAvailable || (allSubmitted && !hasForcedReuploadOption) || (selectedPlatforms.includes('tiktok') && !tiktokComplianceValid)}
+                disabled={anyUploading || !mediaAvailable || tiktokNeedsPreview || (allSubmitted && !hasForcedReuploadOption) || (selectedPlatforms.includes('tiktok') && !tiktokComplianceValid)}
                 className={`w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors cursor-pointer border ${
                   allSubmitted && !hasForcedReuploadOption
                     ? 'bg-green-600/20 text-green-400 border-green-500/30'
@@ -875,6 +909,10 @@ export default function Editor() {
   const [exportProgress, setExportProgress] = useState(0)
   const [exportDone, setExportDone] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
+  const [preparedArtifacts, setPreparedArtifacts] = useState<Record<
+    string,
+    { artifact: RenderedArtifact; snapshotKey: string }
+  >>({})
   const [saved, setSaved] = useState(false)
   // Persisted upload history: { platform: videoUrl } loaded from DB
   const [uploadHistory, setUploadHistory] = useState<Record<string, string>>({})
@@ -890,10 +928,18 @@ export default function Editor() {
   const [aspectRatio, setAspectRatio] = useState('9:16')
   const [captionsEnabled, setCaptionsEnabled] = useState(true)
   const [captionsText, setCaptionsText] = useState('')
+  const captionsTextRef = useRef('')
+  const [captionProvenance, setCaptionProvenance] = useState<CaptionProvenance>('none')
+  const [captionPipelineVersion, setCaptionPipelineVersion] = useState(0)
+  const [captionAudioMode, setCaptionAudioMode] = useState<CaptionAudioMode>('mixed')
+  const [captionLanguage, setCaptionLanguage] = useState<string | null>(null)
+  const [captionAudioStream, setCaptionAudioStream] = useState<string | null>(null)
+  const [captionModelUsed, setCaptionModelUsed] = useState<string | null>(null)
   const [captionsPosition, setCaptionsPosition] = useState('bottom')
   const [captionYOffset, setCaptionYOffset] = useState(0) // % offset from preset position (-20 to +20)
   const [captionStyleId, setCaptionStyleId] = useState('clean')
   const [captionFontScale, setCaptionFontScale] = useState(1)
+  const [captionCardScale, setCaptionCardScale] = useState(DEFAULT_CAPTION_CARD_SCALE)
   const [aiEmphasisEnabled, setAiEmphasisEnabled] = useState(true)
   const [generatingCaptions, setGeneratingCaptions] = useState(false)
   const [captionError, setCaptionError] = useState('')
@@ -906,6 +952,7 @@ export default function Editor() {
   const [fullFrameScale, setFullFrameScale] = useState(DEFAULT_FULL_FRAME_SCALE)
   const [pickingBranding, setPickingBranding] = useState(false)
   const [brandingError, setBrandingError] = useState('')
+  const speechModelSelectionSaving = useAppStore(state => state.speechModelSelectionSaving)
   const [layoutPickerOpen, setLayoutPickerOpen] = useState(false)
   const [exportPresetId, setExportPresetId] = useState('tiktok')
   const [textOverlays] = useState<TextOverlay[]>([])
@@ -980,6 +1027,7 @@ export default function Editor() {
     setCaptionStyleId(tmpl.captionStyleId)
     setCaptionsPosition(tmpl.captionPosition)
     setCaptionFontScale(clampCaptionFontScale(tmpl.captionFontScale ?? 1))
+    setCaptionCardScale(clampCaptionCardScale(tmpl.captionCardScale ?? DEFAULT_CAPTION_CARD_SCALE))
     setCaptionYOffset(Math.max(-20, Math.min(20, tmpl.captionYOffset ?? 0)))
     setExportPresetId(tmpl.exportPresetId)
     if ('contextBackgroundPath' in tmpl) {
@@ -1011,6 +1059,7 @@ export default function Editor() {
       captionStyleId,
       captionPosition: captionsPosition as 'top' | 'center' | 'bottom',
       captionFontScale,
+      captionCardScale,
       captionYOffset,
       captionTone: 'punchy', // default — user can change later
       hashtags: publishMeta.hashtags,
@@ -1025,7 +1074,7 @@ export default function Editor() {
     setTemplateSaveOpen(false)
     setTemplateSaved(true)
     setTimeout(() => setTemplateSaved(false), 2000)
-  }, [templateSaveName, captionStyleId, captionsPosition, captionFontScale, captionYOffset, publishMeta.hashtags, exportPresetId, contextBackgroundPath, contextBackgroundMode, contextBlurStrength, contextVideoY, fullFrameScale, templateStore])
+  }, [templateSaveName, captionStyleId, captionsPosition, captionFontScale, captionCardScale, captionYOffset, publishMeta.hashtags, exportPresetId, contextBackgroundPath, contextBackgroundMode, contextBlurStrength, contextVideoY, fullFrameScale, templateStore])
 
   // ── Undo / Redo history ──
   const history = useEditorHistory()
@@ -1034,21 +1083,28 @@ export default function Editor() {
 
   const takeSnapshot = useCallback((): EditorSnapshot => ({
     title, startSeconds, endSeconds, captionsText,
-    captionsPosition, captionStyleId, captionFontScale, captionYOffset,
+    captionsPosition, captionStyleId, captionFontScale, captionCardScale, captionYOffset,
     publishTitle: publishMeta.title,
     publishDescription: publishMeta.description,
     publishHashtags: publishMeta.hashtags,
-  }), [title, startSeconds, endSeconds, captionsText, captionsPosition, captionStyleId, captionFontScale, captionYOffset, publishMeta])
+  }), [title, startSeconds, endSeconds, captionsText, captionsPosition, captionStyleId, captionFontScale, captionCardScale, captionYOffset, publishMeta])
 
   const applySnapshot = useCallback((snap: EditorSnapshot) => {
     historyRestoringRef.current = true
     setTitle(snap.title)
     setStartSeconds(snap.startSeconds)
     setEndSeconds(snap.endSeconds)
-    setCaptionsText(snap.captionsText)
+    const captions = normalizedCaptionDocument(snap.captionsText)
+    captionsTextRef.current = captions.text
+    setCaptionsText(captions.text)
+    setSubtitleSegments(captions.segments)
+    setCaptionProvenance(captions.text.trim() ? 'edited' : 'none')
+    setCaptionPipelineVersion(0)
+    setCaptionModelUsed(null)
     setCaptionsPosition(snap.captionsPosition)
     setCaptionStyleId(snap.captionStyleId)
     setCaptionFontScale(clampCaptionFontScale(snap.captionFontScale))
+    setCaptionCardScale(clampCaptionCardScale(snap.captionCardScale))
     setCaptionYOffset(snap.captionYOffset)
     setPublishMeta(prev => ({
       ...prev,
@@ -1080,7 +1136,7 @@ export default function Editor() {
       }
     }, 400)
     return () => clearTimeout(timer)
-  }, [title, startSeconds, endSeconds, captionsText, captionsPosition, captionStyleId, captionFontScale, captionYOffset, publishMeta, history, takeSnapshot])
+  }, [title, startSeconds, endSeconds, captionsText, captionsPosition, captionStyleId, captionFontScale, captionCardScale, captionYOffset, publishMeta, history, takeSnapshot])
 
   // Keyboard shortcuts: Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z
   useEffect(() => {
@@ -1119,30 +1175,40 @@ export default function Editor() {
   const playerSeekRef = useRef<((time: number) => void) | null>(null)
   const [playbackTime, setPlaybackTime] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
+  const [captionPreviewPreparing, setCaptionPreviewPreparing] = useState(false)
 
   // ── Subtitle segments (direct state — NOT derived from SRT on every keystroke) ──
   const [subtitleSegments, setSubtitleSegments] = useState<SubtitleSegment[]>([])
-  const captionsTextRef = useRef(captionsText)
   const hasSrtCaptions = subtitleSegments.length > 0
   const canGenerateSubtitles = canGenerateTimedCaptions(clip, vod)
 
-  // Sync: external captionsText changes → parse into segments
-  useEffect(() => {
-    if (captionsText !== captionsTextRef.current) {
-      captionsTextRef.current = captionsText
-      setSubtitleSegments(splitSubtitleSegmentsByWord(parseSrt(captionsText)))
-    }
-  }, [captionsText])
+  const commitCaptionSegments = useCallback((segments: SubtitleSegment[]) => {
+    const normalized = normalizeSubtitleSegments(segments)
+    const srt = serializeSrt(normalized)
+    captionsTextRef.current = srt
+    setSubtitleSegments(normalized)
+    setCaptionsText(srt)
+    setCaptionProvenance(srt ? 'edited' : 'none')
+    setCaptionPipelineVersion(0)
+    setCaptionLanguage(null)
+    setCaptionAudioStream(null)
+    setCaptionModelUsed(null)
+    if (!srt) setCaptionsEnabled(false)
+    setSaved(false)
+  }, [])
 
-  // Sync: segment edits → captionsText (debounced, for save/export/emphasis)
-  useEffect(() => {
-    const timeout = setTimeout(() => {
-      const srt = serializeSrt(subtitleSegments.filter(s => s.text.trim()))
-      captionsTextRef.current = srt
-      setCaptionsText(srt)
-    }, 300)
-    return () => clearTimeout(timeout)
-  }, [subtitleSegments])
+  const handlePlainCaptionChange = useCallback((text: string) => {
+    captionsTextRef.current = text
+    setCaptionsText(text)
+    setSubtitleSegments([])
+    setCaptionProvenance(text.trim() ? 'edited' : 'none')
+    setCaptionPipelineVersion(0)
+    setCaptionLanguage(null)
+    setCaptionAudioStream(null)
+    setCaptionModelUsed(null)
+    if (!text.trim()) setCaptionsEnabled(false)
+    setSaved(false)
+  }, [])
 
   // SRT timestamps remain tied to the source position where captions were
   // generated, even if the clip is trimmed again later.
@@ -1179,31 +1245,62 @@ export default function Editor() {
 
   // ── Subtitle editing callbacks (direct state update — no SRT roundtrip) ──
   const handleSubtitleEdit = useCallback((id: string, text: string) => {
-    setSubtitleSegments(prev => prev.map(s => s.id === id ? { ...s, text } : s))
-  }, [])
+    commitCaptionSegments(subtitleSegments.map(s => s.id === id ? { ...s, text } : s))
+  }, [commitCaptionSegments, subtitleSegments])
   const handleSubtitleDelete = useCallback((id: string) => {
-    setSubtitleSegments(prev => prev.filter(s => s.id !== id))
-  }, [])
+    commitCaptionSegments(subtitleSegments.filter(s => s.id !== id))
+  }, [commitCaptionSegments, subtitleSegments])
   const handleSubtitleSeek = useCallback((srtTimeTarget: number) => {
     playerSeekRef.current?.(captionTimelineStart + srtTimeTarget)
   }, [captionTimelineStart])
   const handleSubtitleShift = useCallback((deltaSeconds: number) => {
-    const shifted = shiftSubtitleSegments(subtitleSegments, deltaSeconds)
-    const srt = serializeSrt(shifted.filter(segment => segment.text.trim()))
-    captionsTextRef.current = srt
-    setSubtitleSegments(shifted)
-    setCaptionsText(srt)
+    commitCaptionSegments(shiftSubtitleSegments(subtitleSegments, deltaSeconds))
+  }, [commitCaptionSegments, subtitleSegments])
+
+  const applyCaptionAlignment = useCallback((result: CaptionAlignmentResult) => {
+    const captions = normalizedCaptionDocument(result.srt || '')
+    captionsTextRef.current = captions.text
+    setCaptionsText(captions.text)
+    setSubtitleSegments(captions.segments)
+    setCaptionsEnabled(result.captionsEnabled && captions.text.trim().length > 0)
+    setCaptionProvenance(result.provenance)
+    setCaptionPipelineVersion(result.pipelineVersion)
+    setCaptionAudioMode(result.audioMode)
+    setCaptionLanguage(result.language)
+    setCaptionAudioStream(result.audioStream)
+    setCaptionModelUsed(result.modelUsed)
+    setClip(current => current ? {
+      ...current,
+      captions_text: result.srt,
+      captions_enabled: result.captionsEnabled ? 1 : 0,
+      captions_source_start: result.sourceStart,
+      captions_provenance: result.provenance,
+      captions_pipeline_version: result.pipelineVersion,
+      caption_audio_mode: result.audioMode,
+      captions_language: result.language,
+      caption_audio_stream: result.audioStream,
+    } : current)
+    if (typeof result.sourceStart === 'number' && Number.isFinite(result.sourceStart)) {
+      setCaptionTimelineStart(Math.max(0, result.sourceStart))
+    }
     setSaved(false)
-  }, [subtitleSegments])
+  }, [])
 
   const handleGenerateCaptions = async () => {
-    if (!clipId || generatingCaptions) return
+    if (!clipId || generatingCaptions || speechModelSelectionSaving) return
     setGeneratingCaptions(true)
     setCaptionError('')
     try {
-      const srt = await invoke<string>('generate_clip_captions', { clipId })
-      setCaptionTimelineStart(isCommunityClip ? 0 : startSeconds)
-      setCaptionsText(srt)
+      const result = await invoke<CaptionAlignmentResult>('generate_clip_captions', {
+        clipId,
+        audioMode: captionAudioMode,
+      })
+      applyCaptionAlignment(result)
+      if (result.cueCount === 0) {
+        setCaptionError(result.message || 'No spoken subtitles were found. Captions remain off.')
+      } else if (result.message) {
+        setCaptionError(result.message)
+      }
 
       // Game detection is manual — no auto-inference after subtitle generation
     } catch (err) {
@@ -1284,14 +1381,46 @@ export default function Editor() {
     setSaved(false)
     setEditorLoadError(null)
     setClip(null)
+    setPreparedArtifacts({})
+    captionsTextRef.current = ''
+    setCaptionsText('')
+    setSubtitleSegments([])
+    setCaptionProvenance('none')
+    setCaptionPipelineVersion(0)
+    setCaptionAudioMode('mixed')
+    setCaptionLanguage(null)
+    setCaptionAudioStream(null)
+    setCaptionModelUsed(null)
+    setCaptionError('')
     setHighlight(null)
     setVod(null)
     setVideoSrc(null)
     setUploadHistory({})
     ;(async () => {
       try {
-        const c = await invoke<Clip>('get_clip_detail', { clipId })
+        let c = await invoke<Clip>('get_clip_detail', { clipId })
         if (!isCurrentLoad()) return
+        let alignmentMessage = ''
+        if (c.captions_enabled === 1) {
+          try {
+            const result = await invoke<CaptionAlignmentResult>('ensure_clip_captions_aligned', { clipId })
+            if (!isCurrentLoad()) return
+            c = {
+              ...c,
+              captions_text: result.srt,
+              captions_enabled: result.captionsEnabled ? 1 : 0,
+              captions_source_start: result.sourceStart,
+              captions_provenance: result.provenance,
+              captions_pipeline_version: result.pipelineVersion,
+              caption_audio_mode: result.audioMode,
+              captions_language: result.language,
+              caption_audio_stream: result.audioStream,
+            }
+            alignmentMessage = result.message || ''
+          } catch (error) {
+            alignmentMessage = errorMessage(error, 'Accurate subtitle timing could not be prepared.')
+          }
+        }
         loadedClipIdRef.current = clipId
         setClip(c)
         setTitle(c.title)
@@ -1301,12 +1430,22 @@ export default function Editor() {
         // Sync export preset to match the clip's saved aspect ratio
         const matchingPreset = EXPORT_PRESETS.find(p => p.aspectRatio === c.aspect_ratio)
         if (matchingPreset) setExportPresetId(matchingPreset.id)
-        setCaptionsEnabled(c.captions_enabled === 1)
-        setCaptionsText(c.captions_text || '')
+        const captions = normalizedCaptionDocument(c.captions_text || '')
+        captionsTextRef.current = captions.text
+        setCaptionsEnabled(c.captions_enabled === 1 && captions.text.trim().length > 0)
+        setCaptionsText(captions.text)
+        setSubtitleSegments(captions.segments)
+        setCaptionProvenance(c.captions_provenance || 'legacy')
+        setCaptionPipelineVersion(c.captions_pipeline_version ?? 0)
+        setCaptionAudioMode(c.caption_audio_mode === 'microphone' ? 'microphone' : 'mixed')
+        setCaptionLanguage(c.captions_language || null)
+        setCaptionAudioStream(c.caption_audio_stream || null)
+        setCaptionError(alignmentMessage)
         setCaptionsPosition(c.captions_position || 'bottom')
         setCaptionYOffset(Math.max(-20, Math.min(20, c.caption_y_offset ?? 0)))
         setCaptionStyleId(c.caption_style || 'clean')
         setCaptionFontScale(clampCaptionFontScale(c.caption_font_scale ?? 1))
+        setCaptionCardScale(clampCaptionCardScale(c.caption_card_scale ?? DEFAULT_CAPTION_CARD_SCALE))
         setCaptionTimelineStart(getCaptionTimelineStart(c))
         const savedLayout = LAYOUT_OPTIONS.some((layout) => layout.id === c.facecam_layout)
           ? c.facecam_layout as LayoutMode
@@ -1349,10 +1488,11 @@ export default function Editor() {
           title: c.title,
           startSeconds: c.start_seconds,
           endSeconds: c.end_seconds,
-          captionsText: c.captions_text || '',
+          captionsText: captions.text,
           captionsPosition: c.captions_position || 'bottom',
           captionStyleId: c.caption_style || 'clean',
           captionFontScale: clampCaptionFontScale(c.caption_font_scale ?? 1),
+          captionCardScale: clampCaptionCardScale(c.caption_card_scale ?? DEFAULT_CAPTION_CARD_SCALE),
           captionYOffset: Math.max(-20, Math.min(20, c.caption_y_offset ?? 0)),
           publishTitle: c.title,
           publishDescription: '',
@@ -1415,6 +1555,38 @@ export default function Editor() {
     setAspectRatio(exportPreset.aspectRatio)
   }, [exportPreset.aspectRatio])
 
+  const persistEditorSettings = async () => {
+    if (!canPersistEditorState(clipId, loadedClipIdRef.current)) {
+      throw new Error('The clip changed before its settings could be saved')
+    }
+    const currentCaptionsText = captionsTextRef.current
+    const snapshot = {
+      clipId,
+      title,
+      startSeconds,
+      endSeconds,
+      aspectRatio,
+      captionsEnabled: captionsEnabled && currentCaptionsText.trim() ? 1 : 0,
+      captionsText: currentCaptionsText || null,
+      captionsProvenance: captionProvenance,
+      captionAudioMode,
+      captionsPosition,
+      captionStyle: captionStyleId,
+      captionFontScale,
+      captionCardScale,
+      captionYOffset,
+      facecamLayout,
+      facecamSettings: JSON.stringify(facecamSettings),
+      contextBackgroundPath,
+      contextBackgroundMode,
+      contextBlurStrength,
+      contextVideoY,
+      fullFrameScale,
+      game: game || null,
+    }
+    await invoke('update_clip_settings', snapshot)
+  }
+
   const handleSave = async () => {
     if (!canPersistEditorState(clipId, loadedClipIdRef.current)) return
     const saveClipId = clipId
@@ -1422,27 +1594,7 @@ export default function Editor() {
     saveRequestGenerationRef.current = saveGeneration
     setSaving(true)
     try {
-      await invoke('update_clip_settings', {
-        clipId: saveClipId,
-        title,
-        startSeconds,
-        endSeconds,
-        aspectRatio,
-        captionsEnabled: captionsEnabled ? 1 : 0,
-        captionsText: captionsText || null,
-        captionsPosition,
-        captionStyle: captionStyleId,
-        captionFontScale,
-        captionYOffset,
-        facecamLayout,
-        facecamSettings: JSON.stringify(facecamSettings),
-        contextBackgroundPath,
-        contextBackgroundMode,
-        contextBlurStrength,
-        contextVideoY,
-        fullFrameScale,
-        game: game || null,
-      })
+      await persistEditorSettings()
       if (
         saveRequestGenerationRef.current === saveGeneration &&
         canPersistEditorState(saveClipId, loadedClipIdRef.current)
@@ -1466,28 +1618,60 @@ export default function Editor() {
   const exportUnlistenRef = useRef<(() => void) | null>(null)
   useEffect(() => () => { exportUnlistenRef.current?.() }, [])
 
+  const currentRenderSnapshotKey = (
+    targetAspectRatio: string,
+    currentCaptionsText = captionsTextRef.current,
+    currentCaptionsEnabled = captionsEnabled,
+  ) => renderSnapshotKey(
+    targetAspectRatio,
+    {
+      clipId,
+      startSeconds,
+      endSeconds,
+      captionsEnabled: currentCaptionsEnabled,
+      captionsText: currentCaptionsText,
+      captionsPosition,
+      captionStyleId,
+      captionFontScale,
+      captionCardScale,
+      captionYOffset,
+      facecamLayout,
+      facecamSettings,
+      contextBackgroundPath,
+      contextBackgroundMode,
+      contextBlurStrength,
+      contextVideoY,
+      fullFrameScale,
+      vodCamRegion: vod?.cam_region_norm ?? null,
+      clipCamRegionOverride: clip?.cam_region_norm_override ?? null,
+      camFitMode: clip?.cam_fit_mode ?? null,
+      allowPerClipCamOverride,
+      sourceFingerprint: clip?.source_fingerprint ?? null,
+    },
+  )
+
   /**
    * Export with a specific aspect ratio (for multi-platform auto-re-export).
-   * Saves clip with the target aspect ratio, exports, waits for completion, then restores.
-   */
-  const handleExportForFormat = async (targetAspectRatio: string) => {
+   * Persists one editor snapshot, then renders that snapshot into an immutable
+   * format-specific artifact without changing the editor's saved aspect ratio.
+    */
+  const handleExportForFormat = async (targetAspectRatio: string): Promise<RenderedArtifact> => {
     if (!clipId) throw new Error('No clip')
-    const originalAR = aspectRatio
+    let snapshotKey = ''
 
-    // Save with target aspect ratio
-    await invoke('update_clip_settings', {
-      clipId, title, startSeconds, endSeconds,
-      aspectRatio: targetAspectRatio,
-      captionsEnabled: captionsEnabled ? 1 : 0,
-      captionsText: captionsText || null,
-      captionsPosition, captionStyle: captionStyleId, captionFontScale, captionYOffset, facecamLayout,
-      facecamSettings: JSON.stringify(facecamSettings),
-      contextBackgroundPath, contextBackgroundMode, contextBlurStrength, contextVideoY, fullFrameScale,
-      game: game || null,
-    })
-
-    // Export and wait for completion
-    return new Promise<void>((resolve, reject) => {
+    return saveThenRender(async () => {
+      await persistEditorSettings()
+      let alignedText = captionsTextRef.current
+      let alignedEnabled = captionsEnabled && alignedText.trim().length > 0
+      if (alignedEnabled) {
+        const alignment = await invoke<CaptionAlignmentResult>('ensure_clip_captions_aligned', { clipId })
+        applyCaptionAlignment(alignment)
+        alignedText = alignment.srt || ''
+        alignedEnabled = alignment.captionsEnabled && alignedText.trim().length > 0
+        if (alignment.message) setCaptionError(alignment.message)
+      }
+      snapshotKey = currentRenderSnapshotKey(targetAspectRatio, alignedText, alignedEnabled)
+    }, () => new Promise<RenderedArtifact>((resolve, reject) => {
       setExporting(true)
       setExportDone(false)
       setExportError(null)
@@ -1495,6 +1679,17 @@ export default function Editor() {
 
       const jobId = `export-${clipId}`
       let unlistenFn: (() => void) | null = null
+      let artifactPromise: Promise<RenderedArtifact> | null = null
+      let settled = false
+
+      const rejectExport = (error: unknown) => {
+        if (settled) return
+        settled = true
+        setExporting(false)
+        setExportError(errorMessage(error, 'Export failed'))
+        unlistenFn?.()
+        reject(error instanceof Error ? error : new Error(errorMessage(error, 'Export failed')))
+      }
 
       listen<{ jobId: string; progress: number; status: string; error?: string }>('job-progress', (event) => {
         if (event.payload.jobId !== jobId) return
@@ -1502,30 +1697,39 @@ export default function Editor() {
         setExportProgress(progress)
 
         if (status === 'completed') {
-          setExporting(false)
-          setExportDone(true)
-          unlistenFn?.()
-          invoke<Clip>('get_clip_detail', { clipId }).then(c => setClip(c)).catch(() => {})
-          // Restore original aspect ratio in state (DB was changed, but UI stays consistent)
-          setAspectRatio(originalAR)
-          resolve()
+          const pendingArtifact = artifactPromise
+          if (!pendingArtifact) {
+            rejectExport(new Error('Export completed without an artifact identity'))
+            return
+          }
+          pendingArtifact.then(async artifact => {
+            if (settled) return
+            settled = true
+            setExporting(false)
+            setExportDone(true)
+            unlistenFn?.()
+            setPreparedArtifacts(prev => ({
+              ...prev,
+              [targetAspectRatio]: { artifact, snapshotKey },
+            }))
+            try {
+              const refreshedClip = await invoke<Clip>('get_clip_detail', { clipId })
+              setClip(refreshedClip)
+            } catch { /* the immutable artifact is still valid */ }
+            resolve(artifact)
+          }).catch(rejectExport)
         } else if (status === 'failed') {
-          setExporting(false)
-          setExportError(error || 'Export failed')
-          unlistenFn?.()
-          setAspectRatio(originalAR)
-          reject(new Error(error || 'Export failed'))
+          rejectExport(new Error(error || 'Export failed'))
         }
       }).then(fn => {
         unlistenFn = fn
-        invoke('export_clip', { clipId }).catch(err => {
-          setExporting(false)
-          unlistenFn?.()
-          setAspectRatio(originalAR)
-          reject(err)
+        artifactPromise = invoke<RenderedArtifact>('export_clip', {
+          clipId,
+          aspectRatio: targetAspectRatio,
         })
-      })
-    })
+        artifactPromise.catch(rejectExport)
+      }).catch(rejectExport)
+    }))
   }
 
   // ── Preview frame sizing (single source of truth for frame dimensions) ──
@@ -1536,6 +1740,15 @@ export default function Editor() {
 
   // Tailwind needs static class names — can't use dynamic `w-[${n}px]`
   const previewWidth = aspectRatio === '9:16' ? 'w-[270px]' : 'w-full'
+
+  const currentPreparedArtifact = preparedArtifacts[exportPreset.aspectRatio]
+  const exactPreviewArtifact = currentPreparedArtifact?.snapshotKey
+    === currentRenderSnapshotKey(exportPreset.aspectRatio)
+    ? currentPreparedArtifact.artifact
+    : null
+  const preparedTikTokArtifact = preparedArtifacts['9:16']
+  const tiktokPreviewReady = preparedTikTokArtifact?.snapshotKey
+    === currentRenderSnapshotKey('9:16')
 
   // Compute actual frame pixel dimensions for facecam overlays
   const frameHeightPx = aspectRatio === '9:16' ? 480 : 249
@@ -1767,13 +1980,71 @@ export default function Editor() {
         <div className="v4-editor-preview-column space-y-4">
           <div className="v4-panel" style={{padding: 16}}>
             <div className="flex items-center justify-between mb-3">
-              <h2 className="text-sm font-semibold text-slate-300">Preview</h2>
-              <span className="text-[9px] font-mono text-slate-500 bg-surface-900 px-1.5 py-0.5 rounded border border-surface-600">
-                {exportPreset.resolution.w}x{exportPreset.resolution.h} {exportPreset.platform}
-              </span>
+              <h2 className="text-sm font-semibold text-slate-300">
+                {editorWorkspace === 'publish' ? 'Exact publish preview' : 'Preview'}
+              </h2>
+              <div className="flex items-center gap-2">
+                {editorWorkspace === 'publish' && exactPreviewArtifact && (
+                  <span className="text-[9px] font-mono text-emerald-300 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/30">
+                    Rendered MP4
+                  </span>
+                )}
+                <span className="text-[9px] font-mono text-slate-500 bg-surface-900 px-1.5 py-0.5 rounded border border-surface-600">
+                  {exportPreset.resolution.w}x{exportPreset.resolution.h} {exportPreset.platform}
+                </span>
+              </div>
             </div>
             <div className="flex justify-center">
               <div className={`relative rounded-lg overflow-hidden ${previewAspect} ${previewWidth} transition-all duration-300 ease-in-out`}>
+                {editorWorkspace === 'publish' ? (
+                  exactPreviewArtifact ? (
+                    <ClipPlayer
+                      key={exactPreviewArtifact.revision}
+                      src={convertFileSrc(exactPreviewArtifact.path)}
+                      clipStart={0}
+                      clipEnd={0}
+                      fullFile
+                      mode="full"
+                      controlsOverlay
+                      className="h-full"
+                      onTimeUpdate={time => setPlaybackTime(isCommunityClip ? time : startSeconds + time)}
+                      onPlayChange={setIsPlaying}
+                      objectFit="contain"
+                    />
+                  ) : (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-surface-950 px-6 text-center">
+                      {exporting ? (
+                        <>
+                          <Loader2 className="h-7 w-7 animate-spin text-violet-300" />
+                          <div>
+                            <p className="text-sm font-medium text-white">Preparing exact preview</p>
+                            <p className="mt-1 text-xs text-slate-400">Rendering {Math.round(exportProgress)}%</p>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <Film className="h-7 w-7 text-violet-300" />
+                          <div>
+                            <p className="text-sm font-medium text-white">Preview not prepared</p>
+                            <p className="mt-1 text-xs leading-relaxed text-slate-400">
+                              Render this saved edit to play the exact MP4 that will be handed to {exportPreset.platform}.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            className="v4-btn primary"
+                            disabled={!hasUsableSourceMedia(clip, vod)}
+                            onClick={() => { void handleExportForFormat(exportPreset.aspectRatio).catch(() => undefined) }}
+                          >
+                            <Film className="h-4 w-4" />
+                            Prepare exact preview
+                          </button>
+                          {exportError && <p role="alert" className="text-xs text-red-300">{exportError}</p>}
+                        </>
+                      )}
+                    </div>
+                  )
+                ) : (
                 <ClipPlayer
                   src={videoSrc}
                   poster={thumbnailPath ? convertFileSrc(thumbnailPath) : null}
@@ -1783,6 +2054,8 @@ export default function Editor() {
                   mode="full"
                   controlsOverlay
                   className="h-full"
+                  playbackBlocked={captionPreviewPreparing}
+                  playbackBlockedLabel="Preparing Glossy captions..."
                   onTimeUpdate={setPlaybackTime}
                   onPlayChange={setIsPlaying}
                   seekRef={playerSeekRef}
@@ -1904,6 +2177,7 @@ export default function Editor() {
                           emphasisTokens={captionTokens}
                           captionStyle={captionStyle}
                           fontScale={captionFontScale}
+                          cardScale={captionCardScale}
                           currentTime={srtTime}
                           trimStart={srtTrimStart}
                           trimEnd={srtTrimEnd}
@@ -1911,6 +2185,9 @@ export default function Editor() {
                           yPercent={captionY}
                           emphasisEnabled={aiEmphasisEnabled}
                           outputWidth={exportPreset.resolution.w}
+                          outputHeight={exportPreset.resolution.h}
+                          captionProvenance={captionProvenance}
+                          onPreparingChange={setCaptionPreviewPreparing}
                         />
                       ) : captionsText ? (
                         <div className="absolute left-0 right-0 flex justify-center pointer-events-none z-10"
@@ -1975,6 +2252,7 @@ export default function Editor() {
                     ))}
                   </>}
                 />
+                )}
               </div>
             </div>
           </div>
@@ -2307,6 +2585,23 @@ export default function Editor() {
                 Change
               </button>
             </div>
+            {aspectRatio === '9:16' && facecamLayout === 'none' && (
+              <div className="mt-3 flex items-center justify-between gap-3 border-l-2 border-cyan-400 bg-cyan-500/5 px-3 py-2">
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-cyan-200">Keep the whole game frame visible</p>
+                  <p className="mt-0.5 text-[10px] leading-relaxed text-slate-400">
+                    Context Fit is recommended for vertical gameplay. Full Frame intentionally crops the scene edges.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setFacecamLayout('context_fit')}
+                  className="shrink-0 rounded border border-cyan-500/40 px-2.5 py-1.5 text-[10px] font-medium text-cyan-200 hover:bg-cyan-500/10 cursor-pointer"
+                >
+                  Use Context Fit
+                </button>
+              </div>
+            )}
             {/* Layout picker modal */}
             {layoutPickerOpen && (
               <LayoutPicker
@@ -2540,7 +2835,7 @@ export default function Editor() {
             )}
             {facecamLayout === 'none' && (
               <p className="text-[9px] text-slate-600 mt-2">
-                Full Frame fills the canvas with a center crop. Zoom out to reveal more gameplay over a subtle video fill.
+                Full Frame is the intentional crop option. Zoom out can reveal more gameplay, but Context Fit preserves the complete source composition.
               </p>
             )}
           </Section>
@@ -2571,13 +2866,41 @@ export default function Editor() {
                     /* SRT segments — full subtitle editor */
                     <>
                       <div className="flex items-center justify-between mb-1">
-                        <label className="text-xs text-slate-400">Subtitle Segments ({subtitleSegments.length})</label>
+                        <div className="flex min-w-0 items-center gap-2">
+                          <label className="text-xs text-slate-400">Subtitle Segments ({subtitleSegments.length})</label>
+                          <span
+                            className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] ${
+                              captionProvenance === 'aligned'
+                                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                                : captionProvenance === 'analysis-draft'
+                                  ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+                                  : 'border-surface-600 bg-surface-900 text-slate-400'
+                            }`}
+                            title={`Caption timing pipeline v${captionPipelineVersion}`}
+                          >
+                            {captionProvenance === 'aligned'
+                              ? 'Aligned timing'
+                              : captionProvenance === 'edited'
+                                ? 'Edited'
+                                : captionProvenance === 'analysis-draft'
+                                  ? 'Analysis draft'
+                                  : 'Legacy timing'}
+                          </span>
+                          {speechModelLabel(captionModelUsed) && (
+                            <span
+                              className="shrink-0 rounded border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-0.5 text-[9px] text-cyan-200"
+                              title="Local speech model used for this generated caption pass"
+                            >
+                              {speechModelLabel(captionModelUsed)}
+                            </span>
+                          )}
+                        </div>
                         <div className="flex items-center gap-1">
-                          <Tooltip text="Regenerate subtitles from the clip audio" position="left">
+                          <Tooltip text={speechModelSelectionSaving ? 'Wait for the speech model selection to finish saving' : 'Regenerate subtitles from the clip audio'} position="left">
                             <button
                               type="button"
                               onClick={handleGenerateCaptions}
-                              disabled={generatingCaptions}
+                              disabled={generatingCaptions || speechModelSelectionSaving}
                               aria-label="Regenerate subtitles"
                               className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-surface-600 text-slate-400 transition-colors hover:border-violet-500/60 hover:text-violet-300 disabled:cursor-wait disabled:opacity-50"
                             >
@@ -2632,7 +2955,7 @@ export default function Editor() {
                     /* No SRT — manual text input + empty state info */
                     <>
                       <label className="block text-xs text-slate-400 mb-1">Caption Text</label>
-                      <input type="text" value={captionsText} onChange={e => setCaptionsText(e.target.value)}
+                      <input type="text" value={captionsText} onChange={e => handlePlainCaptionChange(e.target.value)}
                         placeholder="Type a caption to display..."
                         className="w-full px-3 py-2 bg-surface-900 border border-surface-600 rounded-lg text-white text-sm focus:outline-none focus:border-violet-500 placeholder-slate-500" />
                       {!captionsText && (
@@ -2641,10 +2964,12 @@ export default function Editor() {
                             <>
                               <button
                                 onClick={handleGenerateCaptions}
-                                disabled={generatingCaptions}
+                                disabled={generatingCaptions || speechModelSelectionSaving}
                                 className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-violet-600/20 border border-violet-500/40 rounded-lg text-xs text-violet-400 hover:bg-violet-600/30 transition-colors cursor-pointer disabled:opacity-50"
                               >
-                                {generatingCaptions ? (
+                                {speechModelSelectionSaving ? (
+                                  <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Saving speech model...</>
+                                ) : generatingCaptions ? (
                                   <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Generating subtitles...</>
                                 ) : (
                                   <><MessageSquare className="w-3.5 h-3.5" /> Generate Subtitles (Speech-to-Text)</>
@@ -2672,6 +2997,36 @@ export default function Editor() {
                     </>
                   )}
                 </div>
+
+                <details className="border-y border-surface-600/70 py-2">
+                  <summary className="cursor-pointer text-[10px] font-medium text-slate-400">
+                    Advanced transcription audio
+                  </summary>
+                  <div className="mt-2 flex items-center gap-2">
+                    <label htmlFor="caption-audio-mode" className="text-[10px] text-slate-500">Audio</label>
+                    <select
+                      id="caption-audio-mode"
+                      value={captionAudioMode}
+                      onChange={event => {
+                        setCaptionAudioMode(event.target.value === 'microphone' ? 'microphone' : 'mixed')
+                        setCaptionAudioStream(null)
+                        setCaptionModelUsed(null)
+                        setSaved(false)
+                      }}
+                      className="min-w-0 flex-1 rounded border border-surface-600 bg-surface-900 px-2 py-1.5 text-[10px] text-slate-300 focus:border-violet-500 focus:outline-none"
+                    >
+                      <option value="mixed">Mixed audio (recommended)</option>
+                      <option value="microphone">Microphone only</option>
+                    </select>
+                  </div>
+                  {(captionModelUsed || captionAudioStream || captionLanguage) && (
+                    <p className="mt-2 text-[9px] leading-relaxed text-slate-500">
+                      {speechModelLabel(captionModelUsed) ? `Generated with ${speechModelLabel(captionModelUsed)} · ` : ''}
+                      {captionAudioStream || 'Audio track will be verified on regeneration'}
+                      {captionLanguage ? ` · Recognized language: ${captionLanguage.toUpperCase()}` : ''}
+                    </p>
+                  )}
+                </details>
 
                 {/* Position */}
                 <div>
@@ -2725,12 +3080,15 @@ export default function Editor() {
                         'bold-white': { bg: 'bg-surface-900', border: 'border-amber-700/50', textShadow: 'none' },
                         boxed:       { bg: 'bg-surface-900', border: 'border-pink-400/50', textShadow: '1px 1px 0 #f05bd8, 2px 2px 0 #6d28d9' },
                         neon:        { bg: 'bg-surface-900', border: 'border-emerald-500/40', textShadow: '0 0 6px #00ff8880, 0 0 2px #000' },
-                        minimal:     { bg: 'bg-surface-900', border: 'border-red-500/50', textShadow: '0 1px 0 #7a0000, 0 2px 3px #000' },
+                        minimal:     { bg: 'bg-purple-950/40', border: 'border-orange-400/60', textShadow: 'none' },
                         fire:        { bg: 'bg-surface-900', border: 'border-yellow-400/40', textShadow: '1px 0 0 #000, -1px 0 0 #000, 0 1px 0 #000, 0 -1px 0 #000' },
                         'comic-pop': { bg: 'bg-surface-900', border: 'border-cyan-400/50', textShadow: '1px 1px 0 #f05bd8, 2px 2px 0 #55206f' },
                         'tape-riot': { bg: 'bg-surface-900', border: 'border-lime-400/50', textShadow: 'none' },
-                        'paper-mischief': { bg: 'bg-surface-900', border: 'border-violet-300/50', textShadow: 'none' },
-                        'goblin-bite': { bg: 'bg-surface-900', border: 'border-lime-300/50', textShadow: 'none' },
+                         'paper-mischief': { bg: 'bg-surface-900', border: 'border-violet-300/50', textShadow: 'none' },
+                         'goblin-bite': { bg: 'bg-surface-900', border: 'border-lime-300/50', textShadow: 'none' },
+                         hellfire: { bg: 'bg-surface-900', border: 'border-red-500/50', textShadow: 'none' },
+                         horror: { bg: 'bg-surface-900', border: 'border-zinc-300/50', textShadow: 'none' },
+                         scary: { bg: 'bg-surface-900', border: 'border-red-600/60', textShadow: 'none' },
                       }
                       const hint = styleHints[s.id] || styleHints.clean
                       return (
@@ -2756,6 +3114,15 @@ export default function Editor() {
                                 <span style={{ color: '#15100C' }}>Card</span>
                                 <span style={{ color: s.fontColor }}>board</span>
                               </span>
+                            ) : s.presentation === 'hellfire'
+                              || s.presentation === 'horror'
+                              || s.presentation === 'scary'
+                              || s.presentation === 'glossy-thumbnail' ? (
+                              <img
+                                src={`/caption-glyphs/${s.presentation}/picker.png`}
+                                alt={s.name}
+                                className="mx-auto h-4 max-w-full object-contain"
+                              />
                             ) : s.presentation === 'tape-riot'
                               || s.presentation === 'paper-mischief'
                               || s.presentation === 'goblin-bite' ? (
@@ -2804,6 +3171,24 @@ export default function Editor() {
                       {Math.round(captionFontScale * 100)}%
                     </span>
                   </div>
+                  {captionStyle.presentation === 'cardboard' && (
+                    <div className="mt-2 flex items-center gap-2">
+                      <span className="text-[9px] text-slate-500 w-12 shrink-0">Card Size</span>
+                      <input
+                        type="range"
+                        min={50}
+                        max={100}
+                        step={5}
+                        value={Math.round(captionCardScale * 100)}
+                        onChange={event => setCaptionCardScale(clampCaptionCardScale(Number(event.target.value) / 100))}
+                        aria-label="Cardboard card size"
+                        className="flex-1 h-1 accent-amber-500 cursor-pointer"
+                      />
+                      <span className="text-[9px] font-mono text-slate-500 w-9 text-right">
+                        {Math.round(captionCardScale * 100)}%
+                      </span>
+                    </div>
+                  )}
                 </div>
                 {/* AI Emphasis */}
                 {hasSrtCaptions && (
@@ -2882,13 +3267,13 @@ export default function Editor() {
                 </div>
               )}
 
-              {exportDone && clip.output_path && (
+              {exportDone && exactPreviewArtifact && (
                 <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-4">
                   <div className="flex items-center gap-2 text-emerald-400 text-sm font-medium mb-1">
                     <Check className="w-4 h-4" />
-                    Exported successfully
+                    Exact preview ready
                   </div>
-                  <p className="text-xs text-slate-400 font-mono truncate">{clip.output_path}</p>
+                  <p className="text-xs text-slate-400 font-mono truncate">{exactPreviewArtifact.path}</p>
                 </div>
               )}
 
@@ -2906,6 +3291,7 @@ export default function Editor() {
                 exportPreset={exportPreset}
                 onSave={handleSave}
                 onExportForFormat={handleExportForFormat}
+                tiktokPreviewReady={tiktokPreviewReady}
                 publishMeta={publishMeta}
                 clipTitle={title}
                 uploadHistory={uploadHistory}

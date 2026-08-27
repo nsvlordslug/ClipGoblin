@@ -33,7 +33,9 @@ fn obs_connection(conn: &Connection) -> Result<(u16, String), String> {
 pub fn get_external_source_configs(
     db: State<'_, DbConn>,
 ) -> Result<Vec<ExternalSourceConfig>, String> {
-    let conn = db.lock().map_err(|error| format!("Database lock: {error}"))?;
+    let conn = db
+        .lock()
+        .map_err(|error| format!("Database lock: {error}"))?;
     external_sources::SOURCE_KINDS
         .iter()
         .map(|kind| {
@@ -78,7 +80,9 @@ pub fn pick_external_source_folder(
         return Err("Choose a local folder".to_string());
     }
     let path_string = path.to_string_lossy().to_string();
-    let conn = db.lock().map_err(|error| format!("Database lock: {error}"))?;
+    let conn = db
+        .lock()
+        .map_err(|error| format!("Database lock: {error}"))?;
     db::save_setting(&conn, &format!("source_{kind}_dir"), &path_string)
         .map_err(|error| format!("Database error: {error}"))?;
     db::save_setting(
@@ -99,12 +103,21 @@ pub fn set_external_source_auto_import(
     if !external_sources::SOURCE_KINDS.contains(&kind.as_str()) {
         return Err(format!("Unsupported clip source '{kind}'"));
     }
-    let conn = db.lock().map_err(|error| format!("Database lock: {error}"))?;
+    let conn = db
+        .lock()
+        .map_err(|error| format!("Database lock: {error}"))?;
     if enabled {
         let directory = db::get_setting(&conn, &format!("source_{kind}_dir"))
             .map_err(|error| format!("Database error: {error}"))?;
-        if directory.as_deref().map(str::trim).filter(|value| !value.is_empty()).is_none() {
-            return Err(format!("Choose the {kind} clips folder before enabling auto-import"));
+        if directory
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            return Err(format!(
+                "Choose the {kind} clips folder before enabling auto-import"
+            ));
         }
         let was_enabled = db::get_setting(&conn, &format!("source_{kind}_auto_import"))
             .map_err(|error| format!("Database error: {error}"))?
@@ -132,7 +145,9 @@ pub fn scan_external_source(
     kind: String,
     db: State<'_, DbConn>,
 ) -> Result<Vec<ExternalMediaCandidate>, String> {
-    let conn = db.lock().map_err(|error| format!("Database lock: {error}"))?;
+    let conn = db
+        .lock()
+        .map_err(|error| format!("Database lock: {error}"))?;
     external_sources::scan_configured_source(&conn, &kind)
 }
 
@@ -144,8 +159,7 @@ pub async fn import_external_candidates(
 ) -> Result<Vec<ImportedClip>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = db::db_path().map_err(|error| format!("Database path: {error}"))?;
-        let mut conn = Connection::open(path)
-            .map_err(|error| format!("Database open: {error}"))?;
+        let mut conn = Connection::open(path).map_err(|error| format!("Database open: {error}"))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|error| format!("Database timeout setup: {error}"))?;
         external_sources::import_candidate_ids(&app, &mut conn, &kind, &candidate_ids)
@@ -174,9 +188,14 @@ pub fn pick_and_import_media(
 
     let paths: Result<Vec<_>, _> = files
         .into_iter()
-        .map(|file| file.into_path().map_err(|error| format!("Invalid selected file: {error}")))
+        .map(|file| {
+            file.into_path()
+                .map_err(|error| format!("Invalid selected file: {error}"))
+        })
         .collect();
-    let mut conn = db.lock().map_err(|error| format!("Database lock: {error}"))?;
+    let mut conn = db
+        .lock()
+        .map_err(|error| format!("Database lock: {error}"))?;
     let mut imported = Vec::new();
     for path in paths? {
         let clip = external_sources::import_media_path(&app, &mut conn, &path, "manual")?;
@@ -286,7 +305,9 @@ pub async fn prepare_clip_preview_source(
     db: State<'_, DbConn>,
 ) -> Result<String, String> {
     let (source, cache_key) = {
-        let conn = db.lock().map_err(|error| format!("Database lock: {error}"))?;
+        let conn = db
+            .lock()
+            .map_err(|error| format!("Database lock: {error}"))?;
         let clip = db::get_clip_by_id(&conn, &clip_id)
             .map_err(|error| format!("Database error: {error}"))?
             .ok_or_else(|| "Clip not found".to_string())?;
@@ -325,8 +346,14 @@ pub async fn prepare_clip_preview_source(
         .map_err(|error| format!("Could not create the preview cache: {error}"))?;
     let output = preview_dir.join(format!("{cache_key}.mp4"));
     let cache_is_fresh = output.is_file()
-        && output.metadata().map(|metadata| metadata.len() > 0).unwrap_or(false)
-        && match (source.metadata().and_then(|metadata| metadata.modified()), output.metadata().and_then(|metadata| metadata.modified())) {
+        && output
+            .metadata()
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false)
+        && match (
+            source.metadata().and_then(|metadata| metadata.modified()),
+            output.metadata().and_then(|metadata| metadata.modified()),
+        ) {
             (Ok(source_modified), Ok(output_modified)) => output_modified >= source_modified,
             _ => true,
         };
@@ -362,7 +389,9 @@ pub async fn prepare_clip_preview_source(
 pub fn get_recorder_connection_settings(
     db: State<'_, DbConn>,
 ) -> Result<RecorderConnectionSettings, String> {
-    let conn = db.lock().map_err(|error| format!("Database lock: {error}"))?;
+    let conn = db
+        .lock()
+        .map_err(|error| format!("Database lock: {error}"))?;
     let (obs_port, password) = obs_connection(&conn)?;
     Ok(RecorderConnectionSettings {
         obs_port,
@@ -379,7 +408,9 @@ pub fn save_obs_connection_settings(
     if port < 1024 {
         return Err("Use the OBS WebSocket port shown in OBS settings (normally 4455)".to_string());
     }
-    let conn = db.lock().map_err(|error| format!("Database lock: {error}"))?;
+    let conn = db
+        .lock()
+        .map_err(|error| format!("Database lock: {error}"))?;
     db::save_setting(&conn, "obs_websocket_port", &port.to_string())
         .map_err(|error| format!("Database error: {error}"))?;
     if let Some(password) = password {
@@ -397,7 +428,9 @@ pub async fn test_recorder_connection(
     match kind.as_str() {
         "obs" => {
             let (port, password) = {
-                let conn = db.lock().map_err(|error| format!("Database lock: {error}"))?;
+                let conn = db
+                    .lock()
+                    .map_err(|error| format!("Database lock: {error}"))?;
                 obs_connection(&conn)?
             };
             crate::recorders::obs_status(port, &password).await
@@ -416,17 +449,23 @@ pub async fn save_replay_and_import(
     match kind.as_str() {
         "obs" => {
             let (port, password) = {
-                let conn = db.lock().map_err(|error| format!("Database lock: {error}"))?;
+                let conn = db
+                    .lock()
+                    .map_err(|error| format!("Database lock: {error}"))?;
                 obs_connection(&conn)?
             };
             let path = crate::recorders::obs_save_replay(port, &password).await?;
             wait_for_stable_media_file(&path).await?;
-            let mut conn = db.lock().map_err(|error| format!("Database lock: {error}"))?;
+            let mut conn = db
+                .lock()
+                .map_err(|error| format!("Database lock: {error}"))?;
             external_sources::import_media_path(&app, &mut conn, &path, "obs")
         }
         "meld" => {
             let (before, started_at) = {
-                let conn = db.lock().map_err(|error| format!("Database lock: {error}"))?;
+                let conn = db
+                    .lock()
+                    .map_err(|error| format!("Database lock: {error}"))?;
                 let before = external_sources::scan_configured_source(&conn, "meld")?
                     .into_iter()
                     .map(|candidate| candidate.id)
@@ -439,7 +478,9 @@ pub async fn save_replay_and_import(
             for _ in 0..40 {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 let candidates = {
-                    let conn = db.lock().map_err(|error| format!("Database lock: {error}"))?;
+                    let conn = db
+                        .lock()
+                        .map_err(|error| format!("Database lock: {error}"))?;
                     external_sources::scan_configured_source(&conn, "meld")?
                 };
                 saved_path = candidates
@@ -447,7 +488,10 @@ pub async fn save_replay_and_import(
                     .filter(|candidate| !before.contains(&candidate.id))
                     .filter(|candidate| {
                         chrono::DateTime::parse_from_rfc3339(&candidate.recorded_at)
-                            .map(|value| value.with_timezone(&Utc) >= started_at - chrono::Duration::seconds(2))
+                            .map(|value| {
+                                value.with_timezone(&Utc)
+                                    >= started_at - chrono::Duration::seconds(2)
+                            })
                             .unwrap_or(false)
                     })
                     .map(|candidate| PathBuf::from(candidate.path))
@@ -461,7 +505,9 @@ pub async fn save_replay_and_import(
                     .to_string()
             })?;
             wait_for_stable_media_file(&path).await?;
-            let mut conn = db.lock().map_err(|error| format!("Database lock: {error}"))?;
+            let mut conn = db
+                .lock()
+                .map_err(|error| format!("Database lock: {error}"))?;
             external_sources::import_media_path(&app, &mut conn, &path, "meld")
         }
         _ => Err(format!("Unsupported recorder '{kind}'")),
@@ -480,7 +526,9 @@ pub fn create_stream_marker(
     let label = label
         .map(|value| value.trim().chars().take(120).collect::<String>())
         .filter(|value| !value.is_empty());
-    let conn = db.lock().map_err(|error| format!("Database lock: {error}"))?;
+    let conn = db
+        .lock()
+        .map_err(|error| format!("Database lock: {error}"))?;
     let channel_id = db::get_all_channels(&conn)
         .map_err(|error| format!("Database error: {error}"))?
         .into_iter()
@@ -499,7 +547,8 @@ pub fn create_stream_marker(
 pub fn list_recent_stream_markers(
     db: State<'_, DbConn>,
 ) -> Result<Vec<db::StreamMarkerRow>, String> {
-    let conn = db.lock().map_err(|error| format!("Database lock: {error}"))?;
-    db::get_recent_stream_markers(&conn, 20)
-        .map_err(|error| format!("Database error: {error}"))
+    let conn = db
+        .lock()
+        .map_err(|error| format!("Database lock: {error}"))?;
+    db::get_recent_stream_markers(&conn, 20).map_err(|error| format!("Database error: {error}"))
 }

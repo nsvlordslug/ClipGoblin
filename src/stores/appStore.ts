@@ -17,6 +17,7 @@ interface AppState {
   loggedInUser: TwitchChannel | null
   isLoading: boolean
   error: string | null
+  speechModelSelectionSaving: boolean
 
   checkLogin: () => Promise<void>
   twitchLogin: () => Promise<void>
@@ -29,6 +30,7 @@ interface AppState {
   fetchHighlights: (vodId?: string) => Promise<void>
   fetchClips: () => Promise<void>
   clearError: () => void
+  setSpeechModelSelectionSaving: (saving: boolean) => void
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -39,6 +41,7 @@ export const useAppStore = create<AppState>((set) => ({
   loggedInUser: null,
   isLoading: false,
   error: null,
+  speechModelSelectionSaving: false,
 
   checkLogin: async () => {
     try {
@@ -144,4 +147,5 @@ export const useAppStore = create<AppState>((set) => ({
   },
 
   clearError: () => set({ error: null }),
+  setSpeechModelSelectionSaving: (saving: boolean) => set({ speechModelSelectionSaving: saving }),
 }))

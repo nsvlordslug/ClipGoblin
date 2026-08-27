@@ -31,8 +31,8 @@
 //! part of the VOD into the output instead.
 
 use crate::pipeline::{
-    AnalysisMode, CandidateClip, ClipScoreBreakdown, DimensionScores,
-    DimensionWeights, ScoreFactor, ScoreReport,
+    AnalysisMode, CandidateClip, ClipScoreBreakdown, DimensionScores, DimensionWeights,
+    ScoreFactor, ScoreReport,
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -112,11 +112,11 @@ impl ScoringConfig {
     pub fn standard() -> Self {
         Self {
             dimension_weights: DimensionWeights {
-                hook:    0.30,  // bumped — the opening matters most for short-form
+                hook: 0.30, // bumped — the opening matters most for short-form
                 emotion: 0.28,
                 context: 0.14,
-                visual:  0.14,
-                speech:  0.14,
+                visual: 0.14,
+                speech: 0.14,
             },
             bonuses: BonusConfig {
                 multi_signal: 0.04,
@@ -238,7 +238,9 @@ pub fn rank(
             }
         }
 
-        let Some(pos) = picked else { break; };
+        let Some(pos) = picked else {
+            break;
+        };
         let (best_idx, _) = pool.remove(pos);
 
         let sel_clips: Vec<&CandidateClip> = selected.iter().map(|r| &r.clip).collect();
@@ -254,7 +256,11 @@ pub fn rank(
         });
     }
 
-    log::info!("Ranking: {} candidates → {} ranked clips", candidates.len(), selected.len());
+    log::info!(
+        "Ranking: {} candidates → {} ranked clips",
+        candidates.len(),
+        selected.len()
+    );
     selected
 }
 
@@ -295,7 +301,10 @@ fn build_report(
     // Multi-signal corroboration
     if count >= 2 {
         let val = (count as f64 - 1.0) * b.multi_signal;
-        bonuses.push(ScoreFactor { label: "Multi-signal".into(), value: val });
+        bonuses.push(ScoreFactor {
+            label: "Multi-signal".into(),
+            value: val,
+        });
     }
     // Conditional solo boost — only if the signal is genuinely strong
     // AND the clip has a decent hook
@@ -303,12 +312,18 @@ fn build_report(
         && raw.best_raw() >= b.solo_min_signal
         && dims.hook_strength >= b.solo_min_hook
     {
-        bonuses.push(ScoreFactor { label: "Solo detection".into(), value: b.solo_signal });
+        bonuses.push(ScoreFactor {
+            label: "Solo detection".into(),
+            value: b.solo_signal,
+        });
     }
 
     // Strong open bonus — clips that hook attention immediately
     if dims.hook_strength >= b.strong_open_threshold {
-        bonuses.push(ScoreFactor { label: "Strong opening".into(), value: b.strong_open });
+        bonuses.push(ScoreFactor {
+            label: "Strong opening".into(),
+            value: b.strong_open,
+        });
     }
 
     // Duration bonus
@@ -317,7 +332,10 @@ fn build_report(
     if dur_dist < b.ideal_duration {
         let val = b.duration_max * (1.0 - dur_dist / b.ideal_duration);
         if val > 0.001 {
-            bonuses.push(ScoreFactor { label: "Good length".into(), value: val });
+            bonuses.push(ScoreFactor {
+                label: "Good length".into(),
+                value: val,
+            });
         }
     }
 
@@ -329,7 +347,10 @@ fn build_report(
     if !selected.is_empty() {
         let div = compute_diversity_penalty(clip, selected, config);
         if div > 0.001 {
-            penalties.push(ScoreFactor { label: "Diversity".into(), value: div });
+            penalties.push(ScoreFactor {
+                label: "Diversity".into(),
+                value: div,
+            });
         }
     }
 
@@ -393,12 +414,12 @@ fn rescale_confidence(dim_weighted: f64, signal_count: usize) -> f64 {
     const ANCHORS: [(f64, f64); 8] = [
         (0.00, 0.00),
         (0.25, 0.25),
-        (0.40, 0.55),   // bottom of "most clips"
-        (0.50, 0.65),   // middle
-        (0.60, 0.77),   // top of "most clips"
-        (0.70, 0.84),   // strong
-        (0.80, 0.89),   // very strong
-        (0.90, 0.93),   // exceptional
+        (0.40, 0.55), // bottom of "most clips"
+        (0.50, 0.65), // middle
+        (0.60, 0.77), // top of "most clips"
+        (0.70, 0.84), // strong
+        (0.80, 0.89), // very strong
+        (0.90, 0.93), // exceptional
     ];
 
     let base = if dim_weighted >= 0.90 {
@@ -531,7 +552,11 @@ mod tests {
             end,
             ClipScoreBreakdown::new(audio, speech, scene, vision),
             {
-                let mut s = vec![SignalType::Audio, SignalType::Transcript, SignalType::SceneChange];
+                let mut s = vec![
+                    SignalType::Audio,
+                    SignalType::Transcript,
+                    SignalType::SceneChange,
+                ];
                 if vision.is_some() {
                     s.push(SignalType::Vision);
                 }
@@ -549,7 +574,9 @@ mod tests {
         c
     }
 
-    fn cfg() -> ScoringConfig { ScoringConfig::standard() }
+    fn cfg() -> ScoringConfig {
+        ScoringConfig::standard()
+    }
 
     // ── Config validation ──
 
@@ -574,7 +601,9 @@ mod tests {
     fn for_mode_returns_standard_config() {
         let config = ScoringConfig::for_mode(&AnalysisMode::local());
         let standard = ScoringConfig::standard();
-        assert!((config.dimension_weights.hook - standard.dimension_weights.hook).abs() < f64::EPSILON);
+        assert!(
+            (config.dimension_weights.hook - standard.dimension_weights.hook).abs() < f64::EPSILON
+        );
     }
 
     // ── Dimension scoring ──
@@ -609,9 +638,12 @@ mod tests {
         // best_raw = 0.60 < 0.75 ✗
         let r_qual = build_report(&qualifies, &cfg(), &[]);
         let r_weak = build_report(&too_weak, &cfg(), &[]);
-        assert!(r_qual.bonus_total > r_weak.bonus_total,
+        assert!(
+            r_qual.bonus_total > r_weak.bonus_total,
             "strong solo ({:.3}) should get boost, weak ({:.3}) should not",
-            r_qual.bonus_total, r_weak.bonus_total);
+            r_qual.bonus_total,
+            r_weak.bonus_total
+        );
     }
 
     #[test]
@@ -621,8 +653,10 @@ mod tests {
         let short = make_clip(200.0, 212.0, 0.7, 0.5, 0.3, None);
         let r_ideal = build_report(&ideal, &c, &[]);
         let r_short = build_report(&short, &c, &[]);
-        assert!(r_ideal.bonus_total > r_short.bonus_total,
-            "ideal duration should get larger bonus");
+        assert!(
+            r_ideal.bonus_total > r_short.bonus_total,
+            "ideal duration should get larger bonus"
+        );
     }
 
     // ── Dimensions computed correctly ──
@@ -633,11 +667,17 @@ mod tests {
         let report = build_report(&clip, &cfg(), &[]);
         let d = &report.dimensions;
         // hook_strength = 0.8*0.55 + 0.4*0.30 + 0*0.15 = 0.56
-        assert!((d.hook_strength - 0.56).abs() < 0.01,
-            "hook_strength: expected ~0.56, got {:.3}", d.hook_strength);
+        assert!(
+            (d.hook_strength - 0.56).abs() < 0.01,
+            "hook_strength: expected ~0.56, got {:.3}",
+            d.hook_strength
+        );
         // speech_punch = 0.6*0.65 + 0.8*0.25 + 0.4*0.10 = 0.63
-        assert!((d.speech_punch - 0.63).abs() < 0.01,
-            "speech_punch: expected ~0.63, got {:.3}", d.speech_punch);
+        assert!(
+            (d.speech_punch - 0.63).abs() < 0.01,
+            "speech_punch: expected ~0.63, got {:.3}",
+            d.speech_punch
+        );
     }
 
     // ── Diversity ──
@@ -677,8 +717,11 @@ mod tests {
         let ranked = rank(&clips, &cfg(), 10);
         assert!(ranked.len() >= 2);
         let starts: Vec<f64> = ranked.iter().map(|r| r.clip.start_time).collect();
-        assert!(starts.contains(&100.0) && starts.contains(&500.0),
-            "should select diverse clips: {:?}", starts);
+        assert!(
+            starts.contains(&100.0) && starts.contains(&500.0),
+            "should select diverse clips: {:?}",
+            starts
+        );
     }
 
     // ── Score report ──
@@ -698,7 +741,11 @@ mod tests {
         let clips = vec![make_clip(0.0, 25.0, 0.8, 0.6, 0.4, None)];
         let ranked = rank(&clips, &cfg(), 5);
         assert!(!ranked.is_empty());
-        let report = ranked[0].clip.score_report.as_ref().expect("report should be set");
+        let report = ranked[0]
+            .clip
+            .score_report
+            .as_ref()
+            .expect("report should be set");
         assert!(report.rank_score > 0.0);
         assert!(!report.key_dimensions.is_empty());
     }
@@ -729,7 +776,16 @@ mod tests {
     #[test]
     fn capped_at_max_clips() {
         let clips: Vec<CandidateClip> = (0..20)
-            .map(|i| make_clip(i as f64 * 200.0, i as f64 * 200.0 + 25.0, 0.8, 0.6, 0.4, None))
+            .map(|i| {
+                make_clip(
+                    i as f64 * 200.0,
+                    i as f64 * 200.0 + 25.0,
+                    0.8,
+                    0.6,
+                    0.4,
+                    None,
+                )
+            })
             .collect();
         let ranked = rank(&clips, &cfg(), 5);
         assert!(ranked.len() <= 5);
@@ -755,8 +811,11 @@ mod tests {
         // A decent 3-signal clip should land in the "worth reviewing" range
         let decent = make_clip(0.0, 25.0, 0.7, 0.5, 0.3, None);
         let report = build_report(&decent, &cfg(), &[]);
-        assert!(report.confidence >= 0.40 && report.confidence <= 0.75,
-            "decent clip confidence should be in middle range, got {:.3}", report.confidence);
+        assert!(
+            report.confidence >= 0.40 && report.confidence <= 0.75,
+            "decent clip confidence should be in middle range, got {:.3}",
+            report.confidence
+        );
     }
 
     #[test]
@@ -764,8 +823,11 @@ mod tests {
         // A strong 3-signal clip should stay below 90%
         let strong = make_clip(0.0, 25.0, 0.8, 0.7, 0.5, None);
         let report = build_report(&strong, &cfg(), &[]);
-        assert!(report.confidence < 0.90,
-            "strong clip should be below 90%%, got {:.3}", report.confidence);
+        assert!(
+            report.confidence < 0.90,
+            "strong clip should be below 90%%, got {:.3}",
+            report.confidence
+        );
     }
 
     #[test]
@@ -773,8 +835,11 @@ mod tests {
         // Exceptional 4-signal clip can reach 90%+
         let exceptional = make_clip(0.0, 25.0, 0.95, 0.9, 0.85, Some(0.9));
         let report = build_report(&exceptional, &ScoringConfig::standard(), &[]);
-        assert!(report.confidence >= 0.90,
-            "exceptional multi-signal clip should exceed 90%%, got {:.3}", report.confidence);
+        assert!(
+            report.confidence >= 0.90,
+            "exceptional multi-signal clip should exceed 90%%, got {:.3}",
+            report.confidence
+        );
     }
 
     #[test]
@@ -783,27 +848,37 @@ mod tests {
         // This is the theoretical maximum — real clips won't reach it.
         let max = make_clip(0.0, 25.0, 1.0, 1.0, 1.0, Some(1.0));
         let report = build_report(&max, &ScoringConfig::standard(), &[]);
-        assert!(report.confidence <= 0.99,
-            "confidence should cap at 99%%, got {:.3}", report.confidence);
+        assert!(
+            report.confidence <= 0.99,
+            "confidence should cap at 99%%, got {:.3}",
+            report.confidence
+        );
         // A strong-but-not-max clip should stay well below 95%
         let strong = make_clip(200.0, 225.0, 0.85, 0.75, 0.6, None);
         let r_strong = build_report(&strong, &cfg(), &[]);
-        assert!(r_strong.confidence < 0.90,
-            "strong 3-signal clip should be below 90%%, got {:.3}", r_strong.confidence);
+        assert!(
+            r_strong.confidence < 0.90,
+            "strong 3-signal clip should be below 90%%, got {:.3}",
+            r_strong.confidence
+        );
     }
 
     #[test]
     fn confidence_monotonic_with_quality() {
         // Higher dim_weighted should always produce higher confidence
-        let weak   = make_clip(0.0, 25.0, 0.3, 0.2, 0.1, None);
+        let weak = make_clip(0.0, 25.0, 0.3, 0.2, 0.1, None);
         let medium = make_clip(200.0, 225.0, 0.6, 0.4, 0.3, None);
         let strong = make_clip(400.0, 425.0, 0.9, 0.8, 0.6, None);
         let r_w = build_report(&weak, &cfg(), &[]);
         let r_m = build_report(&medium, &cfg(), &[]);
         let r_s = build_report(&strong, &cfg(), &[]);
-        assert!(r_s.confidence > r_m.confidence && r_m.confidence > r_w.confidence,
+        assert!(
+            r_s.confidence > r_m.confidence && r_m.confidence > r_w.confidence,
             "confidence should increase with quality: {:.3} > {:.3} > {:.3}",
-            r_s.confidence, r_m.confidence, r_w.confidence);
+            r_s.confidence,
+            r_m.confidence,
+            r_w.confidence
+        );
     }
 
     // ── Existing tests ──
@@ -819,7 +894,11 @@ mod tests {
 
         let mut custom = cfg();
         custom.dimension_weights = DimensionWeights {
-            hook: 0.05, emotion: 0.05, context: 0.05, visual: 0.05, speech: 0.80,
+            hook: 0.05,
+            emotion: 0.05,
+            context: 0.05,
+            visual: 0.05,
+            speech: 0.80,
         };
         let re = rerank(&clips, &custom, 10);
         // With speech weight at 0.80, the speech-heavy clip should rank first

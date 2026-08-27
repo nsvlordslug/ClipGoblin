@@ -14,6 +14,7 @@ export interface EditorSnapshot {
   captionsPosition: string
   captionStyleId: string
   captionFontScale: number
+  captionCardScale: number
   captionYOffset: number
   publishTitle: string
   publishDescription: string
@@ -29,6 +30,7 @@ export function snapshotEqual(a: EditorSnapshot, b: EditorSnapshot): boolean {
     a.captionsPosition === b.captionsPosition &&
     a.captionStyleId === b.captionStyleId &&
     a.captionFontScale === b.captionFontScale &&
+    a.captionCardScale === b.captionCardScale &&
     a.captionYOffset === b.captionYOffset &&
     a.publishTitle === b.publishTitle &&
     a.publishDescription === b.publishDescription &&

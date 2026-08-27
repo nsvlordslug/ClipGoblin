@@ -168,7 +168,11 @@ pub fn analyze_with_scorer(
 
     // ── Filter, sort, convert ──
     hits.retain(|h| h.score >= MIN_SCORE);
-    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     hits.truncate(MAX_SEGMENTS);
 
     hits.into_iter().map(|h| h.into_segment()).collect()
@@ -222,18 +226,34 @@ impl ScoredHit {
 
 /// Tier 1 — extreme shock / disbelief.
 const TIER1_KEYWORDS: &[&str] = &[
-    "no way", "oh my god", "what the fuck", "what the hell", "what the",
-    "holy shit", "holy crap", "are you kidding", "impossible", "unbelievable",
+    "no way",
+    "oh my god",
+    "what the fuck",
+    "what the hell",
+    "what the",
+    "holy shit",
+    "holy crap",
+    "are you kidding",
+    "impossible",
+    "unbelievable",
 ];
 /// Tier 2 — strong hype / celebration.
 const TIER2_KEYWORDS: &[&str] = &[
-    "let's go", "lets go", "clutch", "destroyed", "legendary", "epic",
-    "watch this", "clip it", "clip that", "yes sir",
+    "let's go",
+    "lets go",
+    "clutch",
+    "destroyed",
+    "legendary",
+    "epic",
+    "watch this",
+    "clip it",
+    "clip that",
+    "yes sir",
 ];
 /// Tier 3 — moderate excitement / emphasis.
 const TIER3_KEYWORDS: &[&str] = &[
-    "insane", "crazy", "massive", "huge", "oh no", "oh god", "oh snap",
-    "yooo", "yoo", "bruh", "dude", "bro",
+    "insane", "crazy", "massive", "huge", "oh no", "oh god", "oh snap", "yooo", "yoo", "bruh",
+    "dude", "bro",
 ];
 
 fn detect_keywords(keywords: &[InputKeyword], _is_english: bool) -> Vec<ScoredHit> {
@@ -255,17 +275,25 @@ fn detect_keywords(keywords: &[InputKeyword], _is_english: bool) -> Vec<ScoredHi
 
             // Tag by emotional category
             let mut tags = vec!["keyword".to_string()];
-            if lower.contains("no") || lower.contains("what") || lower.contains("oh")
-                || lower.contains("impossible") || lower.contains("unbelievable")
+            if lower.contains("no")
+                || lower.contains("what")
+                || lower.contains("oh")
+                || lower.contains("impossible")
+                || lower.contains("unbelievable")
             {
                 tags.push("shock".to_string());
             }
-            if lower.contains("go") || lower.contains("yes") || lower.contains("clutch")
-                || lower.contains("epic") || lower.contains("legendary")
+            if lower.contains("go")
+                || lower.contains("yes")
+                || lower.contains("clutch")
+                || lower.contains("epic")
+                || lower.contains("legendary")
             {
                 tags.push("hype".to_string());
             }
-            if lower.contains("rage") || lower.contains("done") || lower.contains("dead")
+            if lower.contains("rage")
+                || lower.contains("done")
+                || lower.contains("dead")
                 || lower.contains("quit")
             {
                 tags.push("frustration".to_string());
@@ -332,9 +360,8 @@ fn detect_exclamations(segments: &[InputSegment], is_english: bool) -> Vec<Score
         // Uppercase ratio — SHOUTING
         let alpha_chars: Vec<char> = trimmed.chars().filter(|c| c.is_alphabetic()).collect();
         if alpha_chars.len() >= 3 {
-            let upper_ratio =
-                alpha_chars.iter().filter(|c| c.is_uppercase()).count() as f64
-                    / alpha_chars.len() as f64;
+            let upper_ratio = alpha_chars.iter().filter(|c| c.is_uppercase()).count() as f64
+                / alpha_chars.len() as f64;
             if upper_ratio > 0.6 {
                 score += 0.30;
                 tags.push("shouting".to_string());
@@ -477,17 +504,35 @@ fn detect_speech_bursts(segments: &[InputSegment]) -> Vec<ScoredHit> {
 //  Score = (matched_weight / max_possible) * 0.85
 
 const PROFANITY: &[&str] = &[
-    "fuck", "shit", "damn", "hell", "ass", "crap", "wtf",
-    "goddamn", "bullshit", "motherfucker",
+    "fuck",
+    "shit",
+    "damn",
+    "hell",
+    "ass",
+    "crap",
+    "wtf",
+    "goddamn",
+    "bullshit",
+    "motherfucker",
 ];
 const SUPERLATIVES: &[&str] = &[
-    "best", "worst", "most", "ever", "never", "always",
-    "insane", "incredible", "ridiculous", "absurd",
-    "greatest", "craziest", "biggest", "smallest",
+    "best",
+    "worst",
+    "most",
+    "ever",
+    "never",
+    "always",
+    "insane",
+    "incredible",
+    "ridiculous",
+    "absurd",
+    "greatest",
+    "craziest",
+    "biggest",
+    "smallest",
 ];
 const INTERJECTIONS: &[&str] = &[
-    "oh", "wow", "whoa", "woah", "damn", "ugh", "oof",
-    "yikes", "geez", "jeez", "huh", "wha", "yo",
+    "oh", "wow", "whoa", "woah", "damn", "ugh", "oof", "yikes", "geez", "jeez", "huh", "wha", "yo",
 ];
 
 fn detect_emotional_tone(segments: &[InputSegment], is_english: bool) -> Vec<ScoredHit> {
@@ -545,7 +590,9 @@ fn detect_emotional_tone(segments: &[InputSegment], is_english: bool) -> Vec<Sco
         // Short disbelief questions — "How?!", "Why?!", "What?!"
         if clean_words.len() <= 3
             && (lower.contains('?') || lower.contains('!'))
-            && clean_words.iter().any(|w| ["how", "why", "what", "where", "who"].contains(&w.as_str()))
+            && clean_words
+                .iter()
+                .any(|w| ["how", "why", "what", "where", "who"].contains(&w.as_str()))
         {
             weight += 0.25;
             tags.push("disbelief".to_string());
@@ -630,17 +677,27 @@ fn detect_repetition(segments: &[InputSegment]) -> Vec<ScoredHit> {
 
         let mut tags = vec!["repetition".to_string()];
         // Classify the emotional direction of the repetition
-        let repeated_words: Vec<&str> = words.windows(2)
+        let repeated_words: Vec<&str> = words
+            .windows(2)
             .filter(|w| w[0] == w[1])
             .map(|w| w[0].as_str())
             .collect();
-        if repeated_words.iter().any(|w| ["go", "run", "move", "push"].contains(w)) {
+        if repeated_words
+            .iter()
+            .any(|w| ["go", "run", "move", "push"].contains(w))
+        {
             tags.push("urgency".to_string());
         }
-        if repeated_words.iter().any(|w| ["no", "stop", "wait", "why"].contains(w)) {
+        if repeated_words
+            .iter()
+            .any(|w| ["no", "stop", "wait", "why"].contains(w))
+        {
             tags.push("panic".to_string());
         }
-        if repeated_words.iter().any(|w| ["yes", "yeah", "yep"].contains(w)) {
+        if repeated_words
+            .iter()
+            .any(|w| ["yes", "yeah", "yep"].contains(w))
+        {
             tags.push("celebration".to_string());
         }
 
@@ -664,7 +721,11 @@ fn detect_repetition(segments: &[InputSegment]) -> Vec<ScoredHit> {
 
 /// Remove lower-scoring detections that overlap in time.
 fn dedup_hits(hits: &mut Vec<ScoredHit>) {
-    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut keep = Vec::with_capacity(hits.len());
     'outer: for hit in hits.drain(..) {
@@ -688,7 +749,11 @@ mod tests {
     use super::*;
 
     fn seg(start: f64, end: f64, text: &str) -> InputSegment {
-        InputSegment { start, end, text: text.to_string() }
+        InputSegment {
+            start,
+            end,
+            text: text.to_string(),
+        }
     }
 
     fn kw(keyword: &str, start: f64, end: f64, context: &str) -> InputKeyword {
@@ -701,7 +766,11 @@ mod tests {
     }
 
     fn input(segments: Vec<InputSegment>, keywords: Vec<InputKeyword>) -> TranscriptInput {
-        TranscriptInput { segments, keywords, language: "en".to_string() }
+        TranscriptInput {
+            segments,
+            keywords,
+            language: "en".to_string(),
+        }
     }
 
     // ── Empty input ──
@@ -716,10 +785,13 @@ mod tests {
 
     #[test]
     fn tier1_keyword_scores_highest() {
-        let inp = input(vec![], vec![
-            kw("no way", 10.0, 11.0, "No way that just happened"),
-            kw("gg", 30.0, 31.0, "GG boys"),
-        ]);
+        let inp = input(
+            vec![],
+            vec![
+                kw("no way", 10.0, 11.0, "No way that just happened"),
+                kw("gg", 30.0, 31.0, "GG boys"),
+            ],
+        );
         let result = analyze(&inp);
         assert!(result.len() == 2);
         // "no way" (tier 1) should score higher than "gg" (tier 4)
@@ -765,11 +837,15 @@ mod tests {
     #[test]
     fn burst_after_silence_detected() {
         let segments = vec![
-            seg(0.0, 2.0, "yeah"),                // 0.5 wps — quiet
-            seg(5.0, 7.0, "ok"),                   // 0.5 wps — quiet
-            seg(20.0, 22.0, "yeah"),               // 0.5 wps — quiet
+            seg(0.0, 2.0, "yeah"),   // 0.5 wps — quiet
+            seg(5.0, 7.0, "ok"),     // 0.5 wps — quiet
+            seg(20.0, 22.0, "yeah"), // 0.5 wps — quiet
             // Sudden dense speech after gap
-            seg(40.0, 42.0, "oh my god what just happened that was insane dude I can't believe it"),
+            seg(
+                40.0,
+                42.0,
+                "oh my god what just happened that was insane dude I can't believe it",
+            ),
         ];
         let result = analyze(&input(segments, vec![]));
         assert!(!result.is_empty());
@@ -841,8 +917,11 @@ mod tests {
         let result = analyze(&inp);
         assert!(!result.is_empty());
         for seg in &result {
-            assert!(seg.score >= 0.0 && seg.score <= 1.0,
-                "score {} out of range", seg.score);
+            assert!(
+                seg.score >= 0.0 && seg.score <= 1.0,
+                "score {} out of range",
+                seg.score
+            );
         }
     }
 
@@ -858,8 +937,12 @@ mod tests {
         );
         let result = analyze(&inp);
         for pair in result.windows(2) {
-            assert!(pair[0].score >= pair[1].score,
-                "not sorted: {} before {}", pair[0].score, pair[1].score);
+            assert!(
+                pair[0].score >= pair[1].score,
+                "not sorted: {} before {}",
+                pair[0].score,
+                pair[1].score
+            );
         }
     }
 
@@ -873,15 +956,16 @@ mod tests {
         let result = analyze(&inp);
         // Multiple detectors fire on the same segment but dedup keeps one
         let at_ten: Vec<_> = result.iter().filter(|s| s.start_time < 13.0).collect();
-        assert_eq!(at_ten.len(), 1, "overlapping detections should be deduplicated");
+        assert_eq!(
+            at_ten.len(),
+            1,
+            "overlapping detections should be deduplicated"
+        );
     }
 
     #[test]
     fn metadata_is_populated() {
-        let inp = input(
-            vec![],
-            vec![kw("clutch", 20.0, 21.0, "That was so clutch")],
-        );
+        let inp = input(vec![], vec![kw("clutch", 20.0, 21.0, "That was so clutch")]);
         let result = analyze(&inp);
         assert!(!result.is_empty());
         match &result[0].metadata {

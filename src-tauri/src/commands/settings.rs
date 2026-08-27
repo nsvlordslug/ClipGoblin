@@ -5,9 +5,9 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::db;
-use crate::DbConn;
 use crate::hardware::HardwareInfo;
 use crate::job_queue::{Job, JobQueue};
+use crate::DbConn;
 
 #[derive(serde::Serialize)]
 pub struct AppInfo {
@@ -36,6 +36,9 @@ const ALLOWED_SETTING_KEYS: &[&str] = &[
     "ui_settings",
     "clip_templates",
     "whisper_model",
+    "transcription_language",
+    "transcription_glossary",
+    "transcription_learn_corrections",
     "detection_sensitivity",
     "use_twitch_community_clips",
     "ai_clip_detection_enabled",
@@ -152,9 +155,7 @@ pub(crate) fn allow_configured_asset_directories(
         let conn = db_conn.lock().map_err(|e| format!("DB lock: {e}"))?;
         let mut directories = Vec::new();
         for key in ["download_dir"] {
-            if let Some(path) = db::get_setting(&conn, key)
-                .map_err(|e| format!("DB error: {e}"))?
-            {
+            if let Some(path) = db::get_setting(&conn, key).map_err(|e| format!("DB error: {e}"))? {
                 directories.push(path);
             }
         }
@@ -173,25 +174,30 @@ pub(crate) fn allow_configured_asset_directories(
 }
 
 #[tauri::command]
-pub fn save_setting(
-    key: String,
-    value: String,
-    db: State<'_, DbConn>,
-) -> Result<(), String> {
+pub fn save_setting(key: String, value: String, db: State<'_, DbConn>) -> Result<(), String> {
     if !ALLOWED_SETTING_KEYS.contains(&key.as_str()) {
-        return Err(format!("Setting '{}' is not writable from the frontend", key));
+        return Err(format!(
+            "Setting '{}' is not writable from the frontend",
+            key
+        ));
     }
-    let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
-    db::save_setting(&conn, &key, &value).map_err(|e| format!("DB error: {}", e))
+    let mut conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
+    if key == "transcription_glossary" {
+        db::save_transcription_glossary(&mut conn, &value)
+            .map(|_| ())
+            .map_err(|e| format!("DB error: {}", e))
+    } else {
+        db::save_setting(&conn, &key, &value).map_err(|e| format!("DB error: {}", e))
+    }
 }
 
 #[tauri::command]
-pub fn get_setting(
-    key: String,
-    db: State<'_, DbConn>,
-) -> Result<Option<String>, String> {
+pub fn get_setting(key: String, db: State<'_, DbConn>) -> Result<Option<String>, String> {
     if !ALLOWED_SETTING_KEYS.contains(&key.as_str()) {
-        return Err(format!("Setting '{}' is not readable from the frontend", key));
+        return Err(format!(
+            "Setting '{}' is not readable from the frontend",
+            key
+        ));
     }
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
     db::get_setting(&conn, &key).map_err(|e| format!("DB error: {}", e))
@@ -319,10 +325,7 @@ pub fn estimate_analyze_cost(duration_secs: f64, db: State<'_, DbConn>) -> Resul
 /// any later regens tagged with this VOD). Backs the post-analyze
 /// "this analyze cost ~$Y" readout. Returns 0.0 for an unknown VOD.
 #[tauri::command]
-pub fn get_analysis_cost(
-    vod_id: String,
-    db: State<'_, DbConn>,
-) -> Result<f64, String> {
+pub fn get_analysis_cost(vod_id: String, db: State<'_, DbConn>) -> Result<f64, String> {
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
     Ok(crate::ai_usage::sum_cost_for_vod(&conn, &vod_id))
 }

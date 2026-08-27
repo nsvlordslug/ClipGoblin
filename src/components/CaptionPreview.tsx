@@ -1,9 +1,15 @@
 import React, { useCallback, useMemo, useRef, useState, useEffect } from 'react'
+import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import type { CaptionToken } from '../lib/captionEmphasis'
 import { EMPHASIS_STYLES } from '../lib/captionEmphasis'
 import type { CaptionStyle } from '../lib/editTypes'
-import { clampCaptionFontScale, fitCaptionFontSize } from '../lib/captionSizing'
-import { findActiveSegment } from '../lib/subtitleUtils'
+import {
+  clampCaptionCardScale,
+  clampCaptionFontScale,
+  DEFAULT_CAPTION_CARD_SCALE,
+  fitCaptionFontSize,
+} from '../lib/captionSizing'
+import { findActiveSegment, frameSafeSubtitleSegments } from '../lib/subtitleUtils'
 import type { SubtitleSegment } from '../lib/subtitleUtils'
 
 interface Props {
@@ -11,6 +17,7 @@ interface Props {
   emphasisTokens?: CaptionToken[]
   captionStyle: CaptionStyle
   fontScale?: number
+  cardScale?: number
   currentTime: number
   trimStart?: number
   trimEnd?: number
@@ -18,9 +25,50 @@ interface Props {
   yPercent?: number
   emphasisEnabled: boolean
   outputWidth?: number
+  outputHeight?: number
+  captionProvenance?: string
+  onPreparingChange?: (preparing: boolean) => void
+}
+
+interface ImageCaptionAsset {
+  path: string
+  rendererVersion: string
+}
+
+interface ImageCaptionRenderPlan {
+  presentation: CaptionStyle['presentation']
+  command: string
+  request: {
+    styleId?: string
+    cardScale?: number
+    text: string
+    targetWidth: number
+    targetHeight: number
+    fontSize: number
+    anchorY: number
+    alignment: number
+  }
 }
 
 const DESIGN_WIDTH = 1080
+const GLOSSY_PREVIEW_MIN_DIMENSION = 360
+const GLOSSY_PRELOAD_CONCURRENCY = 3
+const EMPTY_CAPTION_ASSETS = new Map<string, string>()
+
+async function decodeCaptionImage(url: string): Promise<HTMLImageElement> {
+  const image = new Image()
+  image.decoding = 'async'
+  image.src = url
+  if (typeof image.decode === 'function') {
+    await image.decode()
+    return image
+  }
+  await new Promise<void>((resolve, reject) => {
+    image.onload = () => resolve()
+    image.onerror = () => reject(new Error('Caption preview image could not be decoded'))
+  })
+  return image
+}
 
 // ── Layer 1: Tokenizer (style-agnostic) ──
 // Split caption text by whitespace, then re-attach any standalone
@@ -67,6 +115,16 @@ function layeredFaceStyle(
     }
   }
 
+  if (presentation === 'undead-legion') {
+    return {
+      color: emphasized ? '#FF30CD' : '#B2FF1C',
+      backgroundImage: 'linear-gradient(180deg, #C8FF3D 0%, #8FF02C 54%, #FF30CD 66%, #BE177F 100%)',
+      backgroundClip: 'text',
+      WebkitBackgroundClip: 'text',
+      WebkitTextFillColor: 'transparent',
+    }
+  }
+
   return {}
 }
 
@@ -93,7 +151,7 @@ function renderTapeRiotGlyphs(text: string, emphasized: boolean, seed: number) {
   })
 }
 
-type MaterialPresentation = 'tape-riot' | 'paper-mischief' | 'goblin-bite'
+type MaterialPresentation = 'tape-riot' | 'paper-mischief' | 'goblin-bite' | 'undead-legion'
 
 interface MaterialCaptionTextProps {
   presentation: MaterialPresentation
@@ -126,19 +184,19 @@ interface MaterialFaceHighlight {
 
 function buildPaperMischiefDepth(): MaterialLayer[] {
   const layers: MaterialLayer[] = []
-  for (let step = 18; step >= 1; step -= 1) {
-    const color = step <= 3
-      ? '#777478'
+  for (let step = 12; step >= 1; step -= 1) {
+    const color = step <= 2
+      ? '#8B8588'
       : step <= 5
-        ? '#2A232C'
-        : step <= 14
-          ? '#5A2181'
-          : '#35104F'
+        ? '#3B353D'
+        : step <= 9
+          ? '#5A2A78'
+          : '#321540'
     layers.push({
-      x: step * 0.0125,
-      y: step * 0.016,
+      x: step * 0.0115,
+      y: step * 0.0145,
       color,
-      stroke: step === 18 ? '#09060D' : undefined,
+      stroke: step === 12 ? '#0B080D' : undefined,
     })
   }
   return layers
@@ -154,6 +212,9 @@ const MATERIAL_LAYERS: Record<MaterialPresentation, {
   contactShadow?: MaterialContactShadow
   faceHighlight?: MaterialFaceHighlight
   faceStroke?: number
+  rimStroke?: number
+  rimX?: number
+  rimY?: number
 }> = {
   'tape-riot': {
     depth: [
@@ -169,25 +230,22 @@ const MATERIAL_LAYERS: Record<MaterialPresentation, {
   },
   'paper-mischief': {
     depth: buildPaperMischiefDepth(),
-    rim: '#141116',
+    rim: '#2C2730',
     detailFamily: "'ClipGoblin Paper Mischief Fiber'",
-    detailColor: 'rgba(109, 104, 101, 0.34)',
+    detailColor: 'rgba(92, 86, 82, 0.46)',
     accentFamily: "'ClipGoblin Paper Mischief Tabs'",
     accentColor: '#AFFF24',
     contactShadow: {
-      x: 0.30,
-      y: 0.36,
-      blur: 0.045,
-      color: 'rgba(0, 0, 0, 0.68)',
-      stroke: 'rgba(0, 0, 0, 0.76)',
+      x: 0.205,
+      y: 0.265,
+      blur: 0.055,
+      color: 'rgba(0, 0, 0, 0.72)',
+      stroke: 'rgba(0, 0, 0, 0.80)',
     },
-    faceHighlight: {
-      x: -0.012,
-      y: -0.016,
-      color: '#FFFFFF',
-      stroke: '#FFFFFF',
-    },
-    faceStroke: 0.04,
+    faceStroke: 0.015,
+    rimStroke: 0.022,
+    rimX: 0.010,
+    rimY: 0.012,
   },
   'goblin-bite': {
     depth: [
@@ -198,6 +256,16 @@ const MATERIAL_LAYERS: Record<MaterialPresentation, {
     rim: '#171119',
     detailFamily: "'ClipGoblin Goblin Bite Distress'",
     detailColor: 'rgba(48, 70, 12, 0.72)',
+  },
+  'undead-legion': {
+    depth: [
+      { x: -0.10, y: 0.18, color: '#050306', stroke: '#020103' },
+      { x: -0.045, y: 0.105, color: '#9E146F', stroke: '#08050A' },
+      { x: 0, y: 0.038, color: '#161018', stroke: '#080609' },
+    ],
+    rim: '#0C0708',
+    detailFamily: "'Bangers'",
+    detailColor: 'rgba(16, 26, 13, 0.20)',
   },
 }
 
@@ -250,8 +318,8 @@ export function MaterialCaptionText({
         ...layerStyle,
         zIndex: rimLayer,
         color: material.rim,
-        transform: 'translate(0.018em, 0.022em)',
-        WebkitTextStroke: `0.045em ${material.rim}`,
+        transform: `translate(${material.rimX ?? 0.018}em, ${material.rimY ?? 0.022}em)`,
+        WebkitTextStroke: `${material.rimStroke ?? 0.045}em ${material.rim}`,
         paintOrder: 'stroke fill',
       }}>{text}</span>
       {material.faceHighlight && (
@@ -319,6 +387,9 @@ function groupByEmphasis(
 export default function CaptionPreview({
   segments, emphasisTokens = [], captionStyle: cs, currentTime,
   trimStart, trimEnd, position, yPercent, emphasisEnabled, fontScale = 1,
+  cardScale = DEFAULT_CAPTION_CARD_SCALE,
+  outputWidth = 1080, outputHeight = 1920, captionProvenance,
+  onPreparingChange,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [frameWidth, setFrameWidth] = useState(270)
@@ -340,9 +411,13 @@ export default function CaptionPreview({
       : segments,
     [segments, trimStart, trimEnd],
   )
+  const playbackSegments = useMemo(
+    () => frameSafeSubtitleSegments(visibleSegments, captionProvenance),
+    [captionProvenance, visibleSegments],
+  )
   const activeSegment = useMemo(
-    () => findActiveSegment(visibleSegments, currentTime),
-    [visibleSegments, currentTime],
+    () => findActiveSegment(playbackSegments, currentTime),
+    [playbackSegments, currentTime],
   )
 
   // ── Layout computation ──
@@ -350,9 +425,9 @@ export default function CaptionPreview({
   const isVertical = ar < 0.7
   const isLandscape = ar > 1.5
   const isCardboard = cs.presentation === 'cardboard'
-  const activeSegmentIndex = activeSegment ? visibleSegments.indexOf(activeSegment) : -1
+  const activeSegmentIndex = activeSegment ? playbackSegments.indexOf(activeSegment) : -1
   const previousSegmentText = activeSegmentIndex > 0
-    ? visibleSegments[activeSegmentIndex - 1].text.trim()
+    ? playbackSegments[activeSegmentIndex - 1].text.trim()
     : ''
   const cardboardLeadWord = isCardboard && (
     activeSegmentIndex === 0 || /[.!?]["')\]]?$/.test(previousSegmentText)
@@ -367,6 +442,7 @@ export default function CaptionPreview({
   // Font size: respect the user's bounded scale, then shrink only when a word
   // would escape the platform-safe horizontal area.
   const safeFontScale = clampCaptionFontScale(fontScale)
+  const safeCardScale = clampCaptionCardScale(cardScale)
   const rawFontSize = cs.fontSize * scale * safeFontScale
   const baseFontSize = fitCaptionFontSize({
     requestedPx: rawFontSize,
@@ -376,6 +452,181 @@ export default function CaptionPreview({
     characterWidthFactor: cs.characterWidthFactor,
     safeWidthRatio: cs.safeWidthRatio,
   })
+
+  const buildImageCaptionRequest = useCallback((captionText: string): ImageCaptionRenderPlan | null => {
+    const isReferenceImageGlyph = cs.presentation === 'hellfire'
+      || cs.presentation === 'horror'
+      || cs.presentation === 'scary'
+      || cs.presentation === 'glossy-thumbnail'
+    const isPersistentCardboard = cs.presentation === 'cardboard'
+    if ((cs.presentation !== 'paper-mischief'
+      && cs.presentation !== 'undead-legion'
+      && !isReferenceImageGlyph
+      && !isPersistentCardboard) || (!captionText && !isPersistentCardboard)) return null
+    const glossyPreviewScale = cs.presentation === 'glossy-thumbnail'
+      ? Math.min(1, Math.max(
+          GLOSSY_PREVIEW_MIN_DIMENSION / Math.max(1, outputWidth),
+          GLOSSY_PREVIEW_MIN_DIMENSION / Math.max(1, outputHeight),
+        ))
+      : 1
+    const targetWidth = Math.max(320, Math.round(outputWidth * glossyPreviewScale))
+    const targetHeight = Math.max(320, Math.round(outputHeight * glossyPreviewScale))
+    const anchorPercent = yPercent ?? (position === 'top' ? 8 : position === 'center' ? 50 : 97)
+    const outputFontSize = Math.floor(fitCaptionFontSize({
+      requestedPx: cs.fontSize * safeFontScale * glossyPreviewScale,
+      frameWidth: targetWidth,
+      isVertical: targetHeight > targetWidth,
+      text: captionText,
+      characterWidthFactor: cs.characterWidthFactor,
+      safeWidthRatio: cs.safeWidthRatio,
+    }))
+    return {
+      presentation: cs.presentation,
+      command: isPersistentCardboard
+        ? 'render_cardboard_caption'
+        : cs.presentation === 'undead-legion'
+        ? 'render_undead_legion_caption'
+        : cs.presentation === 'paper-mischief'
+          ? 'render_paper_mischief_caption'
+          : 'render_image_glyph_caption',
+      request: {
+        ...(isReferenceImageGlyph ? { styleId: cs.id } : {}),
+        ...(isPersistentCardboard ? { cardScale: safeCardScale } : {}),
+        text: captionText,
+        targetWidth,
+        targetHeight,
+        fontSize: outputFontSize,
+        anchorY: Math.max(0, Math.min(targetHeight, Math.round(targetHeight * anchorPercent / 100))),
+        alignment: position === 'top' ? 8 : position === 'center' ? 5 : 2,
+      },
+    }
+  }, [
+    cs.characterWidthFactor,
+    cs.fontSize,
+    cs.id,
+    cs.presentation,
+    cs.safeWidthRatio,
+    outputHeight,
+    outputWidth,
+    position,
+    safeFontScale,
+    safeCardScale,
+    yPercent,
+  ])
+  const imageCaptionRequest = useMemo(
+    () => buildImageCaptionRequest(activeSegment?.text || ''),
+    [activeSegment, buildImageCaptionRequest],
+  )
+  const imageCaptionRequestKey = useMemo(
+    () => imageCaptionRequest ? JSON.stringify(imageCaptionRequest) : null,
+    [imageCaptionRequest],
+  )
+  const [imageCaptionAsset, setImageCaptionAsset] = useState<{ key: string; url: string } | null>(null)
+  const [glossyCaptionCache, setGlossyCaptionCache] = useState<{
+    signature: string
+    assets: Map<string, string>
+  } | null>(null)
+  const glossyDecodedImagesRef = useRef<Map<string, HTMLImageElement>>(new Map())
+  const glossyPreloadRequests = useMemo(() => {
+    if (cs.presentation !== 'glossy-thumbnail') return []
+    const unique = new Map<string, ImageCaptionRenderPlan>()
+    for (const segment of playbackSegments) {
+      const plan = buildImageCaptionRequest(segment.text)
+      if (plan) unique.set(JSON.stringify(plan), plan)
+    }
+    return Array.from(unique, ([key, plan]) => ({ key, plan }))
+  }, [buildImageCaptionRequest, cs.presentation, playbackSegments])
+  const glossyPreloadSignature = useMemo(
+    () => JSON.stringify(glossyPreloadRequests.map(item => item.key)),
+    [glossyPreloadRequests],
+  )
+  const glossyCaptionAssets = glossyCaptionCache?.signature === glossyPreloadSignature
+    ? glossyCaptionCache.assets
+    : EMPTY_CAPTION_ASSETS
+  const glossyPreloading = cs.presentation === 'glossy-thumbnail'
+    && glossyPreloadRequests.length > 0
+    && glossyCaptionCache?.signature !== glossyPreloadSignature
+
+  useEffect(() => {
+    if (cs.presentation !== 'glossy-thumbnail' || glossyPreloadRequests.length === 0) {
+      onPreparingChange?.(false)
+      return
+    }
+
+    let cancelled = false
+    let cursor = 0
+    const decodedImages = new Map<string, HTMLImageElement>()
+    const urls = new Map<string, string>()
+    glossyDecodedImagesRef.current.clear()
+    onPreparingChange?.(true)
+
+    const worker = async () => {
+      while (!cancelled) {
+        const item = glossyPreloadRequests[cursor]
+        cursor += 1
+        if (!item) return
+        try {
+          const asset = await invoke<ImageCaptionAsset>(item.plan.command, {
+            request: item.plan.request,
+          })
+          const url = convertFileSrc(asset.path)
+          const image = await decodeCaptionImage(url)
+          if (!cancelled) {
+            decodedImages.set(item.key, image)
+            urls.set(item.key, url)
+          }
+        } catch (error) {
+          if (!cancelled) console.warn('Glossy Thumbnail cue preload failed', error)
+        }
+      }
+    }
+
+    void Promise.all(
+      Array.from(
+        { length: Math.min(GLOSSY_PRELOAD_CONCURRENCY, glossyPreloadRequests.length) },
+        () => worker(),
+      ),
+    ).then(() => {
+      if (cancelled) return
+      glossyDecodedImagesRef.current = decodedImages
+      setGlossyCaptionCache({ signature: glossyPreloadSignature, assets: urls })
+      onPreparingChange?.(false)
+    })
+
+    return () => {
+      cancelled = true
+      onPreparingChange?.(false)
+    }
+  }, [cs.presentation, glossyPreloadRequests, glossyPreloadSignature, onPreparingChange])
+
+  useEffect(() => {
+    if (!imageCaptionRequest || !imageCaptionRequestKey) {
+      return
+    }
+    if (cs.presentation === 'glossy-thumbnail'
+      && (glossyPreloading || glossyCaptionAssets.has(imageCaptionRequestKey))) return
+    let cancelled = false
+    invoke<ImageCaptionAsset>(imageCaptionRequest.command, {
+      request: imageCaptionRequest.request,
+    })
+      .then(asset => {
+        if (!cancelled) {
+          setImageCaptionAsset({ key: imageCaptionRequestKey, url: convertFileSrc(asset.path) })
+        }
+      })
+      .catch(error => {
+        if (!cancelled) {
+          console.warn(`${imageCaptionRequest.presentation} image preview fell back to text rendering`, error)
+        }
+      })
+    return () => { cancelled = true }
+  }, [
+    cs.presentation,
+    glossyCaptionAssets,
+    glossyPreloading,
+    imageCaptionRequest,
+    imageCaptionRequestKey,
+  ])
 
   // Safe margins: left/right padding inside the frame
   const safeMarginPx = Math.round(frameWidth * 0.05) // 5% each side
@@ -415,6 +666,7 @@ export default function CaptionPreview({
   const keepsLayeredDepth = cs.presentation === 'tape-riot'
     || cs.presentation === 'paper-mischief'
     || cs.presentation === 'goblin-bite'
+    || cs.presentation === 'undead-legion'
 
   // ── Layer 1: tokenize (style-agnostic, runs once per segment) ──
   const tokens = useMemo(
@@ -447,7 +699,41 @@ export default function CaptionPreview({
     [tokens, isTokenEmphasized],
   )
 
+  const glossyCaptionUrl = imageCaptionRequestKey
+    ? glossyCaptionAssets.get(imageCaptionRequestKey)
+    : null
+  const visibleImageCaptionAsset = glossyCaptionUrl && imageCaptionRequestKey
+    ? { key: imageCaptionRequestKey, url: glossyCaptionUrl }
+    : imageCaptionAsset?.key === imageCaptionRequestKey
+      ? imageCaptionAsset
+      : isCardboard
+        ? imageCaptionAsset
+        : null
+  if (imageCaptionRequestKey && visibleImageCaptionAsset) {
+    return (
+      <div ref={containerRef} className="absolute inset-0 pointer-events-none z-10">
+        <img
+          src={visibleImageCaptionAsset.url}
+          alt=""
+          aria-hidden="true"
+          className="absolute inset-0 h-full w-full pointer-events-none"
+          style={{ objectFit: 'fill' }}
+        />
+      </div>
+    )
+  }
+
   if (!activeSegment) return null
+
+  // New reference-built styles never impersonate their atlas with a generic
+  // CSS font while the native image cue is still rendering.
+  if (imageCaptionRequestKey && (
+    cs.presentation === 'cardboard'
+    || cs.presentation === 'hellfire'
+    || cs.presentation === 'horror'
+    || cs.presentation === 'scary'
+    || cs.presentation === 'glossy-thumbnail'
+  )) return null
 
   const captionFrameStyle: React.CSSProperties = isCardboard ? {
     width: `${Math.round(maxTextWidth * 0.9)}px`,
@@ -474,7 +760,9 @@ export default function CaptionPreview({
     maxWidth: `${maxTextWidth}px`,
     maxHeight: `${Math.round(frameHeight * 0.35)}px`,
     width: `${maxTextWidth}px`,
-    overflow: cs.presentation === 'paper-mischief' ? 'visible' : 'hidden',
+    overflow: cs.presentation === 'paper-mischief' || cs.presentation === 'undead-legion'
+      ? 'visible'
+      : 'hidden',
     textAlign: 'center',
     background: cs.bgColor || undefined,
     padding: cs.bgPadding > 0

@@ -7,7 +7,7 @@ export interface CaptionStyle {
   id: string
   name: string
   /** Optional renderer treatment beyond the base typography fields. */
-  presentation?: 'cardboard' | 'tape-riot' | 'paper-mischief' | 'goblin-bite'
+  presentation?: 'cardboard' | 'tape-riot' | 'paper-mischief' | 'goblin-bite' | 'undead-legion' | 'hellfire' | 'horror' | 'scary' | 'glossy-thumbnail'
   fontFamily: string
   fontSize: number       // px at 1080p export resolution
   fontWeight: number     // 400–900
@@ -29,11 +29,12 @@ export interface CaptionStyle {
 }
 
 export const CAPTION_STYLES: CaptionStyle[] = [
+  // Established styles use their former 125% appearance as the 100% baseline.
   {
     id: 'clean',
     name: 'Clean',
     fontFamily: "'Segoe UI', Arial, sans-serif",
-    fontSize: 52, fontWeight: 700,
+    fontSize: 65, fontWeight: 700,
     fontColor: '#FFFFFF',
     strokeColor: '#000000', strokeWidth: 0,
     bgColor: '', bgPadding: 0, bgRadius: 0,
@@ -46,7 +47,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Cardboard',
     presentation: 'cardboard',
     fontFamily: "'Arial Black', Arial, sans-serif",
-    fontSize: 52, fontWeight: 900,
+    fontSize: 65, fontWeight: 900,
     fontColor: '#7A2118',
     strokeColor: '', strokeWidth: 0,
     bgColor: '#C99358', bgPadding: 32, bgRadius: 0,
@@ -60,7 +61,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     id: 'boxed',
     name: 'Frosted',
     fontFamily: "'Coiny', 'Arial Black', Arial, sans-serif",
-    fontSize: 58, fontWeight: 400,
+    fontSize: 73, fontWeight: 400,
     fontColor: '#FFFFFF',
     strokeColor: '#FFFFFF', strokeWidth: 3,
     bgColor: '', bgPadding: 0, bgRadius: 0,
@@ -73,7 +74,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     id: 'neon',
     name: 'Neon Pop',
     fontFamily: "'Segoe UI', Arial, sans-serif",
-    fontSize: 54, fontWeight: 800,
+    fontSize: 68, fontWeight: 800,
     fontColor: '#00FF88',
     strokeColor: '#000000', strokeWidth: 0,
     bgColor: '', bgPadding: 0, bgRadius: 0,
@@ -83,22 +84,24 @@ export const CAPTION_STYLES: CaptionStyle[] = [
   },
   {
     id: 'minimal',
-    name: 'Drip',
-    fontFamily: "'Nosifer', 'Arial Black', Arial, sans-serif",
-    fontSize: 50, fontWeight: 400,
-    fontColor: '#FF351F',
-    strokeColor: '#3B0000', strokeWidth: 2,
+    name: 'Glossy Thumbnail',
+    presentation: 'glossy-thumbnail',
+    fontFamily: "'Anton', Impact, 'Arial Narrow', sans-serif",
+    fontSize: 66, fontWeight: 400,
+    fontColor: '#FFB400',
+    strokeColor: '#FFF8DE', strokeWidth: 3,
     bgColor: '', bgPadding: 0, bgRadius: 0,
     uppercase: true,
-    letterSpacing: 0.01, lineHeight: 1.15,
-    shadow: '0 2px 0 #7A0000, 0 4px 7px rgba(0,0,0,0.9)',
-    characterWidthFactor: 0.8,
+    letterSpacing: 0, lineHeight: 1.05,
+    shadow: 'none',
+    characterWidthFactor: 0.58,
+    safeWidthRatio: 0.72,
   },
   {
     id: 'fire',
     name: 'Highlight',
     fontFamily: "'Rubik Dirt', 'Arial Black', Arial, sans-serif",
-    fontSize: 60, fontWeight: 400,
+    fontSize: 75, fontWeight: 400,
     fontColor: '#FFE45E',
     strokeColor: '#000000', strokeWidth: 3,
     bgColor: '', bgPadding: 0, bgRadius: 0,
@@ -111,7 +114,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     id: 'comic-pop',
     name: 'Comic Pop',
     fontFamily: "'Bangers', 'Arial Black', Arial, sans-serif",
-    fontSize: 64, fontWeight: 400,
+    fontSize: 80, fontWeight: 400,
     fontColor: '#67E8E6',
     strokeColor: '#55206F', strokeWidth: 3,
     bgColor: '', bgPadding: 0, bgRadius: 0,
@@ -125,7 +128,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Tape Riot',
     presentation: 'tape-riot',
     fontFamily: "'ClipGoblin Tape Riot', 'Arial Black', Arial, sans-serif",
-    fontSize: 60, fontWeight: 400,
+    fontSize: 75, fontWeight: 400,
     fontColor: '#B8FF2C',
     strokeColor: '#17131C', strokeWidth: 3,
     bgColor: '', bgPadding: 0, bgRadius: 0,
@@ -140,9 +143,9 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Paper Mischief',
     presentation: 'paper-mischief',
     fontFamily: "'ClipGoblin Paper Mischief', 'Arial Black', Arial, sans-serif",
-    fontSize: 60, fontWeight: 400,
+    fontSize: 75, fontWeight: 400,
     fontColor: '#F3F0E8',
-    strokeColor: '#27222D', strokeWidth: 2,
+    strokeColor: '', strokeWidth: 0,
     bgColor: '', bgPadding: 0, bgRadius: 0,
     uppercase: true,
     letterSpacing: 0.01, lineHeight: 1.03,
@@ -155,7 +158,7 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     name: 'Goblin Bite',
     presentation: 'goblin-bite',
     fontFamily: "'ClipGoblin Goblin Bite', Impact, 'Arial Narrow', sans-serif",
-    fontSize: 68, fontWeight: 400,
+    fontSize: 85, fontWeight: 400,
     fontColor: '#DFFF20',
     strokeColor: '#111014', strokeWidth: 3,
     bgColor: '', bgPadding: 0, bgRadius: 0,
@@ -164,6 +167,67 @@ export const CAPTION_STYLES: CaptionStyle[] = [
     shadow: 'none',
     characterWidthFactor: 0.58,
     safeWidthRatio: 0.76,
+  },
+  {
+    id: 'undead-legion',
+    name: 'Undead Legion',
+    presentation: 'undead-legion',
+    fontFamily: "'Bangers', 'Arial Black', Arial, sans-serif",
+    fontSize: 66, fontWeight: 400,
+    fontColor: '#B2FF1C',
+    strokeColor: '#0C0708', strokeWidth: 3,
+    bgColor: '', bgPadding: 0, bgRadius: 0,
+    uppercase: false,
+    letterSpacing: 0, lineHeight: 1.02,
+    shadow: 'none',
+    characterWidthFactor: 0.68,
+    safeWidthRatio: 0.78,
+  },
+  {
+    id: 'hellfire',
+    name: 'Hellfire',
+    presentation: 'hellfire',
+    fontFamily: "Georgia, 'Times New Roman', serif",
+    fontSize: 62, fontWeight: 700,
+    fontColor: '#D8D8D8',
+    strokeColor: '#201717', strokeWidth: 2,
+    bgColor: '', bgPadding: 0, bgRadius: 0,
+    uppercase: false,
+    letterSpacing: 0, lineHeight: 1.03,
+    shadow: 'none',
+    characterWidthFactor: 0.68,
+    safeWidthRatio: 0.78,
+  },
+  {
+    id: 'horror',
+    name: 'Horror',
+    presentation: 'horror',
+    fontFamily: "'Arial Narrow', Arial, sans-serif",
+    fontSize: 62, fontWeight: 700,
+    fontColor: '#ECECEC',
+    strokeColor: '#111116', strokeWidth: 1,
+    bgColor: '', bgPadding: 0, bgRadius: 0,
+    uppercase: false,
+    letterSpacing: 0, lineHeight: 1.03,
+    shadow: 'none',
+    characterWidthFactor: 0.58,
+    safeWidthRatio: 0.78,
+  },
+  {
+    id: 'scary',
+    name: 'Scary',
+    presentation: 'scary',
+    // The native image-glyph atlas is authoritative in preview and export.
+    fontFamily: "'Arial Narrow', Arial, sans-serif",
+    fontSize: 62, fontWeight: 700,
+    fontColor: '#D4141C',
+    strokeColor: '#140406', strokeWidth: 1,
+    bgColor: '', bgPadding: 0, bgRadius: 0,
+    uppercase: true,
+    letterSpacing: 0, lineHeight: 1.03,
+    shadow: 'none',
+    characterWidthFactor: 0.58,
+    safeWidthRatio: 0.78,
   },
 ]
 
@@ -195,6 +259,14 @@ export interface ExportPreset {
   hidden?: boolean
 }
 
+export const YOUTUBE_SHORTS_MAX_DURATION_SECONDS = 180
+
+export function isYouTubeShortsDuration(durationSeconds: number): boolean {
+  return Number.isFinite(durationSeconds)
+    && durationSeconds >= 0
+    && durationSeconds <= YOUTUBE_SHORTS_MAX_DURATION_SECONDS
+}
+
 export const EXPORT_PRESETS: ExportPreset[] = [
   {
     id: 'tiktok',
@@ -222,10 +294,10 @@ export const EXPORT_PRESETS: ExportPreset[] = [
     name: 'YouTube Shorts',
     platform: 'YouTube',
     aspectRatio: '9:16',
-    maxDuration: 60,
+    maxDuration: YOUTUBE_SHORTS_MAX_DURATION_SECONDS,
     resolution: { w: 1080, h: 1920 },
     fileLabel: 'shorts',
-    description: '9:16 vertical, max 60s',
+    description: '9:16 vertical, max 3 minutes',
   },
   {
     id: 'youtube',
@@ -255,17 +327,21 @@ export interface LayoutOption {
   regions: { label: string; x: number; y: number; w: number; h: number; fill: string }[]
 }
 
+export function recommendedLayoutForAspect(aspectRatio: string): LayoutMode {
+  return aspectRatio === '9:16' ? 'context_fit' : 'none'
+}
+
 export const LAYOUT_OPTIONS: LayoutOption[] = [
   {
-    id: 'none', name: 'Full Frame', description: 'Center crop — maximizes gameplay visibility',
-    tag: 'Best for gameplay', accent: '#3b82f6',
+    id: 'none', name: 'Full Frame', description: 'Intentional fill crop — scene edges may be trimmed',
+    tag: 'Optional crop', accent: '#3b82f6',
     regions: [
       { label: 'GAME', x: 0, y: 0, w: 100, h: 100, fill: '#1e3a5f' },
     ],
   },
   {
-    id: 'context_fit', name: 'Context Fit', description: 'Keeps the entire video visible with a blurred, black-bar, or branded background',
-    tag: 'Best for imports', accent: '#06b6d4',
+    id: 'context_fit', name: 'Context Fit', description: 'Keeps the entire source composition visible with a blurred, black-bar, or branded background',
+    tag: 'Preserves context', accent: '#06b6d4',
     regions: [
       { label: 'BLUR', x: 0, y: 0, w: 100, h: 100, fill: '#164e63' },
       { label: 'FULL GAME', x: 4, y: 34, w: 92, h: 32, fill: '#0f172a' },
@@ -273,7 +349,7 @@ export const LAYOUT_OPTIONS: LayoutOption[] = [
   },
   {
     id: 'split', name: 'Split View', description: 'Game on top, facecam on bottom — balanced',
-    tag: 'Recommended', accent: '#8b5cf6',
+    tag: 'Creator + game', accent: '#8b5cf6',
     regions: [
       { label: 'GAME', x: 0, y: 0, w: 100, h: 60, fill: '#1e3a5f' },
       { label: 'FACE', x: 0, y: 62, w: 100, h: 38, fill: '#3b1e5f' },

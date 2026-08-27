@@ -102,7 +102,12 @@ pub fn compute_cost(provider: Provider, model: &str, tokens_in: u64, tokens_out:
 /// Errors are swallowed — a logging failure should never break a real
 /// LLM call's user-visible behavior; just emit a warn-level log.
 pub fn log_usage(conn: &Connection, entry: UsageEntry) -> f64 {
-    let cost = compute_cost(entry.provider, entry.model, entry.tokens_in, entry.tokens_out);
+    let cost = compute_cost(
+        entry.provider,
+        entry.model,
+        entry.tokens_in,
+        entry.tokens_out,
+    );
     let id = uuid::Uuid::new_v4().to_string();
     let timestamp = chrono::Utc::now().to_rfc3339();
     let provider_str = entry.provider.as_str();
@@ -126,7 +131,11 @@ pub fn log_usage(conn: &Connection, entry: UsageEntry) -> f64 {
         ],
     );
     if let Err(e) = result {
-        log::warn!("ai_usage::log_usage insert failed: {} (feature={})", e, entry.feature);
+        log::warn!(
+            "ai_usage::log_usage insert failed: {} (feature={})",
+            e,
+            entry.feature
+        );
     }
     cost
 }

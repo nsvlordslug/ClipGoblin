@@ -87,13 +87,39 @@ pub const DEFAULT_BANNED_WORDS: &[&str] = &[
 /// Curated for gaming contexts — adjectives/states a streamer would
 /// actually use, not generic feelings ("happy", "sad").
 pub const DEFAULT_EMOTIONAL_WORDS: &[&str] = &[
-    "speechless", "rattled", "floored", "frozen", "gutted",
-    "stunned", "dazed", "shook", "wrecked", "panicked",
-    "heartbroken", "relieved", "hyped", "ecstatic",
-    "clutched", "choked", "crushed", "dominated", "humbled",
-    "numb", "livid", "bewildered", "dumbstruck", "paralyzed",
-    "elated", "devastated", "overwhelmed", "terrified",
-    "tilted", "vindicated", "broken", "dead", "done",
+    "speechless",
+    "rattled",
+    "floored",
+    "frozen",
+    "gutted",
+    "stunned",
+    "dazed",
+    "shook",
+    "wrecked",
+    "panicked",
+    "heartbroken",
+    "relieved",
+    "hyped",
+    "ecstatic",
+    "clutched",
+    "choked",
+    "crushed",
+    "dominated",
+    "humbled",
+    "numb",
+    "livid",
+    "bewildered",
+    "dumbstruck",
+    "paralyzed",
+    "elated",
+    "devastated",
+    "overwhelmed",
+    "terrified",
+    "tilted",
+    "vindicated",
+    "broken",
+    "dead",
+    "done",
 ];
 
 /// Generic nouns. 2+ hits on a title = specificity penalty.
@@ -102,8 +128,15 @@ pub const DEFAULT_EMOTIONAL_WORDS: &[&str] = &[
 /// to any random clip. Punishing them pushes candidates toward concrete
 /// detail (kills, smokes, round numbers).
 pub const DEFAULT_GENERIC_WORDS: &[&str] = &[
-    "play", "moment", "thing", "stuff", "time",
-    "situation", "clip", "video", "happened",
+    "play",
+    "moment",
+    "thing",
+    "stuff",
+    "time",
+    "situation",
+    "clip",
+    "video",
+    "happened",
 ];
 
 // ───────────────────────────────────────────────────────────────────
@@ -191,10 +224,7 @@ pub fn score_title(title: &str, ctx: &RankerContext) -> f32 {
 }
 
 /// Pick the highest-scoring candidate from a list. Returns None for empty input.
-pub fn pick_best<'a>(
-    candidates: &'a [String],
-    ctx: &RankerContext,
-) -> Option<(&'a str, f32)> {
+pub fn pick_best<'a>(candidates: &'a [String], ctx: &RankerContext) -> Option<(&'a str, f32)> {
     candidates
         .iter()
         .map(|c| (c.as_str(), score_title(c, ctx)))
@@ -294,10 +324,7 @@ fn anchor_score(title: &str) -> f32 {
     let mut anchors = 0;
     for (i, w) in words.iter().enumerate() {
         // Strip punctuation from edges to judge the word itself.
-        let stripped: String = w
-            .chars()
-            .filter(|c| c.is_ascii_alphabetic())
-            .collect();
+        let stripped: String = w.chars().filter(|c| c.is_ascii_alphabetic()).collect();
         if stripped.len() < 2 {
             continue;
         }
@@ -428,8 +455,13 @@ mod tests {
     fn number_boosts_score() {
         let ctx = ctx_tiktok();
         let with_num = score_title("1v5 clutch through smoke", &ctx);
-        let no_num   = score_title("clutch through smoke", &ctx);
-        assert!(with_num > no_num, "number should boost: {} vs {}", with_num, no_num);
+        let no_num = score_title("clutch through smoke", &ctx);
+        assert!(
+            with_num > no_num,
+            "number should boost: {} vs {}",
+            with_num,
+            no_num
+        );
     }
 
     #[test]
@@ -452,7 +484,9 @@ mod tests {
         // Target is 60 after the Wave 3 bump. 65 chars = over by 5 → 0.20 * (1 - 0.5) = 0.10.
         let over = "a".repeat(65);
         let at_limit = "a".repeat(60);
-        assert!(length_score(&over, Platform::Generic) < length_score(&at_limit, Platform::Generic));
+        assert!(
+            length_score(&over, Platform::Generic) < length_score(&at_limit, Platform::Generic)
+        );
     }
 
     #[test]
@@ -474,7 +508,10 @@ mod tests {
         assert_eq!(anchor_score("look what Meg did"), 0.10); // 1 proper noun mid-sentence
         assert_eq!(anchor_score("Legion chased Meg around"), 0.10); // Legion = sentence-start, Meg = anchor
         assert_eq!(anchor_score("DBD is ridiculous"), 0.10); // DBD = all-caps acronym counts
-        assert_eq!(anchor_score("don't blind Legion when vaulting near Meg"), 0.20); // 2+ anchors
+        assert_eq!(
+            anchor_score("don't blind Legion when vaulting near Meg"),
+            0.20
+        ); // 2+ anchors
     }
 
     // ── Template artifacts (hard reject) ─────────────────────────
@@ -552,7 +589,7 @@ mod tests {
         let history = vec!["ace through triple smoke".to_string()];
         // Exact-match = max overlap
         let exact = history_overlap_score("ace through triple smoke", &history);
-        let diff  = history_overlap_score("down 0-12 1v5 victory", &history);
+        let diff = history_overlap_score("down 0-12 1v5 victory", &history);
         assert!(diff > exact);
     }
 
@@ -560,7 +597,10 @@ mod tests {
     fn low_overlap_full_history_score() {
         let history = vec!["ace through triple smoke".to_string()];
         // Jaccard < 0.5 → full 0.10
-        assert_eq!(history_overlap_score("down 0-12 1v5 victory", &history), 0.10);
+        assert_eq!(
+            history_overlap_score("down 0-12 1v5 victory", &history),
+            0.10
+        );
     }
 
     // ── End-to-end ───────────────────────────────────────────────
@@ -594,8 +634,8 @@ mod tests {
     fn pick_best_returns_winner() {
         let ctx = ctx_tiktok();
         let candidates = vec![
-            "insane moment".to_string(),           // 0.0 (banned)
-            "clutch play thing".to_string(),       // low
+            "insane moment".to_string(),                 // 0.0 (banned)
+            "clutch play thing".to_string(),             // low
             "speechless: 1v5 through smoke".to_string(), // high
         ];
         let (best, score) = pick_best(&candidates, &ctx).expect("should pick one");
@@ -615,10 +655,7 @@ mod tests {
         // When everything is banned, pick_best still returns the first (score 0.0)
         // — the CALLER decides whether to fall back to Free path.
         let ctx = ctx_tiktok();
-        let candidates = vec![
-            "insane one".to_string(),
-            "crazy two".to_string(),
-        ];
+        let candidates = vec!["insane one".to_string(), "crazy two".to_string()];
         let result = pick_best(&candidates, &ctx);
         assert!(result.is_some());
         let (_, score) = result.unwrap();

@@ -9,11 +9,46 @@ export interface SubtitleSegment {
   endTime: number
 }
 
+export const FRAME_SAFE_CAPTION_SECONDS = 0.04
+
+function hasGeneratedCaptionTiming(provenance: string | null | undefined): boolean {
+  return provenance === 'aligned' || provenance === 'analysis-draft'
+}
+
+/**
+ * Derive a playback/export-safe timeline without rewriting saved SRT data.
+ * Only machine-generated cues shorter than one representable video frame are
+ * expanded; the following boundary moves just enough to keep word order and
+ * prevent overlap. Manually edited timing is returned untouched.
+ */
+export function frameSafeSubtitleSegments(
+  segments: SubtitleSegment[],
+  provenance: string | null | undefined,
+): SubtitleSegment[] {
+  if (!hasGeneratedCaptionTiming(provenance)
+    || !segments.some(segment => segment.endTime - segment.startTime < FRAME_SAFE_CAPTION_SECONDS)) {
+    return segments
+  }
+
+  const adjusted = segments.map(segment => ({ ...segment }))
+  for (let index = 0; index < adjusted.length; index += 1) {
+    const cue = adjusted[index]
+    if (cue.endTime - cue.startTime >= FRAME_SAFE_CAPTION_SECONDS) continue
+
+    cue.endTime = cue.startTime + FRAME_SAFE_CAPTION_SECONDS
+    const next = adjusted[index + 1]
+    if (next && next.startTime < cue.endTime) {
+      next.startTime = cue.endTime
+    }
+  }
+  return adjusted
+}
+
 /** Parse raw SRT text into editable segments. */
 export function parseSrt(srt: string): SubtitleSegment[] {
   if (!srt || !srt.includes('-->')) return []
 
-  const blocks = srt.trim().split(/\n\n+/)
+  const blocks = srt.replace(/\r\n?/g, '\n').trim().split(/\n\n+/)
   const segments: SubtitleSegment[] = []
 
   for (const block of blocks) {
@@ -39,17 +74,58 @@ export function parseSrt(srt: string): SubtitleSegment[] {
     })
   }
 
-  return segments
+  return normalizeSubtitleSegments(segments)
 }
 
 /** Serialize segments back to SRT format. */
 export function serializeSrt(segments: SubtitleSegment[]): string {
-  return segments
+  return normalizeSubtitleSegments(segments)
     .map((s, i) => {
       const idx = i + 1
       return `${idx}\n${formatSrtTime(s.startTime)} --> ${formatSrtTime(s.endTime)}\n${s.text}`
     })
     .join('\n\n')
+}
+
+function subtitleTokenKey(text: string): string {
+  return text.trim().toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
+}
+
+/**
+ * Establish one global cue timeline for editor preview, persistence, and export.
+ * Duplicate overlap-window words are removed and no cue can extend into the next.
+ */
+export function normalizeSubtitleSegments(segments: SubtitleSegment[]): SubtitleSegment[] {
+  const ordered = segments
+    .filter(segment => Number.isFinite(segment.startTime)
+      && Number.isFinite(segment.endTime)
+      && segment.endTime > segment.startTime
+      && segment.text.trim())
+    .map(segment => ({
+      ...segment,
+      text: segment.text.trim(),
+      startTime: Math.max(0, Math.round(segment.startTime * 1000) / 1000),
+      endTime: Math.max(0, Math.round(segment.endTime * 1000) / 1000),
+    }))
+    .sort((left, right) => left.startTime - right.startTime || left.endTime - right.endTime)
+
+  const deduplicated: SubtitleSegment[] = []
+  for (const segment of ordered) {
+    const previous = deduplicated.at(-1)
+    const duplicate = previous
+      && subtitleTokenKey(previous.text) === subtitleTokenKey(segment.text)
+      && Math.abs(segment.startTime - previous.startTime) <= 0.18
+      && segment.startTime < previous.endTime + 0.04
+    if (!duplicate) deduplicated.push(segment)
+  }
+
+  return deduplicated.flatMap((segment, index) => {
+    const nextStart = deduplicated[index + 1]?.startTime ?? Number.POSITIVE_INFINITY
+    const endTime = Math.min(segment.endTime, nextStart)
+    return endTime > segment.startTime
+      ? [{ ...segment, index: index + 1, endTime }]
+      : []
+  })
 }
 
 /** Find the active segment at a given time. */
@@ -129,14 +205,7 @@ export function splitSubtitleSegmentsByWord(segments: SubtitleSegment[]): Subtit
     }
   }
 
-  const ordered = [...split].sort((a, b) => a.startTime - b.startTime)
-  const normalized = ordered.flatMap((segment, index) => {
-    const nextStart = ordered[index + 1]?.startTime ?? Number.POSITIVE_INFINITY
-    const endTime = Math.min(segment.endTime, nextStart)
-    return endTime > segment.startTime ? [{ ...segment, endTime }] : []
-  })
-
-  return normalized.map((segment, index) => ({ ...segment, index: index + 1 }))
+  return normalizeSubtitleSegments(split)
 }
 
 /** Filter segments to only those within the trim window. */
@@ -165,10 +234,10 @@ function parseSrtTime(ts: string): number {
 }
 
 function formatSrtTime(seconds: number): string {
-  seconds = Math.max(0, seconds)
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  const s = Math.floor(seconds % 60)
-  const ms = Math.floor((seconds % 1) * 1000)
+  const totalMs = Math.round(Math.max(0, seconds) * 1000)
+  const h = Math.floor(totalMs / 3_600_000)
+  const m = Math.floor((totalMs % 3_600_000) / 60_000)
+  const s = Math.floor((totalMs % 60_000) / 1000)
+  const ms = totalMs % 1000
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(ms).padStart(3, '0')}`
 }

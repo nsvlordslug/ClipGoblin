@@ -1,0 +1,1178 @@
+{
+  "rendererVersion": "undead-legion-image-glyph-v4",
+  "name": "ClipGoblin Undead Legion",
+  "sourceFont": null,
+  "sourceFontLicense": "User-approved project alphabet artwork; no external font skeleton",
+  "construction": "cleaned transparent image glyphs from the approved complete alphabet sheet, with authored fallbacks only for absent symbols",
+  "originalMaterialArtwork": true,
+  "sourceSheetSha256": "49ebde1d8442a690eb827a1ec4a6c6096e10e057863178ff663222208d1baa93",
+  "coverage": {
+    "physicalGlyphs": 94,
+    "primarySheetCleaned": 80,
+    "authoredSymbolFallback": 14
+  },
+  "cleanup": {
+    "matte": "local color-key extraction with connected-component cleanup",
+    "edge": "locally rebuilt charcoal separation, black depth, and green rim/glow",
+    "sourceStored": false
+  },
+  "atlas": {
+    "file": "atlas.png",
+    "width": 3240,
+    "height": 4664,
+    "columns": 9,
+    "rows": 11
+  },
+  "metrics": {
+    "cellWidth": 360,
+    "cellHeight": 424,
+    "nominalFontSize": 272,
+    "baseline": 314,
+    "lineHeight": 352,
+    "spaceAdvance": 64,
+    "letterSpacing": -10
+  },
+  "normalization": {
+    "uppercase": false,
+    "smartQuotes": "ASCII quotes",
+    "dashes": "hyphen",
+    "ellipsis": "three periods",
+    "unknown": "?"
+  },
+  "material": {
+    "face": "lime paint with lower-face magenta paint blended inside the glyph",
+    "edge": "thin charcoal separation with narrow magenta sidewall and green halo",
+    "depth": "directional black paint depth down-left",
+    "texture": "source-preserved jagged brush faces with pink paint inside the lower lime face"
+  },
+  "glyphs": {
+    "A": {
+      "atlas": [
+        0,
+        0,
+        360,
+        424
+      ],
+      "advance": 134,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "B": {
+      "atlas": [
+        360,
+        0,
+        360,
+        424
+      ],
+      "advance": 137,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "C": {
+      "atlas": [
+        720,
+        0,
+        360,
+        424
+      ],
+      "advance": 127,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "D": {
+      "atlas": [
+        1080,
+        0,
+        360,
+        424
+      ],
+      "advance": 152,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "E": {
+      "atlas": [
+        1440,
+        0,
+        360,
+        424
+      ],
+      "advance": 156,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "F": {
+      "atlas": [
+        1800,
+        0,
+        360,
+        424
+      ],
+      "advance": 146,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "G": {
+      "atlas": [
+        2160,
+        0,
+        360,
+        424
+      ],
+      "advance": 141,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "H": {
+      "atlas": [
+        2520,
+        0,
+        360,
+        424
+      ],
+      "advance": 150,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "I": {
+      "atlas": [
+        2880,
+        0,
+        360,
+        424
+      ],
+      "advance": 87,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "J": {
+      "atlas": [
+        0,
+        424,
+        360,
+        424
+      ],
+      "advance": 138,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "K": {
+      "atlas": [
+        360,
+        424,
+        360,
+        424
+      ],
+      "advance": 134,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "L": {
+      "atlas": [
+        720,
+        424,
+        360,
+        424
+      ],
+      "advance": 137,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "M": {
+      "atlas": [
+        1080,
+        424,
+        360,
+        424
+      ],
+      "advance": 148,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "N": {
+      "atlas": [
+        1440,
+        424,
+        360,
+        424
+      ],
+      "advance": 144,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "O": {
+      "atlas": [
+        1800,
+        424,
+        360,
+        424
+      ],
+      "advance": 136,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "P": {
+      "atlas": [
+        2160,
+        424,
+        360,
+        424
+      ],
+      "advance": 136,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "Q": {
+      "atlas": [
+        2520,
+        424,
+        360,
+        424
+      ],
+      "advance": 142,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "R": {
+      "atlas": [
+        2880,
+        424,
+        360,
+        424
+      ],
+      "advance": 144,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "S": {
+      "atlas": [
+        0,
+        848,
+        360,
+        424
+      ],
+      "advance": 139,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "T": {
+      "atlas": [
+        360,
+        848,
+        360,
+        424
+      ],
+      "advance": 150,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "U": {
+      "atlas": [
+        720,
+        848,
+        360,
+        424
+      ],
+      "advance": 138,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "V": {
+      "atlas": [
+        1080,
+        848,
+        360,
+        424
+      ],
+      "advance": 140,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "W": {
+      "atlas": [
+        1440,
+        848,
+        360,
+        424
+      ],
+      "advance": 158,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "X": {
+      "atlas": [
+        1800,
+        848,
+        360,
+        424
+      ],
+      "advance": 135,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "Y": {
+      "atlas": [
+        2160,
+        848,
+        360,
+        424
+      ],
+      "advance": 120,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "Z": {
+      "atlas": [
+        2520,
+        848,
+        360,
+        424
+      ],
+      "advance": 132,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "a": {
+      "atlas": [
+        2880,
+        848,
+        360,
+        424
+      ],
+      "advance": 104,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "b": {
+      "atlas": [
+        0,
+        1272,
+        360,
+        424
+      ],
+      "advance": 106,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "c": {
+      "atlas": [
+        360,
+        1272,
+        360,
+        424
+      ],
+      "advance": 102,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "d": {
+      "atlas": [
+        720,
+        1272,
+        360,
+        424
+      ],
+      "advance": 109,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "e": {
+      "atlas": [
+        1080,
+        1272,
+        360,
+        424
+      ],
+      "advance": 103,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "f": {
+      "atlas": [
+        1440,
+        1272,
+        360,
+        424
+      ],
+      "advance": 103,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "g": {
+      "atlas": [
+        1800,
+        1272,
+        360,
+        424
+      ],
+      "advance": 106,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "h": {
+      "atlas": [
+        2160,
+        1272,
+        360,
+        424
+      ],
+      "advance": 102,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "i": {
+      "atlas": [
+        2520,
+        1272,
+        360,
+        424
+      ],
+      "advance": 89,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "j": {
+      "atlas": [
+        2880,
+        1272,
+        360,
+        424
+      ],
+      "advance": 102,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "k": {
+      "atlas": [
+        0,
+        1696,
+        360,
+        424
+      ],
+      "advance": 106,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "l": {
+      "atlas": [
+        360,
+        1696,
+        360,
+        424
+      ],
+      "advance": 71,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "m": {
+      "atlas": [
+        720,
+        1696,
+        360,
+        424
+      ],
+      "advance": 127,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "n": {
+      "atlas": [
+        1080,
+        1696,
+        360,
+        424
+      ],
+      "advance": 103,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "o": {
+      "atlas": [
+        1440,
+        1696,
+        360,
+        424
+      ],
+      "advance": 104,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "p": {
+      "atlas": [
+        1800,
+        1696,
+        360,
+        424
+      ],
+      "advance": 103,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "q": {
+      "atlas": [
+        2160,
+        1696,
+        360,
+        424
+      ],
+      "advance": 106,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "r": {
+      "atlas": [
+        2520,
+        1696,
+        360,
+        424
+      ],
+      "advance": 94,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "s": {
+      "atlas": [
+        2880,
+        1696,
+        360,
+        424
+      ],
+      "advance": 94,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "t": {
+      "atlas": [
+        0,
+        2120,
+        360,
+        424
+      ],
+      "advance": 100,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "u": {
+      "atlas": [
+        360,
+        2120,
+        360,
+        424
+      ],
+      "advance": 102,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "v": {
+      "atlas": [
+        720,
+        2120,
+        360,
+        424
+      ],
+      "advance": 106,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "w": {
+      "atlas": [
+        1080,
+        2120,
+        360,
+        424
+      ],
+      "advance": 127,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "x": {
+      "atlas": [
+        1440,
+        2120,
+        360,
+        424
+      ],
+      "advance": 108,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "y": {
+      "atlas": [
+        1800,
+        2120,
+        360,
+        424
+      ],
+      "advance": 104,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "z": {
+      "atlas": [
+        2160,
+        2120,
+        360,
+        424
+      ],
+      "advance": 104,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "0": {
+      "atlas": [
+        2520,
+        2120,
+        360,
+        424
+      ],
+      "advance": 118,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "1": {
+      "atlas": [
+        2880,
+        2120,
+        360,
+        424
+      ],
+      "advance": 90,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "2": {
+      "atlas": [
+        0,
+        2544,
+        360,
+        424
+      ],
+      "advance": 114,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "3": {
+      "atlas": [
+        360,
+        2544,
+        360,
+        424
+      ],
+      "advance": 112,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "4": {
+      "atlas": [
+        720,
+        2544,
+        360,
+        424
+      ],
+      "advance": 124,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "5": {
+      "atlas": [
+        1080,
+        2544,
+        360,
+        424
+      ],
+      "advance": 111,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "6": {
+      "atlas": [
+        1440,
+        2544,
+        360,
+        424
+      ],
+      "advance": 110,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "7": {
+      "atlas": [
+        1800,
+        2544,
+        360,
+        424
+      ],
+      "advance": 108,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "8": {
+      "atlas": [
+        2160,
+        2544,
+        360,
+        424
+      ],
+      "advance": 111,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "9": {
+      "atlas": [
+        2520,
+        2544,
+        360,
+        424
+      ],
+      "advance": 117,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "!": {
+      "atlas": [
+        2880,
+        2544,
+        360,
+        424
+      ],
+      "advance": 89,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "\"": {
+      "atlas": [
+        0,
+        2968,
+        360,
+        424
+      ],
+      "advance": 93,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "#": {
+      "atlas": [
+        360,
+        2968,
+        360,
+        424
+      ],
+      "advance": 96,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "$": {
+      "atlas": [
+        720,
+        2968,
+        360,
+        424
+      ],
+      "advance": 90,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "%": {
+      "atlas": [
+        1080,
+        2968,
+        360,
+        424
+      ],
+      "advance": 146,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "&": {
+      "atlas": [
+        1440,
+        2968,
+        360,
+        424
+      ],
+      "advance": 189,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback"
+    },
+    "'": {
+      "atlas": [
+        1800,
+        2968,
+        360,
+        424
+      ],
+      "advance": 72,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback"
+    },
+    "(": {
+      "atlas": [
+        2160,
+        2968,
+        360,
+        424
+      ],
+      "advance": 75,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    ")": {
+      "atlas": [
+        2520,
+        2968,
+        360,
+        424
+      ],
+      "advance": 75,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "*": {
+      "atlas": [
+        2880,
+        2968,
+        360,
+        424
+      ],
+      "advance": 83,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "+": {
+      "atlas": [
+        0,
+        3392,
+        360,
+        424
+      ],
+      "advance": 88,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    ",": {
+      "atlas": [
+        360,
+        3392,
+        360,
+        424
+      ],
+      "advance": 95,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "-": {
+      "atlas": [
+        720,
+        3392,
+        360,
+        424
+      ],
+      "advance": 77,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    ".": {
+      "atlas": [
+        1080,
+        3392,
+        360,
+        424
+      ],
+      "advance": 79,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback"
+    },
+    "/": {
+      "atlas": [
+        1440,
+        3392,
+        360,
+        424
+      ],
+      "advance": 82,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    ":": {
+      "atlas": [
+        1800,
+        3392,
+        360,
+        424
+      ],
+      "advance": 86,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    ";": {
+      "atlas": [
+        2160,
+        3392,
+        360,
+        424
+      ],
+      "advance": 90,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "<": {
+      "atlas": [
+        2520,
+        3392,
+        360,
+        424
+      ],
+      "advance": 138,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback"
+    },
+    "=": {
+      "atlas": [
+        2880,
+        3392,
+        360,
+        424
+      ],
+      "advance": 84,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    ">": {
+      "atlas": [
+        0,
+        3816,
+        360,
+        424
+      ],
+      "advance": 138,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback"
+    },
+    "?": {
+      "atlas": [
+        360,
+        3816,
+        360,
+        424
+      ],
+      "advance": 107,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "@": {
+      "atlas": [
+        720,
+        3816,
+        360,
+        424
+      ],
+      "advance": 225,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback"
+    },
+    "[": {
+      "atlas": [
+        1080,
+        3816,
+        360,
+        424
+      ],
+      "advance": 75,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "\\": {
+      "atlas": [
+        1440,
+        3816,
+        360,
+        424
+      ],
+      "advance": 138,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback"
+    },
+    "]": {
+      "atlas": [
+        1800,
+        3816,
+        360,
+        424
+      ],
+      "advance": 75,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "primary-sheet-cleaned"
+    },
+    "^": {
+      "atlas": [
+        2160,
+        3816,
+        360,
+        424
+      ],
+      "advance": 143,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback"
+    },
+    "_": {
+      "atlas": [
+        2520,
+        3816,
+        360,
+        424
+      ],
+      "advance": 148,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback"
+    },
+    "`": {
+      "atlas": [
+        2880,
+        3816,
+        360,
+        424
+      ],
+      "advance": 79,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback"
+    },
+    "{": {
+      "atlas": [
+        0,
+        4240,
+        360,
+        424
+      ],
+      "advance": 120,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback"
+    },
+    "|": {
+      "atlas": [
+        360,
+        4240,
+        360,
+        424
+      ],
+      "advance": 79,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback"
+    },
+    "}": {
+      "atlas": [
+        720,
+        4240,
+        360,
+        424
+      ],
+      "advance": 120,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback"
+    },
+    "~": {
+      "atlas": [
+        1080,
+        4240,
+        360,
+        424
+      ],
+      "advance": 161,
+      "originX": 54,
+      "baseline": 314,
+      "sourceKind": "authored-symbol-fallback"
+    }
+  }
+}

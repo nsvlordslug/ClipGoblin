@@ -1,6 +1,10 @@
 import { Check, Link2, Loader2, AlertCircle, Smartphone } from 'lucide-react'
 import { PLATFORM_INFO, usePlatformStore } from '../stores/platformStore'
-import { getPresetForPlatform, PLATFORM_VISIBILITY } from '../lib/platformUpload'
+import {
+  getPresetForPlatform,
+  PLATFORM_VISIBILITY,
+  YOUTUBE_SHORTS_MAX_DURATION_SECONDS,
+} from '../lib/platformUpload'
 import type { PlatformUploadState, YouTubeSubFormat } from '../lib/platformUpload'
 import Tooltip from './Tooltip'
 
@@ -263,8 +267,8 @@ export default function PlatformUploadSelector({
                       </Tooltip>
                     ))}
                   </div>
-                  {clipDuration != null && clipDuration > 60 && (youtubeSubFormat === 'shorts' || youtubeSubFormat === 'both') && (
-                    <span className="text-[9px] text-amber-400 ml-auto">Clip &gt; 60s</span>
+                  {clipDuration != null && clipDuration > YOUTUBE_SHORTS_MAX_DURATION_SECONDS && (youtubeSubFormat === 'shorts' || youtubeSubFormat === 'both') && (
+                    <span className="text-[9px] text-amber-400 ml-auto">Clip &gt; 3m</span>
                   )}
                 </div>
 

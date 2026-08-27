@@ -5,10 +5,8 @@ pub fn scrub_logs(input: &str) -> String {
     let mut output = input.to_string();
 
     // API keys (OpenAI sk-*, Anthropic key-*, Google AIza*)
-    let api_key_re = Regex::new(
-        r"(sk-[a-zA-Z0-9]{20,}|key-[a-zA-Z0-9]{20,}|AIza[a-zA-Z0-9_-]{30,})",
-    )
-    .unwrap();
+    let api_key_re =
+        Regex::new(r"(sk-[a-zA-Z0-9]{20,}|key-[a-zA-Z0-9]{20,}|AIza[a-zA-Z0-9_-]{30,})").unwrap();
     output = api_key_re
         .replace_all(&output, "[REDACTED_API_KEY]")
         .to_string();

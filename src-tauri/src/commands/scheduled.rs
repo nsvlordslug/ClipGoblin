@@ -1,9 +1,9 @@
 //! Scheduled upload commands and background scheduler.
 
-use tauri::State;
 use crate::db;
 use crate::social;
 use crate::DbConn;
+use tauri::State;
 
 #[tauri::command]
 pub fn schedule_upload(
@@ -39,7 +39,9 @@ pub fn schedule_upload(
 }
 
 #[tauri::command]
-pub fn list_scheduled_uploads(db: State<'_, DbConn>) -> Result<Vec<db::ScheduledUploadRow>, String> {
+pub fn list_scheduled_uploads(
+    db: State<'_, DbConn>,
+) -> Result<Vec<db::ScheduledUploadRow>, String> {
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
     db::get_all_scheduled_uploads(&conn).map_err(|e| format!("DB error: {}", e))
 }
@@ -60,7 +62,11 @@ pub fn cancel_scheduled_upload(id: String, db: State<'_, DbConn>) -> Result<bool
 }
 
 #[tauri::command]
-pub fn reschedule_upload(id: String, new_time: String, db: State<'_, DbConn>) -> Result<bool, String> {
+pub fn reschedule_upload(
+    id: String,
+    new_time: String,
+    db: State<'_, DbConn>,
+) -> Result<bool, String> {
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
     db::reschedule_upload(&conn, &id, &new_time).map_err(|e| format!("DB error: {}", e))
 }
@@ -169,8 +175,9 @@ pub(crate) fn process_due_uploads(handle: &tauri::AppHandle) -> Result<(), Strin
             }
         };
 
-        // Get clip output path — auto-export if missing/invalid so the
-        // scheduler can process Auto-ship uploads without a manual export step.
+        // Resolve the immutable artifact captured when this job was scheduled.
+        // Legacy jobs may still use the clip's last output path; auto-ship jobs
+        // carry a requested aspect ratio and render that exact format when due.
         let output_path = {
             let clip = {
                 let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
@@ -190,39 +197,75 @@ pub(crate) fn process_due_uploads(handle: &tauri::AppHandle) -> Result<(), Strin
                     }
                 }
             };
-            match social::validate_export_file(clip.output_path.as_deref()) {
-                Ok(p) => p.to_string(),
-                Err(_missing) => {
-                    // No existing export — try to render one now. This is the
-                    // critical path for Auto-ship: user hasn't clicked Export,
-                    // but the scheduled upload is due and we have a clip row.
-                    log::info!(
-                        "[Scheduler] Clip {} has no ready export — auto-exporting before upload",
-                        upload.clip_id,
-                    );
-                    let _ = handle.emit("scheduled-upload-status", serde_json::json!({
-                        "id": upload.id, "status": "exporting", "clip_id": upload.clip_id, "platform": upload.platform,
-                    }));
-                    match tokio::task::block_in_place(|| {
+            if meta.artifact_path.is_some() {
+                match social::resolve_upload_artifact(
+                    &upload.platform,
+                    &meta,
+                    clip.output_path.as_deref(),
+                ) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        handle_scheduled_failure(handle, &db, &upload, &error.to_string());
+                        continue;
+                    }
+                }
+            } else if let Some(aspect_ratio) = meta.artifact_aspect_ratio.as_deref() {
+                let _ = handle.emit("scheduled-upload-status", serde_json::json!({
+                    "id": upload.id, "status": "exporting", "clip_id": upload.clip_id, "platform": upload.platform,
+                }));
+                match tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(
+                        crate::commands::export::render_clip_by_id_for_aspect(
+                            &upload.clip_id,
+                            Some(aspect_ratio),
+                        ),
+                    )
+                }) {
+                    Ok(artifact) => {
+                        let mut rendered_meta = meta.clone();
+                        rendered_meta.artifact_path = Some(artifact.path);
+                        rendered_meta.artifact_revision = Some(artifact.revision);
+                        rendered_meta.artifact_aspect_ratio = Some(artifact.aspect_ratio);
+                        match social::resolve_upload_artifact(
+                            &upload.platform,
+                            &rendered_meta,
+                            clip.output_path.as_deref(),
+                        ) {
+                            Ok(path) => path,
+                            Err(error) => {
+                                handle_scheduled_failure(handle, &db, &upload, &error.to_string());
+                                continue;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        handle_scheduled_failure(
+                            handle,
+                            &db,
+                            &upload,
+                            &format!("Auto-export failed: {error}"),
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                match social::validate_export_file(clip.output_path.as_deref()) {
+                    Ok(path) => path.to_string(),
+                    Err(_) => match tokio::task::block_in_place(|| {
                         tokio::runtime::Handle::current()
                             .block_on(crate::commands::export::render_clip_by_id(&upload.clip_id))
                     }) {
                         Ok(path) => path.to_string_lossy().to_string(),
-                        Err(e) => {
+                        Err(error) => {
                             handle_scheduled_failure(
                                 handle,
                                 &db,
                                 &upload,
-                                &format!("Auto-export failed: {}", e),
-                            );
-                            log::error!(
-                                "[Scheduler] Auto-export failed for {}: {}",
-                                upload.clip_id,
-                                e
+                                &format!("Auto-export failed: {error}"),
                             );
                             continue;
                         }
-                    }
+                    },
                 }
             }
         };
@@ -384,21 +427,16 @@ async fn reconcile_processing_uploads(handle: &tauri::AppHandle) -> Result<(), S
             continue;
         };
         match social::tiktok::fetch_publish_status(&access_token, publish_id).await {
-            Ok(status @ (social::tiktok::PublishPollResult::Processing
-                | social::tiktok::PublishPollResult::InboxDelivered)) => {
-                let inbox_delivered = matches!(
-                    status,
-                    social::tiktok::PublishPollResult::InboxDelivered
-                );
+            Ok(
+                status @ (social::tiktok::PublishPollResult::Processing
+                | social::tiktok::PublishPollResult::InboxDelivered),
+            ) => {
+                let inbox_delivered =
+                    matches!(status, social::tiktok::PublishPollResult::InboxDelivered);
                 let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
                 if inbox_delivered {
-                    db::mark_upload_inbox_delivered(
-                        &conn,
-                        &upload.clip_id,
-                        "tiktok",
-                        publish_id,
-                    )
-                    .map_err(|e| format!("DB error: {}", e))?;
+                    db::mark_upload_inbox_delivered(&conn, &upload.clip_id, "tiktok", publish_id)
+                        .map_err(|e| format!("DB error: {}", e))?;
                 }
                 db::record_direct_upload_state_for_analytics(
                     &conn,
@@ -552,18 +590,41 @@ pub(crate) fn handle_scheduled_failure(
     };
 
     if upload.retry_count < 1 {
-        log::warn!("[Scheduler] Upload {} failed (will retry): {}", upload.id, error);
-        db::update_scheduled_upload_status(&conn, &upload.id, "pending", Some(error), None, Some(upload.retry_count + 1)).ok();
-        let _ = handle.emit("scheduled-upload-status", serde_json::json!({
-            "id": upload.id, "status": "retrying", "clip_id": upload.clip_id,
-            "platform": upload.platform, "error": error,
-        }));
+        log::warn!(
+            "[Scheduler] Upload {} failed (will retry): {}",
+            upload.id,
+            error
+        );
+        db::update_scheduled_upload_status(
+            &conn,
+            &upload.id,
+            "pending",
+            Some(error),
+            None,
+            Some(upload.retry_count + 1),
+        )
+        .ok();
+        let _ = handle.emit(
+            "scheduled-upload-status",
+            serde_json::json!({
+                "id": upload.id, "status": "retrying", "clip_id": upload.clip_id,
+                "platform": upload.platform, "error": error,
+            }),
+        );
     } else {
-        log::error!("[Scheduler] Upload {} permanently failed: {}", upload.id, error);
-        db::update_scheduled_upload_status(&conn, &upload.id, "failed", Some(error), None, None).ok();
-        let _ = handle.emit("scheduled-upload-status", serde_json::json!({
-            "id": upload.id, "status": "failed", "clip_id": upload.clip_id,
-            "platform": upload.platform, "error": error,
-        }));
+        log::error!(
+            "[Scheduler] Upload {} permanently failed: {}",
+            upload.id,
+            error
+        );
+        db::update_scheduled_upload_status(&conn, &upload.id, "failed", Some(error), None, None)
+            .ok();
+        let _ = handle.emit(
+            "scheduled-upload-status",
+            serde_json::json!({
+                "id": upload.id, "status": "failed", "clip_id": upload.clip_id,
+                "platform": upload.platform, "error": error,
+            }),
+        );
     }
 }

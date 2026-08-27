@@ -88,13 +88,19 @@ impl MotionProfile {
         let n = energy.len().max(1) as f64;
         let avg = energy.iter().sum::<f64>() / n;
         let variance = energy.iter().map(|v| (v - avg).powi(2)).sum::<f64>() / n;
-        Self { energy, avg, std_dev: variance.sqrt() }
+        Self {
+            energy,
+            avg,
+            std_dev: variance.sqrt(),
+        }
     }
 
     pub fn avg_in_range(&self, start: usize, end: usize) -> f64 {
         let s = start.min(self.energy.len());
         let e = end.min(self.energy.len());
-        if e <= s { return 0.0; }
+        if e <= s {
+            return 0.0;
+        }
         self.energy[s..e].iter().sum::<f64>() / (e - s) as f64
     }
 
@@ -104,7 +110,9 @@ impl MotionProfile {
         self.energy[s..e].iter().cloned().fold(0.0_f64, f64::max)
     }
 
-    pub fn duration_secs(&self) -> usize { self.energy.len() }
+    pub fn duration_secs(&self) -> usize {
+        self.energy.len()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -151,14 +159,16 @@ pub fn extract_scene_changes(
     ffmpeg: &Path,
 ) -> Result<Vec<SceneDetection>, AppError> {
     let mut cmd = Command::new(ffmpeg);
-    cmd.arg("-i").arg(vod_path)
+    cmd.arg("-i")
+        .arg(vod_path)
         .arg("-vf")
         .arg(format!(
             "select='gt(scene\\,{})',metadata=print",
             SCENE_THRESHOLD
         ))
         .arg("-an")
-        .arg("-f").arg("null")
+        .arg("-f")
+        .arg("null")
         .arg("-")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -214,8 +224,14 @@ fn parse_scene_output(stderr: &str) -> Vec<SceneDetection> {
                 // threshold as a floor (the select filter already
                 // proved it exceeded it).
                 if let Some(prev_t) = current_time {
-                    if !detections.iter().any(|d: &SceneDetection| (d.time - prev_t).abs() < 0.1) {
-                        detections.push(SceneDetection { time: prev_t, score: SCENE_THRESHOLD });
+                    if !detections
+                        .iter()
+                        .any(|d: &SceneDetection| (d.time - prev_t).abs() < 0.1)
+                    {
+                        detections.push(SceneDetection {
+                            time: prev_t,
+                            score: SCENE_THRESHOLD,
+                        });
                     }
                 }
                 current_time = Some(t);
@@ -230,7 +246,10 @@ fn parse_scene_output(stderr: &str) -> Vec<SceneDetection> {
                 .unwrap_or(rest.len());
             if let Ok(score) = rest[..end].parse::<f64>() {
                 if let Some(t) = current_time.take() {
-                    detections.push(SceneDetection { time: t, score: score.min(1.0) });
+                    detections.push(SceneDetection {
+                        time: t,
+                        score: score.min(1.0),
+                    });
                 }
             }
         }
@@ -239,12 +258,19 @@ fn parse_scene_output(stderr: &str) -> Vec<SceneDetection> {
     // Flush any trailing unpaired timestamp
     if let Some(t) = current_time {
         if !detections.iter().any(|d| (d.time - t).abs() < 0.1) {
-            detections.push(SceneDetection { time: t, score: SCENE_THRESHOLD });
+            detections.push(SceneDetection {
+                time: t,
+                score: SCENE_THRESHOLD,
+            });
         }
     }
 
     // Merge detections very close together (sub-frame jitter)
-    detections.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
+    detections.sort_by(|a, b| {
+        a.time
+            .partial_cmp(&b.time)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut merged = Vec::with_capacity(detections.len());
     for det in detections {
         if let Some(last) = merged.last_mut() {
@@ -273,10 +299,7 @@ fn parse_scene_output(stderr: &str) -> Vec<SceneDetection> {
 //  frame.  We read the mean motion vector magnitude from metadata
 //  and aggregate into per-second buckets.
 
-pub fn extract_motion_energy(
-    vod_path: &str,
-    ffmpeg: &Path,
-) -> Result<MotionProfile, AppError> {
+pub fn extract_motion_energy(vod_path: &str, ffmpeg: &Path) -> Result<MotionProfile, AppError> {
     let temp_file = std::env::temp_dir()
         .join("clipviral_motion")
         .join(format!("{}.txt", uuid::Uuid::new_v4()));
@@ -289,14 +312,16 @@ pub fn extract_motion_energy(
         .replace(':', "\\:");
 
     let mut cmd = Command::new(ffmpeg);
-    cmd.arg("-i").arg(vod_path)
+    cmd.arg("-i")
+        .arg(vod_path)
         .arg("-vf")
         .arg(format!(
             "fps={},mestimate=method=esa,metadata=mode=print:file='{}'",
             MOTION_FPS, escaped
         ))
         .arg("-an")
-        .arg("-f").arg("null")
+        .arg("-f")
+        .arg("null")
         .arg("-")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -575,7 +600,11 @@ fn detect_motion_surges(profile: &MotionProfile) -> Vec<SignalSegment> {
 
     let threshold = profile.avg + 1.5 * profile.std_dev;
 
-    struct Hit { sec: usize, energy: f64, z: f64 }
+    struct Hit {
+        sec: usize,
+        energy: f64,
+        z: f64,
+    }
 
     let mut hits: Vec<Hit> = Vec::new();
 
@@ -604,7 +633,10 @@ fn detect_motion_surges(profile: &MotionProfile) -> Vec<SignalSegment> {
     let mut segments = Vec::new();
 
     for hit in &hits {
-        if used.iter().any(|&u| (hit.sec as i64 - u as i64).unsigned_abs() < DEDUP_GAP_SECS as u64) {
+        if used
+            .iter()
+            .any(|&u| (hit.sec as i64 - u as i64).unsigned_abs() < DEDUP_GAP_SECS as u64)
+        {
             continue;
         }
         used.push(hit.sec);
@@ -663,7 +695,13 @@ fn detect_sustained_motion(profile: &MotionProfile) -> Vec<SignalSegment> {
         return Vec::new();
     }
 
-    struct Run { start: usize, end: usize, avg_e: f64, peak: f64, raw: f64 }
+    struct Run {
+        start: usize,
+        end: usize,
+        avg_e: f64,
+        peak: f64,
+        raw: f64,
+    }
 
     let scored: Vec<Run> = runs
         .iter()
@@ -672,7 +710,13 @@ fn detect_sustained_motion(profile: &MotionProfile) -> Vec<SignalSegment> {
             let peak = profile.peak_in_range(s, e);
             let duration = (e - s) as f64;
             let raw = (avg_e / profile.avg.max(0.001)) * (duration / 20.0).min(1.0);
-            Run { start: s, end: e, avg_e, peak, raw }
+            Run {
+                start: s,
+                end: e,
+                avg_e,
+                peak,
+                raw,
+            }
         })
         .collect();
 
@@ -703,7 +747,9 @@ fn detect_sustained_motion(profile: &MotionProfile) -> Vec<SignalSegment> {
 
 fn merge_and_rank(segments: &mut Vec<SignalSegment>) {
     segments.sort_by(|a, b| {
-        a.start_time.partial_cmp(&b.start_time).unwrap_or(std::cmp::Ordering::Equal)
+        a.start_time
+            .partial_cmp(&b.start_time)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     let mut merged: Vec<SignalSegment> = Vec::with_capacity(segments.len());
@@ -725,7 +771,11 @@ fn merge_and_rank(segments: &mut Vec<SignalSegment>) {
         merged.push(seg);
     }
 
-    merged.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    merged.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     *segments = merged;
 }
 
@@ -778,7 +828,9 @@ mod tests {
         let result = detect_signals(&scenes, &motion);
 
         assert!(!result.is_empty());
-        assert!(result.iter().all(|s| s.signal_type == SignalType::SceneChange));
+        assert!(result
+            .iter()
+            .all(|s| s.signal_type == SignalType::SceneChange));
     }
 
     #[test]
@@ -786,7 +838,10 @@ mod tests {
         let scenes = make_scenes(&[(10.0, 0.9), (50.0, 0.3)]);
         let segs = detect_scene_cuts(&scenes);
         assert!(segs.len() == 2);
-        assert!(segs[0].score != segs[1].score, "different magnitudes should produce different scores");
+        assert!(
+            segs[0].score != segs[1].score,
+            "different magnitudes should produce different scores"
+        );
         // The 0.9 cut should appear with higher score
         let high = segs.iter().find(|s| s.start_time < 15.0).unwrap();
         let low = segs.iter().find(|s| s.start_time > 40.0).unwrap();
@@ -823,8 +878,12 @@ mod tests {
     fn rapid_cuts_detected() {
         // 6 cuts within 8 seconds — classic montage/replay
         let scenes = make_scenes(&[
-            (10.0, 0.7), (11.5, 0.6), (13.0, 0.8),
-            (14.5, 0.5), (16.0, 0.7), (17.5, 0.6),
+            (10.0, 0.7),
+            (11.5, 0.6),
+            (13.0, 0.8),
+            (14.5, 0.5),
+            (16.0, 0.7),
+            (17.5, 0.6),
         ]);
         let segs = detect_rapid_cuts(&scenes);
         assert!(!segs.is_empty());
@@ -873,7 +932,10 @@ mod tests {
     fn short_burst_not_sustained() {
         let profile = make_motion(60, &[(30, 32, 0.9)]);
         let segs = detect_sustained_motion(&profile);
-        assert!(segs.is_empty(), "2-second burst should not qualify as sustained");
+        assert!(
+            segs.is_empty(),
+            "2-second burst should not qualify as sustained"
+        );
     }
 
     // ── Full pipeline ──
@@ -884,7 +946,11 @@ mod tests {
         let motion = make_motion(60, &[(25, 30, 0.9)]);
         let segs = detect_signals(&scenes, &motion);
         for s in &segs {
-            assert!(s.score >= 0.0 && s.score <= 1.0, "score {} out of range", s.score);
+            assert!(
+                s.score >= 0.0 && s.score <= 1.0,
+                "score {} out of range",
+                s.score
+            );
         }
     }
 
@@ -892,7 +958,10 @@ mod tests {
     fn segments_capped_at_max() {
         // Many scene changes
         let scenes: Vec<SceneDetection> = (0..100)
-            .map(|i| SceneDetection { time: i as f64 * 15.0, score: 0.6 })
+            .map(|i| SceneDetection {
+                time: i as f64 * 15.0,
+                score: 0.6,
+            })
             .collect();
         let motion = MotionProfile::from_energy(vec![]);
         let result = detect_signals(&scenes, &motion);
@@ -929,7 +998,10 @@ lavfi.scene_score=0.432\n";
 
         let dets = parse_scene_output(stderr);
         assert_eq!(dets.len(), 1, "detections within merge window should merge");
-        assert!((dets[0].score - 0.9).abs() < 0.01, "higher score should win");
+        assert!(
+            (dets[0].score - 0.9).abs() < 0.01,
+            "higher score should win"
+        );
     }
 
     #[test]
@@ -947,9 +1019,12 @@ lavfi.mestimate.mean_motion.y=8.0\n";
 
         let profile = parse_motion_output(content);
         assert_eq!(profile.energy.len(), 2); // seconds 0 and 1
-        // Second 0: two frames, magnitudes ~5.83 and ~2.24, avg ~4.04
-        // Second 1: one frame, magnitude ~12.81
-        assert!(profile.energy[1] > profile.energy[0], "second 1 should have more motion");
+                                             // Second 0: two frames, magnitudes ~5.83 and ~2.24, avg ~4.04
+                                             // Second 1: one frame, magnitude ~12.81
+        assert!(
+            profile.energy[1] > profile.energy[0],
+            "second 1 should have more motion"
+        );
     }
 
     #[test]

@@ -20,8 +20,14 @@ pub struct OutputSize {
 }
 
 impl OutputSize {
-    pub const VERTICAL_1080: Self = Self { width: 1080, height: 1920 };
-    pub const VERTICAL_720: Self = Self { width: 720, height: 1280 };
+    pub const VERTICAL_1080: Self = Self {
+        width: 1080,
+        height: 1920,
+    };
+    pub const VERTICAL_720: Self = Self {
+        width: 720,
+        height: 1280,
+    };
 
     pub fn aspect_ratio(&self) -> f64 {
         self.width as f64 / self.height as f64
@@ -50,45 +56,51 @@ impl Platform {
     /// Human-readable label for filenames and UI.
     pub fn label(self) -> &'static str {
         match self {
-            Self::TikTok  => "TikTok",
-            Self::Reels   => "Instagram Reels",
-            Self::Shorts  => "YouTube Shorts",
+            Self::TikTok => "TikTok",
+            Self::Reels => "Instagram Reels",
+            Self::Shorts => "YouTube Shorts",
             Self::YouTube => "YouTube",
-            Self::Square  => "Square",
+            Self::Square => "Square",
         }
     }
 
     /// Short tag appended to export filenames.
     pub fn file_tag(self) -> &'static str {
         match self {
-            Self::TikTok  => "tiktok",
-            Self::Reels   => "reels",
-            Self::Shorts  => "shorts",
+            Self::TikTok => "tiktok",
+            Self::Reels => "reels",
+            Self::Shorts => "shorts",
             Self::YouTube => "youtube",
-            Self::Square  => "square",
+            Self::Square => "square",
         }
     }
 
     /// Target output resolution for this platform.
     pub fn resolution(self) -> OutputSize {
         match self {
-            Self::TikTok | Self::Reels | Self::Shorts =>
-                OutputSize { width: 1080, height: 1920 },
-            Self::YouTube =>
-                OutputSize { width: 1920, height: 1080 },
-            Self::Square =>
-                OutputSize { width: 1080, height: 1080 },
+            Self::TikTok | Self::Reels | Self::Shorts => OutputSize {
+                width: 1080,
+                height: 1920,
+            },
+            Self::YouTube => OutputSize {
+                width: 1920,
+                height: 1080,
+            },
+            Self::Square => OutputSize {
+                width: 1080,
+                height: 1080,
+            },
         }
     }
 
     /// Maximum clip duration in seconds (platform limit).
     pub fn max_duration(self) -> f64 {
         match self {
-            Self::TikTok  => 60.0,
-            Self::Reels   => 90.0,
-            Self::Shorts  => 60.0,
+            Self::TikTok => 60.0,
+            Self::Reels => 90.0,
+            Self::Shorts => 60.0,
             Self::YouTube => 600.0,
-            Self::Square  => 140.0,
+            Self::Square => 140.0,
         }
     }
 
@@ -109,7 +121,7 @@ impl Platform {
     pub fn from_preset_id(id: &str) -> Option<Self> {
         match id {
             "tiktok" => Some(Self::TikTok),
-            "reels"  => Some(Self::Reels),
+            "reels" => Some(Self::Reels),
             "shorts" => Some(Self::Shorts),
             "youtube" => Some(Self::YouTube),
             "square" => Some(Self::Square),
@@ -120,9 +132,9 @@ impl Platform {
     /// Parse from the DB aspect_ratio string (fallback when no preset id is stored).
     pub fn from_aspect_ratio(ar: &str) -> Self {
         match ar {
-            "9:16" => Self::TikTok,   // default vertical platform
-            "1:1"  => Self::Square,
-            _      => Self::YouTube,
+            "9:16" => Self::TikTok, // default vertical platform
+            "1:1" => Self::Square,
+            _ => Self::YouTube,
         }
     }
 }
@@ -201,10 +213,18 @@ pub enum ContextBackgroundMode {
     Branding,
 }
 
-fn default_split_ratio() -> f64 { 0.6 }
-fn default_pip_x() -> f64 { 0.93 }
-fn default_pip_y() -> f64 { 0.93 }
-fn default_pip_size() -> f64 { 0.3 }
+fn default_split_ratio() -> f64 {
+    0.6
+}
+fn default_pip_x() -> f64 {
+    0.93
+}
+fn default_pip_y() -> f64 {
+    0.93
+}
+fn default_pip_size() -> f64 {
+    0.3
+}
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -240,7 +260,11 @@ impl EditorLayoutSettings {
     pub fn normalized(self) -> Self {
         let defaults = Self::default();
         let finite = |value: f64, fallback: f64| {
-            if value.is_finite() { value } else { fallback }
+            if value.is_finite() {
+                value
+            } else {
+                fallback
+            }
         };
         let pip_w = finite(self.pip_w, defaults.pip_w).clamp(15.0, 45.0);
         let pip_h = finite(self.pip_h, defaults.pip_h).clamp(15.0, 45.0);
@@ -279,7 +303,11 @@ impl LayoutMode {
         match s {
             "context_fit" => Self::ContextFit,
             "split" => Self::Split { ratio: 0.6 },
-            "pip" => Self::Pip { x: 0.93, y: 0.93, size: 0.3 },
+            "pip" => Self::Pip {
+                x: 0.93,
+                y: 0.93,
+                size: 0.3,
+            },
             _ => Self::GameplayFocus,
         }
     }
@@ -301,7 +329,9 @@ pub enum CropAnchor {
 }
 
 impl Default for CropAnchor {
-    fn default() -> Self { Self::Center }
+    fn default() -> Self {
+        Self::Center
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -384,11 +414,7 @@ pub fn vertical_filter(target: OutputSize, anchor: CropAnchor) -> String {
 
 /// Build a filter for a known input size.  This produces a more
 /// efficient filter by choosing the optimal strategy upfront.
-pub fn vertical_filter_known(
-    input: InputSize,
-    target: OutputSize,
-    anchor: CropAnchor,
-) -> String {
+pub fn vertical_filter_known(input: InputSize, target: OutputSize, anchor: CropAnchor) -> String {
     let tw = target.width;
     let th = target.height;
     let target_ar = target.aspect_ratio();
@@ -410,14 +436,10 @@ pub fn vertical_filter_known(
 
     if input_ar > target_ar {
         // Landscape → vertical: scale height to match, crop width
-        format!(
-            "scale=-1:{th}:flags=lanczos,crop={tw}:{th}:{crop_x}:0"
-        )
+        format!("scale=-1:{th}:flags=lanczos,crop={tw}:{th}:{crop_x}:0")
     } else {
         // Already vertical or square: scale width to match, crop height from top
-        format!(
-            "scale={tw}:-1:flags=lanczos,crop={tw}:{th}:0:0"
-        )
+        format!("scale={tw}:-1:flags=lanczos,crop={tw}:{th}:0:0")
     }
 }
 
@@ -743,15 +765,13 @@ pub fn layout_filter_with_region(
 fn fit_scale_expr(w: u32, h: u32, mode: crate::cam_region::CamFitMode) -> String {
     use crate::cam_region::CamFitMode;
     match mode {
-        CamFitMode::Fit => format!(
-            "scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos"
-        ),
-        CamFitMode::Fill => format!(
-            "scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos,crop={w}:{h}"
-        ),
-        CamFitMode::Stretch => format!(
-            "scale={w}:{h}:flags=lanczos"
-        ),
+        CamFitMode::Fit => {
+            format!("scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos")
+        }
+        CamFitMode::Fill => {
+            format!("scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos,crop={w}:{h}")
+        }
+        CamFitMode::Stretch => format!("scale={w}:{h}:flags=lanczos"),
     }
 }
 
@@ -786,6 +806,9 @@ pub struct ExportRequest {
     pub layout_settings: EditorLayoutSettings,
     /// Optional caption/subtitle filter string.
     pub caption_filter: Option<String>,
+    /// Optional full-frame transparent caption video. When present, this is
+    /// composited after the layout so preview/export can share rendered cues.
+    pub caption_overlay_path: Option<PathBuf>,
     /// Optional source-frame region to use as the cam slot's content.
     /// `None` falls back to the existing dup-source layout filter.
     pub effective_region: Option<crate::cam_region::CamRegion>,
@@ -806,15 +829,19 @@ pub struct ExportRequest {
 fn export_layout_filter(request: &ExportRequest) -> (String, bool) {
     let has_branding_input = request.context_background_mode == ContextBackgroundMode::Branding
         && request.context_background_path.is_some();
-    if matches!(request.layout, LayoutMode::GameplayFocus) {
-        return full_frame_filter(
+    let caption_filter = request
+        .caption_overlay_path
+        .is_none()
+        .then(|| request.caption_filter.as_deref())
+        .flatten();
+    let base = if matches!(request.layout, LayoutMode::GameplayFocus) {
+        full_frame_filter(
             request.target,
-            request.caption_filter.as_deref(),
+            caption_filter,
             request.full_frame_scale,
             request.context_blur_strength,
-        );
-    }
-    if matches!(request.layout, LayoutMode::ContextFit) {
+        )
+    } else if matches!(request.layout, LayoutMode::ContextFit) {
         let background_mode = if request.context_background_mode == ContextBackgroundMode::Branding
             && !has_branding_input
         {
@@ -822,39 +849,55 @@ fn export_layout_filter(request: &ExportRequest) -> (String, bool) {
         } else {
             request.context_background_mode
         };
-        return context_fit_filter(
+        context_fit_filter(
             request.target,
-            request.caption_filter.as_deref(),
+            caption_filter,
             background_mode,
             request.context_blur_strength,
             request.context_video_y,
-        );
-    }
-    if has_branding_input {
+        )
+    } else if has_branding_input {
         match &request.layout {
             LayoutMode::Split { .. } => {
-                return branded_split_filter(
-                    request.target,
-                    request.caption_filter.as_deref(),
-                    request.layout_settings,
-                );
+                branded_split_filter(request.target, caption_filter, request.layout_settings)
             }
             LayoutMode::Pip { .. } => {
-                return branded_pip_filter(
-                    request.target,
-                    request.caption_filter.as_deref(),
-                    request.layout_settings,
-                );
+                branded_pip_filter(request.target, caption_filter, request.layout_settings)
             }
-            LayoutMode::GameplayFocus | LayoutMode::ContextFit => {}
+            LayoutMode::GameplayFocus | LayoutMode::ContextFit => unreachable!(),
         }
-    }
-    layout_filter_with_region(
-        &request.layout,
-        request.target,
-        request.caption_filter.as_deref(),
-        request.effective_region,
-        request.fit_mode,
+    } else {
+        layout_filter_with_region(
+            &request.layout,
+            request.target,
+            caption_filter,
+            request.effective_region,
+            request.fit_mode,
+        )
+    };
+
+    let Some(_) = request.caption_overlay_path.as_ref() else {
+        return base;
+    };
+    let caption_input_index = if has_branding_input { 2 } else { 1 };
+    let (filter, is_complex) = base;
+    let composed = if is_complex {
+        filter
+            .strip_suffix("[out]")
+            .map(|prefix| format!("{prefix}[composed]"))
+    } else {
+        Some(format!("[0:v]{filter}[composed]"))
+    };
+    let Some(composed) = composed else {
+        log::warn!("Caption overlay fallback: layout graph has no final [out] label");
+        return (filter, is_complex);
+    };
+    (
+        format!(
+            "{composed};[{caption_input_index}:v]setpts=PTS-STARTPTS,format=rgba[caption];\
+             [composed][caption]overlay=0:0:shortest=0:eof_action=pass:format=auto[out]"
+        ),
+        true,
     )
 }
 
@@ -866,22 +909,24 @@ fn append_export_inputs(cmd: &mut Command, request: &ExportRequest) {
         .arg("-i")
         .arg(&request.source_path);
 
-    if request.context_background_mode != ContextBackgroundMode::Branding {
-        return;
+    if request.context_background_mode == ContextBackgroundMode::Branding {
+        if let Some(background) = request.context_background_path.as_deref() {
+            let is_gif = background
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("gif"));
+            if is_gif {
+                cmd.arg("-stream_loop").arg("-1");
+            } else {
+                cmd.arg("-loop").arg("1").arg("-framerate").arg("30");
+            }
+            cmd.arg("-i").arg(background);
+        }
     }
-    let Some(background) = request.context_background_path.as_deref() else {
-        return;
-    };
-    let is_gif = background
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("gif"));
-    if is_gif {
-        cmd.arg("-stream_loop").arg("-1");
-    } else {
-        cmd.arg("-loop").arg("1").arg("-framerate").arg("30");
+
+    if let Some(caption_overlay) = request.caption_overlay_path.as_deref() {
+        cmd.arg("-i").arg(caption_overlay);
     }
-    cmd.arg("-i").arg(background);
 }
 
 fn export_duration(request: &ExportRequest) -> f64 {
@@ -980,36 +1025,44 @@ pub fn build_ffmpeg_command(
     // ── Filter graph ──
     if is_complex {
         // Complex: multiple streams need -filter_complex + explicit mapping
-        cmd.arg("-filter_complex").arg(&filter)
-           .arg("-map").arg("[out]")
-           .arg("-map").arg("0:a?");
+        cmd.arg("-filter_complex")
+            .arg(&filter)
+            .arg("-map")
+            .arg("[out]")
+            .arg("-map")
+            .arg("0:a?");
     } else {
         // Simple: single chain, ffmpeg auto-maps audio
         cmd.arg("-vf").arg(&filter);
     }
 
     // Infinite image/GIF inputs must never outlive the source clip.
-    cmd.arg("-t").arg(format!("{:.3}", export_duration(request)));
+    cmd.arg("-t")
+        .arg(format!("{:.3}", export_duration(request)));
 
     // ── Video codec ──
-    cmd.arg("-c:v").arg(&encode.video_codec)
-       .arg("-preset").arg(&encode.preset)
-       .arg("-crf").arg(encode.crf.to_string());
+    cmd.arg("-c:v")
+        .arg(&encode.video_codec)
+        .arg("-preset")
+        .arg(&encode.preset)
+        .arg("-crf")
+        .arg(encode.crf.to_string());
 
     // ── Audio codec ──
-    cmd.arg("-c:a").arg(&encode.audio_codec)
-       .arg("-b:a").arg(&encode.audio_bitrate);
+    cmd.arg("-c:a")
+        .arg(&encode.audio_codec)
+        .arg("-b:a")
+        .arg(&encode.audio_bitrate);
 
     // ── Container ──
     cmd.arg("-movflags").arg("+faststart");
 
     // ── Output ──
-    cmd.arg("-y")
-       .arg(&request.output_path);
+    cmd.arg("-y").arg(&request.output_path);
 
     // Suppress stdout/stderr (caller can override)
     cmd.stdout(std::process::Stdio::null())
-       .stderr(std::process::Stdio::null());
+        .stderr(std::process::Stdio::null());
 
     cmd
 }
@@ -1063,9 +1116,12 @@ pub fn run_export(
 
     // Filter graph
     if is_complex {
-        cmd.arg("-filter_complex").arg(&filter)
-           .arg("-map").arg("[out]")
-           .arg("-map").arg("0:a?");
+        cmd.arg("-filter_complex")
+            .arg(&filter)
+            .arg("-map")
+            .arg("[out]")
+            .arg("-map")
+            .arg("0:a?");
     } else {
         cmd.arg("-vf").arg(&filter);
     }
@@ -1074,23 +1130,28 @@ pub fn run_export(
     cmd.arg("-t").arg(format!("{duration:.3}"));
 
     // Encoding
-    cmd.arg("-c:v").arg(&encode.video_codec)
-       .arg("-preset").arg(&encode.preset)
-       .arg("-crf").arg(encode.crf.to_string())
-       .arg("-c:a").arg(&encode.audio_codec)
-       .arg("-b:a").arg(&encode.audio_bitrate)
-       .arg("-movflags").arg("+faststart");
+    cmd.arg("-c:v")
+        .arg(&encode.video_codec)
+        .arg("-preset")
+        .arg(&encode.preset)
+        .arg("-crf")
+        .arg(encode.crf.to_string())
+        .arg("-c:a")
+        .arg(&encode.audio_codec)
+        .arg("-b:a")
+        .arg(&encode.audio_bitrate)
+        .arg("-movflags")
+        .arg("+faststart");
 
     // Progress output on stdout (machine-readable)
     cmd.arg("-progress").arg("pipe:1");
 
     // Output
-    cmd.arg("-y")
-       .arg(&request.output_path);
+    cmd.arg("-y").arg(&request.output_path);
 
     // Pipe stdout for progress, pipe stderr for errors
     cmd.stdout(std::process::Stdio::piped())
-       .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped());
 
     #[cfg(windows)]
     {
@@ -1116,7 +1177,9 @@ pub fn run_export(
 
     // Read stderr in a background thread so it doesn't block
     let stderr_thread = std::thread::spawn(move || {
-        let Some(mut pipe) = stderr_pipe else { return String::new() };
+        let Some(mut pipe) = stderr_pipe else {
+            return String::new();
+        };
         use std::io::Read;
         let mut buf = String::new();
         pipe.read_to_string(&mut buf).ok();
@@ -1204,7 +1267,10 @@ mod tests {
 
     #[test]
     fn landscape_1080p_crops_width() {
-        let input = InputSize { width: 1920, height: 1080 };
+        let input = InputSize {
+            width: 1920,
+            height: 1080,
+        };
         let f = vertical_filter_known(input, OutputSize::VERTICAL_1080, CropAnchor::Center);
         // Should scale height to 1920, then crop width
         assert!(f.contains("scale=-1:1920"), "filter: {}", f);
@@ -1215,7 +1281,10 @@ mod tests {
 
     #[test]
     fn landscape_1440p_crops_width() {
-        let input = InputSize { width: 2560, height: 1440 };
+        let input = InputSize {
+            width: 2560,
+            height: 1440,
+        };
         let f = vertical_filter_known(input, OutputSize::VERTICAL_1080, CropAnchor::Center);
         assert!(f.contains("scale=-1:1920"), "filter: {}", f);
         assert!(f.contains("crop=1080:1920"), "filter: {}", f);
@@ -1223,7 +1292,10 @@ mod tests {
 
     #[test]
     fn already_vertical_scales_width() {
-        let input = InputSize { width: 1080, height: 1920 };
+        let input = InputSize {
+            width: 1080,
+            height: 1920,
+        };
         let f = vertical_filter_known(input, OutputSize::VERTICAL_1080, CropAnchor::Center);
         // Already the right ratio — scale width, crop height
         assert!(f.contains("scale=1080:-1"), "filter: {}", f);
@@ -1232,15 +1304,25 @@ mod tests {
 
     #[test]
     fn small_input_scales_up_and_pads() {
-        let input = InputSize { width: 640, height: 360 };
+        let input = InputSize {
+            width: 640,
+            height: 360,
+        };
         let f = vertical_filter_known(input, OutputSize::VERTICAL_1080, CropAnchor::Center);
-        assert!(f.contains("force_original_aspect_ratio=increase"), "filter: {}", f);
+        assert!(
+            f.contains("force_original_aspect_ratio=increase"),
+            "filter: {}",
+            f
+        );
         assert!(f.contains("pad=1080:1920"), "filter: {}", f);
     }
 
     #[test]
     fn square_input_scales_width() {
-        let input = InputSize { width: 1080, height: 1080 };
+        let input = InputSize {
+            width: 1080,
+            height: 1080,
+        };
         let f = vertical_filter_known(input, OutputSize::VERTICAL_1080, CropAnchor::Center);
         // Square is "wider" than 9:16 target ratio → landscape path
         assert!(f.contains("scale=-1:1920"), "filter: {}", f);
@@ -1250,14 +1332,20 @@ mod tests {
     #[test]
     fn wide_but_short_uses_landscape_path() {
         // 21:9 ultrawide
-        let input = InputSize { width: 2560, height: 1080 };
+        let input = InputSize {
+            width: 2560,
+            height: 1080,
+        };
         let f = vertical_filter_known(input, OutputSize::VERTICAL_1080, CropAnchor::Center);
         assert!(f.contains("scale=-1:1920"), "filter: {}", f);
     }
 
     #[test]
     fn offset_anchor_works_with_known_input() {
-        let input = InputSize { width: 1920, height: 1080 };
+        let input = InputSize {
+            width: 1920,
+            height: 1080,
+        };
         let f = vertical_filter_known(input, OutputSize::VERTICAL_1080, CropAnchor::Offset(0.7));
         assert!(f.contains("(iw-ow)*0.70"), "filter: {}", f);
     }
@@ -1266,11 +1354,8 @@ mod tests {
 
     #[test]
     fn gameplay_focus_is_simple_filter() {
-        let (f, complex) = layout_filter(
-            &LayoutMode::GameplayFocus,
-            OutputSize::VERTICAL_1080,
-            None,
-        );
+        let (f, complex) =
+            layout_filter(&LayoutMode::GameplayFocus, OutputSize::VERTICAL_1080, None);
         assert!(!complex, "gameplay focus should be simple filter");
         assert!(f.contains("scale=1080:1920"), "filter: {}", f);
         assert!(f.contains("crop=1080:1920"), "filter: {}", f);
@@ -1278,14 +1363,13 @@ mod tests {
 
     #[test]
     fn context_fit_preserves_full_frame_over_blurred_fill() {
-        let (f, complex) = layout_filter(
-            &LayoutMode::ContextFit,
-            OutputSize::VERTICAL_1080,
-            None,
-        );
+        let (f, complex) = layout_filter(&LayoutMode::ContextFit, OutputSize::VERTICAL_1080, None);
         assert!(complex, "context fit needs a two-branch filter graph");
         assert!(f.contains("[0:v]split=2"), "filter: {f}");
-        assert!(f.contains("boxblur=3:1"), "default blur should stay gentle: {f}");
+        assert!(
+            f.contains("boxblur=3:1"),
+            "default blur should stay gentle: {f}"
+        );
         assert!(
             f.contains("brightness=0.01") && !f.contains("gamma="),
             "background should remain visibly derived from the source: {f}"
@@ -1308,9 +1392,18 @@ mod tests {
             2.0,
         );
         assert!(complex);
-        assert!(f.contains("[1:v]scale=1080:1920"), "branding input missing: {f}");
-        assert!(!f.contains("boxblur="), "branding should remain unblurred: {f}");
-        assert!(f.contains("(H-h)*1.000:shortest=1"), "position should clamp: {f}");
+        assert!(
+            f.contains("[1:v]scale=1080:1920"),
+            "branding input missing: {f}"
+        );
+        assert!(
+            !f.contains("boxblur="),
+            "branding should remain unblurred: {f}"
+        );
+        assert!(
+            f.contains("(H-h)*1.000:shortest=1"),
+            "position should clamp: {f}"
+        );
     }
 
     #[test]
@@ -1323,19 +1416,23 @@ mod tests {
             0.2,
         );
         assert!(complex);
-        assert!(f.contains("pad=1080:1920:(ow-iw)/2:(oh-ih)*0.200:color=black"), "filter: {f}");
-        assert!(!f.contains("boxblur="), "black bars must not sample or blur the source: {f}");
-        assert!(!f.contains("[1:v]"), "black bars must not require a second input: {f}");
+        assert!(
+            f.contains("pad=1080:1920:(ow-iw)/2:(oh-ih)*0.200:color=black"),
+            "filter: {f}"
+        );
+        assert!(
+            !f.contains("boxblur="),
+            "black bars must not sample or blur the source: {f}"
+        );
+        assert!(
+            !f.contains("[1:v]"),
+            "black bars must not require a second input: {f}"
+        );
     }
 
     #[test]
     fn full_frame_zoom_out_reveals_more_source_over_a_filled_canvas() {
-        let (f, complex) = full_frame_filter(
-            OutputSize::VERTICAL_1080,
-            None,
-            0.8,
-            0.25,
-        );
+        let (f, complex) = full_frame_filter(OutputSize::VERTICAL_1080, None, 0.8, 0.25);
         assert!(complex);
         assert!(
             f.contains("[focus_src]scale=1080:1920:force_original_aspect_ratio=increase"),
@@ -1345,21 +1442,25 @@ mod tests {
             f.contains("scale=trunc(iw*0.800/2)*2:trunc(ih*0.800/2)*2"),
             "foreground should pull back without changing aspect ratio: {f}"
         );
-        assert!(f.contains("[background][focus]overlay=(W-w)/2"), "filter: {f}");
-        assert!(f.contains("boxblur="), "background must still fill the canvas: {f}");
+        assert!(
+            f.contains("[background][focus]overlay=(W-w)/2"),
+            "filter: {f}"
+        );
+        assert!(
+            f.contains("boxblur="),
+            "background must still fill the canvas: {f}"
+        );
     }
 
     #[test]
     fn default_full_frame_export_keeps_the_simple_center_crop() {
-        let (f, complex) = full_frame_filter(
-            OutputSize::VERTICAL_1080,
-            None,
-            1.0,
-            0.25,
-        );
+        let (f, complex) = full_frame_filter(OutputSize::VERTICAL_1080, None, 1.0, 0.25);
         assert!(!complex);
         assert!(f.contains("crop=1080:1920"), "filter: {f}");
-        assert!(!f.contains("boxblur="), "standard crop should stay unchanged: {f}");
+        assert!(
+            !f.contains("boxblur="),
+            "standard crop should stay unchanged: {f}"
+        );
     }
 
     #[test]
@@ -1400,8 +1501,14 @@ mod tests {
         assert!(complex);
         assert!(filter.contains("[0:v]scale=1080:1344"), "filter: {filter}");
         assert!(filter.contains("[1:v]scale=1080:576"), "filter: {filter}");
-        assert!(filter.contains("vstack=inputs=2:shortest=1"), "filter: {filter}");
-        assert!(filter.contains("[composed]drawtext=text='clip'[out]"), "filter: {filter}");
+        assert!(
+            filter.contains("vstack=inputs=2:shortest=1"),
+            "filter: {filter}"
+        );
+        assert!(
+            filter.contains("[composed]drawtext=text='clip'[out]"),
+            "filter: {filter}"
+        );
     }
 
     #[test]
@@ -1413,11 +1520,7 @@ mod tests {
             pip_h: 25.0,
             ..EditorLayoutSettings::default()
         };
-        let (filter, complex) = branded_pip_filter(
-            OutputSize::VERTICAL_1080,
-            None,
-            settings,
-        );
+        let (filter, complex) = branded_pip_filter(OutputSize::VERTICAL_1080, None, settings);
         assert!(complex);
         assert!(filter.contains("[1:v]scale=324:480"), "filter: {filter}");
         assert!(
@@ -1442,7 +1545,11 @@ mod tests {
     #[test]
     fn pip_is_complex_filter() {
         let (f, complex) = layout_filter(
-            &LayoutMode::Pip { x: 0.93, y: 0.93, size: 0.3 },
+            &LayoutMode::Pip {
+                x: 0.93,
+                y: 0.93,
+                size: 0.3,
+            },
             OutputSize::VERTICAL_1080,
             None,
         );
@@ -1474,18 +1581,30 @@ mod tests {
 
     #[test]
     fn from_db_unknown_falls_back() {
-        assert!(matches!(LayoutMode::from_db("none"), LayoutMode::GameplayFocus));
-        assert!(matches!(LayoutMode::from_db("context_fit"), LayoutMode::ContextFit));
-        assert!(matches!(LayoutMode::from_db("split"), LayoutMode::Split { .. }));
+        assert!(matches!(
+            LayoutMode::from_db("none"),
+            LayoutMode::GameplayFocus
+        ));
+        assert!(matches!(
+            LayoutMode::from_db("context_fit"),
+            LayoutMode::ContextFit
+        ));
+        assert!(matches!(
+            LayoutMode::from_db("split"),
+            LayoutMode::Split { .. }
+        ));
         assert!(matches!(LayoutMode::from_db("pip"), LayoutMode::Pip { .. }));
-        assert!(matches!(LayoutMode::from_db("invalid"), LayoutMode::GameplayFocus));
+        assert!(matches!(
+            LayoutMode::from_db("invalid"),
+            LayoutMode::GameplayFocus
+        ));
         assert!(matches!(LayoutMode::from_db(""), LayoutMode::GameplayFocus));
     }
 
     #[test]
     fn split_ratio_clamped() {
         let (f, _) = layout_filter(
-            &LayoutMode::Split { ratio: 0.95 },  // exceeds max
+            &LayoutMode::Split { ratio: 0.95 }, // exceeds max
             OutputSize::VERTICAL_1080,
             None,
         );
@@ -1506,6 +1625,7 @@ mod tests {
             layout: LayoutMode::GameplayFocus,
             layout_settings: EditorLayoutSettings::default(),
             caption_filter: None,
+            caption_overlay_path: None,
             effective_region: None,
             fit_mode: crate::cam_region::CamFitMode::Fit,
             context_background_mode: ContextBackgroundMode::Blur,
@@ -1583,7 +1703,11 @@ mod tests {
     #[test]
     fn command_with_pip_builds() {
         let mut req = sample_request();
-        req.layout = LayoutMode::Pip { x: 0.93, y: 0.93, size: 0.3 };
+        req.layout = LayoutMode::Pip {
+            x: 0.93,
+            y: 0.93,
+            size: 0.3,
+        };
         let _cmd = build_export_command(Path::new("ffmpeg"), &req);
     }
 
@@ -1592,6 +1716,40 @@ mod tests {
         let mut req = sample_request();
         req.caption_filter = Some("drawtext=text='hello':fontsize=48".into());
         let _cmd = build_export_command(Path::new("ffmpeg"), &req);
+    }
+
+    #[test]
+    fn transparent_caption_track_is_a_second_input_and_replaces_text_filter() {
+        let mut req = sample_request();
+        req.caption_filter = Some("drawtext=text='legacy'".into());
+        req.caption_overlay_path = Some(PathBuf::from("/tmp/paper-captions.mov"));
+        let args = cmd_args(&build_export_command(Path::new("ffmpeg"), &req));
+        let graph = args
+            .windows(2)
+            .find_map(|pair| (pair[0] == "-filter_complex").then_some(pair[1].as_str()))
+            .expect("caption overlay filter graph");
+
+        assert_eq!(args.iter().filter(|arg| arg.as_str() == "-i").count(), 2);
+        assert!(graph.contains("[1:v]setpts=PTS-STARTPTS,format=rgba[caption]"));
+        assert!(graph.contains("[composed][caption]overlay=0:0"));
+        assert!(!graph.contains("legacy"));
+    }
+
+    #[test]
+    fn transparent_caption_track_follows_branding_as_third_input() {
+        let mut req = sample_request();
+        req.layout = LayoutMode::ContextFit;
+        req.context_background_mode = ContextBackgroundMode::Branding;
+        req.context_background_path = Some(PathBuf::from("/tmp/brand.png"));
+        req.caption_overlay_path = Some(PathBuf::from("/tmp/paper-captions.mov"));
+        let args = cmd_args(&build_export_command(Path::new("ffmpeg"), &req));
+        let graph = args
+            .windows(2)
+            .find_map(|pair| (pair[0] == "-filter_complex").then_some(pair[1].as_str()))
+            .expect("caption overlay filter graph");
+
+        assert_eq!(args.iter().filter(|arg| arg.as_str() == "-i").count(), 3);
+        assert!(graph.contains("[2:v]setpts=PTS-STARTPTS,format=rgba[caption]"));
     }
 
     #[test]
@@ -1664,96 +1822,196 @@ mod tests {
 
     #[test]
     fn file_tag_is_lowercase() {
-        for p in [Platform::TikTok, Platform::Reels, Platform::Shorts, Platform::YouTube, Platform::Square] {
-            assert_eq!(p.file_tag(), p.file_tag().to_lowercase(), "file_tag should be lowercase: {}", p.file_tag());
+        for p in [
+            Platform::TikTok,
+            Platform::Reels,
+            Platform::Shorts,
+            Platform::YouTube,
+            Platform::Square,
+        ] {
+            assert_eq!(
+                p.file_tag(),
+                p.file_tag().to_lowercase(),
+                "file_tag should be lowercase: {}",
+                p.file_tag()
+            );
         }
     }
 
     #[test]
     fn platform_serializes_lowercase() {
-        assert_eq!(serde_json::to_string(&Platform::TikTok).unwrap(), "\"tiktok\"");
-        assert_eq!(serde_json::to_string(&Platform::Reels).unwrap(), "\"reels\"");
-        assert_eq!(serde_json::to_string(&Platform::Shorts).unwrap(), "\"shorts\"");
+        assert_eq!(
+            serde_json::to_string(&Platform::TikTok).unwrap(),
+            "\"tiktok\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Platform::Reels).unwrap(),
+            "\"reels\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Platform::Shorts).unwrap(),
+            "\"shorts\""
+        );
     }
 
-    use crate::cam_region::{CamRegion, CamFitMode};
+    use crate::cam_region::{CamFitMode, CamRegion};
 
     fn sample_region() -> CamRegion {
-        CamRegion { x: 0.12, y: 0.78, w: 0.22, h: 0.22 }
+        CamRegion {
+            x: 0.12,
+            y: 0.78,
+            w: 0.22,
+            h: 0.22,
+        }
     }
 
     #[test]
     fn layout_filter_with_region_no_region_byte_identical_to_layout_filter() {
-        let target = OutputSize { width: 1080, height: 1920 };
+        let target = OutputSize {
+            width: 1080,
+            height: 1920,
+        };
         let modes = [
             LayoutMode::GameplayFocus,
             LayoutMode::ContextFit,
             LayoutMode::Split { ratio: 0.6 },
-            LayoutMode::Pip { x: 0.93, y: 0.93, size: 0.3 },
+            LayoutMode::Pip {
+                x: 0.93,
+                y: 0.93,
+                size: 0.3,
+            },
         ];
         for m in &modes {
             let (old_f, old_c) = layout_filter(m, target, None);
             let (new_f, new_c) = layout_filter_with_region(m, target, None, None, CamFitMode::Fit);
-            assert_eq!(old_f, new_f, "no-region path must be byte-identical for {m:?}");
+            assert_eq!(
+                old_f, new_f,
+                "no-region path must be byte-identical for {m:?}"
+            );
             assert_eq!(old_c, new_c);
         }
     }
 
     #[test]
     fn layout_filter_with_region_pip_uses_split2_and_crop_expr() {
-        let target = OutputSize { width: 1080, height: 1920 };
-        let mode = LayoutMode::Pip { x: 0.93, y: 0.93, size: 0.3 };
-        let (f, complex) = layout_filter_with_region(&mode, target, None, Some(sample_region()), CamFitMode::Fit);
+        let target = OutputSize {
+            width: 1080,
+            height: 1920,
+        };
+        let mode = LayoutMode::Pip {
+            x: 0.93,
+            y: 0.93,
+            size: 0.3,
+        };
+        let (f, complex) =
+            layout_filter_with_region(&mode, target, None, Some(sample_region()), CamFitMode::Fit);
         assert!(complex, "PiP+region must be filter_complex");
         assert!(f.contains("[0:v]split=2"), "must split source: {f}");
-        assert!(f.contains("crop=iw*0.2200:ih*0.2200:iw*0.1200:ih*0.7800"), "region crop expr missing: {f}");
-        assert!(!f.contains("[1:v]"), "must NOT reference second input -- single-input feature: {f}");
+        assert!(
+            f.contains("crop=iw*0.2200:ih*0.2200:iw*0.1200:ih*0.7800"),
+            "region crop expr missing: {f}"
+        );
+        assert!(
+            !f.contains("[1:v]"),
+            "must NOT reference second input -- single-input feature: {f}"
+        );
         assert!(f.ends_with("[out]"));
     }
 
     #[test]
     fn layout_filter_with_region_pip_passthrough_centers_cam_in_slot() {
-        let target = OutputSize { width: 1080, height: 1920 };
-        let mode = LayoutMode::Pip { x: 0.93, y: 0.93, size: 0.3 };
-        let (f, _) = layout_filter_with_region(&mode, target, None, Some(sample_region()), CamFitMode::Fit);
+        let target = OutputSize {
+            width: 1080,
+            height: 1920,
+        };
+        let mode = LayoutMode::Pip {
+            x: 0.93,
+            y: 0.93,
+            size: 0.3,
+        };
+        let (f, _) =
+            layout_filter_with_region(&mode, target, None, Some(sample_region()), CamFitMode::Fit);
         // Center expression in overlay arg: SLOT_X+(SLOT_W-w)/2 form.
-        assert!(f.contains("+(") && f.contains("-w)/2"), "centering expression in overlay: {f}");
+        assert!(
+            f.contains("+(") && f.contains("-w)/2"),
+            "centering expression in overlay: {f}"
+        );
     }
 
     #[test]
     fn layout_filter_with_region_split_uses_split3_with_boxblur() {
-        let target = OutputSize { width: 1080, height: 1920 };
+        let target = OutputSize {
+            width: 1080,
+            height: 1920,
+        };
         let mode = LayoutMode::Split { ratio: 0.6 };
-        let (f, complex) = layout_filter_with_region(&mode, target, None, Some(sample_region()), CamFitMode::Fit);
+        let (f, complex) =
+            layout_filter_with_region(&mode, target, None, Some(sample_region()), CamFitMode::Fit);
         assert!(complex);
-        assert!(f.contains("[0:v]split=3"), "Split+region must split into 3 branches: {f}");
-        assert!(f.contains("boxblur=20:5"), "blurred backdrop branch missing: {f}");
+        assert!(
+            f.contains("[0:v]split=3"),
+            "Split+region must split into 3 branches: {f}"
+        );
+        assert!(
+            f.contains("boxblur=20:5"),
+            "blurred backdrop branch missing: {f}"
+        );
         assert!(f.contains("vstack"), "Split must vstack top+bottom: {f}");
         assert!(f.ends_with("[out]"));
     }
 
     #[test]
     fn layout_filter_with_region_fit_mode_fill_uses_increase_then_crop() {
-        let target = OutputSize { width: 1080, height: 1920 };
-        let mode = LayoutMode::Pip { x: 0.93, y: 0.93, size: 0.3 };
-        let (f_fit, _) = layout_filter_with_region(&mode, target, None, Some(sample_region()), CamFitMode::Fit);
-        let (f_fill, _) = layout_filter_with_region(&mode, target, None, Some(sample_region()), CamFitMode::Fill);
-        assert!(f_fit.contains("force_original_aspect_ratio=decrease"), "Fit uses decrease: {f_fit}");
-        assert!(f_fill.contains("force_original_aspect_ratio=increase"), "Fill uses increase: {f_fill}");
+        let target = OutputSize {
+            width: 1080,
+            height: 1920,
+        };
+        let mode = LayoutMode::Pip {
+            x: 0.93,
+            y: 0.93,
+            size: 0.3,
+        };
+        let (f_fit, _) =
+            layout_filter_with_region(&mode, target, None, Some(sample_region()), CamFitMode::Fit);
+        let (f_fill, _) =
+            layout_filter_with_region(&mode, target, None, Some(sample_region()), CamFitMode::Fill);
+        assert!(
+            f_fit.contains("force_original_aspect_ratio=decrease"),
+            "Fit uses decrease: {f_fit}"
+        );
+        assert!(
+            f_fill.contains("force_original_aspect_ratio=increase"),
+            "Fill uses increase: {f_fill}"
+        );
     }
 
     #[test]
     fn layout_filter_with_region_fit_mode_stretch_drops_aspect_clause() {
-        let target = OutputSize { width: 1080, height: 1920 };
-        let mode = LayoutMode::Pip { x: 0.93, y: 0.93, size: 0.3 };
-        let (f, _) = layout_filter_with_region(&mode, target, None, Some(sample_region()), CamFitMode::Stretch);
+        let target = OutputSize {
+            width: 1080,
+            height: 1920,
+        };
+        let mode = LayoutMode::Pip {
+            x: 0.93,
+            y: 0.93,
+            size: 0.3,
+        };
+        let (f, _) = layout_filter_with_region(
+            &mode,
+            target,
+            None,
+            Some(sample_region()),
+            CamFitMode::Stretch,
+        );
         // Scope the assertion to the cam branch only -- the gameplay branch
         // ALWAYS uses force_original_aspect_ratio=increase to fill the output frame,
         // regardless of fit_mode. Only the cam branch is fit-mode-controlled.
         // Use "[cam_src]crop=" as the anchor (the split declaration has [cam_src]
         // without a trailing crop=, so this uniquely identifies the cam branch start).
         let cam_start = f.find("[cam_src]crop=").expect("cam branch present");
-        let cam_end_rel = f[cam_start..].find("[cam]").expect("cam branch ends with [cam]");
+        let cam_end_rel = f[cam_start..]
+            .find("[cam]")
+            .expect("cam branch ends with [cam]");
         let cam_branch = &f[cam_start..cam_start + cam_end_rel];
         assert!(
             !cam_branch.contains("force_original_aspect_ratio="),
@@ -1763,18 +2021,49 @@ mod tests {
 
     #[test]
     fn layout_filter_with_region_gameplay_focus_ignores_region() {
-        let target = OutputSize { width: 1080, height: 1920 };
-        let (f_no, _) = layout_filter_with_region(&LayoutMode::GameplayFocus, target, None, None, CamFitMode::Fit);
-        let (f_yes, _) = layout_filter_with_region(&LayoutMode::GameplayFocus, target, None, Some(sample_region()), CamFitMode::Fit);
-        assert_eq!(f_no, f_yes, "GameplayFocus has no cam slot -- region must be irrelevant");
+        let target = OutputSize {
+            width: 1080,
+            height: 1920,
+        };
+        let (f_no, _) = layout_filter_with_region(
+            &LayoutMode::GameplayFocus,
+            target,
+            None,
+            None,
+            CamFitMode::Fit,
+        );
+        let (f_yes, _) = layout_filter_with_region(
+            &LayoutMode::GameplayFocus,
+            target,
+            None,
+            Some(sample_region()),
+            CamFitMode::Fit,
+        );
+        assert_eq!(
+            f_no, f_yes,
+            "GameplayFocus has no cam slot -- region must be irrelevant"
+        );
     }
 
     #[test]
     fn layout_filter_with_region_caption_filter_appended() {
-        let target = OutputSize { width: 1080, height: 1920 };
-        let mode = LayoutMode::Pip { x: 0.93, y: 0.93, size: 0.3 };
+        let target = OutputSize {
+            width: 1080,
+            height: 1920,
+        };
+        let mode = LayoutMode::Pip {
+            x: 0.93,
+            y: 0.93,
+            size: 0.3,
+        };
         let caption = "drawtext=text='hi'";
-        let (f, _) = layout_filter_with_region(&mode, target, Some(caption), Some(sample_region()), CamFitMode::Fit);
+        let (f, _) = layout_filter_with_region(
+            &mode,
+            target,
+            Some(caption),
+            Some(sample_region()),
+            CamFitMode::Fit,
+        );
         assert!(f.contains(caption), "caption filter must be embedded: {f}");
         assert!(f.ends_with("[out]"));
     }

@@ -81,10 +81,7 @@ impl AudioProfile {
     pub fn peak_in_range(&self, start: usize, end: usize) -> f64 {
         let s = start.min(self.rms.len());
         let e = end.min(self.rms.len());
-        self.rms[s..e]
-            .iter()
-            .cloned()
-            .fold(0.0_f64, f64::max)
+        self.rms[s..e].iter().cloned().fold(0.0_f64, f64::max)
     }
 
     pub fn duration_secs(&self) -> usize {
@@ -311,7 +308,12 @@ fn detect_spikes(profile: &AudioProfile) -> Vec<SignalSegment> {
         } else {
             energy / profile.avg.max(0.001)
         };
-        hits.push(Hit { sec: i, energy, peak, z_score: z });
+        hits.push(Hit {
+            sec: i,
+            energy,
+            peak,
+            z_score: z,
+        });
     }
 
     if hits.is_empty() {
@@ -319,14 +321,21 @@ fn detect_spikes(profile: &AudioProfile) -> Vec<SignalSegment> {
     }
 
     // Sort by z-score descending, then deduplicate within a time gap
-    hits.sort_by(|a, b| b.z_score.partial_cmp(&a.z_score).unwrap_or(std::cmp::Ordering::Equal));
+    hits.sort_by(|a, b| {
+        b.z_score
+            .partial_cmp(&a.z_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let max_z = hits[0].z_score.max(1.0);
 
     let mut used: Vec<usize> = Vec::new();
     let mut segments = Vec::new();
 
     for hit in &hits {
-        if used.iter().any(|&u| (hit.sec as i64 - u as i64).unsigned_abs() < MERGE_GAP_SECS as u64) {
+        if used
+            .iter()
+            .any(|&u| (hit.sec as i64 - u as i64).unsigned_abs() < MERGE_GAP_SECS as u64)
+        {
             continue;
         }
         used.push(hit.sec);
@@ -401,21 +410,35 @@ fn detect_surges(profile: &AudioProfile) -> Vec<SignalSegment> {
         let ratio = during / before.max(0.001);
         let raw = delta * 2.0 + ratio;
         let peak = profile.peak_in_range(i, i + WINDOW_SECS);
-        hits.push(Hit { sec: i, delta, before, during, peak, raw });
+        hits.push(Hit {
+            sec: i,
+            delta,
+            before,
+            during,
+            peak,
+            raw,
+        });
     }
 
     if hits.is_empty() {
         return Vec::new();
     }
 
-    hits.sort_by(|a, b| b.raw.partial_cmp(&a.raw).unwrap_or(std::cmp::Ordering::Equal));
+    hits.sort_by(|a, b| {
+        b.raw
+            .partial_cmp(&a.raw)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let max_raw = hits[0].raw.max(1.0);
 
     let mut used: Vec<usize> = Vec::new();
     let mut segments = Vec::new();
 
     for hit in &hits {
-        if used.iter().any(|&u| (hit.sec as i64 - u as i64).unsigned_abs() < MERGE_GAP_SECS as u64) {
+        if used
+            .iter()
+            .any(|&u| (hit.sec as i64 - u as i64).unsigned_abs() < MERGE_GAP_SECS as u64)
+        {
             continue;
         }
         used.push(hit.sec);
@@ -513,14 +536,17 @@ fn detect_sustained(profile: &AudioProfile) -> Vec<SignalSegment> {
             let duration = (e - s) as f64;
             let duration_factor = (duration / 30.0).min(1.0);
             let raw = (avg_energy / profile.avg.max(0.001)) * duration_factor;
-            Run { start: s, end: e, avg_energy, peak, raw }
+            Run {
+                start: s,
+                end: e,
+                avg_energy,
+                peak,
+                raw,
+            }
         })
         .collect();
 
-    let max_raw = scored_runs
-        .iter()
-        .map(|r| r.raw)
-        .fold(1.0_f64, f64::max);
+    let max_raw = scored_runs.iter().map(|r| r.raw).fold(1.0_f64, f64::max);
 
     scored_runs
         .iter()
@@ -710,7 +736,9 @@ mod tests {
         assert!(!segs.is_empty(), "quiet-to-loud jump should be detected");
         let best = &segs[0];
         assert!(
-            best.tags.iter().any(|t| t == "ambush" || t == "shock" || t == "jumpscare"),
+            best.tags
+                .iter()
+                .any(|t| t == "ambush" || t == "shock" || t == "jumpscare"),
             "surge from quiet should get jumpscare-type tags"
         );
     }
@@ -723,7 +751,10 @@ mod tests {
         let p = make_profile(60, &[(20, 35, 0.8)]);
         let segs = detect_sustained(&p);
 
-        assert!(!segs.is_empty(), "15-second loud section should be detected");
+        assert!(
+            !segs.is_empty(),
+            "15-second loud section should be detected"
+        );
         let best = &segs[0];
         assert!(best.duration() >= 10.0);
         assert!(best.tags.iter().any(|t| t == "fight" || t == "chaos"));
@@ -734,7 +765,10 @@ mod tests {
         // 3-second burst is too short for sustained
         let p = make_profile(60, &[(30, 33, 0.9)]);
         let segs = detect_sustained(&p);
-        assert!(segs.is_empty(), "3-second burst is below MIN_SUSTAINED_SECS");
+        assert!(
+            segs.is_empty(),
+            "3-second burst is below MIN_SUSTAINED_SECS"
+        );
     }
 
     // ── Full pipeline ──
@@ -742,10 +776,13 @@ mod tests {
     #[test]
     fn detect_signals_combines_all_detectors() {
         // A profile with both a spike and a sustained section
-        let p = make_profile(120, &[
-            (30, 33, 0.95),  // spike
-            (70, 85, 0.75),  // sustained 15s
-        ]);
+        let p = make_profile(
+            120,
+            &[
+                (30, 33, 0.95), // spike
+                (70, 85, 0.75), // sustained 15s
+            ],
+        );
         let segs = detect_signals(&p);
 
         assert!(segs.len() >= 2, "should detect both events");
@@ -772,15 +809,14 @@ mod tests {
 
     #[test]
     fn scores_are_normalised_0_to_1() {
-        let p = make_profile(120, &[
-            (20, 23, 0.95),
-            (50, 55, 0.70),
-            (90, 93, 0.80),
-        ]);
+        let p = make_profile(120, &[(20, 23, 0.95), (50, 55, 0.70), (90, 93, 0.80)]);
         let segs = detect_signals(&p);
         for seg in &segs {
-            assert!(seg.score >= 0.0 && seg.score <= 1.0,
-                "score {} out of range", seg.score);
+            assert!(
+                seg.score >= 0.0 && seg.score <= 1.0,
+                "score {} out of range",
+                seg.score
+            );
         }
     }
 
@@ -790,7 +826,11 @@ mod tests {
         let segs = detect_signals(&p);
         assert!(!segs.is_empty());
         match &segs[0].metadata {
-            Some(SignalMetadata::Audio { rms_delta, peak_rms, ratio_above_avg }) => {
+            Some(SignalMetadata::Audio {
+                rms_delta,
+                peak_rms,
+                ratio_above_avg,
+            }) => {
                 assert!(*rms_delta > 0.0);
                 assert!(*peak_rms > 0.0);
                 assert!(*ratio_above_avg > 1.0);
@@ -823,9 +863,18 @@ mod tests {
         ];
         merge_and_rank(&mut segs);
         assert_eq!(segs.len(), 1, "overlapping segments should merge");
-        assert!((segs[0].score - 0.9).abs() < f64::EPSILON, "higher score wins");
-        assert!((segs[0].start_time - 10.0).abs() < f64::EPSILON, "start is the earlier");
-        assert!((segs[0].end_time - 18.0).abs() < f64::EPSILON, "end is the later");
+        assert!(
+            (segs[0].score - 0.9).abs() < f64::EPSILON,
+            "higher score wins"
+        );
+        assert!(
+            (segs[0].start_time - 10.0).abs() < f64::EPSILON,
+            "start is the earlier"
+        );
+        assert!(
+            (segs[0].end_time - 18.0).abs() < f64::EPSILON,
+            "end is the later"
+        );
     }
 
     // ── astats parser ──
@@ -844,7 +893,10 @@ lavfi.astats.Overall.RMS_level=-10.0
         assert_eq!(profile.rms.len(), 3);
         // -30 dB → (30/60) = 0.5, -20 dB → (40/60) ≈ 0.667, -10 dB → (50/60) ≈ 0.833
         assert!((profile.rms[0] - 0.5).abs() < 0.01);
-        assert!(profile.rms[1] > profile.rms[0], "louder second should have higher RMS");
+        assert!(
+            profile.rms[1] > profile.rms[0],
+            "louder second should have higher RMS"
+        );
         assert!(profile.rms[2] > profile.rms[1]);
     }
 

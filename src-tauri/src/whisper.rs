@@ -3,24 +3,34 @@
 //! Provides model management (download check, paths) and audio transcription
 //! with automatic GPU acceleration when CUDA is available at runtime.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::time::UNIX_EPOCH;
 
+use sha2::{Digest, Sha256};
 use whisper_rs::{
-    DtwMode, DtwModelPreset, FullParams, SamplingStrategy, WhisperContext,
-    WhisperContextParameters, WhisperSegment, WhisperVadContext,
-    WhisperVadContextParams, WhisperVadParams,
+    get_lang_str, DtwMode, DtwModelPreset, FullParams, SamplingStrategy, WhisperContext,
+    WhisperContextParameters, WhisperSegment, WhisperVadContext, WhisperVadContextParams,
+    WhisperVadParams,
 };
 
-const SILERO_VAD_MODEL_BYTES: &[u8] =
-    include_bytes!("../resources/models/ggml-silero-v6.2.0.bin");
+const SILERO_VAD_MODEL_BYTES: &[u8] = include_bytes!("../resources/models/ggml-silero-v6.2.0.bin");
 static SILERO_VAD_MODEL_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 static TRANSCRIPTION_MUTEX: Mutex<()> = Mutex::new(());
 const MAX_PCM_WINDOW_SECONDS: f64 = 5.0 * 60.0;
 const PCM_SAMPLE_RATE: f64 = 16_000.0;
 const PCM_BYTES_PER_SAMPLE: u64 = 4;
+const CAPTION_SPEECH_PADDING_SECONDS: f64 = 0.20;
+pub const RECOGNITION_PIPELINE_VERSION: u32 = 1;
+const CAPTION_RECOGNITION_RECIPE_VERSION: u32 = 3;
+const MAX_STATIC_PROMPT_CHARS: usize = 320;
+const MAX_PREVIOUS_TRANSCRIPT_CHARS: usize = 180;
+const MIN_CONTEXT_CARRY_WINDOW_SECONDS: f64 = 1.0;
+const MIN_PROMPT_ECHO_TERM_CHARS: usize = 5;
+const MIN_PREVIOUS_CONTEXT_ECHO_CHARS: usize = 8;
 
 fn acquire_transcription_slot() -> Result<MutexGuard<'static, ()>, String> {
     TRANSCRIPTION_MUTEX
@@ -48,15 +58,25 @@ impl WhisperModel {
     pub fn download_url(&self) -> &'static str {
         match self {
             Self::Base => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
-            Self::Medium => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
+            Self::Medium => {
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin"
+            }
         }
     }
 
-    /// Approximate file size in bytes.
+    /// Exact size of the official whisper.cpp model artifact in bytes.
     pub fn size_bytes(&self) -> u64 {
         match self {
-            Self::Base => 148_000_000,   // ~148 MB
-            Self::Medium => 1_533_000_000, // ~1.5 GB
+            Self::Base => 147_951_465,
+            Self::Medium => 1_533_763_059,
+        }
+    }
+
+    /// SHA-256 published by the official whisper.cpp Hugging Face repository.
+    pub fn expected_sha256(&self) -> &'static str {
+        match self {
+            Self::Base => "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+            Self::Medium => "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208",
         }
     }
 
@@ -66,9 +86,142 @@ impl WhisperModel {
             Self::Medium => "Medium (Accurate)",
         }
     }
+
+    pub fn cache_key(&self) -> &'static str {
+        match self {
+            Self::Base => "base",
+            Self::Medium => "medium",
+        }
+    }
 }
 
 // ── Transcript types ──
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecognitionLanguage {
+    English,
+    Auto,
+}
+
+impl RecognitionLanguage {
+    pub fn from_setting(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("auto") {
+            Self::Auto
+        } else {
+            Self::English
+        }
+    }
+
+    pub fn cache_key(self) -> &'static str {
+        match self {
+            Self::English => "en",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DecoderProfile {
+    DetectionGreedy,
+    CaptionBeamSearch,
+}
+
+impl DecoderProfile {
+    fn sampling_strategy(self) -> SamplingStrategy {
+        match self {
+            Self::DetectionGreedy => SamplingStrategy::Greedy { best_of: 1 },
+            Self::CaptionBeamSearch => SamplingStrategy::BeamSearch {
+                beam_size: 5,
+                patience: -1.0,
+            },
+        }
+    }
+
+    fn temperature(self) -> f32 {
+        0.0
+    }
+
+    pub fn cache_key(self) -> &'static str {
+        match self {
+            Self::DetectionGreedy => "greedy-best-of-1",
+            Self::CaptionBeamSearch => "beam-search-5",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RecognitionOptions {
+    pub language: RecognitionLanguage,
+    pub decoder: DecoderProfile,
+    pub initial_prompt: String,
+    pub scope_fingerprint: String,
+    pub carry_previous_context: bool,
+    automatic_prompt_terms: Vec<String>,
+    recipe_version: u32,
+}
+
+impl RecognitionOptions {
+    pub fn detection(
+        language: RecognitionLanguage,
+        initial_prompt: String,
+        scope_fingerprint: String,
+    ) -> Self {
+        Self {
+            language,
+            decoder: DecoderProfile::DetectionGreedy,
+            initial_prompt: bounded_prompt(&initial_prompt, MAX_STATIC_PROMPT_CHARS),
+            scope_fingerprint,
+            carry_previous_context: false,
+            automatic_prompt_terms: Vec::new(),
+            recipe_version: RECOGNITION_PIPELINE_VERSION,
+        }
+    }
+
+    pub fn final_caption(language: RecognitionLanguage, initial_prompt: String) -> Self {
+        Self {
+            language,
+            decoder: DecoderProfile::CaptionBeamSearch,
+            initial_prompt: bounded_prompt(&initial_prompt, MAX_STATIC_PROMPT_CHARS),
+            scope_fingerprint: "clip-range-v1".to_string(),
+            carry_previous_context: true,
+            automatic_prompt_terms: Vec::new(),
+            recipe_version: CAPTION_RECOGNITION_RECIPE_VERSION,
+        }
+    }
+
+    pub fn with_automatic_prompt_terms(mut self, terms: Vec<String>) -> Self {
+        for term in terms {
+            let term = bounded_prompt(&term, 64);
+            if !term.is_empty()
+                && !self
+                    .automatic_prompt_terms
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(&term))
+            {
+                self.automatic_prompt_terms.push(term);
+            }
+        }
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecognitionProvenance {
+    pub pipeline_version: u32,
+    pub model: String,
+    pub language_mode: String,
+    pub resolved_language: String,
+    pub decoder: String,
+    pub audio_mode: String,
+    pub audio_stream: String,
+    pub source_fingerprint: String,
+    pub prompt_fingerprint: String,
+    pub scope_fingerprint: String,
+    pub signature: String,
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TranscriptWord {
@@ -90,6 +243,8 @@ pub struct TranscriptResult {
     pub segments: Vec<TranscriptSegment>,
     pub language: String,
     pub duration: f64,
+    #[serde(default)]
+    pub recognition: RecognitionProvenance,
 }
 
 #[derive(Debug)]
@@ -125,8 +280,255 @@ struct AudioProbeTags {
     handler_name: Option<String>,
 }
 
-fn microphone_label_score(label: &str) -> u8 {
-    let normalized: String = label
+fn sha256_hex(parts: &[&str]) -> String {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn bounded_prompt(value: &str, max_chars: usize) -> String {
+    let normalized = value
+        .replace('\0', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    normalized.chars().take(max_chars).collect()
+}
+
+fn prompt_with_previous_tail(options: &RecognitionOptions, previous_tail: &str) -> String {
+    if !options.carry_previous_context || previous_tail.trim().is_empty() {
+        return options.initial_prompt.clone();
+    }
+    let tail = bounded_prompt(previous_tail, MAX_PREVIOUS_TRANSCRIPT_CHARS);
+    bounded_prompt(
+        &format!("{} Previous speech: {}", options.initial_prompt, tail),
+        MAX_STATIC_PROMPT_CHARS + MAX_PREVIOUS_TRANSCRIPT_CHARS + 18,
+    )
+}
+
+fn update_previous_tail(previous_tail: &mut String, decoded_text: &str) {
+    if decoded_text.trim().is_empty() {
+        return;
+    }
+    let combined = if previous_tail.is_empty() {
+        decoded_text.to_string()
+    } else {
+        format!("{} {}", previous_tail, decoded_text)
+    };
+    let chars = combined.chars().collect::<Vec<_>>();
+    let start = chars.len().saturating_sub(MAX_PREVIOUS_TRANSCRIPT_CHARS);
+    *previous_tail = chars[start..].iter().collect::<String>().trim().to_string();
+}
+
+fn compact_prompt_echo_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(|character| character.to_lowercase())
+        .collect()
+}
+
+fn repeats_automatic_prompt_context(decoded_text: &str, automatic_terms: &[String]) -> bool {
+    let decoded = compact_prompt_echo_text(decoded_text);
+    if decoded.is_empty() {
+        return false;
+    }
+
+    automatic_terms.iter().any(|term| {
+        let term = compact_prompt_echo_text(term);
+        term.chars().count() >= MIN_PROMPT_ECHO_TERM_CHARS
+            && decoded.match_indices(&term).take(2).count() >= 2
+    })
+}
+
+fn repeats_previous_prompt_context(decoded_text: &str, previous_tail: &str) -> bool {
+    let decoded = compact_prompt_echo_text(decoded_text);
+    if decoded.is_empty() || previous_tail.trim().is_empty() {
+        return false;
+    }
+
+    let words = previous_tail
+        .split_whitespace()
+        .map(compact_prompt_echo_text)
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    let recent = &words[words.len().saturating_sub(5)..];
+    let repeated = |term: &str| {
+        term.chars().count() >= MIN_PREVIOUS_CONTEXT_ECHO_CHARS
+            && decoded.match_indices(term).take(2).count() >= 2
+    };
+
+    if recent.last().is_some_and(|word| repeated(word)) {
+        return true;
+    }
+    (2..=recent.len()).any(|length| repeated(&recent[recent.len() - length..].concat()))
+}
+
+fn repeats_prompt_context(
+    decoded_text: &str,
+    automatic_terms: &[String],
+    previous_tail: &str,
+) -> bool {
+    repeats_automatic_prompt_context(decoded_text, automatic_terms)
+        || repeats_previous_prompt_context(decoded_text, previous_tail)
+}
+
+fn window_can_seed_context(window_start: f64, window_end: f64) -> bool {
+    window_start.is_finite()
+        && window_end.is_finite()
+        && window_end - window_start >= MIN_CONTEXT_CARRY_WINDOW_SECONDS
+}
+
+fn update_previous_tail_for_window(
+    previous_tail: &mut String,
+    decoded_text: &str,
+    window_start: f64,
+    window_end: f64,
+) {
+    if window_can_seed_context(window_start, window_end) {
+        update_previous_tail(previous_tail, decoded_text);
+    }
+}
+
+fn resolved_language_for_state(
+    state: &whisper_rs::WhisperState,
+    language: RecognitionLanguage,
+) -> Option<String> {
+    match language {
+        RecognitionLanguage::English => Some("en"),
+        RecognitionLanguage::Auto => get_lang_str(state.full_lang_id_from_state()),
+    }
+    .filter(|value| !value.trim().is_empty())
+    .map(str::to_string)
+}
+
+fn record_language_vote(language: Option<&str>, votes: &mut HashMap<String, usize>) {
+    if let Some(language) = language {
+        *votes.entry(language.to_string()).or_default() += 1;
+    }
+}
+
+fn resolved_language(language: RecognitionLanguage, votes: &HashMap<String, usize>) -> String {
+    match language {
+        RecognitionLanguage::English => "en".to_string(),
+        RecognitionLanguage::Auto => votes
+            .iter()
+            .max_by(|left, right| left.1.cmp(right.1).then_with(|| right.0.cmp(left.0)))
+            .map(|(language, _)| language.clone())
+            .unwrap_or_else(|| "und".to_string()),
+    }
+}
+
+pub fn source_fingerprint(path: &str) -> Result<String, String> {
+    let path = std::path::Path::new(path);
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("Could not inspect transcription source: {error}"))?;
+    let canonical = path
+        .canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_nanos().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    Ok(sha256_hex(&[
+        "source-v1",
+        &canonical,
+        &metadata.len().to_string(),
+        &modified,
+    ]))
+}
+
+fn audio_stream_description(stream: Option<&SpeechAudioStream>) -> String {
+    match stream {
+        Some(stream) => format!("Track {}: {}", stream.index, stream.label),
+        None => "Default audio track".to_string(),
+    }
+}
+
+fn recognition_provenance(
+    audio_path: &str,
+    model: WhisperModel,
+    options: &RecognitionOptions,
+    audio_mode: &str,
+    stream: Option<&SpeechAudioStream>,
+) -> Result<RecognitionProvenance, String> {
+    let source_fingerprint = source_fingerprint(audio_path)?;
+    let prompt_fingerprint = sha256_hex(&["prompt-v1", &options.initial_prompt]);
+    let audio_stream = audio_stream_description(stream);
+    let pipeline_version = options.recipe_version.to_string();
+    let signature = sha256_hex(&[
+        "recognition-signature-v1",
+        &pipeline_version,
+        model.cache_key(),
+        options.language.cache_key(),
+        options.decoder.cache_key(),
+        audio_mode,
+        &audio_stream,
+        &source_fingerprint,
+        &prompt_fingerprint,
+        &options.scope_fingerprint,
+    ]);
+    Ok(RecognitionProvenance {
+        pipeline_version: options.recipe_version,
+        model: model.cache_key().to_string(),
+        language_mode: options.language.cache_key().to_string(),
+        resolved_language: String::new(),
+        decoder: options.decoder.cache_key().to_string(),
+        audio_mode: audio_mode.to_string(),
+        audio_stream,
+        source_fingerprint,
+        prompt_fingerprint,
+        scope_fingerprint: options.scope_fingerprint.clone(),
+        signature,
+    })
+}
+
+pub fn expected_file_recognition(
+    audio_path: &str,
+    model: WhisperModel,
+    options: &RecognitionOptions,
+) -> Result<RecognitionProvenance, String> {
+    recognition_provenance(audio_path, model, options, "mixed", None)
+}
+
+pub fn scope_fingerprint_for_windows(windows: &[(f64, f64)]) -> String {
+    let normalized = windows
+        .iter()
+        .filter(|(start, end)| start.is_finite() && end.is_finite() && end > start)
+        .map(|(start, end)| format!("{start:.3}-{end:.3}"))
+        .collect::<Vec<_>>()
+        .join("|");
+    sha256_hex(&["transcription-scope-v1", &normalized])
+}
+
+pub fn expected_clip_recognition(
+    audio_path: &str,
+    model: WhisperModel,
+    options: &RecognitionOptions,
+    audio_mode: &str,
+) -> Result<RecognitionProvenance, String> {
+    let audio_mode = if audio_mode == "microphone" {
+        "microphone"
+    } else {
+        "mixed"
+    };
+    let stream = preferred_transcription_audio_stream(audio_path, audio_mode);
+    recognition_provenance(audio_path, model, options, audio_mode, stream.as_ref())
+}
+
+fn normalized_audio_label(label: &str) -> String {
+    label
         .chars()
         .map(|character| {
             if character.is_ascii_alphanumeric() {
@@ -135,7 +537,11 @@ fn microphone_label_score(label: &str) -> u8 {
                 ' '
             }
         })
-        .collect();
+        .collect()
+}
+
+fn microphone_label_score(label: &str) -> u8 {
+    let normalized = normalized_audio_label(label);
     let words: Vec<&str> = normalized.split_whitespace().collect();
 
     if words.contains(&"microphone") {
@@ -147,7 +553,26 @@ fn microphone_label_score(label: &str) -> u8 {
     }
 }
 
-fn select_microphone_audio_stream(probe_json: &str) -> Option<SpeechAudioStream> {
+fn mixed_label_score(label: &str) -> u8 {
+    let normalized = normalized_audio_label(label);
+    let words: Vec<&str> = normalized.split_whitespace().collect();
+    if normalized.contains("all audio")
+        || normalized.contains("stream mix")
+        || normalized.contains("mixed audio")
+        || words.contains(&"master")
+    {
+        3
+    } else if words.contains(&"mix") || words.contains(&"mixed") {
+        2
+    } else {
+        0
+    }
+}
+
+fn select_audio_stream(
+    probe_json: &str,
+    score_label: impl Fn(&str) -> u8,
+) -> Option<SpeechAudioStream> {
     let probe: AudioProbeOutput = serde_json::from_str(probe_json).ok()?;
     let mut best: Option<(u8, SpeechAudioStream)> = None;
 
@@ -160,7 +585,7 @@ fn select_microphone_audio_stream(probe_json: &str) -> Option<SpeechAudioStream>
         .into_iter()
         .flatten()
         {
-            let score = microphone_label_score(label);
+            let score = score_label(label);
             let is_better = score > 0
                 && best
                     .as_ref()
@@ -181,7 +606,18 @@ fn select_microphone_audio_stream(probe_json: &str) -> Option<SpeechAudioStream>
     best.map(|(_, stream)| stream)
 }
 
-fn preferred_transcription_audio_stream(audio_path: &str) -> Option<SpeechAudioStream> {
+fn select_microphone_audio_stream(probe_json: &str) -> Option<SpeechAudioStream> {
+    select_audio_stream(probe_json, microphone_label_score)
+}
+
+fn select_mixed_audio_stream(probe_json: &str) -> Option<SpeechAudioStream> {
+    select_audio_stream(probe_json, mixed_label_score)
+}
+
+fn preferred_transcription_audio_stream(
+    audio_path: &str,
+    audio_mode: &str,
+) -> Option<SpeechAudioStream> {
     let ffprobe = crate::bin_manager::ffprobe_path().ok()?;
     let mut command = Command::new(ffprobe);
     command
@@ -208,7 +644,11 @@ fn preferred_transcription_audio_stream(audio_path: &str) -> Option<SpeechAudioS
         return None;
     }
     let probe_json = std::str::from_utf8(&output.stdout).ok()?;
-    select_microphone_audio_stream(probe_json)
+    if audio_mode == "microphone" {
+        select_microphone_audio_stream(probe_json)
+    } else {
+        select_mixed_audio_stream(probe_json)
+    }
 }
 
 fn value_after_marker(line: &str, marker: &str) -> Option<f64> {
@@ -263,11 +703,11 @@ fn speech_windows_from_silence_log(stderr: &str, duration: f64) -> Vec<(f64, f64
 
     let mut windows: Vec<(f64, f64)> = Vec::new();
     for (start, end) in raw_windows {
-        if end - start < 0.12 {
+        if end - start < 0.08 {
             continue;
         }
-        let padded_start = (start - 0.08).max(0.0);
-        let padded_end = (end + 0.08).min(duration);
+        let padded_start = (start - CAPTION_SPEECH_PADDING_SECONDS).max(0.0);
+        let padded_end = (end + CAPTION_SPEECH_PADDING_SECONDS).min(duration);
         if let Some(previous) = windows.last_mut() {
             if padded_start <= previous.1 {
                 previous.1 = previous.1.max(padded_end);
@@ -367,8 +807,8 @@ fn detect_vad_speech_windows(samples: &[f32]) -> Option<Vec<(f64, f64)>> {
     params.set_min_speech_duration(80);
     params.set_min_silence_duration(160);
     params.set_max_speech_duration(18.0);
-    params.set_speech_pad(20);
-    params.set_samples_overlap(0.0);
+    params.set_speech_pad(160);
+    params.set_samples_overlap(0.16);
 
     let segments = match context.segments_from_samples(params, samples) {
         Ok(segments) => segments,
@@ -458,6 +898,65 @@ fn normalized_word(word: &str) -> String {
         .collect()
 }
 
+fn deduplicate_aligned_segments(mut segments: Vec<TranscriptSegment>) -> Vec<TranscriptSegment> {
+    segments.sort_by(|left, right| {
+        left.start
+            .total_cmp(&right.start)
+            .then_with(|| left.end.total_cmp(&right.end))
+    });
+
+    let mut accepted_words: Vec<TranscriptWord> = Vec::new();
+    let mut normalized_segments = Vec::new();
+    for mut segment in segments {
+        segment.words.sort_by(|left, right| {
+            left.start
+                .total_cmp(&right.start)
+                .then_with(|| left.end.total_cmp(&right.end))
+        });
+        segment.words.retain(|word| {
+            let normalized = normalized_word(&word.word);
+            if normalized.is_empty() || !word.start.is_finite() || !word.end.is_finite() {
+                return false;
+            }
+            let duplicate = accepted_words.iter().rev().take(8).any(|previous| {
+                normalized_word(&previous.word) == normalized
+                    && (word.start - previous.start).abs() <= 0.18
+                    && word.start < previous.end + 0.04
+            });
+            if duplicate {
+                false
+            } else {
+                accepted_words.push(word.clone());
+                true
+            }
+        });
+        if segment.words.is_empty() {
+            continue;
+        }
+        segment.start = segment
+            .words
+            .first()
+            .map(|word| word.start)
+            .unwrap_or(segment.start);
+        segment.end = segment
+            .words
+            .last()
+            .map(|word| word.end)
+            .unwrap_or(segment.end);
+        segment.text = segment
+            .words
+            .iter()
+            .map(|word| word.word.trim())
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !segment.text.is_empty() && segment.end > segment.start {
+            normalized_segments.push(segment);
+        }
+    }
+    normalized_segments
+}
+
 fn distribute_words(words: &[String], start: f64, end: f64) -> Vec<TranscriptWord> {
     if words.is_empty() || end <= start {
         return Vec::new();
@@ -465,7 +964,12 @@ fn distribute_words(words: &[String], start: f64, end: f64) -> Vec<TranscriptWor
 
     let weights: Vec<usize> = words
         .iter()
-        .map(|word| word.chars().filter(|character| character.is_alphanumeric()).count().max(1))
+        .map(|word| {
+            word.chars()
+                .filter(|character| character.is_alphanumeric())
+                .count()
+                .max(1)
+        })
         .collect();
     let total_weight = weights.iter().sum::<usize>().max(1) as f64;
     let mut cursor = start;
@@ -560,13 +1064,10 @@ fn reconcile_segment_words(
         if fill_end <= fill_start {
             return distribute_words(&text_words, segment_start, segment_end);
         }
-        for (offset, word) in distribute_words(
-            &text_words[run_start..run_end],
-            fill_start,
-            fill_end,
-        )
-        .into_iter()
-        .enumerate()
+        for (offset, word) in
+            distribute_words(&text_words[run_start..run_end], fill_start, fill_end)
+                .into_iter()
+                .enumerate()
         {
             aligned[run_start + offset] = Some(word);
         }
@@ -643,14 +1144,70 @@ fn convert_segment(segment: &WhisperSegment<'_>, time_offset: f64) -> Option<Tra
     })
 }
 
+fn collect_window_segments(
+    state: &whisper_rs::WhisperState,
+    window_start: f64,
+    window_end: f64,
+) -> (Vec<TranscriptSegment>, String) {
+    let mut segments = Vec::new();
+    let mut decoded_text = String::new();
+    for segment_index in 0..state.full_n_segments() {
+        if let Some(segment) = state.get_segment(segment_index) {
+            if let Some(converted) = convert_segment(&segment, window_start) {
+                if let Some(clamped) = clamp_segment_to_window(converted, window_start, window_end)
+                {
+                    if !decoded_text.is_empty() {
+                        decoded_text.push(' ');
+                    }
+                    decoded_text.push_str(clamped.text.trim());
+                    segments.push(clamped);
+                }
+            }
+        }
+    }
+    (segments, decoded_text)
+}
+
+fn decode_window_without_prompt_context(
+    ctx: &WhisperContext,
+    samples: &[f32],
+    window_start: f64,
+    window_end: f64,
+    options: &RecognitionOptions,
+) -> Result<(Vec<TranscriptSegment>, String, Option<String>), String> {
+    let mut params = FullParams::new(options.decoder.sampling_strategy());
+    params.set_temperature(options.decoder.temperature());
+    match options.language {
+        RecognitionLanguage::English => params.set_language(Some("en")),
+        RecognitionLanguage::Auto => params.set_language(None),
+    }
+    params.set_no_context(true);
+    params.set_token_timestamps(true);
+    params.set_print_special(false);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    params.set_debug_mode(false);
+    params.set_n_threads(optimal_thread_count());
+
+    let mut state = ctx
+        .create_state()
+        .map_err(|error| format!("Failed to create promptless retry state: {error}"))?;
+    state
+        .full(params, samples)
+        .map_err(|error| format!("Promptless retry inference failed: {error}"))?;
+    let language = resolved_language_for_state(&state, options.language);
+    let (segments, decoded_text) = collect_window_segments(&state, window_start, window_end);
+    Ok((segments, decoded_text, language))
+}
+
 // ── Path helpers ──
 
 /// Models directory: %APPDATA%/clipviral/models/
 pub fn models_dir() -> Result<PathBuf, String> {
     let data = dirs::data_dir().ok_or("Cannot determine app data directory")?;
     let dir = data.join("clipviral").join("models");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create models dir: {}", e))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create models dir: {}", e))?;
     Ok(dir)
 }
 
@@ -662,7 +1219,11 @@ pub fn model_path(model: WhisperModel) -> Result<PathBuf, String> {
 /// Check whether a model has been downloaded.
 pub fn is_model_downloaded(model: WhisperModel) -> bool {
     model_path(model)
-        .map(|p| p.exists())
+        .and_then(|path| {
+            std::fs::metadata(path)
+                .map_err(|error| format!("Could not inspect local model: {error}"))
+        })
+        .map(|metadata| metadata.is_file() && metadata.len() == model.size_bytes())
         .unwrap_or(false)
 }
 
@@ -678,23 +1239,30 @@ pub fn find_ffmpeg() -> Result<PathBuf, String> {
 /// Extract 16 kHz mono f32le PCM from a media file using ffmpeg, piped to stdout.
 fn extract_pcm_audio(audio_path: &str, ffmpeg: &PathBuf) -> Result<Vec<f32>, String> {
     let mut child_cmd = Command::new(ffmpeg);
-    child_cmd.args([
-        "-i", audio_path,
-        "-ar", "16000",
-        "-ac", "1",
-        "-f", "f32le",
-        "-acodec", "pcm_f32le",
-        "pipe:1",
-    ])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null());
+    child_cmd
+        .args([
+            "-i",
+            audio_path,
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-f",
+            "f32le",
+            "-acodec",
+            "pcm_f32le",
+            "pipe:1",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         child_cmd.creation_flags(0x08000000);
     }
-    let mut child = child_cmd.spawn()
+    let mut child = child_cmd
+        .spawn()
         .map_err(|e| format!("Failed to spawn ffmpeg: {}", e))?;
 
     let mut raw = Vec::new();
@@ -778,7 +1346,18 @@ fn extract_pcm_audio_range(
         .arg(audio_path)
         .arg("-t")
         .arg(format!("{duration:.3}"))
-        .args(["-vn", "-ar", "16000", "-ac", "1", "-f", "f32le", "-acodec", "pcm_f32le", "pipe:1"])
+        .args([
+            "-vn",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-f",
+            "f32le",
+            "-acodec",
+            "pcm_f32le",
+            "pipe:1",
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -843,13 +1422,14 @@ pub fn transcribe<F>(
     audio_path: &str,
     model: WhisperModel,
     use_gpu: bool,
+    options: RecognitionOptions,
     on_progress: F,
 ) -> Result<TranscriptResult, String>
 where
     F: Fn(u32) + Send + Sync + 'static,
 {
     let _transcription_slot = acquire_transcription_slot()?;
-    transcribe_internal(audio_path, model, use_gpu, false, on_progress)
+    transcribe_internal(audio_path, model, use_gpu, false, options, on_progress)
 }
 
 fn transcribe_internal<F>(
@@ -857,14 +1437,18 @@ fn transcribe_internal<F>(
     model: WhisperModel,
     use_gpu: bool,
     align_word_timestamps: bool,
+    options: RecognitionOptions,
     on_progress: F,
 ) -> Result<TranscriptResult, String>
 where
     F: Fn(u32) + Send + Sync + 'static,
 {
     let duration = crate::commands::export::probe_media_duration(std::path::Path::new(audio_path))
-        .ok_or_else(|| "Could not determine media duration for bounded transcription".to_string())?;
+        .ok_or_else(|| {
+            "Could not determine media duration for bounded transcription".to_string()
+        })?;
     let windows = split_transcription_windows(&[(0.0, duration)]);
+    let provenance = expected_file_recognition(audio_path, model, &options)?;
     transcribe_windows_bounded_internal(
         audio_path,
         &windows,
@@ -872,6 +1456,8 @@ where
         model,
         use_gpu,
         align_word_timestamps,
+        &options,
+        provenance,
         on_progress,
     )
 }
@@ -884,36 +1470,54 @@ pub fn transcribe_range<F>(
     end_seconds: f64,
     model: WhisperModel,
     use_gpu: bool,
+    audio_mode: &str,
+    options: RecognitionOptions,
     on_progress: F,
 ) -> Result<TranscriptResult, String>
 where
     F: Fn(u32) + Send + Sync + 'static,
 {
     let duration = end_seconds - start_seconds;
-    if !start_seconds.is_finite() || !end_seconds.is_finite() || start_seconds < 0.0 || duration <= 0.0 {
+    if !start_seconds.is_finite()
+        || !end_seconds.is_finite()
+        || start_seconds < 0.0
+        || duration <= 0.0
+    {
         return Err("Invalid clip range for transcription".to_string());
     }
     let _transcription_slot = acquire_transcription_slot()?;
 
     let ffmpeg = find_ffmpeg()?;
-    let temp_path = std::env::temp_dir().join(format!(
-        "clipviral-caption-{}.wav",
-        uuid::Uuid::new_v4()
-    ));
-    let speech_stream = preferred_transcription_audio_stream(audio_path);
+    let temp_path =
+        std::env::temp_dir().join(format!("clipviral-caption-{}.wav", uuid::Uuid::new_v4()));
+    let audio_mode = if audio_mode == "microphone" {
+        "microphone"
+    } else {
+        "mixed"
+    };
+    let speech_stream = preferred_transcription_audio_stream(audio_path, audio_mode);
+    let provenance = recognition_provenance(
+        audio_path,
+        model,
+        &options,
+        audio_mode,
+        speech_stream.as_ref(),
+    )?;
     let audio_map = speech_stream
         .as_ref()
         .map(|stream| format!("0:{}", stream.index))
         .unwrap_or_else(|| "0:a:0".to_string());
     if let Some(stream) = speech_stream.as_ref() {
         log::info!(
-            "[Whisper] Using speech-focused audio stream {} ({}) for clip captions",
+            "[Whisper] Using {} audio stream {} ({}) for clip captions",
+            audio_mode,
             audio_map,
             stream.label
         );
     } else {
         log::debug!(
-            "[Whisper] No labeled microphone track found; using default audio stream for clip captions"
+            "[Whisper] No labeled {} track found; using the default mixed audio stream for clip captions",
+            audio_mode
         );
     }
     let mut command = Command::new(&ffmpeg);
@@ -961,25 +1565,50 @@ where
         return Err(format!("Failed to extract clip audio: {}", tail.trim()));
     }
 
+    let progress_fn = Arc::new(on_progress);
     let result = match temp_path.to_str() {
         Some(path) => {
-            let windows = detect_speech_windows(&temp_path, duration, &ffmpeg)
+            let amplitude_windows = detect_speech_windows(&temp_path, duration, &ffmpeg);
+            let windows = amplitude_windows
+                .as_ref()
+                .filter(|windows| !windows.is_empty())
+                .cloned()
                 .unwrap_or_else(|| vec![(0.0, duration)]);
             log::info!(
-                "[Whisper] Clip captions: transcribing {} speech window(s) across {:.1}s",
+                "[Whisper] Clip captions: amplitude gate supplied {} window(s) across {:.1}s; Silero will refine them",
                 windows.len(),
                 duration
             );
-            if windows.is_empty() {
-                on_progress(100);
-                Ok(TranscriptResult {
-                    segments: Vec::new(),
-                    language: "en".to_string(),
+            let primary_progress = Arc::clone(&progress_fn);
+            let mut aligned = transcribe_windows_internal(
+                path,
+                &windows,
+                model,
+                use_gpu,
+                true,
+                &options,
+                provenance.clone(),
+                move |value| primary_progress(value),
+            )?;
+            if aligned.segments.is_empty() {
+                log::info!(
+                    "[Whisper] Quiet-speech fallback: Silero returned no words; transcribing the bounded full clip"
+                );
+                let fallback_progress = Arc::clone(&progress_fn);
+                aligned = transcribe_windows_bounded_internal(
+                    path,
+                    &[(0.0, duration)],
                     duration,
-                })
-            } else {
-                transcribe_windows_internal(path, &windows, model, use_gpu, true, on_progress)
+                    model,
+                    use_gpu,
+                    true,
+                    &options,
+                    provenance,
+                    move |value| fallback_progress(value),
+                )?;
             }
+            aligned.segments = deduplicate_aligned_segments(aligned.segments);
+            Ok(aligned)
         }
         None => Err("Temporary caption path has invalid encoding".to_string()),
     };
@@ -1011,13 +1640,24 @@ pub fn transcribe_windows<F>(
     windows: &[(f64, f64)],
     model: WhisperModel,
     use_gpu: bool,
+    options: RecognitionOptions,
     on_progress: F,
 ) -> Result<TranscriptResult, String>
 where
     F: Fn(u32) + Send + Sync + 'static,
 {
     let _transcription_slot = acquire_transcription_slot()?;
-    transcribe_windows_internal(audio_path, windows, model, use_gpu, false, on_progress)
+    let provenance = expected_file_recognition(audio_path, model, &options)?;
+    transcribe_windows_internal(
+        audio_path,
+        windows,
+        model,
+        use_gpu,
+        false,
+        &options,
+        provenance,
+        on_progress,
+    )
 }
 
 fn transcribe_windows_bounded_internal<F>(
@@ -1027,6 +1667,8 @@ fn transcribe_windows_bounded_internal<F>(
     model: WhisperModel,
     use_gpu: bool,
     align_word_timestamps: bool,
+    options: &RecognitionOptions,
+    mut provenance: RecognitionProvenance,
     on_progress: F,
 ) -> Result<TranscriptResult, String>
 where
@@ -1078,6 +1720,8 @@ where
     progress_fn(15);
 
     let mut all_segments = Vec::new();
+    let mut language_votes = HashMap::new();
+    let mut previous_tail = String::new();
     let mut samples_processed = 0usize;
     for (index, &(window_start, window_end)) in bounded_windows.iter().enumerate() {
         log::debug!(
@@ -1091,8 +1735,16 @@ where
         let actual_window_end =
             (window_start + samples.len() as f64 / PCM_SAMPLE_RATE).min(window_end);
 
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        params.set_language(Some("en"));
+        let mut params = FullParams::new(options.decoder.sampling_strategy());
+        params.set_temperature(options.decoder.temperature());
+        match options.language {
+            RecognitionLanguage::English => params.set_language(Some("en")),
+            RecognitionLanguage::Auto => params.set_language(None),
+        }
+        let prompt = prompt_with_previous_tail(options, &previous_tail);
+        if !prompt.is_empty() {
+            params.set_initial_prompt(&prompt);
+        }
         params.set_token_timestamps(true);
         params.set_print_special(false);
         params.set_print_progress(false);
@@ -1116,27 +1768,52 @@ where
         state
             .full(params, &samples)
             .map_err(|e| format!("Whisper inference failed on chunk {}: {e}", index + 1))?;
+        let mut window_language = resolved_language_for_state(&state, options.language);
+        let (mut window_segments, mut decoded_text) =
+            collect_window_segments(&state, window_start, actual_window_end);
+        drop(state);
 
-        let num_segments = state.full_n_segments();
-        for segment_index in 0..num_segments {
-            if let Some(segment) = state.get_segment(segment_index) {
-                if let Some(converted) = convert_segment(&segment, window_start) {
-                    if let Some(clamped) =
-                        clamp_segment_to_window(converted, window_start, actual_window_end)
-                    {
-                        all_segments.push(clamped);
-                    }
-                }
-            }
+        if repeats_prompt_context(
+            &decoded_text,
+            &options.automatic_prompt_terms,
+            &previous_tail,
+        ) {
+            log::warn!(
+                "[Whisper] Prompt context repeated in chunk {}; retrying that chunk without prompt context",
+                index + 1
+            );
+            let (retry_segments, retry_text, retry_language) =
+                decode_window_without_prompt_context(
+                    &ctx,
+                    &samples,
+                    window_start,
+                    actual_window_end,
+                    options,
+                )?;
+            window_segments = retry_segments;
+            decoded_text = retry_text;
+            window_language = retry_language;
         }
+
+        record_language_vote(window_language.as_deref(), &mut language_votes);
+        all_segments.extend(window_segments);
+        update_previous_tail_for_window(
+            &mut previous_tail,
+            &decoded_text,
+            window_start,
+            actual_window_end,
+        );
         samples_processed += samples.len();
     }
 
     progress_fn(100);
+    let language = resolved_language(options.language, &language_votes);
+    provenance.resolved_language = language.clone();
     Ok(TranscriptResult {
         segments: all_segments,
-        language: "en".to_string(),
+        language,
         duration: source_duration,
+        recognition: provenance,
     })
 }
 
@@ -1146,6 +1823,8 @@ fn transcribe_windows_internal<F>(
     model: WhisperModel,
     use_gpu: bool,
     align_word_timestamps: bool,
+    options: &RecognitionOptions,
+    mut provenance: RecognitionProvenance,
     on_progress: F,
 ) -> Result<TranscriptResult, String>
 where
@@ -1156,11 +1835,12 @@ where
     }
 
     if !align_word_timestamps {
-        let source_duration = crate::commands::export::probe_media_duration(
-            std::path::Path::new(audio_path),
-        )
-        .or_else(|| windows.iter().map(|(_, end)| *end).reduce(f64::max))
-        .ok_or_else(|| "Could not determine media duration for bounded transcription".to_string())?;
+        let source_duration =
+            crate::commands::export::probe_media_duration(std::path::Path::new(audio_path))
+                .or_else(|| windows.iter().map(|(_, end)| *end).reduce(f64::max))
+                .ok_or_else(|| {
+                    "Could not determine media duration for bounded transcription".to_string()
+                })?;
         return transcribe_windows_bounded_internal(
             audio_path,
             windows,
@@ -1168,6 +1848,8 @@ where
             model,
             use_gpu,
             false,
+            options,
+            provenance,
             on_progress,
         );
     }
@@ -1215,10 +1897,13 @@ where
     }
     if active_windows.is_empty() {
         progress_fn(100);
+        let language = resolved_language(options.language, &HashMap::new());
+        provenance.resolved_language = language.clone();
         return Ok(TranscriptResult {
             segments: Vec::new(),
-            language: "en".to_string(),
+            language,
             duration: total_duration,
+            recognition: provenance,
         });
     }
 
@@ -1275,6 +1960,8 @@ where
     // 4. Run inference per window, mapping each segment's timestamps back
     //    into the original-VOD reference frame.
     let mut all_segments: Vec<TranscriptSegment> = Vec::new();
+    let mut language_votes = HashMap::new();
+    let mut previous_tail = String::new();
     let mut samples_processed: usize = 0;
 
     for (i, &(window_start_secs, window_end_secs)) in active_windows.iter().enumerate() {
@@ -1303,8 +1990,16 @@ where
 
         // Per-window inference params — set fresh each time because progress
         // callback closure captures the running totals at call time.
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        params.set_language(Some("en"));
+        let mut params = FullParams::new(options.decoder.sampling_strategy());
+        params.set_temperature(options.decoder.temperature());
+        match options.language {
+            RecognitionLanguage::English => params.set_language(Some("en")),
+            RecognitionLanguage::Auto => params.set_language(None),
+        }
+        let prompt = prompt_with_previous_tail(options, &previous_tail);
+        if !prompt.is_empty() {
+            params.set_initial_prompt(&prompt);
+        }
         params.set_token_timestamps(true);
         params.set_print_special(false);
         params.set_print_progress(false);
@@ -1335,22 +2030,41 @@ where
         state
             .full(params, slice)
             .map_err(|e| format!("Whisper inference failed on window {}: {}", i + 1, e))?;
+        let mut window_language = resolved_language_for_state(&state, options.language);
+        let (mut window_segments, mut decoded_text) =
+            collect_window_segments(&state, window_start_secs, window_end_secs);
+        drop(state);
 
-        // Map slice-local segment timestamps back to original VOD time.
-        let num_segments = state.full_n_segments();
-        for j in 0..num_segments {
-            if let Some(segment) = state.get_segment(j) {
-                if let Some(converted) = convert_segment(&segment, window_start_secs) {
-                    if let Some(clamped) = clamp_segment_to_window(
-                        converted,
-                        window_start_secs,
-                        window_end_secs,
-                    ) {
-                        all_segments.push(clamped);
-                    }
-                }
-            }
+        if repeats_prompt_context(
+            &decoded_text,
+            &options.automatic_prompt_terms,
+            &previous_tail,
+        ) {
+            log::warn!(
+                "[Whisper] Prompt context repeated in speech window {}; retrying that window without prompt context",
+                i + 1
+            );
+            let (retry_segments, retry_text, retry_language) =
+                decode_window_without_prompt_context(
+                    &ctx,
+                    slice,
+                    window_start_secs,
+                    window_end_secs,
+                    options,
+                )?;
+            window_segments = retry_segments;
+            decoded_text = retry_text;
+            window_language = retry_language;
         }
+
+        record_language_vote(window_language.as_deref(), &mut language_votes);
+        all_segments.extend(window_segments);
+        update_previous_tail_for_window(
+            &mut previous_tail,
+            &decoded_text,
+            window_start_secs,
+            window_end_secs,
+        );
 
         samples_processed += slice.len();
     }
@@ -1364,10 +2078,13 @@ where
         total_window_samples as f64 / 16000.0,
     );
 
+    let language = resolved_language(options.language, &language_votes);
+    provenance.resolved_language = language.clone();
     Ok(TranscriptResult {
         segments: all_segments,
-        language: "en".to_string(),
+        language,
         duration: total_duration,
+        recognition: provenance,
     })
 }
 
@@ -1376,13 +2093,45 @@ where
 fn optimal_thread_count() -> i32 {
     let cpus = num_cpus::get_physical();
     let threads = if cpus > 2 { cpus - 1 } else { 1 };
-    log::debug!("[Whisper] Using {} threads ({} physical cores)", threads, cpus);
+    log::debug!(
+        "[Whisper] Using {} threads ({} physical cores)",
+        threads,
+        cpus
+    );
     threads as i32
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn official_model_metadata_is_exact() {
+        assert_eq!(WhisperModel::Base.size_bytes(), 147_951_465);
+        assert_eq!(
+            WhisperModel::Base.expected_sha256(),
+            "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"
+        );
+        assert_eq!(WhisperModel::Medium.size_bytes(), 1_533_763_059);
+        assert_eq!(
+            WhisperModel::Medium.expected_sha256(),
+            "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the optional local Medium model"]
+    fn installed_medium_model_loads_with_local_whisper_runtime() {
+        assert!(
+            is_model_downloaded(WhisperModel::Medium),
+            "official Medium model is not installed"
+        );
+        let path = model_path(WhisperModel::Medium).unwrap();
+        let mut params = WhisperContextParameters::default();
+        params.use_gpu = false;
+        WhisperContext::new_with_params(path.to_str().unwrap(), params)
+            .expect("local whisper runtime could not load the Medium model");
+    }
 
     #[test]
     fn long_transcription_windows_are_split_into_bounded_pcm_chunks() {
@@ -1395,12 +2144,7 @@ mod tests {
 
         assert_eq!(
             chunks,
-            vec![
-                (0.0, 300.0),
-                (300.0, 600.0),
-                (600.0, 750.0),
-                (800.0, 850.0)
-            ]
+            vec![(0.0, 300.0), (300.0, 600.0), (600.0, 750.0), (800.0, 850.0)]
         );
         assert!(chunks
             .iter()
@@ -1411,11 +2155,31 @@ mod tests {
     #[test]
     fn merges_whisper_subword_tokens_into_timed_words() {
         let words = merge_token_pieces(vec![
-            TimedTokenPiece { text: " Not".into(), start: 1.0, end: 1.2 },
-            TimedTokenPiece { text: " Sta".into(), start: 1.2, end: 1.4 },
-            TimedTokenPiece { text: "cie".into(), start: 1.4, end: 1.6 },
-            TimedTokenPiece { text: " stabbing".into(), start: 1.6, end: 2.0 },
-            TimedTokenPiece { text: ".".into(), start: 2.0, end: 2.1 },
+            TimedTokenPiece {
+                text: " Not".into(),
+                start: 1.0,
+                end: 1.2,
+            },
+            TimedTokenPiece {
+                text: " Sta".into(),
+                start: 1.2,
+                end: 1.4,
+            },
+            TimedTokenPiece {
+                text: "cie".into(),
+                start: 1.4,
+                end: 1.6,
+            },
+            TimedTokenPiece {
+                text: " stabbing".into(),
+                start: 1.6,
+                end: 2.0,
+            },
+            TimedTokenPiece {
+                text: ".".into(),
+                start: 2.0,
+                end: 2.1,
+            },
         ]);
 
         assert_eq!(words.len(), 3);
@@ -1433,14 +2197,29 @@ mod tests {
             0.0,
             1.4,
             vec![
-                TranscriptWord { word: "I".into(), start: 0.0, end: 0.1 },
-                TranscriptWord { word: "quick".into(), start: 0.6, end: 1.0 },
-                TranscriptWord { word: "proc".into(), start: 1.0, end: 1.4 },
+                TranscriptWord {
+                    word: "I".into(),
+                    start: 0.0,
+                    end: 0.1,
+                },
+                TranscriptWord {
+                    word: "quick".into(),
+                    start: 0.6,
+                    end: 1.0,
+                },
+                TranscriptWord {
+                    word: "proc".into(),
+                    start: 1.0,
+                    end: 1.4,
+                },
             ],
         );
 
         assert_eq!(
-            words.iter().map(|word| word.word.as_str()).collect::<Vec<_>>(),
+            words
+                .iter()
+                .map(|word| word.word.as_str())
+                .collect::<Vec<_>>(),
             vec!["I", "got", "a", "quick", "proc"]
         );
         assert!(words[1].start >= words[0].end);
@@ -1454,15 +2233,31 @@ mod tests {
             end: 10.5,
             text: "We're not in the".into(),
             words: vec![
-                TranscriptWord { word: "We're".into(), start: 8.6, end: 9.1 },
-                TranscriptWord { word: "not".into(), start: 9.1, end: 9.7 },
-                TranscriptWord { word: "in".into(), start: 9.7, end: 10.0 },
+                TranscriptWord {
+                    word: "We're".into(),
+                    start: 8.6,
+                    end: 9.1,
+                },
+                TranscriptWord {
+                    word: "not".into(),
+                    start: 9.1,
+                    end: 9.7,
+                },
+                TranscriptWord {
+                    word: "in".into(),
+                    start: 9.7,
+                    end: 10.0,
+                },
             ],
         };
         let clamped = clamp_segment_to_window(segment, 8.5, 9.3).unwrap();
 
         assert_eq!(
-            clamped.words.iter().map(|word| word.word.as_str()).collect::<Vec<_>>(),
+            clamped
+                .words
+                .iter()
+                .map(|word| word.word.as_str())
+                .collect::<Vec<_>>(),
             vec!["We're", "not"]
         );
         assert_eq!(clamped.words[1].end, 9.3);
@@ -1481,31 +2276,28 @@ mod tests {
         let windows = speech_windows_from_silence_log(log, 30.0);
 
         assert_eq!(windows.len(), 2);
-        assert!((windows[0].0 - 12.141).abs() < 0.001);
-        assert!((windows[0].1 - 14.725).abs() < 0.001);
-        assert!((windows[1].0 - 25.913).abs() < 0.001);
-        assert!((windows[1].1 - 26.719).abs() < 0.001);
+        assert!((windows[0].0 - 12.021).abs() < 0.001);
+        assert!((windows[0].1 - 14.845).abs() < 0.001);
+        assert!((windows[1].0 - 25.793).abs() < 0.001);
+        assert!((windows[1].1 - 26.839).abs() < 0.001);
     }
 
     #[test]
     fn handles_fully_active_and_fully_silent_audio() {
-        assert_eq!(
-            speech_windows_from_silence_log("", 5.0),
-            vec![(0.0, 5.0)]
-        );
+        assert_eq!(speech_windows_from_silence_log("", 5.0), vec![(0.0, 5.0)]);
         assert!(speech_windows_from_silence_log("silence_start: 0.0", 5.0).is_empty());
     }
 
     #[test]
     fn bundled_vad_model_loads_and_rejects_silence() {
         assert_eq!(SILERO_VAD_MODEL_BYTES.len(), 885_098);
-        let windows = detect_vad_speech_windows(&vec![0.0; 16_000])
-            .expect("bundled Silero VAD should load");
+        let windows =
+            detect_vad_speech_windows(&vec![0.0; 16_000]).expect("bundled Silero VAD should load");
         assert!(windows.is_empty());
     }
 
     #[test]
-    fn selects_medal_microphone_track_over_mixed_audio() {
+    fn selects_mixed_or_microphone_track_by_requested_mode() {
         let probe = r#"{
             "streams": [
                 {"index": 1, "tags": {"name": "All Audio"}},
@@ -1519,6 +2311,13 @@ mod tests {
             Some(SpeechAudioStream {
                 index: 3,
                 label: "Microphone".to_string(),
+            })
+        );
+        assert_eq!(
+            select_mixed_audio_stream(probe),
+            Some(SpeechAudioStream {
+                index: 1,
+                label: "All Audio".to_string(),
             })
         );
     }
@@ -1548,4 +2347,160 @@ mod tests {
         assert_eq!(select_microphone_audio_stream("not json"), None);
     }
 
+    #[test]
+    fn recognition_signature_covers_recipe_without_storing_prompt_text() {
+        let source = std::env::temp_dir().join(format!(
+            "clipgoblin-recognition-source-{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&source, b"first source").unwrap();
+        let options = RecognitionOptions::final_caption(
+            RecognitionLanguage::English,
+            "Game: Dead by Daylight. Vocabulary: Meg Thomas.".into(),
+        );
+        let stream = SpeechAudioStream {
+            index: 2,
+            label: "All Audio".into(),
+        };
+        let first = recognition_provenance(
+            &source.to_string_lossy(),
+            WhisperModel::Base,
+            &options,
+            "mixed",
+            Some(&stream),
+        )
+        .unwrap();
+
+        assert_eq!(first.pipeline_version, 3);
+        assert_eq!(first.decoder, "beam-search-5");
+        assert_eq!(first.audio_stream, "Track 2: All Audio");
+        assert!(!serde_json::to_string(&first)
+            .unwrap()
+            .contains("Dead by Daylight"));
+
+        let medium_signature = recognition_provenance(
+            &source.to_string_lossy(),
+            WhisperModel::Medium,
+            &options,
+            "mixed",
+            Some(&stream),
+        )
+        .unwrap();
+        assert_eq!(medium_signature.model, "medium");
+        assert_ne!(first.signature, medium_signature.signature);
+
+        let auto = RecognitionOptions::final_caption(
+            RecognitionLanguage::Auto,
+            options.initial_prompt.clone(),
+        );
+        let auto_signature = recognition_provenance(
+            &source.to_string_lossy(),
+            WhisperModel::Base,
+            &auto,
+            "mixed",
+            Some(&stream),
+        )
+        .unwrap();
+        assert_ne!(first.signature, auto_signature.signature);
+
+        let mut shifted_range = options.clone();
+        shifted_range.scope_fingerprint = scope_fingerprint_for_windows(&[(10.0, 40.0)]);
+        let shifted_signature = recognition_provenance(
+            &source.to_string_lossy(),
+            WhisperModel::Base,
+            &shifted_range,
+            "mixed",
+            Some(&stream),
+        )
+        .unwrap();
+        assert_ne!(first.signature, shifted_signature.signature);
+
+        std::fs::write(&source, b"a changed and longer source").unwrap();
+        let changed_source = recognition_provenance(
+            &source.to_string_lossy(),
+            WhisperModel::Base,
+            &options,
+            "mixed",
+            Some(&stream),
+        )
+        .unwrap();
+        let _ = std::fs::remove_file(source);
+        assert_ne!(first.signature, changed_source.signature);
+    }
+
+    #[test]
+    fn prompt_and_context_tail_are_bounded() {
+        let options =
+            RecognitionOptions::final_caption(RecognitionLanguage::English, "context ".repeat(100));
+        assert!(options.initial_prompt.chars().count() <= MAX_STATIC_PROMPT_CHARS);
+        let prompt = prompt_with_previous_tail(&options, &"previous ".repeat(100));
+        assert!(
+            prompt.chars().count() <= MAX_STATIC_PROMPT_CHARS + MAX_PREVIOUS_TRANSCRIPT_CHARS + 18
+        );
+        assert!(!prompt.contains('\0'));
+    }
+
+    #[test]
+    fn repeated_automatic_context_is_retried_but_real_repetition_is_preserved() {
+        let options = RecognitionOptions::final_caption(
+            RecognitionLanguage::English,
+            "Game: Dead by Daylight. Vocabulary: Meg Thomas.".into(),
+        )
+        .with_automatic_prompt_terms(vec!["Dead by Daylight".into()]);
+
+        assert!(repeats_automatic_prompt_context(
+            "Dead by Daylight. DeadByDaylight.com.",
+            &options.automatic_prompt_terms,
+        ));
+        assert!(repeats_prompt_context(
+            "Stay away. Stay away.",
+            &[],
+            "Earlier speech ended with stay away.",
+        ));
+        assert!(!repeats_prompt_context(
+            "Leave me alone, leave me alone, leave me alone.",
+            &options.automatic_prompt_terms,
+            "Completely unrelated previous speech.",
+        ));
+    }
+
+    #[test]
+    fn very_short_windows_do_not_seed_following_caption_context() {
+        let mut previous_tail = "earlier speech".to_string();
+        update_previous_tail_for_window(&mut previous_tail, "weak fragment", 8.5, 8.95);
+        assert_eq!(previous_tail, "earlier speech");
+
+        update_previous_tail_for_window(&mut previous_tail, "clear next line", 9.0, 10.0);
+        assert!(previous_tail.ends_with("clear next line"));
+    }
+
+    #[test]
+    fn detection_and_caption_profiles_remain_distinct() {
+        let detection = RecognitionOptions::detection(
+            RecognitionLanguage::English,
+            String::new(),
+            "full-vod-v1".into(),
+        );
+        let caption =
+            RecognitionOptions::final_caption(RecognitionLanguage::English, String::new());
+        assert!(matches!(
+            detection.decoder.sampling_strategy(),
+            SamplingStrategy::Greedy { best_of: 1 }
+        ));
+        assert!(matches!(
+            caption.decoder.sampling_strategy(),
+            SamplingStrategy::BeamSearch {
+                beam_size: 5,
+                patience
+            } if patience == -1.0
+        ));
+        assert_eq!(detection.decoder.temperature(), 0.0);
+        assert_eq!(caption.decoder.temperature(), 0.0);
+        assert_eq!(detection.decoder.cache_key(), "greedy-best-of-1");
+        assert_eq!(caption.decoder.cache_key(), "beam-search-5");
+        assert_eq!(detection.recipe_version, RECOGNITION_PIPELINE_VERSION);
+        assert_eq!(caption.recipe_version, CAPTION_RECOGNITION_RECIPE_VERSION);
+        assert!(!detection.carry_previous_context);
+        assert!(caption.carry_previous_context);
+    }
 }

@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { LockKeyhole, Send, Smartphone, UserRound } from 'lucide-react'
-import type { TikTokComplianceValue } from '../lib/tiktokCompliance'
+import {
+  visibleTikTokPrivacyOptions,
+  type TikTokComplianceValue,
+} from '../lib/tiktokCompliance'
+import { describeTikTokIdentity } from '../lib/tiktokIdentity'
 
 // Mirrors the Rust `TikTokCreatorInfo` struct (src-tauri/src/social/tiktok.rs).
 interface CreatorInfo {
@@ -103,12 +107,14 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
   const maxDurationSec = info?.max_video_post_duration_sec ?? 0
   const directDurationExceeded = clipDurationSec != null && maxDurationSec > 0 && clipDurationSec > maxDurationSec
   const draftDurationExceeded = clipDurationSec != null && clipDurationSec > 600
-  const privacyOptions = info && DIRECT_POST_AUDIT_PENDING
-    ? info.privacy_level_options.includes('SELF_ONLY')
-      ? ['SELF_ONLY']
-      : info.privacy_level_options
-    : info?.privacy_level_options ?? []
-  const valid = !!info && !error && (isDraft
+  const identity = describeTikTokIdentity(info?.creator_username, info?.creator_nickname)
+  const privacyOptions = info
+    ? visibleTikTokPrivacyOptions(
+        info.privacy_level_options,
+        DIRECT_POST_AUDIT_PENDING,
+      )
+    : []
+  const valid = !!info && !error && identity.verified && (isDraft
     ? !draftDurationExceeded
     : value.privacyLevel != null
       && privacyOptions.includes(value.privacyLevel)
@@ -159,12 +165,21 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
           )}
         </div>
         <span className="text-xs text-slate-300">
-          Posting to TikTok as{' '}
-          <span className="font-semibold text-white">
-            {info.creator_nickname || `@${info.creator_username}`}
+          {identity.verified ? 'Posting to TikTok as ' : ''}
+          <span className={`font-semibold ${identity.verified ? 'text-white' : 'text-amber-300'}`}>
+            {identity.primary}
           </span>
+          {identity.secondary && (
+            <span className="ml-1 text-slate-500">({identity.secondary})</span>
+          )}
         </span>
       </div>
+
+      {!identity.verified && (
+        <div className="rounded border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[10px] leading-relaxed text-amber-200">
+          Reconnect TikTok before publishing so ClipGoblin can verify the API-returned account handle.
+        </div>
+      )}
 
       <div>
         <label className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold block mb-1">

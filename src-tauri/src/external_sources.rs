@@ -157,8 +157,12 @@ fn media_fingerprint(path: &Path) -> Result<String, String> {
         file.seek(SeekFrom::End(-(last_len as i64)))
             .map_err(|error| format!("Could not seek '{}': {error}", path.display()))?;
         buffer.resize(last_len, 0);
-        file.read_exact(&mut buffer)
-            .map_err(|error| format!("Could not finish fingerprinting '{}': {error}", path.display()))?;
+        file.read_exact(&mut buffer).map_err(|error| {
+            format!(
+                "Could not finish fingerprinting '{}': {error}",
+                path.display()
+            )
+        })?;
         hasher.update(&buffer);
     }
 
@@ -253,7 +257,13 @@ pub(crate) fn scan_configured_source(
         let mut by_path = HashMap::new();
         let mut missing_games = HashSet::new();
         for row in rows.filter_map(Result::ok) {
-            if row.2.as_deref().map(str::trim).unwrap_or_default().is_empty() {
+            if row
+                .2
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default()
+                .is_empty()
+            {
                 missing_games.insert(row.1.clone());
             }
             by_path.insert(row.0, row.1);
@@ -300,7 +310,9 @@ pub(crate) fn scan_configured_source(
                  WHERE id = ?2 AND (game IS NULL OR TRIM(game) = '')",
                 rusqlite::params![candidate.folder_label, clip_id],
             ) {
-                log::debug!("[sources] Could not backfill Medal game folder for {clip_id}: {error}");
+                log::debug!(
+                    "[sources] Could not backfill Medal game folder for {clip_id}: {error}"
+                );
             }
         }
     }
@@ -458,8 +470,15 @@ pub(crate) fn import_media_path(
         captions_position: "bottom".to_string(),
         caption_style: "clean".to_string(),
         caption_font_scale: 1.0,
+        caption_card_scale: crate::db::DEFAULT_CAPTION_CARD_SCALE,
         caption_y_offset: 0.0,
         captions_source_start: None,
+        captions_provenance: "none".to_string(),
+        captions_pipeline_version: 0,
+        caption_audio_mode: "mixed".to_string(),
+        captions_recognition_signature: None,
+        captions_language: None,
+        caption_audio_stream: None,
         facecam_layout: "context_fit".to_string(),
         facecam_settings: None,
         context_background_path: None,
@@ -520,7 +539,10 @@ pub(crate) fn import_candidate_ids(
         .filter(|candidate| selected.contains(candidate.id.as_str()))
         .collect();
     if matching.len() != selected.len() {
-        return Err("One or more selected clips changed or left the configured folder; scan again".to_string());
+        return Err(
+            "One or more selected clips changed or left the configured folder; scan again"
+                .to_string(),
+        );
     }
 
     Ok(matching
@@ -579,7 +601,10 @@ fn auto_sync_once(app: &AppHandle, kind: &str) -> Result<Vec<ImportedClip>, Stri
         match import_media_path(app, &mut conn, Path::new(&candidate.path), kind) {
             Ok(result) if result.status == "imported" => imported.push(result),
             Ok(_) => {}
-            Err(error) => log::warn!("[sources] Auto-import failed for {}: {error}", candidate.path),
+            Err(error) => log::warn!(
+                "[sources] Auto-import failed for {}: {error}",
+                candidate.path
+            ),
         }
     }
     Ok(imported)
@@ -626,7 +651,10 @@ mod tests {
 
     #[test]
     fn imported_titles_are_human_readable() {
-        assert_eq!(clean_title(Path::new("clutch_play-2026.mp4")), "clutch play 2026");
+        assert_eq!(
+            clean_title(Path::new("clutch_play-2026.mp4")),
+            "clutch play 2026"
+        );
     }
 
     #[test]

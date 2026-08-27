@@ -63,16 +63,14 @@ fn youtube_proxy_error(error: String) -> AppError {
 const DEFAULT_YOUTUBE_CLIENT_ID: &str =
     "963785158873-iuutl54610isuch1mcaqnbsoc90acrnb.apps.googleusercontent.com";
 
-static CLIENT_ID: Lazy<String> = Lazy::new(|| {
-    match std::env::var("YOUTUBE_CLIENT_ID") {
-        Ok(val) if !val.is_empty() => {
-            log::info!("YouTube CLIENT_ID loaded from env (len={})", val.len());
-            val
-        }
-        _ => {
-            log::info!("Using embedded YouTube CLIENT_ID");
-            DEFAULT_YOUTUBE_CLIENT_ID.to_string()
-        }
+static CLIENT_ID: Lazy<String> = Lazy::new(|| match std::env::var("YOUTUBE_CLIENT_ID") {
+    Ok(val) if !val.is_empty() => {
+        log::info!("YouTube CLIENT_ID loaded from env (len={})", val.len());
+        val
+    }
+    _ => {
+        log::info!("Using embedded YouTube CLIENT_ID");
+        DEFAULT_YOUTUBE_CLIENT_ID.to_string()
     }
 });
 
@@ -155,8 +153,7 @@ pub fn wait_for_auth_code(listener: TcpListener) -> Result<String, AppError> {
 
         // Skip non-callback requests (e.g. /favicon.ico)
         if !path.starts_with("/?") && path != "/" {
-            let resp =
-                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             if let Ok(mut w) = stream.try_clone() {
                 w.write_all(resp.as_bytes()).ok();
                 w.flush().ok();
@@ -300,6 +297,7 @@ impl PlatformAdapter for YouTubeAdapter {
         Ok(ConnectedAccount {
             platform: "youtube".into(),
             account_name: channel.name,
+            account_handle: None,
             account_id: channel.id,
             connected_at: now,
         })
@@ -342,9 +340,7 @@ impl PlatformAdapter for YouTubeAdapter {
             }
             db::UploadClaim::InboxDelivered { .. } => {
                 return Ok(UploadResult {
-                    status: UploadResultStatus::Duplicate {
-                        existing_url: None,
-                    },
+                    status: UploadResultStatus::Duplicate { existing_url: None },
                     job_id: String::new(),
                 });
             }
@@ -421,6 +417,7 @@ impl PlatformAdapter for YouTubeAdapter {
             (Some(name), Some(id)) => Ok(Some(ConnectedAccount {
                 platform: "youtube".into(),
                 account_name: name,
+                account_handle: None,
                 account_id: id,
                 connected_at: String::new(), // Not stored separately for retrieval
             })),
@@ -435,9 +432,7 @@ impl PlatformAdapter for YouTubeAdapter {
 
 /// Exchange authorization code for tokens + fetch channel info.
 /// Returns `(TokenResponse, ChannelInfo)`.
-async fn do_handle_callback_net(
-    code: &str,
-) -> Result<(TokenResponse, ChannelInfo), AppError> {
+async fn do_handle_callback_net(code: &str) -> Result<(TokenResponse, ChannelInfo), AppError> {
     let tokens = exchange_code(code).await?;
     let channel = fetch_channel_info(&tokens.access_token).await?;
     Ok((tokens, channel))
@@ -447,9 +442,11 @@ async fn do_handle_callback_net(
 async fn do_refresh_token_net(refresh_tok: &str) -> Result<TokenResponse, AppError> {
     log::info!("[YouTube Refresh] Refreshing token via auth proxy");
 
-    let proxy = AuthProxy::new()
-        .map_err(|e| AppError::Api(format!("Auth proxy init failed: {}", e)))?;
-    let proxy_resp = proxy.youtube_refresh(refresh_tok).await
+    let proxy =
+        AuthProxy::new().map_err(|e| AppError::Api(format!("Auth proxy init failed: {}", e)))?;
+    let proxy_resp = proxy
+        .youtube_refresh(refresh_tok)
+        .await
         .map_err(youtube_proxy_error)?;
 
     if let Some(err) = proxy_resp.error {
@@ -469,7 +466,8 @@ async fn do_refresh_token_net(refresh_tok: &str) -> Result<TokenResponse, AppErr
         )));
     }
 
-    let access_token = proxy_resp.access_token
+    let access_token = proxy_resp
+        .access_token
         .ok_or_else(|| AppError::Api("Proxy response missing access_token".into()))?;
 
     Ok(TokenResponse {
@@ -627,9 +625,11 @@ async fn do_upload_net(
 async fn exchange_code(code: &str) -> Result<TokenResponse, AppError> {
     log::info!("[YouTube Token] Exchanging code via auth proxy");
 
-    let proxy = AuthProxy::new()
-        .map_err(|e| AppError::Api(format!("Auth proxy init failed: {}", e)))?;
-    let proxy_resp = proxy.youtube_token_exchange(code, REDIRECT_URI).await
+    let proxy =
+        AuthProxy::new().map_err(|e| AppError::Api(format!("Auth proxy init failed: {}", e)))?;
+    let proxy_resp = proxy
+        .youtube_token_exchange(code, REDIRECT_URI)
+        .await
         .map_err(youtube_proxy_error)?;
 
     if let Some(err) = proxy_resp.error {
@@ -640,7 +640,8 @@ async fn exchange_code(code: &str) -> Result<TokenResponse, AppError> {
         )));
     }
 
-    let access_token = proxy_resp.access_token
+    let access_token = proxy_resp
+        .access_token
         .ok_or_else(|| AppError::Api("Proxy response missing access_token".into()))?;
 
     Ok(TokenResponse {
@@ -654,7 +655,10 @@ async fn exchange_code(code: &str) -> Result<TokenResponse, AppError> {
 async fn fetch_channel_info(access_token: &str) -> Result<ChannelInfo, AppError> {
     let client = reqwest::Client::new();
     let resp = client
-        .get(format!("{}/channels?part=snippet&mine=true", YOUTUBE_API_URL))
+        .get(format!(
+            "{}/channels?part=snippet&mine=true",
+            YOUTUBE_API_URL
+        ))
         .header("Authorization", format!("Bearer {}", access_token))
         .send()
         .await?;
@@ -753,19 +757,34 @@ pub struct VideoStats {
 ///   https://youtube.com/shorts/abc123?feature=...
 pub fn extract_video_id(url: &str) -> Option<String> {
     if let Some(rest) = url.strip_prefix("https://youtu.be/") {
-        let id: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
-        if !id.is_empty() { return Some(id) }
+        let id: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if !id.is_empty() {
+            return Some(id);
+        }
     }
     let lower = url.to_lowercase();
     if let Some(idx) = lower.find("/shorts/") {
         let rest = &url[idx + "/shorts/".len()..];
-        let id: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
-        if !id.is_empty() { return Some(id) }
+        let id: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if !id.is_empty() {
+            return Some(id);
+        }
     }
     if let Some(idx) = lower.find("v=") {
         let rest = &url[idx + 2..];
-        let id: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
-        if !id.is_empty() { return Some(id) }
+        let id: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if !id.is_empty() {
+            return Some(id);
+        }
     }
     None
 }
@@ -832,10 +851,7 @@ pub async fn ensure_fresh_access_token(db_conn: &crate::DbConn) -> Result<String
 /// Returns `Ok(VideoStats)` with `None` fields when the API returns an empty
 /// result (deleted video) — only errors on network/auth failures.
 pub async fn fetch_video_stats(access_token: &str, video_id: &str) -> Result<VideoStats, AppError> {
-    let url = format!(
-        "{}/videos?part=statistics&id={}",
-        YOUTUBE_API_URL, video_id
-    );
+    let url = format!("{}/videos?part=statistics&id={}", YOUTUBE_API_URL, video_id);
     let resp = reqwest::Client::new()
         .get(&url)
         .header("Authorization", format!("Bearer {}", access_token))
@@ -856,7 +872,10 @@ pub async fn fetch_video_stats(access_token: &str, video_id: &str) -> Result<Vid
         .and_then(|arr| arr.first())
         .and_then(|item| item.get("statistics"));
     match stats {
-        None => Ok(VideoStats { view_count: None, like_count: None }),
+        None => Ok(VideoStats {
+            view_count: None,
+            like_count: None,
+        }),
         Some(s) => {
             let parse_u64 = |v: &serde_json::Value| -> Option<i64> {
                 v.as_str().and_then(|s| s.parse::<i64>().ok())

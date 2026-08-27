@@ -1,6 +1,6 @@
 [package]
 name = "clipviral"
-version = "1.6.19"
+version = "1.7.0"
 description = "AI-powered Twitch stream clip generator"
 authors = ["ClipViral"]
 license = "MIT"
@@ -38,6 +38,7 @@ async-trait = "0.1"
 dotenvy = "0.15"
 sha2 = "0.10"
 regex = "1"
+png = "0.17.16"
 whisper-rs = { version = "0.16" }
 num_cpus = "1"
 futures-util = "0.3"

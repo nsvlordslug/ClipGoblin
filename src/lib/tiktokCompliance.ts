@@ -23,3 +23,11 @@ export const EMPTY_TIKTOK_COMPLIANCE: TikTokComplianceValue = {
   yourBrand: false,
   brandedContent: false,
 }
+
+export function visibleTikTokPrivacyOptions(
+  options: string[],
+  auditPending: boolean,
+): string[] {
+  if (!auditPending) return [...options]
+  return options.includes('SELF_ONLY') ? ['SELF_ONLY'] : [...options]
+}

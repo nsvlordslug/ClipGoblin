@@ -130,7 +130,15 @@ mod tests {
     #[test]
     fn parse_valid_round_trips() {
         let r = CamRegion::parse_norm_json(r#"{"x":0.12,"y":0.78,"w":0.22,"h":0.22}"#).unwrap();
-        assert_eq!(r, CamRegion { x: 0.12, y: 0.78, w: 0.22, h: 0.22 });
+        assert_eq!(
+            r,
+            CamRegion {
+                x: 0.12,
+                y: 0.78,
+                w: 0.22,
+                h: 0.22
+            }
+        );
     }
 
     #[test]
@@ -175,13 +183,26 @@ mod tests {
 
     #[test]
     fn to_norm_json_canonical_form() {
-        let r = CamRegion { x: 0.123456, y: 0.789, w: 0.25, h: 0.25 };
-        assert_eq!(r.to_norm_json(), r#"{"x":0.123,"y":0.789,"w":0.250,"h":0.250}"#);
+        let r = CamRegion {
+            x: 0.123456,
+            y: 0.789,
+            w: 0.25,
+            h: 0.25,
+        };
+        assert_eq!(
+            r.to_norm_json(),
+            r#"{"x":0.123,"y":0.789,"w":0.250,"h":0.250}"#
+        );
     }
 
     #[test]
     fn to_norm_json_round_trips() {
-        let original = CamRegion { x: 0.1, y: 0.7, w: 0.25, h: 0.25 };
+        let original = CamRegion {
+            x: 0.1,
+            y: 0.7,
+            w: 0.25,
+            h: 0.25,
+        };
         let serialized = original.to_norm_json();
         let parsed = CamRegion::parse_norm_json(&serialized).unwrap();
         assert_eq!(parsed, original);
@@ -191,13 +212,23 @@ mod tests {
 
     #[test]
     fn to_crop_expr_matches_spec_example() {
-        let r = CamRegion { x: 0.12, y: 0.78, w: 0.22, h: 0.22 };
+        let r = CamRegion {
+            x: 0.12,
+            y: 0.78,
+            w: 0.22,
+            h: 0.22,
+        };
         assert_eq!(r.to_crop_expr(), "iw*0.2200:ih*0.2200:iw*0.1200:ih*0.7800");
     }
 
     #[test]
     fn to_crop_expr_uses_iw_ih_not_pixels() {
-        let r = CamRegion { x: 0.5, y: 0.5, w: 0.5, h: 0.5 };
+        let r = CamRegion {
+            x: 0.5,
+            y: 0.5,
+            w: 0.5,
+            h: 0.5,
+        };
         let expr = r.to_crop_expr();
         assert!(expr.starts_with("iw*"), "must use iw multiplier: {expr}");
         assert!(expr.contains(":ih*"), "must use ih multiplier: {expr}");
@@ -240,21 +271,15 @@ mod tests {
 
     #[test]
     fn resolve_uses_override_when_setting_on_and_override_set() {
-        let r = resolve_effective_region(
-            Some(SAMPLE_JSON_VOD),
-            Some(SAMPLE_JSON_OVERRIDE),
-            true,
-        ).unwrap();
+        let r = resolve_effective_region(Some(SAMPLE_JSON_VOD), Some(SAMPLE_JSON_OVERRIDE), true)
+            .unwrap();
         assert_eq!(r.x, 0.5, "override should win");
     }
 
     #[test]
     fn resolve_ignores_override_when_setting_off() {
-        let r = resolve_effective_region(
-            Some(SAMPLE_JSON_VOD),
-            Some(SAMPLE_JSON_OVERRIDE),
-            false,
-        ).unwrap();
+        let r = resolve_effective_region(Some(SAMPLE_JSON_VOD), Some(SAMPLE_JSON_OVERRIDE), false)
+            .unwrap();
         assert_eq!(r.x, 0.1, "override must be ignored when toggle off");
     }
 
@@ -267,11 +292,7 @@ mod tests {
 
     #[test]
     fn resolve_falls_back_to_vod_when_override_invalid() {
-        let r = resolve_effective_region(
-            Some(SAMPLE_JSON_VOD),
-            Some("garbage"),
-            true,
-        ).unwrap();
+        let r = resolve_effective_region(Some(SAMPLE_JSON_VOD), Some("garbage"), true).unwrap();
         assert_eq!(r.x, 0.1);
     }
 }

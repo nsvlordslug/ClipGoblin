@@ -127,13 +127,9 @@ pub fn finalize(
             let ts_candidates = pick_thumbnail_timestamps(&clip, audio, scene_cuts);
             let thumb_path = config.thumb_dir.join(format!("{}.jpg", clip.id));
 
-            if let Some(_) = try_extract_thumbnail(
-                ffmpeg,
-                vod_path,
-                &ts_candidates,
-                &thumb_path,
-                config,
-            ) {
+            if let Some(_) =
+                try_extract_thumbnail(ffmpeg, vod_path, &ts_candidates, &thumb_path, config)
+            {
                 clip.preview_thumbnail_path = Some(thumb_path.to_string_lossy().into_owned());
             }
 
@@ -144,7 +140,10 @@ pub fn finalize(
     log::info!(
         "Output: {} clips finalized, {} with thumbnails",
         clips.len(),
-        clips.iter().filter(|c| c.preview_thumbnail_path.is_some()).count(),
+        clips
+            .iter()
+            .filter(|c| c.preview_thumbnail_path.is_some())
+            .count(),
     );
 
     Ok(clips)
@@ -153,10 +152,7 @@ pub fn finalize(
 /// Lightweight variant that skips thumbnail generation.
 ///
 /// Useful for dry runs, testing, or when ffmpeg is not available.
-pub fn finalize_without_thumbnails(
-    ranked: &[RankedClip],
-    max_clips: usize,
-) -> Vec<CandidateClip> {
+pub fn finalize_without_thumbnails(ranked: &[RankedClip], max_clips: usize) -> Vec<CandidateClip> {
     ranked
         .iter()
         .take(max_clips)
@@ -204,7 +200,11 @@ pub fn pick_thumbnail_timestamps(
     if let Some(best_cut) = scene_cuts
         .iter()
         .filter(|c| c.time >= start && c.time <= end)
-        .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|a, b| {
+            a.score
+                .partial_cmp(&b.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     {
         // Grab the frame just after the cut (the new scene)
         let after_cut = (best_cut.time + 0.3).min(end);
@@ -248,9 +248,7 @@ fn try_extract_thumbnail(
 ) -> Option<f64> {
     for &ts in timestamps {
         if extract_single_frame(ffmpeg, vod_path, ts, output_path, config).is_ok() {
-            let size = std::fs::metadata(output_path)
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
             if size >= config.min_thumb_bytes {
                 return Some(ts);
             }
@@ -301,7 +299,10 @@ fn extract_single_frame(
         .map_err(|e| AppError::Ffmpeg(format!("Thumbnail extraction failed: {e}")))?;
 
     // ffmpeg sometimes returns non-zero but still writes a valid frame
-    if output_path.exists() && std::fs::metadata(output_path).map(|m| m.len() > 0).unwrap_or(false)
+    if output_path.exists()
+        && std::fs::metadata(output_path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
     {
         Ok(())
     } else if status.success() {
@@ -352,22 +353,23 @@ mod tests {
         let ts = pick_thumbnail_timestamps(&clip, Some(&audio), &[]);
         assert!(!ts.is_empty());
         // First candidate should be near the audio peak
-        assert!(
-            (ts[0] - 25.5).abs() < 1.5,
-            "expected ~25.5, got {}", ts[0]
-        );
+        assert!((ts[0] - 25.5).abs() < 1.5, "expected ~25.5, got {}", ts[0]);
     }
 
     #[test]
     fn scene_cut_included_as_candidate() {
         let clip = make_clip("b", 10.0, 40.0);
-        let cuts = vec![SceneDetection { time: 22.0, score: 0.8 }];
+        let cuts = vec![SceneDetection {
+            time: 22.0,
+            score: 0.8,
+        }];
 
         let ts = pick_thumbnail_timestamps(&clip, None, &cuts);
         // Should include a timestamp just after the cut
         assert!(
             ts.iter().any(|&t| (t - 22.3).abs() < 1.0),
-            "timestamps {:?} should include scene cut at 22.3", ts
+            "timestamps {:?} should include scene cut at 22.3",
+            ts
         );
     }
 
@@ -378,7 +380,8 @@ mod tests {
         // Midpoint = 115.0
         assert!(
             ts.iter().any(|&t| (t - 115.0).abs() < 2.5),
-            "timestamps {:?} should include midpoint ~115", ts
+            "timestamps {:?} should include midpoint ~115",
+            ts
         );
     }
 
@@ -389,7 +392,8 @@ mod tests {
         // Hook = start + 2 = 52
         assert!(
             ts.iter().any(|&t| (t - 52.0).abs() < 2.5),
-            "timestamps {:?} should include hook ~52", ts
+            "timestamps {:?} should include hook ~52",
+            ts
         );
     }
 
@@ -409,7 +413,10 @@ mod tests {
         rms[25] = 0.95;
         let audio = AudioProfile::from_rms(rms);
         // Scene cut near the audio peak — should not duplicate
-        let cuts = vec![SceneDetection { time: 25.0, score: 0.7 }];
+        let cuts = vec![SceneDetection {
+            time: 25.0,
+            score: 0.7,
+        }];
 
         let ts = pick_thumbnail_timestamps(&clip, Some(&audio), &cuts);
         // Check no two timestamps are within 2s of each other
@@ -417,7 +424,9 @@ mod tests {
             for j in (i + 1)..ts.len() {
                 assert!(
                     (ts[i] - ts[j]).abs() >= 2.0,
-                    "timestamps too close: {} and {}", ts[i], ts[j]
+                    "timestamps too close: {} and {}",
+                    ts[i],
+                    ts[j]
                 );
             }
         }
@@ -427,8 +436,14 @@ mod tests {
     fn scene_cuts_outside_clip_ignored() {
         let clip = make_clip("g", 10.0, 30.0);
         let cuts = vec![
-            SceneDetection { time: 5.0, score: 0.9 },  // before clip
-            SceneDetection { time: 50.0, score: 0.8 },  // after clip
+            SceneDetection {
+                time: 5.0,
+                score: 0.9,
+            }, // before clip
+            SceneDetection {
+                time: 50.0,
+                score: 0.8,
+            }, // after clip
         ];
         let ts = pick_thumbnail_timestamps(&clip, None, &cuts);
         // None of the cut timestamps should appear
@@ -443,7 +458,14 @@ mod tests {
     #[test]
     fn finalize_without_thumbnails_caps_at_top_n() {
         let ranked: Vec<RankedClip> = (0..10)
-            .map(|i| make_ranked(&format!("clip-{i}"), i as f64 * 100.0, i as f64 * 100.0 + 25.0, i + 1))
+            .map(|i| {
+                make_ranked(
+                    &format!("clip-{i}"),
+                    i as f64 * 100.0,
+                    i as f64 * 100.0 + 25.0,
+                    i + 1,
+                )
+            })
             .collect();
 
         let result = finalize_without_thumbnails(&ranked, 5);

@@ -93,7 +93,10 @@ impl JobHandle {
     /// Update this job's progress (clamped to 0–100) and notify listeners.
     pub fn set_progress(&self, pct: u8) {
         let Ok(mut map) = self.state.lock() else {
-            log::error!("Job state mutex poisoned in set_progress for job {}", self.id);
+            log::error!(
+                "Job state mutex poisoned in set_progress for job {}",
+                self.id
+            );
             return;
         };
         if let Some(job) = map.get_mut(&self.id) {
@@ -201,7 +204,10 @@ impl JobQueue {
             // Queued → Running
             {
                 let Ok(mut map) = state.lock() else {
-                    log::error!("Job state mutex poisoned transitioning {} to Running", job_id);
+                    log::error!(
+                        "Job state mutex poisoned transitioning {} to Running",
+                        job_id
+                    );
                     return;
                 };
                 if let Some(job) = map.get_mut(&job_id) {
@@ -222,7 +228,10 @@ impl JobQueue {
             // Running → Completed | Failed
             {
                 let Ok(mut map) = state.lock() else {
-                    log::error!("Job state mutex poisoned transitioning {} to final state", job_id);
+                    log::error!(
+                        "Job state mutex poisoned transitioning {} to final state",
+                        job_id
+                    );
                     return;
                 };
                 if let Some(job) = map.get_mut(&job_id) {
@@ -301,7 +310,8 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             handle.set_progress(100);
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -317,13 +327,17 @@ mod tests {
 
         let log_cb = log.clone();
         q.on_progress(move |evt| {
-            log_cb.lock().unwrap().push((evt.job_id, evt.status, evt.progress));
+            log_cb
+                .lock()
+                .unwrap()
+                .push((evt.job_id, evt.status, evt.progress));
         });
 
         q.add_job("cb-1", |handle| async move {
             handle.set_progress(40);
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -342,7 +356,8 @@ mod tests {
 
         q.add_job("fail-1", |_handle| async move {
             Err("something broke".to_string())
-        }).unwrap();
+        })
+        .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -366,15 +381,23 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 r.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
-            }).unwrap();
+            })
+            .unwrap();
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         let peak_val = peak.load(std::sync::atomic::Ordering::SeqCst);
-        assert!(peak_val <= MAX_CONCURRENT, "peak concurrency {peak_val} exceeded limit {MAX_CONCURRENT}");
+        assert!(
+            peak_val <= MAX_CONCURRENT,
+            "peak concurrency {peak_val} exceeded limit {MAX_CONCURRENT}"
+        );
 
-        let completed = q.list().iter().filter(|j| j.status == JobStatus::Completed).count();
+        let completed = q
+            .list()
+            .iter()
+            .filter(|j| j.status == JobStatus::Completed)
+            .count();
         assert_eq!(completed, 6);
     }
 
@@ -390,7 +413,8 @@ mod tests {
         q.add_job("busy", |_| async {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert!(!q.remove("busy"));
     }

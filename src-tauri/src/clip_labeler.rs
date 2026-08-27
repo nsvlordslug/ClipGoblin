@@ -68,7 +68,11 @@ pub fn generate(clip: &CandidateClip) -> ClipLabels {
     let hook = build_hook(clip);
     let reason = build_reason(clip);
 
-    ClipLabels { title, hook, reason }
+    ClipLabels {
+        title,
+        hook,
+        reason,
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -159,7 +163,9 @@ fn reaction_context(phrase: &Option<String>, event: Option<&str>) -> Option<Stri
     let ctx = context_tag(event);
 
     // Skip if quote already mentions the event
-    if phrase.to_lowercase().contains(event) { return None; }
+    if phrase.to_lowercase().contains(event) {
+        return None;
+    }
 
     let words: Vec<&str> = phrase.split_whitespace().take(5).collect();
     let quote = words.join(" ");
@@ -178,16 +184,16 @@ fn reaction_context(phrase: &Option<String>, event: Option<&str>) -> Option<Stri
 fn context_tag(event: &str) -> &'static str {
     match event {
         "jumpscare" | "ambush" => "caught off guard",
-        "fight"       => "mid-fight",
-        "explosion"   => "right before it blows up",
+        "fight" => "mid-fight",
+        "explosion" => "right before it blows up",
         "celebration" => "clutches it",
-        "panic"       => "instant panic",
+        "panic" => "instant panic",
         "frustration" => "loses it",
-        "disbelief"   => "didn't see that coming",
-        "shock"       => "instant reaction",
-        "hype"        => "peak hype",
-        "reaction"    => "the reaction",
-        "rapid cuts"  => "rapid-fire",
+        "disbelief" => "didn't see that coming",
+        "shock" => "instant reaction",
+        "hype" => "peak hype",
+        "reaction" => "the reaction",
+        "rapid cuts" => "rapid-fire",
         _ => "out of nowhere",
     }
 }
@@ -197,7 +203,9 @@ fn context_tag(event: &str) -> &'static str {
 /// through to event-based formats.
 fn standalone_quote(phrase: &Option<String>) -> Option<String> {
     let phrase = phrase.as_ref()?;
-    if is_vague(phrase) { return None; }
+    if is_vague(phrase) {
+        return None;
+    }
 
     let words: Vec<&str> = phrase.split_whitespace().collect();
     if words.len() >= 7 {
@@ -263,10 +271,7 @@ fn event_tension(event: Option<&str>, start_time: f64) -> Option<String> {
             "Fight goes wrong fast",
             "Fight starts and it gets bad",
         ],
-        "explosion" => &[
-            "Explosion hits out of nowhere",
-            "Blows up with no warning",
-        ],
+        "explosion" => &["Explosion hits out of nowhere", "Blows up with no warning"],
         "panic" => &[
             "Panic hits instantly",
             "Everything goes wrong at once",
@@ -276,26 +281,11 @@ fn event_tension(event: Option<&str>, start_time: f64) -> Option<String> {
             "Clutches it at the last second",
             "Barely survives then celebrates",
         ],
-        "frustration" => &[
-            "Nothing goes right",
-            "Loses it after that play",
-        ],
-        "shock" | "disbelief" => &[
-            "Didn't see that coming",
-            "Shock hits out of nowhere",
-        ],
-        "hype" => &[
-            "Hype hits out of nowhere",
-            "Goes off at the perfect time",
-        ],
-        "reaction" => &[
-            "Reaction says it all",
-            "Reacts instantly",
-        ],
-        "rapid cuts" => &[
-            "Everything happens at once",
-            "Too much too fast",
-        ],
+        "frustration" => &["Nothing goes right", "Loses it after that play"],
+        "shock" | "disbelief" => &["Didn't see that coming", "Shock hits out of nowhere"],
+        "hype" => &["Hype hits out of nowhere", "Goes off at the perfect time"],
+        "reaction" => &["Reaction says it all", "Reacts instantly"],
+        "rapid cuts" => &["Everything happens at once", "Too much too fast"],
         _ => return None,
     };
 
@@ -305,12 +295,20 @@ fn event_tension(event: Option<&str>, start_time: f64) -> Option<String> {
 /// Soft curiosity — speed/timing phrasing for genuinely exceptional clips.
 /// Gated behind 3+ strong signals so it's earned, not manufactured.
 fn soft_curiosity(scores: &ClipScoreBreakdown, start_time: f64) -> Option<String> {
-    if scores.active_signal_count() < 3 { return None; }
-    if scores.best_raw() < 0.85 { return None; }
+    if scores.active_signal_count() < 3 {
+        return None;
+    }
+    if scores.best_raw() < 0.85 {
+        return None;
+    }
     let mut vals = vec![scores.audio_score, scores.speech_score, scores.scene_score];
-    if let Some(v) = scores.vision_score { vals.push(v); }
+    if let Some(v) = scores.vision_score {
+        vals.push(v);
+    }
     vals.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-    if vals.len() < 2 || vals[1] < 0.65 { return None; }
+    if vals.len() < 2 || vals[1] < 0.65 {
+        return None;
+    }
 
     const PHRASES: &[&str] = &[
         "This happens way too fast",
@@ -326,46 +324,84 @@ fn soft_curiosity(scores: &ClipScoreBreakdown, start_time: f64) -> Option<String
 /// Drops leading filler, takes up to 8 words.
 fn extract_phrase(excerpt: &str) -> Option<String> {
     let trimmed = excerpt.trim();
-    if trimmed.len() < 3 { return None; }
+    if trimmed.len() < 3 {
+        return None;
+    }
 
     let filler = ["like", "so", "um", "uh", "okay", "ok", "well", "and", "but"];
-    let words: Vec<&str> = trimmed.split_whitespace()
+    let words: Vec<&str> = trimmed
+        .split_whitespace()
         .skip_while(|w| filler.contains(&w.to_lowercase().as_str()))
         .take(8)
         .collect();
 
-    if words.len() < 2 { return None; }
+    if words.len() < 2 {
+        return None;
+    }
     Some(words.join(" "))
 }
 
 /// True if the phrase is too vague to stand alone.
 fn is_vague(s: &str) -> bool {
     let wc = s.split_whitespace().count();
-    if wc < 4 { return true; }
+    if wc < 4 {
+        return true;
+    }
     let lower = s.to_lowercase();
-    let vague = ["oh my god", "oh my gosh", "what the hell", "what the fuck",
-                  "no way dude", "are you serious", "holy shit"];
+    let vague = [
+        "oh my god",
+        "oh my gosh",
+        "what the hell",
+        "what the fuck",
+        "no way dude",
+        "are you serious",
+        "holy shit",
+    ];
     wc <= 4 && vague.iter().any(|v| lower.contains(v))
 }
 
 /// Pick the primary event tag for context.
 fn primary_event(tags: &[String]) -> Option<&'static str> {
     let t = TagSet::new(tags);
-    if t.has("jumpscare") || t.has("ambush") { return Some("jumpscare"); }
-    if t.has("fight")       { return Some("fight"); }
-    if t.has("explosion")   { return Some("explosion"); }
-    if t.has("celebration") { return Some("celebration"); }
-    if t.has("panic")       { return Some("panic"); }
-    if t.has("frustration") { return Some("frustration"); }
-    if t.has("disbelief")   { return Some("disbelief"); }
-    if t.has("shock")       { return Some("shock"); }
-    if t.has("hype")        { return Some("hype"); }
-    if t.has("reaction")    { return Some("reaction"); }
-    if t.has("rapid_cuts")  { return Some("rapid cuts"); }
+    if t.has("jumpscare") || t.has("ambush") {
+        return Some("jumpscare");
+    }
+    if t.has("fight") {
+        return Some("fight");
+    }
+    if t.has("explosion") {
+        return Some("explosion");
+    }
+    if t.has("celebration") {
+        return Some("celebration");
+    }
+    if t.has("panic") {
+        return Some("panic");
+    }
+    if t.has("frustration") {
+        return Some("frustration");
+    }
+    if t.has("disbelief") {
+        return Some("disbelief");
+    }
+    if t.has("shock") {
+        return Some("shock");
+    }
+    if t.has("hype") {
+        return Some("hype");
+    }
+    if t.has("reaction") {
+        return Some("reaction");
+    }
+    if t.has("rapid_cuts") {
+        return Some("rapid cuts");
+    }
     None
 }
 
-fn word_count(s: &str) -> usize { s.split_whitespace().count() }
+fn word_count(s: &str) -> usize {
+    s.split_whitespace().count()
+}
 
 /// Factual label for the dominant signal, used in fallback titles.
 fn dominant_signal_name(scores: &ClipScoreBreakdown) -> &'static str {
@@ -375,11 +411,17 @@ fn dominant_signal_name(scores: &ClipScoreBreakdown) -> &'static str {
     let v = scores.vision_score.unwrap_or(0.0);
     let best = a.max(s).max(sc).max(v);
 
-    if (a - best).abs() < 0.01 { "Audio peak" }
-    else if (s - best).abs() < 0.01 { "Speech signal" }
-    else if (sc - best).abs() < 0.01 { "Scene change" }
-    else if (v - best).abs() < 0.01 { "Vision signal" }
-    else { "Signal" }
+    if (a - best).abs() < 0.01 {
+        "Audio peak"
+    } else if (s - best).abs() < 0.01 {
+        "Speech signal"
+    } else if (sc - best).abs() < 0.01 {
+        "Scene change"
+    } else if (v - best).abs() < 0.01 {
+        "Vision signal"
+    } else {
+        "Signal"
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -397,7 +439,11 @@ fn build_hook(clip: &CandidateClip) -> String {
             if trimmed.len() <= 35 {
                 return format!("\"{}\"", trimmed);
             }
-            let first: String = trimmed.split_whitespace().take(4).collect::<Vec<_>>().join(" ");
+            let first: String = trimmed
+                .split_whitespace()
+                .take(4)
+                .collect::<Vec<_>>()
+                .join(" ");
             return format!("\"{}...\"", first);
         }
     }
@@ -562,9 +608,17 @@ mod tests {
         clip.transcript_excerpt = Some("Oh my god what just happened".into());
         let labels = generate(&clip);
         // Reaction + Context: quote + gaming context tag
-        assert!(labels.title.starts_with('"'), "should quote: {}", labels.title);
+        assert!(
+            labels.title.starts_with('"'),
+            "should quote: {}",
+            labels.title
+        );
         // "shock" maps to "instant reaction"
-        assert!(labels.title.contains("instant reaction"), "title: {}", labels.title);
+        assert!(
+            labels.title.contains("instant reaction"),
+            "title: {}",
+            labels.title
+        );
     }
 
     #[test]
@@ -573,9 +627,17 @@ mod tests {
         clip.transcript_excerpt = Some("I can not believe he just did that to us".into());
         let labels = generate(&clip);
         // Specific enough (≥4 words), no tags → standalone quote
-        assert!(labels.title.starts_with('"'), "should quote: {}", labels.title);
+        assert!(
+            labels.title.starts_with('"'),
+            "should quote: {}",
+            labels.title
+        );
         // No context tag appended
-        assert!(!labels.title.contains("reaction"), "standalone: {}", labels.title);
+        assert!(
+            !labels.title.contains("reaction"),
+            "standalone: {}",
+            labels.title
+        );
     }
 
     #[test]
@@ -594,8 +656,11 @@ mod tests {
         let labels = generate(&clip);
         // Single word → no phrase → event tension format
         let lower = labels.title.to_lowercase();
-        assert!(lower.contains("ambush") || lower.contains("jumpscare"),
-            "should use event: {}", labels.title);
+        assert!(
+            lower.contains("ambush") || lower.contains("jumpscare"),
+            "should use event: {}",
+            labels.title
+        );
     }
 
     #[test]
@@ -604,8 +669,11 @@ mod tests {
         let labels = generate(&clip);
         // No transcript → event tension or outcome
         let lower = labels.title.to_lowercase();
-        assert!(lower.contains("ambush") || lower.contains("jumpscare"),
-            "should use event tension: {}", labels.title);
+        assert!(
+            lower.contains("ambush") || lower.contains("jumpscare"),
+            "should use event tension: {}",
+            labels.title
+        );
     }
 
     #[test]
@@ -619,8 +687,16 @@ mod tests {
     fn fallback_title_includes_signal_and_timestamp() {
         let clip = make_clip(&[], 0.3, 0.2, 0.1, None);
         let labels = generate(&clip);
-        assert!(labels.title.contains("1:00"), "fallback should show time: {}", labels.title);
-        assert!(labels.title.contains("Audio peak"), "fallback should name signal: {}", labels.title);
+        assert!(
+            labels.title.contains("1:00"),
+            "fallback should show time: {}",
+            labels.title
+        );
+        assert!(
+            labels.title.contains("Audio peak"),
+            "fallback should name signal: {}",
+            labels.title
+        );
     }
 
     #[test]
@@ -644,7 +720,8 @@ mod tests {
     #[test]
     fn long_transcript_truncated_in_hook() {
         let mut clip = make_clip(&[], 0.7, 0.6, 0.3, None);
-        clip.transcript_excerpt = Some("Oh my god I can not believe what just happened that was insane".into());
+        clip.transcript_excerpt =
+            Some("Oh my god I can not believe what just happened that was insane".into());
         let labels = generate(&clip);
         assert!(labels.hook.len() <= 40, "hook too long: {}", labels.hook);
         assert!(labels.hook.ends_with("...\""));
@@ -692,8 +769,11 @@ mod tests {
     fn reason_shows_signal_count() {
         let clip = make_clip(&["reaction"], 0.8, 0.7, 0.6, None);
         let labels = generate(&clip);
-        assert!(labels.reason.contains("3 signals active"),
-            "reason: {}", labels.reason);
+        assert!(
+            labels.reason.contains("3 signals active"),
+            "reason: {}",
+            labels.reason
+        );
     }
 
     #[test]

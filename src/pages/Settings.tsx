@@ -12,6 +12,8 @@ import { useUiStore, tryAdvanceTapCounter, type TapCounterState } from '../store
 import { useTemplateStore } from '../stores/templateStore'
 import { CAPTION_STYLES, EXPORT_PRESETS } from '../lib/editTypes'
 import { requiresHighDetectionCostConsent, type DetectionSensitivity } from '../lib/detectionCostConsent'
+import { persistSpeechModelSelection, type SpeechModel } from '../lib/speechModelSelection'
+import { normalizeTranscriptionGlossary } from '../lib/transcriptionGlossary'
 import {
   getNextSettingsSection,
   resolveSettingsSection,
@@ -206,9 +208,17 @@ export default function SettingsPage() {
   const [modelStatus, setModelStatus] = useState<{ base: { downloaded: boolean }; medium: { downloaded: boolean } } | null>(null)
   const [activeModel, setActiveModel] = useState<'base' | 'medium'>('base')
   const [modelDownloading, setModelDownloading] = useState<string | null>(null)
+  const [modelSaving, setModelSaving] = useState<SpeechModel | null>(null)
   const [modelProgress, setModelProgress] = useState(0)
   const [modelDownloadedMb, setModelDownloadedMb] = useState(0)
   const [confirmDeleteModel, setConfirmDeleteModel] = useState<string | null>(null)
+  const [modelError, setModelError] = useState<string | null>(null)
+  const [transcriptionLanguage, setTranscriptionLanguage] = useState<'en' | 'auto'>('en')
+  const [transcriptionGlossary, setTranscriptionGlossary] = useState('')
+  const [learnFromSubtitleCorrections, setLearnFromSubtitleCorrections] = useState(true)
+  const [transcriptionAccuracySaved, setTranscriptionAccuracySaved] = useState(false)
+  const [transcriptionAccuracySaving, setTranscriptionAccuracySaving] = useState(false)
+  const [transcriptionAccuracyError, setTranscriptionAccuracyError] = useState<string | null>(null)
 
   // Phase 6.0 — AI usage cost summary (populated on mount + after every analyze/regen)
   const [costSummary, setCostSummary] = useState<{ avgPerAnalyzeUsd: number; total30dUsd: number; vodCount: number } | null>(null)
@@ -258,7 +268,13 @@ export default function SettingsPage() {
     }
   }
 
-  const { loggedInUser, twitchLogin, twitchLogout, isLoading: twitchLoading } = useAppStore()
+  const {
+    loggedInUser,
+    twitchLogin,
+    twitchLogout,
+    isLoading: twitchLoading,
+    setSpeechModelSelectionSaving,
+  } = useAppStore()
   const s = ai.settings
   const isByok = ai.isByok()
   const meta = PROVIDER_META[s.provider]
@@ -304,6 +320,12 @@ export default function SettingsPage() {
         setModelStatus(mStatus)
         const savedModel = await invoke<string | null>('get_setting', { key: 'whisper_model' })
         if (savedModel === 'base' || savedModel === 'medium') setActiveModel(savedModel)
+        const savedLanguage = await invoke<string | null>('get_setting', { key: 'transcription_language' })
+        setTranscriptionLanguage(savedLanguage === 'auto' ? 'auto' : 'en')
+        const savedGlossary = await invoke<string | null>('get_setting', { key: 'transcription_glossary' })
+        setTranscriptionGlossary(savedGlossary || '')
+        const savedCorrectionLearning = await invoke<string | null>('get_setting', { key: 'transcription_learn_corrections' })
+        setLearnFromSubtitleCorrections(savedCorrectionLearning !== 'false')
       } catch (error) { console.error('check_model_status failed:', error) }
       // Only load AI settings from DB if they haven't been loaded yet.
       // Re-loading on every Settings mount would overwrite in-memory changes
@@ -343,32 +365,63 @@ export default function SettingsPage() {
     return () => { unlisten.then(fn => fn()) }
   }, [modelDownloading])
 
+  const persistModelSelection = async (modelName: SpeechModel) => {
+    setModelSaving(modelName)
+    setSpeechModelSelectionSaving(true)
+    try {
+      const confirmedModel = await persistSpeechModelSelection(modelName, {
+        save: model => invoke('save_setting', { key: 'whisper_model', value: model }),
+        read: () => invoke<string | null>('get_setting', { key: 'whisper_model' }),
+      })
+      setActiveModel(confirmedModel)
+    } finally {
+      setModelSaving(null)
+      setSpeechModelSelectionSaving(false)
+    }
+  }
+
   const handleModelDownload = async (modelName: string) => {
+    setModelError(null)
     setModelDownloading(modelName)
     setModelProgress(0)
     setModelDownloadedMb(0)
     try {
       await invoke('download_model', { modelName })
-      // Status refreshed via event listener
-    } catch {
+      const mStatus = await invoke<{ base: { downloaded: boolean }; medium: { downloaded: boolean } }>('check_model_status')
+      const selectedModel = modelName === 'medium' ? 'medium' : 'base'
+      if (!mStatus[selectedModel].downloaded) {
+        throw new Error('The local model download finished but did not pass its integrity check.')
+      }
+      setModelStatus(mStatus)
+      setModelDownloading(null)
+      await persistModelSelection(selectedModel)
+    } catch (error) {
+      setModelError(String(error))
+    } finally {
       setModelDownloading(null)
     }
   }
 
   const handleModelDelete = async (modelName: string) => {
+    setModelError(null)
     try {
       await invoke('delete_model', { modelName })
       const mStatus = await invoke<{ base: { downloaded: boolean }; medium: { downloaded: boolean } }>('check_model_status')
       setModelStatus(mStatus)
-    } catch { /* best effort */ }
+    } catch (error) {
+      setModelError(String(error))
+    }
     setConfirmDeleteModel(null)
   }
 
   const handleModelSelect = async (modelName: 'base' | 'medium') => {
-    setActiveModel(modelName)
+    if (modelSaving || modelDownloading || modelName === activeModel) return
+    setModelError(null)
     try {
-      await invoke('save_setting', { key: 'whisper_model', value: modelName })
-    } catch { /* best effort */ }
+      await persistModelSelection(modelName)
+    } catch (error) {
+      setModelError(String(error))
+    }
   }
 
   const handleSaveAi = async () => {
@@ -377,6 +430,44 @@ export default function SettingsPage() {
       setAiSaved(true)
       setTimeout(() => setAiSaved(false), 2000)
     } catch (err) { console.error('Failed to save AI settings:', err) }
+  }
+
+  const saveTranscriptionAccuracy = async () => {
+    if (transcriptionAccuracySaving) return
+    const requestedGlossary = normalizeTranscriptionGlossary(transcriptionGlossary.slice(0, 1_500))
+    const requestedCorrectionLearning = learnFromSubtitleCorrections ? 'true' : 'false'
+    setTranscriptionAccuracySaving(true)
+    setTranscriptionAccuracySaved(false)
+    setTranscriptionAccuracyError(null)
+    try {
+      await invoke('save_setting', { key: 'transcription_language', value: transcriptionLanguage })
+      await invoke('save_setting', {
+        key: 'transcription_learn_corrections',
+        value: requestedCorrectionLearning,
+      })
+      await invoke('save_setting', { key: 'transcription_glossary', value: requestedGlossary })
+
+      const [savedLanguage, savedGlossary, savedCorrectionLearning] = await Promise.all([
+        invoke<string | null>('get_setting', { key: 'transcription_language' }),
+        invoke<string | null>('get_setting', { key: 'transcription_glossary' }),
+        invoke<string | null>('get_setting', { key: 'transcription_learn_corrections' }),
+      ])
+      if (savedLanguage !== transcriptionLanguage
+        || normalizeTranscriptionGlossary(savedGlossary || '') !== requestedGlossary
+        || savedCorrectionLearning !== requestedCorrectionLearning) {
+        throw new Error('ClipGoblin could not verify the saved recognition settings.')
+      }
+      setTranscriptionGlossary(requestedGlossary)
+      setTranscriptionAccuracySaved(true)
+      setTimeout(() => setTranscriptionAccuracySaved(false), 1500)
+    } catch (error) {
+      console.error('Failed to save transcription accuracy settings:', error)
+      setTranscriptionAccuracyError(
+        error instanceof Error ? error.message : 'Recognition settings could not be saved.',
+      )
+    } finally {
+      setTranscriptionAccuracySaving(false)
+    }
   }
 
   const applySensitivity = async (next: DetectionSensitivity) => {
@@ -1021,33 +1112,61 @@ export default function SettingsPage() {
           <Mic className="w-3.5 h-3.5 inline-block mr-1.5 text-violet-400" style={{verticalAlign: -2}} />
           Transcription Model
         </h3>
-        <p className="text-sm text-slate-400 mb-5">
-          Choose which AI model is used for speech recognition during VOD analysis.
-        </p>
+        <div className="mb-5 space-y-1.5 text-sm text-slate-400">
+          <p>
+            Final subtitle recognition runs entirely on this PC. Clip audio is not sent to a cloud transcription service.
+          </p>
+          <p className="text-xs text-slate-500">
+            Full-VOD detection always stays on the fast Base model. Quality mode uses Medium only for final selected-clip subtitles and safely falls back to Base if Medium is unavailable.
+          </p>
+        </div>
 
-        <div className="grid grid-cols-2 gap-3 mb-4">
+        {modelError && (
+          <div role="alert" className="mb-4 flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>{modelError}</span>
+          </div>
+        )}
+
+        {modelSaving && (
+          <div role="status" aria-live="polite" className="mb-4 flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-xs text-violet-200">
+            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+            <span>Saving and confirming {modelSaving === 'medium' ? 'Quality local (Medium)' : 'Fast local (Base)'}...</span>
+          </div>
+        )}
+
+        {activeModel === 'medium' && modelStatus && !modelStatus.medium.downloaded && (
+          <div role="status" className="mb-4 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+            <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>Quality local is selected, but Medium is unavailable. Final captions will use the local Base fallback until Medium is downloaded.</span>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 gap-3 mb-4 md:grid-cols-2">
           {/* Base model card */}
           {([
             {
               id: 'base' as const,
-              title: 'Base (Fast)',
-              desc: 'Best for clear audio with a good microphone. Transcribes quickly \u2014 about 5\u201310 minutes per hour of video. Occasionally misses quiet words or mumbling.',
-              size: '142 MB',
-              sizeMb: 142,
-              recommended: true,
+              title: 'Fast local (Base)',
+              desc: 'Lower storage and memory use. Best for quick final captions with clear speech, but it can miss quiet, overlapping, or game-specific words.',
+              size: '148 MB',
+              sizeMb: 148,
+              recommended: false,
             },
             {
               id: 'medium' as const,
-              title: 'Medium (Accurate)',
-              desc: 'Better at catching every word, even with background game audio. Takes 2\u20133x longer to transcribe. Choose this if the base model misses too many words.',
-              size: '1.5 GB',
-              sizeMb: 1500,
-              recommended: false,
+              title: 'Quality local (Medium)',
+              desc: 'Stronger recognition for noisy gameplay, accents, and less-clear speech. It runs locally but takes longer and uses more memory and storage than Base.',
+              size: '1.53 GB download (1.43 GiB)',
+              sizeMb: 1534,
+              recommended: true,
             },
           ]).map(model => {
             const downloaded = modelStatus?.[model.id]?.downloaded ?? false
             const isActive = activeModel === model.id
             const isDownloading = modelDownloading === model.id
+            const isSaving = modelSaving === model.id
+            const selectionLocked = modelSaving !== null
             const isConfirmingDelete = confirmDeleteModel === model.id
 
             return (
@@ -1108,10 +1227,11 @@ export default function SettingsPage() {
                 {!downloaded && !isDownloading && (
                   <button
                     onClick={() => handleModelDownload(model.id)}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white text-xs font-medium rounded-lg transition-colors cursor-pointer w-full justify-center"
+                    disabled={selectionLocked}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white text-xs font-medium rounded-lg transition-colors cursor-pointer w-full justify-center disabled:cursor-wait disabled:opacity-50"
                   >
                     <Download className="w-3 h-3" />
-                    Download
+                    Download & use
                   </button>
                 )}
 
@@ -1131,20 +1251,23 @@ export default function SettingsPage() {
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => handleModelSelect(model.id)}
-                      className="flex-1 flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white text-xs font-medium rounded-lg transition-colors cursor-pointer justify-center"
+                      disabled={selectionLocked}
+                      className="flex-1 flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white text-xs font-medium rounded-lg transition-colors cursor-pointer justify-center disabled:cursor-wait disabled:opacity-50"
                     >
-                      Use This Model
+                      {isSaving ? <><Loader2 className="h-3 w-3 animate-spin" /> Saving...</> : 'Use This Model'}
                     </button>
                     {isConfirmingDelete ? (
                       <div className="flex items-center gap-1">
                         <button
                           onClick={() => handleModelDelete(model.id)}
+                          disabled={selectionLocked}
                           className="px-2 py-1 rounded bg-red-600 text-white text-[10px] hover:bg-red-500 transition-colors cursor-pointer"
                         >
                           Yes
                         </button>
                         <button
                           onClick={() => setConfirmDeleteModel(null)}
+                          disabled={selectionLocked}
                           className="px-2 py-1 rounded bg-surface-700 text-slate-400 text-[10px] hover:text-white transition-colors cursor-pointer"
                         >
                           No
@@ -1153,7 +1276,8 @@ export default function SettingsPage() {
                     ) : (
                       <button
                         onClick={() => setConfirmDeleteModel(model.id)}
-                        className="px-2 py-1.5 text-slate-500 hover:text-red-400 text-[10px] transition-colors cursor-pointer"
+                        disabled={selectionLocked}
+                        className="px-2 py-1.5 text-slate-500 hover:text-red-400 text-[10px] transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-50"
                       >
                         Delete
                       </button>
@@ -1169,12 +1293,14 @@ export default function SettingsPage() {
                         <span className="text-[10px] text-red-400">Delete active model?</span>
                         <button
                           onClick={() => handleModelDelete(model.id)}
+                          disabled={selectionLocked}
                           className="px-2 py-0.5 rounded bg-red-600 text-white text-[10px] hover:bg-red-500 transition-colors cursor-pointer"
                         >
                           Yes
                         </button>
                         <button
                           onClick={() => setConfirmDeleteModel(null)}
+                          disabled={selectionLocked}
                           className="px-2 py-0.5 rounded bg-surface-700 text-slate-400 text-[10px] hover:text-white transition-colors cursor-pointer"
                         >
                           No
@@ -1183,7 +1309,8 @@ export default function SettingsPage() {
                     ) : (
                       <button
                         onClick={() => setConfirmDeleteModel(model.id)}
-                        className="px-2 py-1 text-slate-500 hover:text-red-400 text-[10px] transition-colors cursor-pointer"
+                        disabled={selectionLocked}
+                        className="px-2 py-1 text-slate-500 hover:text-red-400 text-[10px] transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-50"
                       >
                         Delete
                       </button>
@@ -1194,6 +1321,79 @@ export default function SettingsPage() {
             )
           })}
         </div>
+
+        <details className="mb-4 border-y border-surface-700 py-3">
+          <summary className="cursor-pointer text-xs font-medium text-slate-300">
+            Recognition accuracy
+          </summary>
+          <div className="mt-3 space-y-3">
+            <div className="v4-setting-row">
+              <div className="v4-setting-info">
+                <label htmlFor="transcription-language" className="v4-setting-name">Spoken language</label>
+                <div className="v4-setting-desc">English is more predictable. Auto records the language Whisper detects.</div>
+              </div>
+              <select
+                id="transcription-language"
+                value={transcriptionLanguage}
+                onChange={event => setTranscriptionLanguage(event.target.value === 'auto' ? 'auto' : 'en')}
+                className="rounded border border-surface-600 bg-surface-900 px-3 py-2 text-xs text-slate-200 focus:border-violet-500 focus:outline-none"
+              >
+                <option value="en">English</option>
+                <option value="auto">Auto detect</option>
+              </select>
+            </div>
+            <div>
+              <label htmlFor="transcription-glossary" className="block text-xs font-medium text-slate-300">
+                Names and game terms
+              </label>
+              <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
+                Optional comma-separated context for local recognition. Repeated subtitle corrections can also add local context, but never replace words automatically.
+              </p>
+              <textarea
+                id="transcription-glossary"
+                value={transcriptionGlossary}
+                onChange={event => setTranscriptionGlossary(event.target.value.slice(0, 1_500))}
+                disabled={transcriptionAccuracySaving}
+                rows={2}
+                placeholder="Dead by Daylight, Meg Thomas, ClipGoblin"
+                className="mt-2 w-full resize-y rounded border border-surface-600 bg-surface-900 px-3 py-2 text-xs text-slate-200 placeholder-slate-600 focus:border-violet-500 focus:outline-none"
+              />
+            </div>
+            <label className="flex cursor-pointer items-start gap-2 text-xs text-slate-300">
+              <input
+                type="checkbox"
+                checked={learnFromSubtitleCorrections}
+                onChange={event => setLearnFromSubtitleCorrections(event.target.checked)}
+                className="mt-0.5 accent-violet-500"
+              />
+              <span>
+                Learn names from repeated subtitle corrections
+                <span className="mt-0.5 block text-[10px] leading-relaxed text-slate-500">
+                  Uses repeated corrections only as private local recognition context. Existing captions are never rewritten.
+                </span>
+              </span>
+            </label>
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={saveTranscriptionAccuracy}
+                disabled={transcriptionAccuracySaving}
+                className="v4-btn secondary"
+              >
+                {transcriptionAccuracySaving
+                  ? 'Saving...'
+                  : transcriptionAccuracySaved
+                    ? 'Saved'
+                    : 'Save recognition settings'}
+              </button>
+            </div>
+            {transcriptionAccuracyError && (
+              <p role="alert" className="text-right text-[10px] text-red-300">
+                {transcriptionAccuracyError}
+              </p>
+            )}
+          </div>
+        </details>
 
         {/* GPU note */}
         <div className="flex items-center gap-2 text-xs text-slate-500 pt-3 border-t border-surface-700">

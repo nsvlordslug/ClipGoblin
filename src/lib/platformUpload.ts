@@ -1,4 +1,9 @@
-import { EXPORT_PRESETS } from './editTypes'
+import {
+  EXPORT_PRESETS,
+  isYouTubeShortsDuration,
+} from './editTypes'
+
+export { YOUTUBE_SHORTS_MAX_DURATION_SECONDS } from './editTypes'
 
 export { isSuccessfulUploadHandoff, isTikTokInboxDelivered, shouldOfferForcedReupload } from './uploadStatus'
 
@@ -20,7 +25,10 @@ export function getDefaultYouTubeSubFormat(
   clipDurationSec: number,
   currentAspectRatio: string,
 ): YouTubeSubFormat {
-  if (currentAspectRatio === '9:16' && clipDurationSec <= 60) return 'shorts'
+  if (
+    currentAspectRatio === '9:16'
+    && isYouTubeShortsDuration(clipDurationSec)
+  ) return 'shorts'
   return 'regular'
 }
 

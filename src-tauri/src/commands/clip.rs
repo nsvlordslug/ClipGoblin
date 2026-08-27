@@ -1,13 +1,59 @@
 //! Clip editing and management commands.
 
-use tauri::{AppHandle, Manager, State};
-use tauri_plugin_dialog::DialogExt;
-use rusqlite::OptionalExtension;
 use crate::db;
 use crate::personalization::PersonalizationStatus;
 use crate::DbConn;
+use rusqlite::OptionalExtension;
+use tauri::{AppHandle, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 
 const MAX_BRANDING_ASSET_BYTES: u64 = 50 * 1024 * 1024;
+
+fn caption_words(srt: &str) -> Vec<String> {
+    srt.lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !trimmed.contains("-->") && trimmed.parse::<u32>().is_err()
+        })
+        .flat_map(str::split_whitespace)
+        .filter_map(|word| {
+            let cleaned = word
+                .trim_matches(|character: char| !character.is_alphanumeric() && character != '\'')
+                .trim();
+            (!cleaned.is_empty() && cleaned.chars().count() <= 40).then(|| cleaned.to_string())
+        })
+        .take(1_200)
+        .collect()
+}
+
+fn repeated_correction_candidates(before: &str, after: &str) -> Vec<(String, String)> {
+    let before_words = caption_words(before);
+    let after_words = caption_words(after);
+    if before_words.len() != after_words.len() {
+        return Vec::new();
+    }
+    before_words
+        .into_iter()
+        .zip(after_words)
+        .filter_map(|(source, corrected)| {
+            let source_key = source.to_lowercase();
+            let corrected_key = corrected.to_lowercase();
+            if source_key == corrected_key
+                || source_key
+                    .chars()
+                    .any(|character| character.is_ascii_digit())
+                || corrected_key
+                    .chars()
+                    .any(|character| character.is_ascii_digit())
+            {
+                None
+            } else {
+                Some((source_key, corrected))
+            }
+        })
+        .take(64)
+        .collect()
+}
 
 fn branding_dir() -> Result<std::path::PathBuf, String> {
     let dir = dirs::data_dir()
@@ -22,8 +68,7 @@ fn branding_dir() -> Result<std::path::PathBuf, String> {
 
 fn supported_branding_extension(path: &std::path::Path) -> Option<String> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif")
-        .then_some(extension)
+    matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif").then_some(extension)
 }
 
 fn validate_staged_branding_path(path: Option<String>) -> Result<Option<String>, String> {
@@ -49,7 +94,10 @@ pub fn pick_context_branding_asset(app: AppHandle) -> Result<Option<String>, Str
         .dialog()
         .file()
         .set_title("Choose a branding image or GIF")
-        .add_filter("Branding image or GIF", &["png", "jpg", "jpeg", "webp", "gif"])
+        .add_filter(
+            "Branding image or GIF",
+            &["png", "jpg", "jpeg", "webp", "gif"],
+        )
         .blocking_pick_file();
     let Some(picked) = picked else {
         return Ok(None);
@@ -106,6 +154,7 @@ pub fn update_clip_settings(
     captions_position: String,
     caption_style: String,
     caption_font_scale: f64,
+    caption_card_scale: f64,
     caption_y_offset: f64,
     facecam_layout: String,
     facecam_settings: Option<String>,
@@ -115,6 +164,8 @@ pub fn update_clip_settings(
     context_video_y: f64,
     full_frame_scale: f64,
     game: Option<String>,
+    captions_provenance: Option<String>,
+    caption_audio_mode: Option<String>,
     db: State<'_, DbConn>,
 ) -> Result<(), String> {
     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
@@ -151,27 +202,101 @@ pub fn update_clip_settings(
         }
         None => None,
     };
+    let captions_text = captions_text.filter(|value| !value.trim().is_empty());
+    let captions_changed =
+        before.captions_text.as_deref().map(str::trim) != captions_text.as_deref().map(str::trim);
+    let learned_corrections = if db::transcription_correction_learning_enabled(&conn)
+        && captions_changed
+        && matches!(
+            db::normalize_captions_provenance(&before.captions_provenance),
+            "aligned" | "analysis-draft"
+        ) {
+        repeated_correction_candidates(
+            before.captions_text.as_deref().unwrap_or(""),
+            captions_text.as_deref().unwrap_or(""),
+        )
+    } else {
+        Vec::new()
+    };
+    let boundaries_changed = (before.start_seconds - start_seconds).abs() >= 0.001
+        || (before.end_seconds - end_seconds).abs() >= 0.001;
+    let mut captions_enabled = captions_enabled;
+    let mut captions_pipeline_version = before.captions_pipeline_version;
+    let mut captions_provenance = captions_provenance
+        .as_deref()
+        .map(db::normalize_captions_provenance)
+        .unwrap_or_else(|| db::normalize_captions_provenance(&before.captions_provenance))
+        .to_string();
+    if captions_text.is_none() {
+        captions_enabled = 0;
+        captions_provenance = "none".to_string();
+        captions_pipeline_version = 0;
+    } else if captions_changed {
+        captions_provenance = "edited".to_string();
+        captions_pipeline_version = 0;
+    } else if boundaries_changed
+        && matches!(captions_provenance.as_str(), "aligned" | "analysis-draft")
+    {
+        captions_provenance = "analysis-draft".to_string();
+        captions_pipeline_version = 0;
+    }
+    let caption_audio_mode = db::normalize_caption_audio_mode(
+        caption_audio_mode
+            .as_deref()
+            .unwrap_or(&before.caption_audio_mode),
+    );
+    let recognition_invalidated = captions_changed
+        || boundaries_changed
+        || caption_audio_mode != db::normalize_caption_audio_mode(&before.caption_audio_mode);
     db::update_clip_settings(
-        &conn, &clip_id, &title, start_seconds, end_seconds,
-        &aspect_ratio, captions_enabled, captions_text.as_deref(),
-        &captions_position, &caption_style, caption_font_scale, caption_y_offset,
+        &conn,
+        &clip_id,
+        &title,
+        start_seconds,
+        end_seconds,
+        &aspect_ratio,
+        captions_enabled,
+        captions_text.as_deref(),
+        &captions_position,
+        &caption_style,
+        caption_font_scale,
+        caption_card_scale,
+        caption_y_offset,
         &facecam_layout,
         facecam_settings.as_deref(),
-        context_background_path.as_deref(), context_background_mode,
-        context_blur_strength, context_video_y, full_frame_scale,
+        context_background_path.as_deref(),
+        context_background_mode,
+        context_blur_strength,
+        context_video_y,
+        full_frame_scale,
         game.as_deref(),
-    ).map_err(|e| format!("DB error: {}", e))?;
+        &captions_provenance,
+        captions_pipeline_version,
+        caption_audio_mode,
+    )
+    .map_err(|e| format!("DB error: {}", e))?;
+    if recognition_invalidated {
+        conn.execute(
+            "UPDATE clips
+                SET captions_recognition_signature = NULL,
+                    captions_language = NULL,
+                    caption_audio_stream = NULL
+              WHERE id = ?1",
+            [&clip_id],
+        )
+        .map_err(|e| format!("DB error clearing stale recognition metadata: {e}"))?;
+    }
+    if !learned_corrections.is_empty() {
+        db::record_transcription_corrections(&conn, &learned_corrections)
+            .map_err(|e| format!("DB error saving local vocabulary context: {e}"))?;
+    }
 
     if (before.start_seconds - start_seconds).abs() >= 0.75
         || (before.end_seconds - end_seconds).abs() >= 0.75
     {
         let dedupe_key = format!(
             "trim:{}:{:.1}:{:.1}:{:.1}:{:.1}",
-            clip_id,
-            before.start_seconds,
-            before.end_seconds,
-            start_seconds,
-            end_seconds,
+            clip_id, before.start_seconds, before.end_seconds, start_seconds, end_seconds,
         );
         let metadata = serde_json::json!({
             "startDelta": start_seconds - before.start_seconds,
@@ -326,7 +451,10 @@ pub fn save_clip_review(
     let note = note
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    if note.as_ref().is_some_and(|value| value.chars().count() > 2_000) {
+    if note
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > 2_000)
+    {
         return Err("Review notes must be 2,000 characters or fewer.".to_string());
     }
 
@@ -356,25 +484,43 @@ pub fn save_clip_review(
     };
 
     let mut conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
+    let reviewed_clip = conn
+        .query_row(
+            "SELECT id, start_seconds, end_seconds
+               FROM clips
+              WHERE highlight_id = ?1
+              ORDER BY created_at DESC
+              LIMIT 1",
+            [&highlight_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("DB error finding reviewed clip: {}", e))?;
+    let approved_bounds = if rating.as_deref() == Some("good") {
+        reviewed_clip
+            .as_ref()
+            .map(|(_, start_seconds, end_seconds)| (*start_seconds, *end_seconds))
+    } else {
+        None
+    };
 
-    db::set_clip_review(
+    db::set_clip_review_with_bounds(
         &mut conn,
         &highlight_id,
         rating.as_deref(),
         note.as_deref(),
         issues_json.as_deref(),
+        approved_bounds,
     )
     .map_err(|e| format!("DB error saving review: {}", e))?;
 
-    let clip_id = conn
-        .query_row(
-            "SELECT id FROM clips WHERE highlight_id = ?1 LIMIT 1",
-            [&highlight_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|e| format!("DB error finding reviewed clip: {}", e))?;
-    if let Some(clip_id) = clip_id {
+    if let Some((clip_id, _, _)) = reviewed_clip {
         let dedupe_key = format!(
             "review:{}:{}:{}",
             clip_id,
@@ -425,9 +571,7 @@ pub fn record_clip_opened(clip_id: String, db: State<'_, DbConn>) -> Result<(), 
 }
 
 #[tauri::command]
-pub fn get_personalization_status(
-    db: State<'_, DbConn>,
-) -> Result<PersonalizationStatus, String> {
+pub fn get_personalization_status(db: State<'_, DbConn>) -> Result<PersonalizationStatus, String> {
     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
     let feedback = db::get_detection_feedback(&conn)
         .map_err(|e| format!("DB error loading personalization status: {}", e))?;
@@ -492,10 +636,7 @@ pub fn reset_personalization_history(db: State<'_, DbConn>) -> Result<(), String
 /// dimension scores in `clips[]` were computed under the previous config.
 /// The export annotates this in `config_note` for downstream consumers.
 #[tauri::command]
-pub fn export_review_data_for_vod(
-    vod_id: String,
-    db: State<'_, DbConn>,
-) -> Result<String, String> {
+pub fn export_review_data_for_vod(vod_id: String, db: State<'_, DbConn>) -> Result<String, String> {
     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
 
     // ── VOD metadata ──
@@ -505,13 +646,12 @@ pub fn export_review_data_for_vod(
 
     // ── Resolved config ──
     let sensitivity_str = db::get_setting(&conn, "detection_sensitivity")
-        .ok().flatten()
+        .ok()
+        .flatten()
         .unwrap_or_else(|| "medium".to_string());
     let sensitivity = crate::game_config::Sensitivity::from_str_or_default(&sensitivity_str);
-    let resolved = crate::game_config::ResolvedConfig::resolve(
-        vod.game_name.as_deref(),
-        sensitivity,
-    );
+    let resolved =
+        crate::game_config::ResolvedConfig::resolve(vod.game_name.as_deref(), sensitivity);
 
     let resolved_json = serde_json::json!({
         "audio_spike_threshold": resolved.audio.spike_threshold,
@@ -595,6 +735,27 @@ pub fn export_review_data_for_vod(
         "exported_at": chrono::Utc::now().to_rfc3339(),
     });
 
-    serde_json::to_string_pretty(&payload)
-        .map_err(|e| format!("JSON serialization error: {}", e))
+    serde_json::to_string_pretty(&payload).map_err(|e| format!("JSON serialization error: {}", e))
+}
+
+#[cfg(test)]
+mod transcription_correction_tests {
+    use super::repeated_correction_candidates;
+
+    #[test]
+    fn learns_only_word_for_word_manual_corrections() {
+        let before = "1\n00:00:00,000 --> 00:00:01,000\nhello stacy\n";
+        let after = "1\n00:00:00,000 --> 00:00:01,000\nhello Stacie\n";
+        assert_eq!(
+            repeated_correction_candidates(before, after),
+            vec![("stacy".to_string(), "Stacie".to_string())]
+        );
+    }
+
+    #[test]
+    fn ignores_rewrites_that_shift_word_alignment() {
+        let before = "1\n00:00:00,000 --> 00:00:01,000\nthat worked\n";
+        let after = "1\n00:00:00,000 --> 00:00:01,000\nthat really worked\n";
+        assert!(repeated_correction_candidates(before, after).is_empty());
+    }
 }

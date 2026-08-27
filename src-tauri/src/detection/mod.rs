@@ -48,10 +48,10 @@ impl Platform {
     /// that matters less than whether the title communicates anything at all.
     pub fn title_length_target(self) -> usize {
         match self {
-            Platform::TikTok         => 60,
-            Platform::YouTubeShorts  => 60,
+            Platform::TikTok => 60,
+            Platform::YouTubeShorts => 60,
             Platform::InstagramReels => 60,
-            Platform::Generic        => 60,
+            Platform::Generic => 60,
         }
     }
 
@@ -60,20 +60,20 @@ impl Platform {
     /// to produce the final 5-tag hashtag set.
     pub fn evergreen_hashtags(self) -> &'static [&'static str] {
         match self {
-            Platform::TikTok         => &["gaming", "fyp", "gamingtiktok"],
-            Platform::YouTubeShorts  => &["gaming", "shorts", "gamingshorts"],
+            Platform::TikTok => &["gaming", "fyp", "gamingtiktok"],
+            Platform::YouTubeShorts => &["gaming", "shorts", "gamingshorts"],
             Platform::InstagramReels => &["gaming", "reels", "gamingreels"],
-            Platform::Generic        => &["gaming", "clips", "fyp"],
+            Platform::Generic => &["gaming", "clips", "fyp"],
         }
     }
 
     /// Human-readable display name for prompt interpolation + UI.
     pub fn display_name(self) -> &'static str {
         match self {
-            Platform::TikTok         => "TikTok",
-            Platform::YouTubeShorts  => "YouTube Shorts",
+            Platform::TikTok => "TikTok",
+            Platform::YouTubeShorts => "YouTube Shorts",
             Platform::InstagramReels => "Instagram Reels",
-            Platform::Generic        => "a social platform",
+            Platform::Generic => "a social platform",
         }
     }
 
@@ -81,10 +81,10 @@ impl Platform {
     /// Returns [`Platform::Generic`] for unknown inputs.
     pub fn from_str_or_generic(s: &str) -> Self {
         match s.to_lowercase().as_str() {
-            "tiktok"          => Platform::TikTok,
+            "tiktok" => Platform::TikTok,
             "youtube_shorts" | "youtubeshorts" | "shorts" => Platform::YouTubeShorts,
             "instagram_reels" | "instagramreels" | "reels" => Platform::InstagramReels,
-            _                 => Platform::Generic,
+            _ => Platform::Generic,
         }
     }
 }
@@ -109,8 +109,12 @@ mod tests {
     #[test]
     fn evergreen_hashtags_platform_specific() {
         assert!(Platform::TikTok.evergreen_hashtags().contains(&"fyp"));
-        assert!(Platform::YouTubeShorts.evergreen_hashtags().contains(&"shorts"));
-        assert!(Platform::InstagramReels.evergreen_hashtags().contains(&"reels"));
+        assert!(Platform::YouTubeShorts
+            .evergreen_hashtags()
+            .contains(&"shorts"));
+        assert!(Platform::InstagramReels
+            .evergreen_hashtags()
+            .contains(&"reels"));
     }
 
     #[test]
@@ -150,8 +154,14 @@ mod tests {
     fn platform_from_str_case_insensitive() {
         assert_eq!(Platform::from_str_or_generic("TikTok"), Platform::TikTok);
         assert_eq!(Platform::from_str_or_generic("tiktok"), Platform::TikTok);
-        assert_eq!(Platform::from_str_or_generic("shorts"), Platform::YouTubeShorts);
-        assert_eq!(Platform::from_str_or_generic("reels"), Platform::InstagramReels);
+        assert_eq!(
+            Platform::from_str_or_generic("shorts"),
+            Platform::YouTubeShorts
+        );
+        assert_eq!(
+            Platform::from_str_or_generic("reels"),
+            Platform::InstagramReels
+        );
         assert_eq!(Platform::from_str_or_generic("unknown"), Platform::Generic);
     }
 
