@@ -7,7 +7,7 @@ import { listen } from '@tauri-apps/api/event'
 const openUrl = (url: string) => invoke('open_url', { url })
 import type { Clip, Vod } from '../types'
 import type { UploadResult } from '../stores/platformStore'
-import { CAPTION_STYLES, EXPORT_PRESETS, LAYOUT_OPTIONS } from '../lib/editTypes'
+import { CAPTION_STYLES, EXPORT_PRESETS, LAYOUT_OPTIONS, previewObjectFitForLayout } from '../lib/editTypes'
 import type { LayoutMode, TextOverlay } from '../lib/editTypes'
 import type { Highlight } from '../types'
 import ClipPlayer from '../components/ClipPlayer'
@@ -1623,7 +1623,23 @@ export default function Editor() {
   // ── Sync aspect ratio when export preset changes ──
   useEffect(() => {
     setAspectRatio(exportPreset.aspectRatio)
+    setFacecamLayout(current => {
+      if (exportPreset.aspectRatio === '9:16' && current === 'landscape') return 'context_fit'
+      if (exportPreset.aspectRatio === '16:9' && (current === 'none' || current === 'context_fit')) return 'landscape'
+      return current
+    })
   }, [exportPreset.aspectRatio])
+
+  const handleLayoutSelect = (layout: LayoutMode) => {
+    const leavingLandscape = facecamLayout === 'landscape' && layout !== 'landscape'
+    setFacecamLayout(layout)
+    if (layout === 'landscape') {
+      setExportPresetId('youtube')
+    } else if (leavingLandscape && (layout === 'none' || layout === 'context_fit')) {
+      setExportPresetId('tiktok')
+    }
+    setLayoutPickerOpen(false)
+  }
 
   const persistEditorSettings = async () => {
     if (!canPersistEditorState(clipId, loadedClipIdRef.current)) {
@@ -2074,7 +2090,7 @@ export default function Editor() {
                   onPlayChange={setIsPlaying}
                   seekRef={playerSeekRef}
                   videoElementRef={mainVideoElementRef}
-                  objectFit={facecamLayout === 'context_fit' ? 'contain' : 'cover'}
+                  objectFit={previewObjectFitForLayout(facecamLayout)}
                   blurBackground={(facecamLayout === 'context_fit'
                     && contextBackgroundMode !== 'black'
                     && !brandingActive)
@@ -2615,13 +2631,18 @@ export default function Editor() {
                 </button>
               </div>
             )}
+            {facecamLayout === 'landscape' && (
+              <p className="mt-2 text-[9px] leading-relaxed text-slate-500">
+                Landscape / Widescreen exports a standard 16:9 frame while keeping the full game and HUD visible. The video stays upright.
+              </p>
+            )}
             {/* Layout picker modal */}
             {layoutPickerOpen && (
               <LayoutPicker
                 current={facecamLayout}
                 aspectRatio={aspectRatio as '9:16' | '16:9'}
                 platformName={exportPreset.platform}
-                onSelect={(layout) => { setFacecamLayout(layout); setLayoutPickerOpen(false) }}
+                onSelect={handleLayoutSelect}
                 onClose={() => setLayoutPickerOpen(false)}
               />
             )}

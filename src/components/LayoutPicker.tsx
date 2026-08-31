@@ -19,37 +19,43 @@ function LayoutCard({ option, aspectRatio, selected, hovered }: {
 }) {
   const border = selected ? option.accent : hovered ? 'rgba(255,255,255,0.3)' : 'rgba(255,255,255,0.1)'
 
-  // Card shape matches the export format
-  const aspectClass = aspectRatio === '9:16' ? 'aspect-[9/16]' : 'aspect-video'
+  // Landscape owns its 16:9 output shape; other layouts continue to preview
+  // against the currently selected export format.
+  const previewAspectRatio = option.outputAspectRatio || aspectRatio
+  const aspectClass = previewAspectRatio === '9:16'
+    ? 'h-full aspect-[9/16]'
+    : 'w-full aspect-video'
 
   return (
-    <div className={`relative w-full ${aspectClass} rounded overflow-hidden`}
-      style={{ border: `2px solid ${border}`, background: '#0a0a14' }}>
+    <div className="flex h-28 w-full items-center justify-center">
+      <div className={`relative max-h-full max-w-full ${aspectClass} rounded overflow-hidden`}
+        style={{ border: `2px solid ${border}`, background: '#0a0a14' }}>
 
-      {/* Composition regions */}
-      {option.regions.map((r, i) => (
-        <div key={i} className="absolute flex items-center justify-center transition-all duration-200"
-          style={{
-            left: `${r.x}%`, top: `${r.y}%`, width: `${r.w}%`, height: `${r.h}%`,
-            background: r.fill,
-            borderRadius: r.w < 50 ? '3px' : undefined,
-          }}>
-          <span className="text-[6px] font-mono text-white/40 select-none uppercase tracking-wider">{r.label}</span>
+        {/* Composition regions */}
+        {option.regions.map((r, i) => (
+          <div key={i} className="absolute flex items-center justify-center transition-all duration-200"
+            style={{
+              left: `${r.x}%`, top: `${r.y}%`, width: `${r.w}%`, height: `${r.h}%`,
+              background: r.fill,
+              borderRadius: r.w < 50 ? '3px' : undefined,
+            }}>
+            <span className="text-[6px] font-mono text-white/40 select-none uppercase tracking-wider">{r.label}</span>
+          </div>
+        ))}
+
+        {/* Simulated subtitle bar at bottom */}
+        <div className="absolute bottom-[8%] left-[10%] right-[10%] flex justify-center">
+          <div className="h-[3px] bg-white/20 rounded-full" style={{ width: '60%' }} />
         </div>
-      ))}
 
-      {/* Simulated subtitle bar at bottom */}
-      <div className="absolute bottom-[8%] left-[10%] right-[10%] flex justify-center">
-        <div className="h-[3px] bg-white/20 rounded-full" style={{ width: '60%' }} />
+        {/* Selected checkmark */}
+        {selected && (
+          <div className="absolute top-1 right-1 w-4 h-4 rounded-full flex items-center justify-center"
+            style={{ background: option.accent }}>
+            <Check className="w-2.5 h-2.5 text-white" />
+          </div>
+        )}
       </div>
-
-      {/* Selected checkmark */}
-      {selected && (
-        <div className="absolute top-1 right-1 w-4 h-4 rounded-full flex items-center justify-center"
-          style={{ background: option.accent }}>
-          <Check className="w-2.5 h-2.5 text-white" />
-        </div>
-      )}
     </div>
   )
 }
@@ -88,7 +94,7 @@ export default function LayoutPicker({ current, aspectRatio, platformName, onSel
               </p>
             </div>
           )}
-          <div className="grid grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             {LAYOUT_OPTIONS.map(option => {
               const isSelected = option.id === current
               const isHovered = option.id === hoveredId

@@ -166,7 +166,7 @@ impl InputSize {
 
 /// Export layout mode.
 ///
-/// Determines how the source video is arranged in the vertical frame.
+/// Determines how the source video is arranged in the output frame.
 /// The string values match the `facecam_layout` column in the DB
 /// and the `LayoutMode` type in the frontend.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -181,6 +181,10 @@ pub enum LayoutMode {
     /// Keep the complete source frame visible over a selectable vertical background.
     /// Best for: landscape recordings where UI and action context span the frame.
     ContextFit,
+
+    /// Standard 16:9 presentation that preserves the complete source frame.
+    /// Best for: widescreen gameplay where the full HUD must remain visible.
+    Landscape,
 
     /// Game on top (60%), facecam on bottom (40%).
     /// Best for: streamers with webcam, reaction content.
@@ -302,6 +306,7 @@ impl LayoutMode {
     pub fn from_db(s: &str) -> Self {
         match s {
             "context_fit" => Self::ContextFit,
+            "landscape" => Self::Landscape,
             "split" => Self::Split { ratio: 0.6 },
             "pip" => Self::Pip {
                 x: 0.93,
@@ -314,7 +319,7 @@ impl LayoutMode {
 
     /// Whether this layout requires `-filter_complex` (vs simple `-vf`).
     pub fn is_complex(&self) -> bool {
-        !matches!(self, Self::GameplayFocus)
+        !matches!(self, Self::GameplayFocus | Self::Landscape)
     }
 }
 
@@ -477,6 +482,8 @@ pub fn layout_filter(
             (filter, false)
         }
 
+        LayoutMode::Landscape => landscape_filter(target, caption_filter),
+
         LayoutMode::ContextFit => context_fit_filter(
             target,
             caption_filter,
@@ -533,6 +540,20 @@ pub fn layout_filter(
             (f, true)
         }
     }
+}
+
+fn landscape_filter(target: OutputSize, caption_filter: Option<&str>) -> (String, bool) {
+    let tw = target.width;
+    let th = target.height;
+    let base = format!(
+        "scale={tw}:{th}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,\
+         setsar=1,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:color=black"
+    );
+    let filter = match caption_filter {
+        Some(caption_filter) => format!("{base},{caption_filter}"),
+        None => base,
+    };
+    (filter, false)
 }
 
 fn context_fit_filter(
@@ -711,7 +732,7 @@ pub fn layout_filter_with_region(
     let crop_expr = region.to_crop_expr();
 
     match mode {
-        LayoutMode::GameplayFocus | LayoutMode::ContextFit => {
+        LayoutMode::GameplayFocus | LayoutMode::ContextFit | LayoutMode::Landscape => {
             // No cam slot; region irrelevant.
             layout_filter(mode, target, caption_filter)
         }
@@ -841,6 +862,8 @@ fn export_layout_filter(request: &ExportRequest) -> (String, bool) {
             request.full_frame_scale,
             request.context_blur_strength,
         )
+    } else if matches!(request.layout, LayoutMode::Landscape) {
+        landscape_filter(request.target, caption_filter)
     } else if matches!(request.layout, LayoutMode::ContextFit) {
         let background_mode = if request.context_background_mode == ContextBackgroundMode::Branding
             && !has_branding_input
@@ -864,7 +887,9 @@ fn export_layout_filter(request: &ExportRequest) -> (String, bool) {
             LayoutMode::Pip { .. } => {
                 branded_pip_filter(request.target, caption_filter, request.layout_settings)
             }
-            LayoutMode::GameplayFocus | LayoutMode::ContextFit => unreachable!(),
+            LayoutMode::GameplayFocus | LayoutMode::ContextFit | LayoutMode::Landscape => {
+                unreachable!()
+            }
         }
     } else {
         layout_filter_with_region(
@@ -1383,6 +1408,28 @@ mod tests {
     }
 
     #[test]
+    fn landscape_preserves_full_frame_without_rotation_or_crop() {
+        let target = OutputSize {
+            width: 1920,
+            height: 1080,
+        };
+        let (f, complex) = layout_filter(&LayoutMode::Landscape, target, None);
+
+        assert!(!complex, "landscape should remain a simple filter: {f}");
+        assert!(
+            f.contains("scale=1920:1080:force_original_aspect_ratio=decrease"),
+            "landscape must fit the complete source: {f}"
+        );
+        assert!(
+            f.contains("pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black"),
+            "landscape must pad non-16:9 inputs instead of cropping: {f}"
+        );
+        assert!(!f.contains("crop="), "landscape must not crop: {f}");
+        assert!(!f.contains("transpose"), "landscape must not rotate: {f}");
+        assert!(!f.contains("rotate"), "landscape must not rotate: {f}");
+    }
+
+    #[test]
     fn context_fit_branding_uses_second_input_and_clamped_video_position() {
         let (f, complex) = context_fit_filter(
             OutputSize::VERTICAL_1080,
@@ -1590,6 +1637,10 @@ mod tests {
             LayoutMode::ContextFit
         ));
         assert!(matches!(
+            LayoutMode::from_db("landscape"),
+            LayoutMode::Landscape
+        ));
+        assert!(matches!(
             LayoutMode::from_db("split"),
             LayoutMode::Split { .. }
         ));
@@ -1662,6 +1713,28 @@ mod tests {
         let mut req = sample_request();
         req.layout = LayoutMode::ContextFit;
         let _cmd = build_export_command(Path::new("ffmpeg"), &req);
+    }
+
+    #[test]
+    fn landscape_command_uses_the_widescreen_fit_filter() {
+        let mut req = sample_request();
+        req.platform = Platform::YouTube;
+        req.target = OutputSize {
+            width: 1920,
+            height: 1080,
+        };
+        req.layout = LayoutMode::Landscape;
+
+        let args = cmd_args(&build_export_command(Path::new("ffmpeg"), &req));
+        let filter = args
+            .windows(2)
+            .find_map(|pair| (pair[0] == "-vf").then_some(pair[1].as_str()))
+            .expect("landscape should use the simple video filter path");
+        assert!(filter.contains("force_original_aspect_ratio=decrease"));
+        assert!(filter.contains("pad=1920:1080"));
+        assert!(!filter.contains("crop="));
+        assert!(!filter.contains("transpose"));
+        assert!(!filter.contains("rotate"));
     }
 
     #[test]
@@ -1874,6 +1947,7 @@ mod tests {
         let modes = [
             LayoutMode::GameplayFocus,
             LayoutMode::ContextFit,
+            LayoutMode::Landscape,
             LayoutMode::Split { ratio: 0.6 },
             LayoutMode::Pip {
                 x: 0.93,

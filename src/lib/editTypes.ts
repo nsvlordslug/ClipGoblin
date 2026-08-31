@@ -313,12 +313,14 @@ export const EXPORT_PRESETS: ExportPreset[] = [
 
 // ── Layout Modes ──
 
-export type LayoutMode = 'none' | 'context_fit' | 'split' | 'pip'
+export type LayoutMode = 'none' | 'context_fit' | 'landscape' | 'split' | 'pip'
 
 export interface LayoutOption {
   id: LayoutMode
   name: string
   description: string
+  /** Output shape owned by this layout. Omitted layouts follow the selected export preset. */
+  outputAspectRatio?: '9:16' | '16:9'
   /** Short tag for recommendations */
   tag?: string
   /** Color accent for the card */
@@ -328,23 +330,34 @@ export interface LayoutOption {
 }
 
 export function recommendedLayoutForAspect(aspectRatio: string): LayoutMode {
-  return aspectRatio === '9:16' ? 'context_fit' : 'none'
+  return aspectRatio === '9:16' ? 'context_fit' : 'landscape'
+}
+
+export function previewObjectFitForLayout(layout: LayoutMode): 'cover' | 'contain' {
+  return layout === 'context_fit' || layout === 'landscape' ? 'contain' : 'cover'
 }
 
 export const LAYOUT_OPTIONS: LayoutOption[] = [
   {
     id: 'none', name: 'Full Frame', description: 'Intentional fill crop — scene edges may be trimmed',
-    tag: 'Optional crop', accent: '#3b82f6',
+    outputAspectRatio: '9:16', tag: 'Optional crop', accent: '#3b82f6',
     regions: [
       { label: 'GAME', x: 0, y: 0, w: 100, h: 100, fill: '#1e3a5f' },
     ],
   },
   {
     id: 'context_fit', name: 'Context Fit', description: 'Keeps the entire source composition visible with a blurred, black-bar, or branded background',
-    tag: 'Preserves context', accent: '#06b6d4',
+    outputAspectRatio: '9:16', tag: 'Preserves context', accent: '#06b6d4',
     regions: [
       { label: 'BLUR', x: 0, y: 0, w: 100, h: 100, fill: '#164e63' },
       { label: 'FULL GAME', x: 4, y: 34, w: 92, h: 32, fill: '#0f172a' },
+    ],
+  },
+  {
+    id: 'landscape', name: 'Landscape / Widescreen', description: 'Standard 16:9 export that keeps the full game and HUD visible without rotating the video',
+    outputAspectRatio: '16:9', tag: 'Full game + HUD', accent: '#f59e0b',
+    regions: [
+      { label: 'FULL GAME + HUD', x: 0, y: 0, w: 100, h: 100, fill: '#3f2b0b' },
     ],
   },
   {
