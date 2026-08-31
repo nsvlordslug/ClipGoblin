@@ -6,7 +6,9 @@ import type { ScheduledUpload } from '../types'
 interface ScheduleState {
   uploads: ScheduledUpload[]
   loading: boolean
-  load: () => Promise<void>
+  loaded: boolean
+  loadedAt: number | null
+  load: (options?: { force?: boolean }) => Promise<void>
   schedule: (clipId: string, platform: string, scheduledTime: string, metaJson: string) => Promise<string>
   cancel: (id: string) => Promise<boolean>
   reschedule: (id: string, newTime: string) => Promise<boolean>
@@ -23,18 +25,38 @@ interface ScheduledUploadStatusEvent {
   error?: string | null
 }
 
+let loadInFlight: Promise<void> | null = null
+
 export const useScheduleStore = create<ScheduleState>((set, get) => ({
   uploads: [],
   loading: false,
+  loaded: false,
+  loadedAt: null,
 
-  load: async () => {
-    set({ loading: true })
+  load: async (options = {}) => {
+    if (get().loaded && !options.force) return
+    if (loadInFlight) {
+      await loadInFlight
+      if (options.force) return get().load({ force: true })
+      return
+    }
+
+    const task = (async () => {
+      set({ loading: true })
+      try {
+        const uploads = await invoke<ScheduledUpload[]>('list_scheduled_uploads')
+        set({ uploads, loading: false, loaded: true, loadedAt: Date.now() })
+      } catch (e) {
+        console.error('[ScheduleStore] Failed to load scheduled uploads:', e)
+        set({ loading: false })
+      }
+    })()
+
+    loadInFlight = task
     try {
-      const uploads = await invoke<ScheduledUpload[]>('list_scheduled_uploads')
-      set({ uploads, loading: false })
-    } catch (e) {
-      console.error('[ScheduleStore] Failed to load scheduled uploads:', e)
-      set({ loading: false })
+      await task
+    } finally {
+      if (loadInFlight === task) loadInFlight = null
     }
   },
 
@@ -45,19 +67,19 @@ export const useScheduleStore = create<ScheduleState>((set, get) => ({
       scheduledTime,
       metaJson,
     })
-    await get().load()
+    await get().load({ force: true })
     return id
   },
 
   cancel: async (id) => {
     const ok = await invoke<boolean>('cancel_scheduled_upload', { id })
-    if (ok) await get().load()
+    if (ok) await get().load({ force: true })
     return ok
   },
 
   reschedule: async (id, newTime) => {
     const ok = await invoke<boolean>('reschedule_upload', { id, newTime })
-    if (ok) await get().load()
+    if (ok) await get().load({ force: true })
     return ok
   },
 

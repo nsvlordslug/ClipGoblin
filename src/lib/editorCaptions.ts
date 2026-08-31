@@ -29,6 +29,20 @@ export function canGenerateTimedCaptions(
   return hasUsableSourceMedia(clip, vod)
 }
 
+export function shouldPrepareCaptionAlignment(
+  workspace: 'edit' | 'captions' | 'publish',
+  captionsEnabled: boolean,
+  captionsText: string | null | undefined,
+  provenance: string | null | undefined,
+  alreadyRequested: boolean,
+): boolean {
+  return workspace === 'captions'
+    && captionsEnabled
+    && hasPath(captionsText)
+    && provenance !== 'edited'
+    && !alreadyRequested
+}
+
 export function getCaptionTimelineStart(
   clip: EditorMediaClip | null | undefined,
 ): number {

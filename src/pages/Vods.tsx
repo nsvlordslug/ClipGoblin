@@ -145,7 +145,21 @@ function v4StatusLabel(vod: { analysis_status: string; analysis_progress?: numbe
 }
 
 export default function Vods() {
-  const { loggedInUser, vods, isLoading, checkLogin, fetchVods, refreshVods, removeVod, updateVod, removeClipsForVod } = useAppStore()
+  const {
+    loggedInUser,
+    vods,
+    vodsResource,
+    checkLogin,
+    ensureVods,
+    fetchVods,
+    refreshVods,
+    invalidateVods,
+    invalidateClips,
+    invalidateHighlights,
+    removeVod,
+    updateVod,
+    removeClipsForVod,
+  } = useAppStore()
   // Raw scoring export remains a diagnostic action even though normal clip
   // feedback is now a user-facing Detection setting.
   const showReviewExport = useUiStore(
@@ -342,14 +356,9 @@ export default function Vods() {
 
   useEffect(() => {
     if (loggedInUser) {
-      console.log('[Vods] Restoring deleted VODs then fetching, channelId=', loggedInUser.id)
-      invoke('restore_deleted_vods')
-        .then(() => fetchVods(loggedInUser.id))
-        .then(() => {
-          console.log('[Vods] fetchVods resolved, vods in store:', useAppStore.getState().vods.length)
-        })
+      void ensureVods(loggedInUser.id)
     }
-  }, [loggedInUser, fetchVods])
+  }, [loggedInUser, ensureVods])
 
   // Poll for status updates while any VOD is downloading (reads from DB only, no loading spinner)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -443,6 +452,8 @@ export default function Vods() {
           if (vod.analysis_status === 'completed') {
             clearInterval(poll)
             if (loggedInUser) refreshVods(loggedInUser.id)
+            invalidateClips()
+            invalidateHighlights()
             // Surface the actual spend for this analyze (paid providers only),
             // in an understated toast. Fetch before navigating so the value is
             // ready; a small nav delay lets the toast paint on this page first.
@@ -485,7 +496,7 @@ export default function Vods() {
       }, 2000)
     } catch (err) {
       alert(`Analysis failed: ${err}`)
-      if (loggedInUser) fetchVods(loggedInUser.id)
+      if (loggedInUser) fetchVods(loggedInUser.id, { force: true })
     }
   }
 
@@ -555,7 +566,8 @@ export default function Vods() {
       // First clear its deleted_vods entry, then fetch fresh from API.
       if (loggedInUser) {
         await invoke('restore_deleted_vods')
-        await fetchVods(loggedInUser.id)
+        invalidateVods(loggedInUser.id)
+        await fetchVods(loggedInUser.id, { force: true })
       }
     } catch (err) {
       console.error('[Vods] Delete FAILED:', err)
@@ -569,6 +581,7 @@ export default function Vods() {
     try {
       const trimmed = gameInput.trim()
       await invoke('set_vod_game', { vodId, gameName: trimmed || null })
+      invalidateClips()
       if (loggedInUser) refreshVods(loggedInUser.id)
       setEditingGameId(null)
       setGameInput('')
@@ -626,7 +639,8 @@ export default function Vods() {
     setRestoringVods(true)
     try {
       await invoke('restore_deleted_vods')
-      await fetchVods(loggedInUser.id)
+      invalidateVods(loggedInUser.id)
+      await fetchVods(loggedInUser.id, { force: true })
     } catch (err) {
       alert(`Failed to restore VODs: ${err}`)
     } finally {
@@ -714,7 +728,7 @@ export default function Vods() {
         </div>
       </div>
 
-      {isLoading ? (
+      {vods.length === 0 && (!vodsResource.loaded || vodsResource.loading) ? (
         <div className="v4-panel text-center p-12">
           <p className="text-slate-400 text-sm">Loading VODs...</p>
         </div>

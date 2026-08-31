@@ -6,6 +6,8 @@ import { useAppStore } from '../stores/appStore'
 import { PLATFORM_INFO } from '../stores/platformStore'
 import { fmtCountdown } from '../lib/uiFormat'
 import type { ScheduledUpload } from '../types'
+import XHandoffCard, { ManualShareAvailabilityNote } from '../components/XHandoffCard'
+import { canOfferXHandoff } from '../lib/xHandoff'
 
 const THUMB_STYLES = ['a', 'b', 'c', 'd', 'e', 'f'] as const
 
@@ -152,6 +154,7 @@ export default function ScheduledUploads() {
   const pending = uploads.filter(u => u.status === 'pending' || u.status === 'uploading' || u.status === 'processing')
   const completed = uploads.filter(u => u.status === 'completed')
   const failed = uploads.filter(u => u.status === 'failed')
+  const completedWithoutManualShare = completed.some(upload => !canOfferXHandoff(upload.platform, upload.video_url))
 
   const nextPending = [...pending].sort((a, b) => new Date(a.scheduled_time).getTime() - new Date(b.scheduled_time).getTime())[0]
 
@@ -234,6 +237,15 @@ export default function ScheduledUploads() {
             </>
           )}
         </div>
+        {upload.status === 'completed' && upload.video_url && (
+          <XHandoffCard
+            platform={upload.platform}
+            publishedUrl={upload.video_url}
+            clipTitle={clipTitle}
+            className="col-span-full"
+            compact
+          />
+        )}
         {rescheduleId === upload.id && (
           <div className="absolute right-0 top-full mt-1 z-10 v4-panel flex items-center gap-2" style={{padding:10}}>
             <input
@@ -343,6 +355,7 @@ export default function ScheduledUploads() {
               <h2 className="text-xs font-bold text-slate-400 mb-2 uppercase tracking-[0.15em]">
                 Completed ({completed.length})
               </h2>
+              {completedWithoutManualShare && <ManualShareAvailabilityNote className="mb-3" />}
               {groupByDay(completed).map(g => renderDayGroup(g, 'completed'))}
             </section>
           )}

@@ -5,6 +5,7 @@ import {
   canGenerateTimedCaptions,
   getCaptionTimelineStart,
   hasUsableSourceMedia,
+  shouldPrepareCaptionAlignment,
 } from '../src/lib/editorCaptions.ts'
 
 test('allows subtitle generation from an imported Medal source without a VOD row', () => {
@@ -43,4 +44,17 @@ test('keeps imported subtitle time tied to the original source after trimming', 
 
 test('falls back to clip start for legacy Twitch captions', () => {
   assert.equal(getCaptionTimelineStart({ start_seconds: 196.3 }), 196.3)
+})
+
+test('defers generated-caption alignment until the Captions workspace is opened', () => {
+  assert.equal(shouldPrepareCaptionAlignment('edit', true, 'captions', 'analysis-draft', false), false)
+  assert.equal(shouldPrepareCaptionAlignment('publish', true, 'captions', 'analysis-draft', false), false)
+  assert.equal(shouldPrepareCaptionAlignment('captions', true, 'captions', 'analysis-draft', false), true)
+})
+
+test('does not auto-align edited, empty, disabled, or already-requested captions', () => {
+  assert.equal(shouldPrepareCaptionAlignment('captions', true, 'captions', 'edited', false), false)
+  assert.equal(shouldPrepareCaptionAlignment('captions', true, '  ', 'analysis-draft', false), false)
+  assert.equal(shouldPrepareCaptionAlignment('captions', false, 'captions', 'analysis-draft', false), false)
+  assert.equal(shouldPrepareCaptionAlignment('captions', true, 'captions', 'analysis-draft', true), false)
 })

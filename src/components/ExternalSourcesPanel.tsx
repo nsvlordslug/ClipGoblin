@@ -67,7 +67,10 @@ export default function ExternalSourcesPanel({ hidden = false }: { hidden?: bool
   const [recorderStatus, setRecorderStatus] = useState<Partial<Record<'obs' | 'meld', RecorderStatus>>>({})
 
   const refreshLibrary = useCallback(async () => {
-    await Promise.all([fetchClips(), fetchHighlights()])
+    await Promise.all([
+      fetchClips({ force: true }),
+      fetchHighlights(undefined, { force: true }),
+    ])
   }, [fetchClips, fetchHighlights])
 
   const load = useCallback(async () => {

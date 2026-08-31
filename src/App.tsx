@@ -127,6 +127,8 @@ export default function App() {
   const vods = useAppStore(s => s.vods)
   const highlights = useAppStore(s => s.highlights)
   const loggedInUser = useAppStore(s => s.loggedInUser)
+  const loginChecked = useAppStore(s => s.loginChecked)
+  const checkLogin = useAppStore(s => s.checkLogin)
   const fetchClips = useAppStore(s => s.fetchClips)
   const fetchHighlights = useAppStore(s => s.fetchHighlights)
   const speechModelSelectionSaving = useAppStore(s => s.speechModelSelectionSaving)
@@ -146,6 +148,15 @@ export default function App() {
     const unlisten = startScheduleListening()
     return unlisten
   }, [loadPlatforms, loadAi, loadUi, loadTemplates, loadSchedules, startScheduleListening])
+
+  useEffect(() => {
+    void checkLogin()
+  }, [checkLogin])
+
+  useEffect(() => {
+    if (!loginChecked) return
+    void Promise.all([fetchClips(), fetchHighlights()])
+  }, [fetchClips, fetchHighlights, loggedInUser?.id, loginChecked])
 
   useEffect(() => {
     let disposed = false
@@ -171,7 +182,10 @@ export default function App() {
     listen<ExternalImportEvent[]>('external-clips-imported', (event) => {
       const imported = event.payload
       if (imported.length === 0) return
-      void Promise.all([fetchClips(), fetchHighlights()])
+      void Promise.all([
+        fetchClips({ force: true }),
+        fetchHighlights(undefined, { force: true }),
+      ])
       setExternalImportNotice({
         count: imported.length,
         source: imported[0]?.sourceKind || 'recording folder',

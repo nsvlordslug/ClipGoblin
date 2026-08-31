@@ -13,6 +13,8 @@ import { localDateTimeAfter } from '../lib/dateTime'
 import { getPresetForPlatform, isTikTokInboxDelivered } from '../lib/platformUpload'
 import { artifactUploadFields } from '../lib/exportArtifacts'
 import type { RenderedArtifact } from '../lib/exportArtifacts'
+import XHandoffCard, { ManualShareAvailabilityNote } from './XHandoffCard'
+import { canOfferXHandoff } from '../lib/xHandoff'
 
 // ── Types ──
 
@@ -185,6 +187,9 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
       s.status === 'duplicate' || s.acceptedWithoutLink === true || s.draftHandoff === true
     ).length
   }, 0)
+  const hasXHandoff = activePlatforms.some(platform =>
+    clips.some(clip => canOfferXHandoff(platform, clipStatuses[platform]?.[clip.id]?.videoUrl))
+  )
 
   useEffect(() => {
     const uploadSucceeded = completed
@@ -194,7 +199,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
       && doneJobs === totalJobs
       && failedJobs === 0
       && attentionJobs === 0
-    if (!uploadSucceeded) return
+    if (!uploadSucceeded || hasXHandoff) return
 
     const timer = window.setTimeout(() => {
       onComplete()
@@ -206,6 +211,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
     attentionJobs,
     doneJobs,
     failedJobs,
+    hasXHandoff,
     onClose,
     onComplete,
     scheduleComplete,
@@ -648,9 +654,27 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
                           )
                         })}
                       </div>
+                      {activePlatforms.map(platform => {
+                        const publishedUrl = clipStatuses[platform]?.[clip.id]?.videoUrl
+                        if (!publishedUrl || !canOfferXHandoff(platform, publishedUrl)) return null
+                        return (
+                          <XHandoffCard
+                            key={`${platform}:${publishedUrl}`}
+                            platform={platform}
+                            publishedUrl={publishedUrl}
+                            clipTitle={clip.title}
+                            className="mt-2"
+                            compact
+                          />
+                        )
+                      })}
                     </div>
                   ))}
                 </div>
+              )}
+
+              {completed && !hasXHandoff && (
+                <ManualShareAvailabilityNote className="mt-3" />
               )}
             </div>
           )}

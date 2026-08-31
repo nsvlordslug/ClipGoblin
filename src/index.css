@@ -1024,8 +1024,18 @@ body.theme-light {
 .v4-editor-workspace[hidden] {
   display: none;
 }
+.v4-editor-tools-publish {
+  max-height: none;
+  overflow: visible;
+}
+.v4-editor-tools-publish .v4-editor-workspace-scroll {
+  overflow: visible;
+  padding-right: 0;
+  scrollbar-gutter: auto;
+}
 .v4-editor-publish-controls {
-  z-index: 5;
+  position: static;
+  z-index: auto;
 }
 .v4-editor-save-button {
   min-height: 34px;

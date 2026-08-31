@@ -222,7 +222,7 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, on
         note,
         issues,
       })
-      await fetchHighlights()
+      await fetchHighlights(undefined, { force: true })
       await onReviewSaved()
     } catch (error) {
       console.error('Failed to save clip review:', error)
@@ -260,8 +260,10 @@ function ClipCard({ clip, highlight, confidence, posterSrc, onDelete, onEdit, on
       return
     }
     try {
-      const v = await invoke<Vod>('get_vod_detail', { vodId: clip.vod_id })
-      if (v.local_path) setVideoSrc(convertFileSrc(v.local_path))
+      const store = useAppStore.getState()
+      await store.ensureVodDetails([clip.vod_id])
+      const v = useAppStore.getState().vodDetailsById[clip.vod_id]
+      if (v?.local_path) setVideoSrc(convertFileSrc(v.local_path))
     } catch (error) {
       console.warn(`[Clips] Failed to load VOD source for clip ${clip.id}`)
       setPreviewError(String(error))
@@ -605,10 +607,17 @@ export default function Clips() {
   const focusVodId = routeState?.focusVodId ?? null
   const focusClipId = routeState?.focusClipId ?? null
   const openFocusedReview = routeState?.openReview === true
-  const { clips, highlights, fetchClips, fetchHighlights, refreshVods, loggedInUser } = useAppStore()
-  const { uploads: scheduledUploads, load: loadSchedules } = useScheduleStore()
+  const clips = useAppStore(state => state.clips)
+  const highlights = useAppStore(state => state.highlights)
+  const loggedInUser = useAppStore(state => state.loggedInUser)
+  const vodMap = useAppStore(state => state.vodDetailsById)
+  const checkLogin = useAppStore(state => state.checkLogin)
+  const fetchClips = useAppStore(state => state.fetchClips)
+  const fetchHighlights = useAppStore(state => state.fetchHighlights)
+  const refreshVods = useAppStore(state => state.refreshVods)
+  const ensureVodDetails = useAppStore(state => state.ensureVodDetails)
+  const scheduledUploads = useScheduleStore(state => state.uploads)
   const showReviewTools = useUiStore((state) => state.settings.showReviewTools)
-  const [vodMap, setVodMap] = useState<Record<string, Vod>>({})
   const [personalizationStatus, setPersonalizationStatus] = useState<PersonalizationStatus | null>(null)
   const [importingMedia, setImportingMedia] = useState(false)
   const [importNotice, setImportNotice] = useState<{ ok: boolean; text: string } | null>(null)
@@ -685,10 +694,8 @@ export default function Clips() {
 
   // ── Load data ──
   useEffect(() => {
-    fetchClips()
-    fetchHighlights()
-    loadSchedules()
-  }, [fetchClips, fetchHighlights, loadSchedules])
+    void checkLogin().then(() => Promise.all([fetchClips(), fetchHighlights()]))
+  }, [checkLogin, fetchClips, fetchHighlights])
 
   useEffect(() => {
     if (autoCollapsedMedalRef.current) return
@@ -713,7 +720,10 @@ export default function Clips() {
     try {
       const results = await invoke<Array<{ status: string }>>('pick_and_import_media')
       if (results.length === 0) return
-      await Promise.all([fetchClips(), fetchHighlights()])
+      await Promise.all([
+        fetchClips({ force: true }),
+        fetchHighlights(undefined, { force: true }),
+      ])
       const imported = results.filter(result => result.status === 'imported').length
       const duplicates = results.length - imported
       setImportNotice({
@@ -860,21 +870,8 @@ export default function Clips() {
     const vodIds = [...new Set(clips
       .filter(c => !c.source_media_path && !c.vod_id.startsWith('external:'))
       .map(c => c.vod_id))]
-    setVodMap(prev => {
-      const missing = vodIds.filter(id => !prev[id])
-      if (missing.length === 0) return prev
-      Promise.all(missing.map(id =>
-        invoke<Vod>('get_vod_detail', { vodId: id }).catch(() => null)
-      )).then(vods => {
-        setVodMap(current => {
-          const updated = { ...current }
-          vods.forEach((vod, i) => { if (vod) updated[missing[i]] = vod })
-          return updated
-        })
-      })
-      return prev
-    })
-  }, [clips])
+    void ensureVodDetails(vodIds)
+  }, [clips, ensureVodDetails])
 
   // ── Persist sort/filter prefs ──
   useEffect(() => { saveSort({ by: sortBy, dir: sortDir }) }, [sortBy, sortDir])
@@ -954,8 +951,8 @@ export default function Clips() {
         console.error('Failed to delete clip:', err)
       }
     }
-    fetchClips()
-    fetchHighlights()
+    void fetchClips({ force: true })
+    void fetchHighlights(undefined, { force: true })
     if (loggedInUser) refreshVods(loggedInUser.id)
   }
 
@@ -1009,9 +1006,9 @@ export default function Clips() {
 
   // Filter out hidden (pending-delete) clips, then apply the source workspace.
   const sourceCounts = useMemo(() => countClipsBySource(clips), [clips])
-  const visibleClips = clips.filter(c => (
+  const visibleClips = useMemo(() => clips.filter(c => (
     !hiddenIds.has(c.id) && clipMatchesSourceTab(c, sourceTab)
-  ))
+  )), [clips, hiddenIds, sourceTab])
 
   const selectSourceTab = (tab: ClipSourceTab) => {
     setSourceTab(tab)
@@ -1021,7 +1018,10 @@ export default function Clips() {
 
   const selectAll = () => setSelectedIds(new Set(visibleClips.map(c => c.id)))
   const deselectAll = () => setSelectedIds(new Set())
-  const selectedClips = visibleClips.filter(c => selectedIds.has(c.id))
+  const selectedClips = useMemo(
+    () => visibleClips.filter(c => selectedIds.has(c.id)),
+    [visibleClips, selectedIds],
+  )
 
   // ── Collapse toggle ──
 

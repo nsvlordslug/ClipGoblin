@@ -61,7 +61,7 @@ import { parseStoredTags } from '../lib/tags'
 import TwitchProvenanceBadges from '../components/TwitchProvenanceBadges'
 import { getNextEditorWorkspace, isEditorWorkspaceId } from '../lib/editorWorkspace'
 import type { EditorWorkspaceId, EditorWorkspaceNavigationKey } from '../lib/editorWorkspace'
-import { canGenerateTimedCaptions, getCaptionTimelineStart, hasUsableSourceMedia } from '../lib/editorCaptions'
+import { canGenerateTimedCaptions, getCaptionTimelineStart, hasUsableSourceMedia, shouldPrepareCaptionAlignment } from '../lib/editorCaptions'
 import { canPersistEditorState, LatestRequestGate } from '../lib/editorRequestGuard'
 import {
   brandingAssetName,
@@ -80,6 +80,8 @@ import {
 } from '../lib/fullFrame'
 import { artifactUploadFields, renderSnapshotKey, saveThenRender } from '../lib/exportArtifacts'
 import type { RenderedArtifact } from '../lib/exportArtifacts'
+import XHandoffCard, { ManualShareUnavailableCard } from '../components/XHandoffCard'
+import { canOfferXHandoff } from '../lib/xHandoff'
 import { speechModelLabel } from '../lib/speechModelSelection'
 
 type CaptionProvenance = 'none' | 'analysis-draft' | 'aligned' | 'edited' | 'legacy'
@@ -156,7 +158,7 @@ function PillGroup<T extends string>({ value, options, onChange }: {
 }
 
 /** Action buttons — extracted so platform hooks are called at component level */
-function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, exportDone, exportError, mediaAvailable, exportPreset, onSave, onExportForFormat, tiktokPreviewReady, publishMeta, clipTitle, uploadHistory, onUploadHistoryChange }: {
+function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, exportDone, exportError, mediaAvailable, exportPreset, onSave, onExportForFormat, publishMeta, clipTitle, uploadHistory, onUploadHistoryChange }: {
   clipId: string; clip: Clip | null; saving: boolean; saved: boolean
   exporting: boolean; exportProgress: number; exportDone: boolean; exportError: string | null
   mediaAvailable: boolean
@@ -164,7 +166,6 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
   onSave: () => Promise<void>
   /** Export with a specific aspect ratio override (for multi-platform re-export) */
   onExportForFormat: (aspectRatio: string) => Promise<RenderedArtifact>
-  tiktokPreviewReady: boolean
   publishMeta?: { title: string; description: string; hashtags: string[]; visibility: string }
   /** The main clip title from the editor (single source of truth for upload title) */
   clipTitle: string
@@ -309,8 +310,6 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
     && platformStates.tiktok.draftHandoff === true
   const tiktokProcessing = platformStates.tiktok?.status === 'processing'
   const tiktokPreviouslyAccepted = platformStates.tiktok?.status === 'duplicate'
-  const tiktokNeedsPreview = selectedPlatforms.includes('tiktok') && !tiktokPreviewReady
-
   // Build upload metadata — includes title from main field, caption, and hashtags
   const buildUploadMeta = (platform: string, force = false, artifact?: RenderedArtifact) => {
     const baseDesc = publishMeta?.description || ''
@@ -565,8 +564,12 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
     instagram: 'Instagram',
   }
 
+  const xHandoffUrls = Object.entries(allUploadUrls).filter(([platform, url]) =>
+    canOfferXHandoff(platform, url)
+  )
+
   return (
-    <div className="v4-editor-publish-controls sticky bottom-0 bg-surface-900/80 backdrop-blur-sm p-2 -mx-1 rounded-lg space-y-2">
+    <div className="v4-editor-publish-controls space-y-2">
       {/* Save button */}
       <div className="flex gap-2">
         {/* Save button */}
@@ -683,12 +686,6 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
           />
           )}
 
-        {tiktokNeedsPreview && (
-          <div role="status" className="border-l-2 border-violet-400 bg-violet-500/5 px-3 py-2 text-[11px] leading-relaxed text-violet-100">
-            Prepare the exact 9:16 preview on the left before sending this video to TikTok.
-          </div>
-        )}
-
         {tiktokProcessing && (
           <div role="status" className="border-l-2 border-cyan-400 bg-cyan-500/5 px-3 py-2 text-[11px] leading-relaxed text-cyan-100">
             TikTok received the video and is still processing it. TikTok has not confirmed an
@@ -745,7 +742,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
             {scheduleMode ? (
               <button
                 onClick={handleScheduleUpload}
-                disabled={scheduling || !scheduleTime || !mediaAvailable || tiktokNeedsPreview || (selectedPlatforms.includes('tiktok') && !tiktokComplianceValid)}
+                disabled={scheduling || !scheduleTime || !mediaAvailable || (selectedPlatforms.includes('tiktok') && !tiktokComplianceValid)}
                 className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors cursor-pointer border bg-amber-600/80 text-white border-amber-500 hover:bg-amber-500 disabled:opacity-60"
               >
                 {scheduling ? (
@@ -759,7 +756,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
             ) : (
               <button
                 onClick={() => void handleMultiUpload(new Set(forcedReuploadPlatforms))}
-                disabled={anyUploading || !mediaAvailable || tiktokNeedsPreview || (allSubmitted && !hasForcedReuploadOption) || (selectedPlatforms.includes('tiktok') && !tiktokComplianceValid)}
+                disabled={anyUploading || !mediaAvailable || (allSubmitted && !hasForcedReuploadOption) || (selectedPlatforms.includes('tiktok') && !tiktokComplianceValid)}
                 className={`w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors cursor-pointer border ${
                   allSubmitted && !hasForcedReuploadOption
                     ? 'bg-green-600/20 text-green-400 border-green-500/30'
@@ -836,6 +833,21 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
         </div>
       )}
 
+      {xHandoffUrls.length > 0 ? (
+        <div className="space-y-2">
+          {xHandoffUrls.map(([platform, url]) => (
+            <XHandoffCard
+              key={`${platform}:${url}`}
+              platform={platform}
+              publishedUrl={url}
+              clipTitle={clipTitle}
+            />
+          ))}
+        </div>
+      ) : (
+        <ManualShareUnavailableCard />
+      )}
+
       {/* Add to Montage */}
       <button onClick={handleAddToMontage}
         className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs text-slate-400 bg-surface-800 border border-surface-600 rounded-lg hover:text-white hover:border-violet-500/40 transition-colors cursor-pointer">
@@ -903,6 +915,9 @@ export default function Editor() {
   const editorLoadGateRef = useRef<LatestRequestGate | null>(null)
   if (!editorLoadGateRef.current) editorLoadGateRef.current = new LatestRequestGate()
   const loadedClipIdRef = useRef<string | null>(null)
+  const captionAlignmentGenerationRef = useRef(0)
+  const captionAlignmentRequestedClipRef = useRef<string | null>(null)
+  const [captionAlignmentPreparing, setCaptionAlignmentPreparing] = useState(false)
   const saveRequestGenerationRef = useRef(0)
   const [saving, setSaving] = useState(false)
   const [exporting, setExporting] = useState(false)
@@ -932,6 +947,12 @@ export default function Editor() {
   const [captionProvenance, setCaptionProvenance] = useState<CaptionProvenance>('none')
   const [captionPipelineVersion, setCaptionPipelineVersion] = useState(0)
   const [captionAudioMode, setCaptionAudioMode] = useState<CaptionAudioMode>('mixed')
+  const captionsEnabledRef = useRef(captionsEnabled)
+  captionsEnabledRef.current = captionsEnabled
+  const captionProvenanceRef = useRef(captionProvenance)
+  captionProvenanceRef.current = captionProvenance
+  const captionAudioModeRef = useRef(captionAudioMode)
+  captionAudioModeRef.current = captionAudioMode
   const [captionLanguage, setCaptionLanguage] = useState<string | null>(null)
   const [captionAudioStream, setCaptionAudioStream] = useState<string | null>(null)
   const [captionModelUsed, setCaptionModelUsed] = useState<string | null>(null)
@@ -953,6 +974,7 @@ export default function Editor() {
   const [pickingBranding, setPickingBranding] = useState(false)
   const [brandingError, setBrandingError] = useState('')
   const speechModelSelectionSaving = useAppStore(state => state.speechModelSelectionSaving)
+  const invalidateClips = useAppStore(state => state.invalidateClips)
   const [layoutPickerOpen, setLayoutPickerOpen] = useState(false)
   const [exportPresetId, setExportPresetId] = useState('tiktok')
   const [textOverlays] = useState<TextOverlay[]>([])
@@ -1166,10 +1188,11 @@ export default function Editor() {
         clipId: saveClipId,
         description: publishMeta.description || null,
         hashtags: hashtagStr,
-      }).catch(err => console.warn('[Editor] Failed to auto-save publish meta:', err))
+      }).then(() => invalidateClips())
+        .catch(err => console.warn('[Editor] Failed to auto-save publish meta:', err))
     }, 500) // debounce 500ms
     return () => clearTimeout(timer)
-  }, [clipId, publishMeta.description, publishMeta.hashtags])
+  }, [clipId, invalidateClips, publishMeta.description, publishMeta.hashtags])
 
   // ── Player state (declared before subtitle/marker code that depends on it) ──
   const playerSeekRef = useRef<((time: number) => void) | null>(null)
@@ -1283,11 +1306,11 @@ export default function Editor() {
     if (typeof result.sourceStart === 'number' && Number.isFinite(result.sourceStart)) {
       setCaptionTimelineStart(Math.max(0, result.sourceStart))
     }
-    setSaved(false)
+    if (result.changed) setSaved(false)
   }, [])
 
   const handleGenerateCaptions = async () => {
-    if (!clipId || generatingCaptions || speechModelSelectionSaving) return
+    if (!clipId || generatingCaptions || speechModelSelectionSaving || captionAlignmentPreparing) return
     setGeneratingCaptions(true)
     setCaptionError('')
     try {
@@ -1331,6 +1354,75 @@ export default function Editor() {
       setGeneratingCaptions(false)
     }
   }
+
+  const prepareDeferredCaptionAlignment = useCallback(async () => {
+    if (!clipId || loadedClipIdRef.current !== clipId) return
+    if (captionAlignmentRequestedClipRef.current === clipId) return
+
+    captionAlignmentRequestedClipRef.current = clipId
+    const requestGeneration = captionAlignmentGenerationRef.current + 1
+    captionAlignmentGenerationRef.current = requestGeneration
+    const startingText = captionsTextRef.current
+    const startingEnabled = captionsEnabledRef.current
+    const startingProvenance = captionProvenanceRef.current
+    const startingAudioMode = captionAudioModeRef.current
+    setCaptionAlignmentPreparing(true)
+    setCaptionError('')
+
+    try {
+      const result = await invoke<CaptionAlignmentResult>('ensure_clip_captions_aligned', { clipId })
+      const requestIsCurrent = captionAlignmentGenerationRef.current === requestGeneration
+        && loadedClipIdRef.current === clipId
+      if (!requestIsCurrent) return
+
+      if (
+        captionsTextRef.current !== startingText
+        || captionsEnabledRef.current !== startingEnabled
+        || captionProvenanceRef.current !== startingProvenance
+        || captionAudioModeRef.current !== startingAudioMode
+      ) {
+        setCaptionError('Accurate timing finished, but your newer subtitle edits were kept.')
+        return
+      }
+
+      applyCaptionAlignment(result)
+      if (result.cueCount === 0) {
+        setCaptionError(result.message || 'No spoken subtitles were found. Captions remain off.')
+      } else if (result.message) {
+        setCaptionError(result.message)
+      }
+    } catch (error) {
+      const requestIsCurrent = captionAlignmentGenerationRef.current === requestGeneration
+        && loadedClipIdRef.current === clipId
+      if (requestIsCurrent) {
+        setCaptionError(errorMessage(error, 'Accurate subtitle timing could not be prepared.'))
+      }
+    } finally {
+      if (captionAlignmentGenerationRef.current === requestGeneration) {
+        setCaptionAlignmentPreparing(false)
+      }
+    }
+  }, [applyCaptionAlignment, clipId])
+
+  useEffect(() => {
+    const alreadyRequested = captionAlignmentRequestedClipRef.current === clipId
+    if (!shouldPrepareCaptionAlignment(
+      editorWorkspace,
+      captionsEnabled,
+      captionsText,
+      captionProvenance,
+      alreadyRequested,
+    )) return
+
+    void prepareDeferredCaptionAlignment()
+  }, [
+    captionProvenance,
+    captionsEnabled,
+    captionsText,
+    clipId,
+    editorWorkspace,
+    prepareDeferredCaptionAlignment,
+  ])
 
   // ── Build timeline markers (memoized to avoid rebuilding on every render) ──
   const { timelineMarkers, suggestedHookStart } = useMemo(() => {
@@ -1376,6 +1468,9 @@ export default function Editor() {
     const loadGeneration = loadGate.begin()
     const isCurrentLoad = () => loadGate.isCurrent(loadGeneration)
     loadedClipIdRef.current = null
+    captionAlignmentGenerationRef.current += 1
+    captionAlignmentRequestedClipRef.current = null
+    setCaptionAlignmentPreparing(false)
     saveRequestGenerationRef.current += 1
     setSaving(false)
     setSaved(false)
@@ -1398,29 +1493,8 @@ export default function Editor() {
     setUploadHistory({})
     ;(async () => {
       try {
-        let c = await invoke<Clip>('get_clip_detail', { clipId })
+        const c = await invoke<Clip>('get_clip_detail', { clipId })
         if (!isCurrentLoad()) return
-        let alignmentMessage = ''
-        if (c.captions_enabled === 1) {
-          try {
-            const result = await invoke<CaptionAlignmentResult>('ensure_clip_captions_aligned', { clipId })
-            if (!isCurrentLoad()) return
-            c = {
-              ...c,
-              captions_text: result.srt,
-              captions_enabled: result.captionsEnabled ? 1 : 0,
-              captions_source_start: result.sourceStart,
-              captions_provenance: result.provenance,
-              captions_pipeline_version: result.pipelineVersion,
-              caption_audio_mode: result.audioMode,
-              captions_language: result.language,
-              caption_audio_stream: result.audioStream,
-            }
-            alignmentMessage = result.message || ''
-          } catch (error) {
-            alignmentMessage = errorMessage(error, 'Accurate subtitle timing could not be prepared.')
-          }
-        }
         loadedClipIdRef.current = clipId
         setClip(c)
         setTitle(c.title)
@@ -1440,7 +1514,7 @@ export default function Editor() {
         setCaptionAudioMode(c.caption_audio_mode === 'microphone' ? 'microphone' : 'mixed')
         setCaptionLanguage(c.captions_language || null)
         setCaptionAudioStream(c.caption_audio_stream || null)
-        setCaptionError(alignmentMessage)
+        setCaptionError('')
         setCaptionsPosition(c.captions_position || 'bottom')
         setCaptionYOffset(Math.max(-20, Math.min(20, c.caption_y_offset ?? 0)))
         setCaptionStyleId(c.caption_style || 'clean')
@@ -1500,18 +1574,6 @@ export default function Editor() {
         })
         setHistoryTick(0)
 
-        // Fetch linked highlight for marker data
-        let loadedHighlight: Highlight | undefined
-        try {
-          const highlights = await invoke<Array<Omit<Highlight, 'tags'> & { tags: unknown }>>('get_all_highlights')
-          if (!isCurrentLoad()) return
-          const rawHighlight = highlights.find(h => h.id === c.highlight_id)
-          loadedHighlight = rawHighlight
-            ? { ...rawHighlight, tags: parseStoredTags(rawHighlight.tags) }
-            : undefined
-          if (loadedHighlight) setHighlight(loadedHighlight)
-        } catch { /* non-critical */ }
-
         if (c.source_media_path) {
           setVod(null)
           setGame(c.game || '')
@@ -1535,6 +1597,14 @@ export default function Editor() {
             setVideoSrc(convertFileSrc(v.local_path))
           }
         }
+
+        // Marker metadata is non-critical and should not delay the video preview.
+        try {
+          const highlights = await invoke<Array<Omit<Highlight, 'tags'> & { tags: unknown }>>('get_all_highlights')
+          if (!isCurrentLoad()) return
+          const rawHighlight = highlights.find(h => h.id === c.highlight_id)
+          if (rawHighlight) setHighlight({ ...rawHighlight, tags: parseStoredTags(rawHighlight.tags) })
+        } catch { /* non-critical */ }
 
         if (isCurrentLoad()) invoke('record_clip_opened', { clipId }).catch(() => {})
 
@@ -1585,6 +1655,7 @@ export default function Editor() {
       game: game || null,
     }
     await invoke('update_clip_settings', snapshot)
+    invalidateClips()
   }
 
   const handleSave = async () => {
@@ -1742,13 +1813,10 @@ export default function Editor() {
   const previewWidth = aspectRatio === '9:16' ? 'w-[270px]' : 'w-full'
 
   const currentPreparedArtifact = preparedArtifacts[exportPreset.aspectRatio]
-  const exactPreviewArtifact = currentPreparedArtifact?.snapshotKey
+  const currentRenderedArtifact = currentPreparedArtifact?.snapshotKey
     === currentRenderSnapshotKey(exportPreset.aspectRatio)
     ? currentPreparedArtifact.artifact
     : null
-  const preparedTikTokArtifact = preparedArtifacts['9:16']
-  const tiktokPreviewReady = preparedTikTokArtifact?.snapshotKey
-    === currentRenderSnapshotKey('9:16')
 
   // Compute actual frame pixel dimensions for facecam overlays
   const frameHeightPx = aspectRatio === '9:16' ? 480 : 249
@@ -1981,14 +2049,9 @@ export default function Editor() {
           <div className="v4-panel" style={{padding: 16}}>
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-sm font-semibold text-slate-300">
-                {editorWorkspace === 'publish' ? 'Exact publish preview' : 'Preview'}
+                {editorWorkspace === 'publish' ? 'Publish preview' : 'Preview'}
               </h2>
               <div className="flex items-center gap-2">
-                {editorWorkspace === 'publish' && exactPreviewArtifact && (
-                  <span className="text-[9px] font-mono text-emerald-300 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/30">
-                    Rendered MP4
-                  </span>
-                )}
                 <span className="text-[9px] font-mono text-slate-500 bg-surface-900 px-1.5 py-0.5 rounded border border-surface-600">
                   {exportPreset.resolution.w}x{exportPreset.resolution.h} {exportPreset.platform}
                 </span>
@@ -1996,55 +2059,6 @@ export default function Editor() {
             </div>
             <div className="flex justify-center">
               <div className={`relative rounded-lg overflow-hidden ${previewAspect} ${previewWidth} transition-all duration-300 ease-in-out`}>
-                {editorWorkspace === 'publish' ? (
-                  exactPreviewArtifact ? (
-                    <ClipPlayer
-                      key={exactPreviewArtifact.revision}
-                      src={convertFileSrc(exactPreviewArtifact.path)}
-                      clipStart={0}
-                      clipEnd={0}
-                      fullFile
-                      mode="full"
-                      controlsOverlay
-                      className="h-full"
-                      onTimeUpdate={time => setPlaybackTime(isCommunityClip ? time : startSeconds + time)}
-                      onPlayChange={setIsPlaying}
-                      objectFit="contain"
-                    />
-                  ) : (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-surface-950 px-6 text-center">
-                      {exporting ? (
-                        <>
-                          <Loader2 className="h-7 w-7 animate-spin text-violet-300" />
-                          <div>
-                            <p className="text-sm font-medium text-white">Preparing exact preview</p>
-                            <p className="mt-1 text-xs text-slate-400">Rendering {Math.round(exportProgress)}%</p>
-                          </div>
-                        </>
-                      ) : (
-                        <>
-                          <Film className="h-7 w-7 text-violet-300" />
-                          <div>
-                            <p className="text-sm font-medium text-white">Preview not prepared</p>
-                            <p className="mt-1 text-xs leading-relaxed text-slate-400">
-                              Render this saved edit to play the exact MP4 that will be handed to {exportPreset.platform}.
-                            </p>
-                          </div>
-                          <button
-                            type="button"
-                            className="v4-btn primary"
-                            disabled={!hasUsableSourceMedia(clip, vod)}
-                            onClick={() => { void handleExportForFormat(exportPreset.aspectRatio).catch(() => undefined) }}
-                          >
-                            <Film className="h-4 w-4" />
-                            Prepare exact preview
-                          </button>
-                          {exportError && <p role="alert" className="text-xs text-red-300">{exportError}</p>}
-                        </>
-                      )}
-                    </div>
-                  )
-                ) : (
                 <ClipPlayer
                   src={videoSrc}
                   poster={thumbnailPath ? convertFileSrc(thumbnailPath) : null}
@@ -2252,7 +2266,6 @@ export default function Editor() {
                     ))}
                   </>}
                 />
-                )}
               </div>
             </div>
           </div>
@@ -2260,7 +2273,7 @@ export default function Editor() {
         </div>
 
         {/* ── Right: Settings ── */}
-        <aside className="v4-editor-tools">
+        <aside className={`v4-editor-tools ${editorWorkspace === 'publish' ? 'v4-editor-tools-publish' : ''}`}>
           <nav className="v4-editor-tabs" role="tablist" aria-label="Clip editor workspaces">
             {([
               { id: 'edit' as const, label: 'Edit', Icon: Film },
@@ -2309,9 +2322,9 @@ export default function Editor() {
               <input type="text" value={title} onChange={e => setTitle(e.target.value)}
                 onBlur={() => {
                   if (clipId) {
-                    invoke('set_clip_title', { clipId, title: title || null }).catch(err =>
-                      console.warn('[Editor] Failed to save title on blur:', err)
-                    )
+                    invoke('set_clip_title', { clipId, title: title || null })
+                      .then(() => invalidateClips())
+                      .catch(err => console.warn('[Editor] Failed to save title on blur:', err))
                   }
                 }}
                 className="flex-1 px-3 py-2 bg-surface-900 border border-surface-600 rounded-lg text-white text-sm focus:outline-none focus:border-violet-500" />
@@ -2358,9 +2371,9 @@ export default function Editor() {
 
                     setTitle(newTitle)
                     if (clipId) {
-                      invoke('set_clip_title', { clipId, title: newTitle }).catch(err =>
-                        console.warn('[Editor] Failed to save regenerated title:', err)
-                      )
+                      invoke('set_clip_title', { clipId, title: newTitle })
+                        .then(() => invalidateClips())
+                        .catch(err => console.warn('[Editor] Failed to save regenerated title:', err))
                     }
                   }}
                   className="px-2 py-2 bg-surface-900 border border-surface-600 rounded-lg text-slate-400 hover:text-violet-400 hover:border-violet-500/40 transition-colors cursor-pointer"
@@ -2549,9 +2562,9 @@ export default function Editor() {
                 onBlur={() => {
                   // Persist game to clip DB on blur so it survives navigation
                   if (clipId) {
-                    invoke('set_clip_game', { clipId, game: game || null }).catch(err =>
-                      console.warn('[Editor] Failed to save game on blur:', err)
-                    )
+                    invoke('set_clip_game', { clipId, game: game || null })
+                      .then(() => invalidateClips())
+                      .catch(err => console.warn('[Editor] Failed to save game on blur:', err))
                   }
                 }}
                 placeholder="e.g. Dead by Daylight, Valorant"
@@ -2858,6 +2871,12 @@ export default function Editor() {
                 <span className="text-xs text-slate-400">{captionsEnabled ? 'On' : 'Off'}</span>
               </label>
             </div>
+            {captionAlignmentPreparing && (
+              <div role="status" className="mb-3 flex items-center gap-2 border-l-2 border-violet-400 bg-violet-500/5 px-3 py-2 text-[11px] text-violet-100">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Checking accurate subtitle timing...
+              </div>
+            )}
             {captionsEnabled && (
               <div className="space-y-3">
                 {/* Caption text */}
@@ -2896,11 +2915,15 @@ export default function Editor() {
                           )}
                         </div>
                         <div className="flex items-center gap-1">
-                          <Tooltip text={speechModelSelectionSaving ? 'Wait for the speech model selection to finish saving' : 'Regenerate subtitles from the clip audio'} position="left">
+                          <Tooltip text={captionAlignmentPreparing
+                            ? 'Wait for the accurate timing check to finish'
+                            : speechModelSelectionSaving
+                              ? 'Wait for the speech model selection to finish saving'
+                              : 'Regenerate subtitles from the clip audio'} position="left">
                             <button
                               type="button"
                               onClick={handleGenerateCaptions}
-                              disabled={generatingCaptions || speechModelSelectionSaving}
+                              disabled={generatingCaptions || speechModelSelectionSaving || captionAlignmentPreparing}
                               aria-label="Regenerate subtitles"
                               className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-surface-600 text-slate-400 transition-colors hover:border-violet-500/60 hover:text-violet-300 disabled:cursor-wait disabled:opacity-50"
                             >
@@ -2964,7 +2987,7 @@ export default function Editor() {
                             <>
                               <button
                                 onClick={handleGenerateCaptions}
-                                disabled={generatingCaptions || speechModelSelectionSaving}
+                                disabled={generatingCaptions || speechModelSelectionSaving || captionAlignmentPreparing}
                                 className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-violet-600/20 border border-violet-500/40 rounded-lg text-xs text-violet-400 hover:bg-violet-600/30 transition-colors cursor-pointer disabled:opacity-50"
                               >
                                 {speechModelSelectionSaving ? (
@@ -3267,13 +3290,13 @@ export default function Editor() {
                 </div>
               )}
 
-              {exportDone && exactPreviewArtifact && (
+              {exportDone && currentRenderedArtifact && (
                 <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-4">
                   <div className="flex items-center gap-2 text-emerald-400 text-sm font-medium mb-1">
                     <Check className="w-4 h-4" />
-                    Exact preview ready
+                    Rendered export ready
                   </div>
-                  <p className="text-xs text-slate-400 font-mono truncate">{exactPreviewArtifact.path}</p>
+                  <p className="text-xs text-slate-400 font-mono truncate">{currentRenderedArtifact.path}</p>
                 </div>
               )}
 
@@ -3291,7 +3314,6 @@ export default function Editor() {
                 exportPreset={exportPreset}
                 onSave={handleSave}
                 onExportForFormat={handleExportForFormat}
-                tiktokPreviewReady={tiktokPreviewReady}
                 publishMeta={publishMeta}
                 clipTitle={title}
                 uploadHistory={uploadHistory}

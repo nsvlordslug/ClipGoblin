@@ -38,7 +38,7 @@ export default function Analytics() {
     setRefreshStatus('Refreshing view counts...')
     try {
       const summary = await invoke<RefreshStatsSummary>('refresh_upload_stats')
-      await loadUploads()
+      await loadUploads({ force: true })
       const parts: string[] = []
       if (summary.updated) parts.push(`${summary.updated} updated`)
       if (summary.skipped) parts.push(`${summary.skipped} skipped`)

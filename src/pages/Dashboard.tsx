@@ -38,7 +38,7 @@ function fmtCountdown(targetISO: string): string {
 }
 
 export default function Dashboard() {
-  const { channels, vods, highlights, clips, checkLogin, fetchHighlights, fetchClips, fetchVods, loggedInUser } =
+  const { channels, vods, highlights, clips, checkLogin, ensureVods, fetchHighlights, fetchClips, fetchVods, loggedInUser } =
     useAppStore()
   const { uploads: scheduledUploads, load: loadSchedules } = useScheduleStore()
   const navigate = useNavigate()
@@ -53,11 +53,16 @@ export default function Dashboard() {
   const [recorderNotice, setRecorderNotice] = useState<{ ok: boolean; text: string } | null>(null)
 
   useEffect(() => {
-    checkLogin()
-    fetchHighlights()
-    fetchClips()
-    loadSchedules()
+    void checkLogin().then(() => Promise.all([
+      fetchHighlights(),
+      fetchClips(),
+      loadSchedules(),
+    ]))
   }, [checkLogin, fetchHighlights, fetchClips, loadSchedules])
+
+  useEffect(() => {
+    if (loggedInUser) void ensureVods(loggedInUser.id)
+  }, [ensureVods, loggedInUser])
 
   // Live countdown tick
   useEffect(() => {
@@ -72,7 +77,7 @@ export default function Dashboard() {
       setAutoShipReport(event.payload)
       // Keep the banner visible for 30s; user can also dismiss it manually.
       setTimeout(() => setAutoShipReport(prev => prev === event.payload ? null : prev), 30_000)
-      loadSchedules().catch(() => {})
+      loadSchedules({ force: true }).catch(() => {})
     }).then(fn => { unlisten = fn }).catch(() => {})
     return () => { unlisten?.() }
   }, [loadSchedules])
@@ -168,7 +173,7 @@ export default function Dashboard() {
         return
       }
       for (const ch of targets) {
-        try { await fetchVods(ch.id) } catch { /* keep hunting other channels */ }
+        try { await fetchVods(ch.id, { force: true }) } catch { /* keep hunting other channels */ }
       }
       // Re-read store after fetches
       const freshVods = useAppStore.getState().vods
@@ -226,7 +231,10 @@ export default function Dashboard() {
     setRecorderNotice(null)
     try {
       const result = await invoke<ImportedClipResult>('save_replay_and_import', { kind: recorderKind })
-      await Promise.all([fetchClips(), fetchHighlights()])
+      await Promise.all([
+        fetchClips({ force: true }),
+        fetchHighlights(undefined, { force: true }),
+      ])
       setRecorderNotice({
         ok: true,
         text: result.status === 'already_imported' ? 'That replay is already in your library.' : `${result.title} is ready in Clips.`,
