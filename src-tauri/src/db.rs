@@ -3,14 +3,54 @@ use std::path::PathBuf;
 
 use crate::crypto;
 
+#[cfg(debug_assertions)]
+const TIKTOK_SANDBOX_ENV: &str = "CLIPGOBLIN_TIKTOK_SANDBOX";
+#[cfg(debug_assertions)]
+pub(crate) const OFFLINE_TEST_DATA_DIR_ENV: &str = "CLIPGOBLIN_OFFLINE_TEST_DATA_DIR";
+
+fn database_dir(base: PathBuf, sandbox_review: bool) -> PathBuf {
+    let app_dir = base.join("clipviral");
+    if sandbox_review {
+        app_dir.join("sandbox-review")
+    } else {
+        app_dir
+    }
+}
+
+fn sandbox_review_enabled() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        return std::env::var(TIKTOK_SANDBOX_ENV).as_deref() == Ok("1");
+    }
+
+    #[cfg(not(debug_assertions))]
+    false
+}
+
 /// Get the path to the database file.
 ///
 /// Returns an error instead of panicking if the data directory cannot be
 /// determined or created (e.g. sandboxed environment, permission issue).
 pub fn db_path() -> std::result::Result<PathBuf, String> {
-    let data_dir = dirs::data_dir()
-        .ok_or_else(|| "Could not determine your system data directory. Ensure your OS user profile is set up correctly.".to_string())?
-        .join("clipviral");
+    #[cfg(debug_assertions)]
+    let base_dir = if let Some(path) = std::env::var_os(OFFLINE_TEST_DATA_DIR_ENV) {
+        let path = PathBuf::from(path);
+        if !path.is_absolute() {
+            return Err(format!(
+                "{OFFLINE_TEST_DATA_DIR_ENV} must be an absolute path"
+            ));
+        }
+        path
+    } else {
+        dirs::data_dir().ok_or_else(|| {
+            "Could not determine your system data directory. Ensure your OS user profile is set up correctly."
+                .to_string()
+        })?
+    };
+    #[cfg(not(debug_assertions))]
+    let base_dir = dirs::data_dir()
+        .ok_or_else(|| "Could not determine your system data directory. Ensure your OS user profile is set up correctly.".to_string())?;
+    let data_dir = database_dir(base_dir, sandbox_review_enabled());
     std::fs::create_dir_all(&data_dir).map_err(|e| {
         format!(
             "Failed to create data directory at {}: {}",
@@ -119,6 +159,11 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
     .ok();
     conn.execute("ALTER TABLE clips ADD COLUMN captions_text TEXT", [])
         .ok();
+    conn.execute(
+        "ALTER TABLE clips ADD COLUMN user_edited INTEGER NOT NULL DEFAULT 0",
+        [],
+    )
+    .ok();
     conn.execute(
         "ALTER TABLE clips ADD COLUMN captions_position TEXT DEFAULT 'bottom'",
         [],
@@ -276,6 +321,27 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
     )
     .ok();
 
+    // Local publish-copy feedback. This records only the suggestion strategy
+    // and the generated/final text so future local choices can improve without
+    // introducing another settings surface or any network dependency.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS copy_feedback (
+            id TEXT PRIMARY KEY,
+            clip_id TEXT NOT NULL,
+            brief_signature TEXT NOT NULL,
+            copy_kind TEXT NOT NULL,
+            strategy TEXT NOT NULL,
+            generated_text TEXT NOT NULL,
+            final_text TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_copy_feedback_kind_strategy
+            ON copy_feedback(copy_kind, strategy);",
+    )
+    .ok();
+
     // Social publishing: upload history for duplicate detection
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS upload_history (
@@ -316,9 +382,12 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
         [],
     )
     .ok();
+    migrate_upload_variants(conn)?;
+    crate::social::youtube_session::migrate(conn)?;
     conn.execute(
         "UPDATE upload_history
-         SET status = 'failed', last_error = 'Upload interrupted before completion',
+         SET status = CASE WHEN platform = 'youtube' THEN 'uncertain' ELSE 'failed' END,
+             last_error = 'Upload interrupted before completion. Check the platform before trying again.',
              updated_at = datetime('now')
          WHERE status = 'uploading' OR (status = 'processing' AND job_id IS NULL)",
         [],
@@ -400,13 +469,22 @@ pub(crate) fn run_migrations(conn: &Connection) -> SqliteResult<()> {
              job_id, platform_video_id, upload_meta_json, created_at)
          SELECT lower(hex(randomblob(16))), h.clip_id, h.platform,
                 COALESCE(h.uploaded_at, datetime('now')), 'completed', 0, h.video_url,
-                h.job_id, h.platform_video_id, '{}', COALESCE(h.uploaded_at, datetime('now'))
+                h.job_id, h.platform_video_id,
+                json_object('artifact_aspect_ratio', h.artifact_aspect_ratio),
+                COALESCE(h.uploaded_at, datetime('now'))
          FROM upload_history h
          WHERE h.status = 'completed'
            AND (h.video_url IS NOT NULL OR h.platform_video_id IS NOT NULL)
            AND EXISTS (SELECT 1 FROM clips c WHERE c.id = h.clip_id)
            AND NOT EXISTS (
                SELECT 1 FROM scheduled_uploads s WHERE s.clip_id = h.clip_id AND s.platform = h.platform
+                 AND (
+                     (CASE WHEN s.platform = 'youtube' AND json_valid(s.upload_meta_json)
+                       THEN COALESCE(json_extract(s.upload_meta_json, '$.artifact_aspect_ratio'), '') ELSE '' END)
+                         = h.artifact_aspect_ratio
+                     OR (COALESCE(h.platform_video_id, '') != '' AND s.platform_video_id = h.platform_video_id)
+                     OR (COALESCE(h.video_url, '') != '' AND s.video_url = h.video_url)
+                 )
            )",
         [],
     ).ok();
@@ -1150,6 +1228,8 @@ pub struct UploadHistoryRow {
     pub last_error: Option<String>,
     #[serde(default)]
     pub updated_at: Option<String>,
+    #[serde(default)]
+    pub artifact_aspect_ratio: String,
 }
 
 fn default_upload_status() -> String {
@@ -1162,6 +1242,7 @@ pub enum UploadClaim {
     Completed { video_url: Option<String> },
     InboxDelivered { job_id: Option<String> },
     InProgress { job_id: Option<String> },
+    Uncertain,
 }
 
 // ── Sensitive field encryption ──
@@ -1748,25 +1829,33 @@ pub fn get_reviewed_moments_for_vod(
 ) -> SqliteResult<Vec<ReviewedMomentFeedbackRow>> {
     let mut stmt = conn.prepare(
         "SELECT df.highlight_id,
-                COALESCE(df.start_seconds, ef.start_seconds, h.start_seconds) AS start_seconds,
-                COALESCE(df.end_seconds, ef.end_seconds, h.end_seconds) AS end_seconds,
+                COALESCE(c.start_seconds, df.start_seconds, ef.start_seconds, h.start_seconds) AS start_seconds,
+                COALESCE(c.end_seconds, df.end_seconds, ef.end_seconds, h.end_seconds) AS end_seconds,
                 df.rating,
                 COALESCE(df.note, ef.note) AS note,
                 ef.issues
            FROM detection_feedback df
            LEFT JOIN clip_edit_feedback ef ON ef.highlight_id = df.highlight_id
            LEFT JOIN highlights h ON h.id = df.highlight_id
+           LEFT JOIN clips c ON c.id = (
+                SELECT id FROM clips WHERE highlight_id = df.highlight_id
+                ORDER BY created_at DESC, id LIMIT 1
+           )
           WHERE df.vod_id = ?1
             AND COALESCE(df.start_seconds, ef.start_seconds, h.start_seconds) IS NOT NULL
             AND COALESCE(df.end_seconds, ef.end_seconds, h.end_seconds) IS NOT NULL
          UNION ALL
          SELECT ef.highlight_id,
-                ef.start_seconds,
-                ef.end_seconds,
+                COALESCE(c.start_seconds, ef.start_seconds),
+                COALESCE(c.end_seconds, ef.end_seconds),
                 NULL AS rating,
                 ef.note,
                 ef.issues
            FROM clip_edit_feedback ef
+           LEFT JOIN clips c ON c.id = (
+                SELECT id FROM clips WHERE highlight_id = ef.highlight_id
+                ORDER BY created_at DESC, id LIMIT 1
+           )
           WHERE ef.vod_id = ?1
             AND NOT EXISTS (
                 SELECT 1
@@ -2058,16 +2147,54 @@ pub fn insert_clip(conn: &Connection, c: &ClipRow) -> SqliteResult<()> {
     Ok(())
 }
 
-/// Atomically replace one VOD's generated highlights and clips.
+/// Find clips whose saved work must survive another analysis. Legacy edits
+/// predate user_edited, so also recognize customized fields and linked records.
+fn protected_analysis_clips(conn: &Connection, vod_id: &str) -> SqliteResult<Vec<ClipRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.id FROM clips c LEFT JOIN highlights h ON h.id = c.highlight_id
+         WHERE c.vod_id = ?1 AND (
+            c.user_edited = 1 OR h.id IS NULL OR h.review_rating = 'good'
+            OR COALESCE(c.output_path, '') <> '' OR c.render_status <> 'pending'
+            OR COALESCE(c.publish_description, '') <> '' OR COALESCE(c.publish_hashtags, '') <> ''
+            OR c.source_media_path IS NOT NULL
+            OR c.start_seconds <> h.start_seconds OR c.end_seconds <> h.end_seconds
+            OR c.title <> COALESCE(h.description, 'Highlight')
+            OR COALESCE(c.game, '') <> COALESCE((SELECT game_name FROM vods WHERE id = c.vod_id), '')
+            OR c.aspect_ratio <> '9:16' OR c.crop_x IS NOT NULL OR c.crop_y IS NOT NULL
+            OR c.crop_width IS NOT NULL OR c.crop_height IS NOT NULL
+            OR c.captions_provenance IN ('edited', 'aligned', 'legacy')
+            OR (c.captions_enabled = 0 AND COALESCE(c.captions_text, '') <> '')
+            OR c.captions_position <> 'bottom' OR c.caption_style <> 'clean'
+            OR c.caption_font_scale <> 1 OR c.caption_card_scale <> ?2 OR c.caption_y_offset <> 0
+            OR c.facecam_layout NOT IN ('none', 'context_fit') OR c.facecam_settings IS NOT NULL
+            OR c.context_background_path IS NOT NULL OR c.context_background_mode <> 'blur'
+            OR c.context_blur_strength <> 0.25 OR c.context_video_y <> 0.5 OR c.full_frame_scale <> 1
+            OR c.cam_region_norm_override IS NOT NULL OR c.cam_fit_mode IS NOT NULL
+            OR c.caption_audio_mode <> 'mixed'
+            OR EXISTS (SELECT 1 FROM detection_feedback WHERE highlight_id = c.highlight_id AND rating = 'good')
+            OR EXISTS (SELECT 1 FROM clip_edit_feedback WHERE highlight_id = c.highlight_id)
+            OR EXISTS (SELECT 1 FROM scheduled_uploads WHERE clip_id = c.id)
+            OR EXISTS (SELECT 1 FROM upload_history WHERE clip_id = c.id)
+            OR EXISTS (SELECT 1 FROM clip_performance WHERE clip_id = c.id)
+            OR EXISTS (SELECT 1 FROM clip_behavior_events WHERE clip_id = c.id AND event_type = 'trim')
+         )",
+    )?;
+    let ids = stmt.query_map(params![vod_id, DEFAULT_CAPTION_CARD_SCALE], |row| row.get::<_, String>(0))?
+        .collect::<SqliteResult<Vec<_>>>()?;
+    ids.into_iter().map(|id| get_clip_by_id(conn, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)).collect()
+}
+
+/// Atomically replace disposable generated results, retaining creator work.
 ///
 /// The previous successful analysis remains untouched if any insert fails.
 /// Filesystem work (captions/thumbnails) is deliberately prepared outside this
-/// transaction so the database write stays short.
+/// transaction so the database write stays short. Returns only newly inserted
+/// clip IDs, so callers cannot auto-publish or overwrite thumbnails of retained clips.
 pub fn replace_analysis_results(
     conn: &mut Connection,
     vod_id: &str,
     rows: &[AnalysisResultRow],
-) -> SqliteResult<()> {
+) -> SqliteResult<Vec<String>> {
     if rows.is_empty() {
         return Err(rusqlite::Error::InvalidParameterName(
             "analysis result set cannot be empty".to_string(),
@@ -2085,17 +2212,39 @@ pub fn replace_analysis_results(
     }
 
     let tx = conn.transaction()?;
-    delete_clips_for_vod(&tx, vod_id)?;
-    delete_highlights_for_vod(&tx, vod_id)?;
+    let retained = protected_analysis_clips(&tx, vod_id)?;
+    let retained_ids: std::collections::HashSet<&str> = retained.iter().map(|c| c.id.as_str()).collect();
+    for clip in get_clips_by_vod(&tx, vod_id)? {
+        if !retained_ids.contains(clip.id.as_str()) {
+            tx.execute("DELETE FROM clips WHERE id = ?1", [&clip.id])?;
+        }
+    }
+    tx.execute(
+        "DELETE FROM highlights WHERE vod_id = ?1
+         AND NOT EXISTS (SELECT 1 FROM clips WHERE highlight_id = highlights.id)",
+        [vod_id],
+    )?;
+    let mut inserted = Vec::new();
     for row in rows {
+        let already_retained = retained.iter().any(|old| {
+            let overlap = old.end_seconds.min(row.clip.end_seconds)
+                - old.start_seconds.max(row.clip.start_seconds);
+            let shorter = (old.end_seconds - old.start_seconds)
+                .min(row.clip.end_seconds - row.clip.start_seconds);
+            old.highlight_id == row.highlight.id || (shorter > 0.0 && overlap >= shorter * 0.5)
+        });
+        if already_retained {
+            continue;
+        }
         insert_highlight(&tx, &row.highlight)?;
         insert_clip(&tx, &row.clip)?;
         if let Some(path) = row.auto_captions_path.as_deref() {
             update_clip_auto_captions(&tx, &row.clip.id, path)?;
         }
+        inserted.push(row.clip.id.clone());
     }
     tx.commit()?;
-    Ok(())
+    Ok(inserted)
 }
 
 pub fn delete_clips_for_vod(conn: &Connection, vod_id: &str) -> SqliteResult<()> {
@@ -2291,7 +2440,7 @@ pub fn update_clip_settings(
     caption_audio_mode: &str,
 ) -> SqliteResult<()> {
     conn.execute(
-        "UPDATE clips SET title = ?1, start_seconds = ?2, end_seconds = ?3, aspect_ratio = ?4, captions_enabled = ?5, captions_text = ?6, captions_position = ?7, caption_style = ?8, facecam_layout = ?9, game = ?10, caption_font_scale = ?11, context_background_path = ?12, context_background_mode = ?13, context_blur_strength = ?14, context_video_y = ?15, full_frame_scale = ?16, facecam_settings = ?17, caption_y_offset = ?18, captions_provenance = ?19, captions_pipeline_version = ?20, caption_audio_mode = ?21, caption_card_scale = ?22, render_status = 'pending' WHERE id = ?23",
+        "UPDATE clips SET title = ?1, start_seconds = ?2, end_seconds = ?3, aspect_ratio = ?4, captions_enabled = ?5, captions_text = ?6, captions_position = ?7, caption_style = ?8, facecam_layout = ?9, game = ?10, caption_font_scale = ?11, context_background_path = ?12, context_background_mode = ?13, context_blur_strength = ?14, context_video_y = ?15, full_frame_scale = ?16, facecam_settings = ?17, caption_y_offset = ?18, captions_provenance = ?19, captions_pipeline_version = ?20, caption_audio_mode = ?21, caption_card_scale = ?22, render_status = 'pending', user_edited = 1 WHERE id = ?23",
         params![title, start_seconds, end_seconds, aspect_ratio, captions_enabled, captions_text, captions_position, caption_style, facecam_layout, game, normalize_caption_font_scale(caption_font_scale), context_background_path, normalize_context_background_mode(context_background_mode), normalize_context_blur_strength(context_blur_strength), normalize_context_video_y(context_video_y), normalize_full_frame_scale(full_frame_scale), facecam_settings, normalize_caption_y_offset(caption_y_offset), normalize_captions_provenance(captions_provenance), captions_pipeline_version.max(0), normalize_caption_audio_mode(caption_audio_mode), normalize_caption_card_scale(caption_card_scale), clip_id],
     )?;
     Ok(())
@@ -2504,7 +2653,8 @@ pub fn update_clip_keyword_boost(conn: &Connection, clip_id: &str, boost: f64) -
 /// Update just the game field on a single clip (lightweight — no full settings save needed).
 pub fn update_clip_game(conn: &Connection, clip_id: &str, game: Option<&str>) -> SqliteResult<()> {
     conn.execute(
-        "UPDATE clips SET game = ?1 WHERE id = ?2",
+        "UPDATE clips SET game = ?1,
+            user_edited = CASE WHEN game IS NOT ?1 THEN 1 ELSE user_edited END WHERE id = ?2",
         params![game, clip_id],
     )?;
     Ok(())
@@ -2532,10 +2682,77 @@ pub fn update_clip_publish_meta(
     hashtags: Option<&str>,
 ) -> SqliteResult<()> {
     conn.execute(
-        "UPDATE clips SET publish_description = ?1, publish_hashtags = ?2 WHERE id = ?3",
+        "UPDATE clips SET publish_description = ?1, publish_hashtags = ?2,
+            user_edited = CASE WHEN publish_description IS NOT ?1 OR publish_hashtags IS NOT ?2
+                              THEN 1 ELSE user_edited END WHERE id = ?3",
         params![description, hashtags, clip_id],
     )?;
     Ok(())
+}
+
+/// Upsert one local creator response to generated publish copy.
+///
+/// Reusing the same id lets an initially accepted suggestion become `edited`
+/// when the creator changes it, instead of counting both outcomes separately.
+pub fn record_copy_feedback(
+    conn: &Connection,
+    id: &str,
+    clip_id: &str,
+    brief_signature: &str,
+    copy_kind: &str,
+    strategy: &str,
+    generated_text: &str,
+    final_text: &str,
+    outcome: &str,
+) -> SqliteResult<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO copy_feedback
+            (id, clip_id, brief_signature, copy_kind, strategy, generated_text,
+             final_text, outcome, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+         ON CONFLICT(id) DO UPDATE SET
+            final_text = excluded.final_text,
+            outcome = excluded.outcome,
+            updated_at = excluded.updated_at",
+        params![
+            id,
+            clip_id,
+            brief_signature,
+            copy_kind,
+            strategy,
+            generated_text,
+            final_text,
+            outcome,
+            now,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Aggregate local copy-strategy preferences from creator choices.
+/// Accepted copy gets the strongest vote; an edited suggestion still gets a
+/// small positive signal because its factual/structural direction was useful.
+pub fn get_copy_strategy_preferences(
+    conn: &Connection,
+    copy_kind: &str,
+) -> SqliteResult<std::collections::HashMap<String, f64>> {
+    let mut stmt = conn.prepare(
+        "SELECT strategy,
+                SUM(CASE outcome
+                    WHEN 'accepted' THEN 1.0
+                    WHEN 'edited' THEN 0.20
+                    WHEN 'rejected' THEN -0.75
+                    ELSE 0.0
+                END) AS preference
+         FROM copy_feedback
+         WHERE copy_kind = ?1
+         GROUP BY strategy",
+    )?;
+    let rows = stmt.query_map(params![copy_kind], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+    })?;
+    rows.collect()
 }
 
 // ── Performance tracking helpers ──
@@ -2722,6 +2939,47 @@ pub fn get_all_highlights(conn: &Connection) -> SqliteResult<Vec<HighlightRow>> 
 
 // ── Upload history helpers ──
 
+/// Replace the old clip/platform uniqueness constraint without discarding history.
+/// Existing rows have an unknown format and remain conservative duplicate guards.
+fn migrate_upload_variants(conn: &Connection) -> SqliteResult<()> {
+    let has_variant = conn.prepare("PRAGMA table_info(upload_history)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<SqliteResult<Vec<_>>>()?
+        .iter().any(|name| name == "artifact_aspect_ratio");
+    if has_variant { return Ok(()); }
+    conn.execute_batch(
+        "SAVEPOINT upload_variant_migration;
+         CREATE TABLE upload_history_variants (
+             id TEXT PRIMARY KEY, clip_id TEXT NOT NULL, platform TEXT NOT NULL,
+             video_url TEXT, uploaded_at TEXT, status TEXT NOT NULL DEFAULT 'completed',
+             job_id TEXT, platform_video_id TEXT, last_error TEXT, updated_at TEXT,
+             artifact_aspect_ratio TEXT NOT NULL DEFAULT '',
+             UNIQUE(clip_id, platform, artifact_aspect_ratio)
+         );
+         INSERT INTO upload_history_variants
+             (id, clip_id, platform, video_url, uploaded_at, status, job_id,
+              platform_video_id, last_error, updated_at)
+         SELECT id, clip_id, platform, video_url, uploaded_at, status, job_id,
+                platform_video_id, last_error, updated_at FROM upload_history;
+         DROP TABLE upload_history;
+         ALTER TABLE upload_history_variants RENAME TO upload_history;
+         RELEASE upload_variant_migration;"
+    ).inspect_err(|_| { let _ = conn.execute_batch("ROLLBACK TO upload_variant_migration; RELEASE upload_variant_migration;"); })
+}
+
+pub fn upload_variant(platform: &str, aspect_ratio: Option<&str>) -> &'static str {
+    if platform == "youtube" {
+        match aspect_ratio { Some("9:16") => "9:16", Some("16:9") => "16:9", _ => "" }
+    } else { "" }
+}
+
+fn scheduled_variant(upload: &ScheduledUploadRow) -> String {
+    let meta = upload.upload_meta_json.as_deref()
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok());
+    upload_variant(&upload.platform, meta.as_ref()
+        .and_then(|value| value["artifact_aspect_ratio"].as_str())).to_string()
+}
+
 fn upload_history_from_row(row: &rusqlite::Row<'_>) -> SqliteResult<UploadHistoryRow> {
     Ok(UploadHistoryRow {
         id: row.get(0)?,
@@ -2734,6 +2992,7 @@ fn upload_history_from_row(row: &rusqlite::Row<'_>) -> SqliteResult<UploadHistor
         platform_video_id: row.get(7)?,
         last_error: row.get(8)?,
         updated_at: row.get(9)?,
+        artifact_aspect_ratio: row.get(10)?,
     })
 }
 
@@ -2742,12 +3001,22 @@ pub fn get_upload_for_clip(
     clip_id: &str,
     platform: &str,
 ) -> SqliteResult<Option<UploadHistoryRow>> {
+    get_upload_for_variant(conn, clip_id, platform, "")
+}
+
+pub fn get_upload_for_variant(
+    conn: &Connection,
+    clip_id: &str,
+    platform: &str,
+    variant: &str,
+) -> SqliteResult<Option<UploadHistoryRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, clip_id, platform, video_url, uploaded_at, status, job_id,
-                platform_video_id, last_error, updated_at
-         FROM upload_history WHERE clip_id = ?1 AND platform = ?2",
+                platform_video_id, last_error, updated_at, artifact_aspect_ratio
+         FROM upload_history WHERE clip_id = ?1 AND platform = ?2
+           AND artifact_aspect_ratio = ?3",
     )?;
-    let mut rows = stmt.query_map(params![clip_id, platform], upload_history_from_row)?;
+    let mut rows = stmt.query_map(params![clip_id, platform, variant], upload_history_from_row)?;
     match rows.next() {
         Some(row) => Ok(Some(row?)),
         None => Ok(None),
@@ -2760,7 +3029,7 @@ pub fn get_uploads_for_clip(
 ) -> SqliteResult<Vec<UploadHistoryRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, clip_id, platform, video_url, uploaded_at, status, job_id,
-                platform_video_id, last_error, updated_at
+                platform_video_id, last_error, updated_at, artifact_aspect_ratio
          FROM upload_history WHERE clip_id = ?1",
     )?;
     let rows = stmt.query_map(params![clip_id], upload_history_from_row)?;
@@ -2776,8 +3045,24 @@ pub fn begin_upload(
     platform: &str,
     force: bool,
 ) -> SqliteResult<UploadClaim> {
-    if let Some(existing) = get_upload_for_clip(conn, clip_id, platform)? {
+    begin_upload_variant(conn, clip_id, platform, "", force)
+}
+
+pub fn begin_upload_variant(
+    conn: &Connection, clip_id: &str, platform: &str, variant: &str, force: bool,
+) -> SqliteResult<UploadClaim> {
+    // A legacy row has no proven format. Never bypass a possibly completed or
+    // in-flight legacy upload merely by adding a format to the next request.
+    let mut candidates: Vec<_> = get_uploads_for_clip(conn, clip_id)?.into_iter()
+        .filter(|row| row.platform == platform && (variant.is_empty()
+            || row.artifact_aspect_ratio.is_empty() || row.artifact_aspect_ratio == variant))
+        .collect();
+    candidates.sort_by_key(|row| match row.status.as_str() {
+        "uncertain" => 0, "uploading" | "processing" => 1, _ => 2,
+    });
+    for existing in candidates {
         match existing.status.as_str() {
+            "uncertain" => return Ok(UploadClaim::Uncertain),
             "uploading" | "processing" => {
                 return Ok(UploadClaim::InProgress {
                     job_id: existing.job_id,
@@ -2801,13 +3086,13 @@ pub fn begin_upload(
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO upload_history
-            (id, clip_id, platform, status, updated_at)
-         VALUES (?1, ?2, ?3, 'uploading', ?4)
-         ON CONFLICT(clip_id, platform) DO UPDATE SET
+            (id, clip_id, platform, status, updated_at, artifact_aspect_ratio)
+         VALUES (?1, ?2, ?3, 'uploading', ?4, ?5)
+         ON CONFLICT(clip_id, platform, artifact_aspect_ratio) DO UPDATE SET
             status = 'uploading', video_url = NULL, uploaded_at = NULL,
             job_id = NULL, platform_video_id = NULL, last_error = NULL,
             updated_at = excluded.updated_at",
-        params![id, clip_id, platform, now],
+        params![id, clip_id, platform, now, variant],
     )?;
     Ok(UploadClaim::Acquired)
 }
@@ -2836,14 +3121,21 @@ pub fn mark_upload_complete(
     job_id: Option<&str>,
     platform_video_id: Option<&str>,
 ) -> SqliteResult<()> {
+    mark_upload_variant_complete(conn, clip_id, platform, "", video_url, job_id, platform_video_id)
+}
+
+pub fn mark_upload_variant_complete(
+    conn: &Connection, clip_id: &str, platform: &str, variant: &str,
+    video_url: Option<&str>, job_id: Option<&str>, platform_video_id: Option<&str>,
+) -> SqliteResult<()> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO upload_history
             (id, clip_id, platform, video_url, uploaded_at, status, job_id,
-             platform_video_id, last_error, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'completed', ?6, ?7, NULL, ?5)
-         ON CONFLICT(clip_id, platform) DO UPDATE SET
+             platform_video_id, last_error, updated_at, artifact_aspect_ratio)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'completed', ?6, ?7, NULL, ?5, ?8)
+         ON CONFLICT(clip_id, platform, artifact_aspect_ratio) DO UPDATE SET
             video_url = excluded.video_url,
             uploaded_at = excluded.uploaded_at,
             status = 'completed',
@@ -2851,7 +3143,7 @@ pub fn mark_upload_complete(
             platform_video_id = COALESCE(excluded.platform_video_id, upload_history.platform_video_id),
             last_error = NULL,
             updated_at = excluded.updated_at",
-        params![id, clip_id, platform, video_url, now, job_id, platform_video_id],
+        params![id, clip_id, platform, video_url, now, job_id, platform_video_id, variant],
     )?;
     let metadata = serde_json::json!({ "platform": platform }).to_string();
     let _ = record_clip_behavior(
@@ -2893,13 +3185,35 @@ pub fn mark_upload_failed(
     platform: &str,
     error: &str,
 ) -> SqliteResult<()> {
+    mark_upload_variant_failed(conn, clip_id, platform, "", error)
+}
+
+pub fn mark_upload_variant_failed(
+    conn: &Connection, clip_id: &str, platform: &str, variant: &str, error: &str,
+) -> SqliteResult<()> {
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
-        "UPDATE upload_history SET status = 'failed', last_error = ?3,
+        "UPDATE upload_history SET status = CASE WHEN status = 'uncertain' THEN status ELSE 'failed' END, last_error = ?3,
                 updated_at = ?4
-         WHERE clip_id = ?1 AND platform = ?2",
-        params![clip_id, platform, error, now],
+         WHERE clip_id = ?1 AND platform = ?2 AND artifact_aspect_ratio = ?5",
+        params![clip_id, platform, error, now, variant],
     )?;
+    Ok(())
+}
+
+/// Persist before sending media bytes. Only a confirmed remote success may clear
+/// this guard; a lost response or app shutdown must never trigger a new upload.
+pub fn mark_upload_variant_uncertain(
+    conn: &Connection, clip_id: &str, platform: &str, variant: &str,
+) -> SqliteResult<()> {
+    let changed = conn.execute(
+        "UPDATE upload_history SET status = 'uncertain',
+             last_error = 'Upload outcome is uncertain. Check YouTube Studio before attempting another upload.',
+             updated_at = ?4
+         WHERE clip_id = ?1 AND platform = ?2 AND artifact_aspect_ratio = ?3",
+        params![clip_id, platform, variant, chrono::Utc::now().to_rfc3339()],
+    )?;
+    if changed != 1 { return Err(rusqlite::Error::QueryReturnedNoRows); }
     Ok(())
 }
 
@@ -2909,7 +3223,7 @@ pub fn get_processing_uploads(
 ) -> SqliteResult<Vec<UploadHistoryRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, clip_id, platform, video_url, uploaded_at, status, job_id,
-                platform_video_id, last_error, updated_at
+                platform_video_id, last_error, updated_at, artifact_aspect_ratio
          FROM upload_history
          WHERE platform = ?1 AND status IN ('processing', 'inbox_delivered')",
     )?;
@@ -2944,15 +3258,29 @@ pub fn record_direct_upload_state_for_analytics(
     platform_video_id: Option<&str>,
     error_message: Option<&str>,
 ) -> SqliteResult<()> {
+    record_direct_upload_variant_for_analytics(conn, clip_id, platform, status,
+        video_url, job_id, platform_video_id, error_message, "{}")
+}
+
+pub fn record_direct_upload_variant_for_analytics(
+    conn: &Connection, clip_id: &str, platform: &str, status: &str,
+    video_url: Option<&str>, job_id: Option<&str>, platform_video_id: Option<&str>,
+    error_message: Option<&str>, meta_json: &str,
+) -> SqliteResult<()> {
+    let meta: serde_json::Value = serde_json::from_str(meta_json)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let variant = upload_variant(platform, meta["artifact_aspect_ratio"].as_str());
     let now = chrono::Utc::now().to_rfc3339();
     let updated = conn.execute(
         "UPDATE scheduled_uploads SET status = ?3, video_url = COALESCE(?4, video_url),
                 job_id = COALESCE(?5, job_id),
                 platform_video_id = COALESCE(?6, platform_video_id),
-                error_message = ?7, stats_updated_at = NULL
+                error_message = ?7, stats_updated_at = NULL, upload_meta_json = ?9
          WHERE id = (
              SELECT id FROM scheduled_uploads
              WHERE clip_id = ?1 AND platform = ?2
+               AND (CASE WHEN platform = 'youtube' AND json_valid(upload_meta_json)
+                    THEN COALESCE(json_extract(upload_meta_json, '$.artifact_aspect_ratio'), '') ELSE '' END) = ?8
                AND status NOT IN ('pending', 'cancelled')
              ORDER BY created_at DESC LIMIT 1
          )",
@@ -2963,7 +3291,9 @@ pub fn record_direct_upload_state_for_analytics(
             video_url,
             job_id,
             platform_video_id,
-            error_message
+            error_message,
+            variant,
+            meta_json
         ],
     )?;
     if updated == 0 {
@@ -2972,7 +3302,7 @@ pub fn record_direct_upload_state_for_analytics(
             "INSERT INTO scheduled_uploads
                 (id, clip_id, platform, scheduled_time, status, retry_count,
                  error_message, video_url, job_id, platform_video_id, upload_meta_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, ?9, '{}', ?4)",
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, ?9, ?10, ?4)",
             params![
                 id,
                 clip_id,
@@ -2982,7 +3312,8 @@ pub fn record_direct_upload_state_for_analytics(
                 error_message,
                 video_url,
                 job_id,
-                platform_video_id
+                platform_video_id,
+                meta_json
             ],
         )?;
     }
@@ -3017,6 +3348,43 @@ pub fn delete_settings_for_platform(conn: &Connection, platform: &str) -> Sqlite
         params![format!("{}_%", platform)],
     )?;
     Ok(())
+}
+
+pub fn connected_upload_account(conn: &Connection, platform: &str) -> SqliteResult<Option<String>> {
+    let key = match platform {
+        "youtube" => "youtube_channel_id",
+        "tiktok" => "tiktok_open_id",
+        _ => return Ok(None),
+    };
+    Ok(get_setting(conn, key)?.filter(|value| !value.trim().is_empty()))
+}
+
+pub fn validate_upload_destination(
+    conn: &Connection, platform: &str, expected: Option<&str>,
+) -> Result<(), String> {
+    let expected = expected.filter(|id| !id.is_empty()).ok_or_else(||
+        "This upload has no saved destination account. Review and schedule it again.".to_string())?;
+    let actual = connected_upload_account(conn, platform).map_err(|error| error.to_string())?;
+    if actual.as_deref() != Some(expected) {
+        return Err("The connected destination account changed or was disconnected. Review and schedule this upload again.".into());
+    }
+    Ok(())
+}
+
+fn bind_scheduled_destination(conn: &Connection, row: &ScheduledUploadRow) -> SqliteResult<String> {
+    let fail = |message: String| rusqlite::Error::ToSqlConversionFailure(message.into());
+    let mut meta: serde_json::Value = serde_json::from_str(row.upload_meta_json.as_deref().unwrap_or("{}"))
+        .map_err(|error| fail(format!("Invalid upload metadata: {error}")))?;
+    let object = meta.as_object_mut().ok_or_else(|| fail("Upload metadata must be an object".into()))?;
+    let account = connected_upload_account(conn, &row.platform)?
+        .ok_or_else(|| fail(format!("Connect {} before scheduling an upload", row.platform)))?;
+    if let Some(expected) = object.get("target_account_id").and_then(|value| value.as_str()) {
+        if expected != account {
+            return Err(fail("The destination account changed. Review the upload before scheduling.".into()));
+        }
+    }
+    object.insert("target_account_id".into(), serde_json::Value::String(account));
+    Ok(meta.to_string())
 }
 
 // ── Scheduled upload types ──
@@ -3075,6 +3443,8 @@ fn scheduled_upload_from_row(row: &rusqlite::Row<'_>) -> SqliteResult<ScheduledU
 }
 
 pub fn insert_scheduled_upload(conn: &Connection, row: &ScheduledUploadRow) -> SqliteResult<()> {
+    // All scheduling paths, including automatic shipping, use this function.
+    let bound_meta = bind_scheduled_destination(conn, row)?;
     conn.execute(
         "INSERT INTO scheduled_uploads (id, clip_id, platform, scheduled_time, status,
                  retry_count, error_message, video_url, job_id, platform_video_id,
@@ -3091,7 +3461,7 @@ pub fn insert_scheduled_upload(conn: &Connection, row: &ScheduledUploadRow) -> S
             row.video_url,
             row.job_id,
             row.platform_video_id,
-            row.upload_meta_json,
+            bound_meta,
             row.created_at
         ],
     )?;
@@ -3193,7 +3563,10 @@ pub fn recover_interrupted_scheduled_uploads(conn: &Connection) -> SqliteResult<
     };
 
     for upload in &interrupted {
-        match get_upload_for_clip(conn, &upload.clip_id, &upload.platform)? {
+        let variant = scheduled_variant(upload);
+        let history = get_upload_for_variant(conn, &upload.clip_id, &upload.platform, &variant)?
+            .or(if variant.is_empty() { None } else { get_upload_for_clip(conn, &upload.clip_id, &upload.platform)? });
+        match history {
             Some(history) if history.status == "completed" => {
                 update_scheduled_upload_complete(
                     conn,
@@ -3344,10 +3717,25 @@ pub fn update_upload_video_identity(
 }
 
 pub fn reschedule_upload(conn: &Connection, id: &str, new_time: &str) -> SqliteResult<bool> {
+    let Some(upload) = get_all_scheduled_uploads(conn)?.into_iter().find(|row| row.id == id) else {
+        return Ok(false);
+    };
+    let meta = upload.upload_meta_json.as_deref()
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok());
+    validate_upload_destination(conn, &upload.platform,
+        meta.as_ref().and_then(|value| value["target_account_id"].as_str()))
+        .map_err(|message| rusqlite::Error::ToSqlConversionFailure(
+            format!("{message} Open the clip editor to create a new schedule for the selected account.").into()))?;
+    let variant = scheduled_variant(&upload);
+    if get_upload_for_variant(conn, &upload.clip_id, &upload.platform, &variant)?
+        .is_some_and(|history| history.status == "uncertain") {
+        return Err(rusqlite::Error::ToSqlConversionFailure(
+            "Upload outcome is uncertain. Check YouTube Studio; rescheduling is blocked to avoid duplicate posts.".into()));
+    }
     let changed = conn.execute(
         "UPDATE scheduled_uploads SET scheduled_time = ?1, status = 'pending',
                 error_message = NULL, video_url = NULL, job_id = NULL,
-                platform_video_id = NULL WHERE id = ?2",
+                platform_video_id = NULL WHERE id = ?2 AND status IN ('pending', 'failed', 'cancelled')",
         params![new_time, id],
     )?;
     Ok(changed > 0)
@@ -3362,6 +3750,16 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn sandbox_review_database_is_isolated_from_production() {
+        let base = PathBuf::from("profile-data");
+        assert_eq!(database_dir(base.clone(), false), base.join("clipviral"));
+        assert_eq!(
+            database_dir(base.clone(), true),
+            base.join("clipviral").join("sandbox-review")
+        );
     }
 
     #[test]
@@ -3698,6 +4096,7 @@ mod tests {
     #[test]
     fn scheduled_upload_claim_is_atomic_and_requires_a_due_pending_row() {
         let conn = fresh_db();
+        save_setting(&conn, "tiktok_open_id", "account-a").unwrap();
         conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
         insert_scheduled_upload(
             &conn,
@@ -3723,6 +4122,7 @@ mod tests {
     #[test]
     fn interrupted_scheduled_uploads_recover_without_automatic_duplicate_posts() {
         let conn = fresh_db();
+        save_setting(&conn, "tiktok_open_id", "account-a").unwrap();
         conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
         for (id, clip_id) in [
             ("safe-retry", "clip-no-claim"),
@@ -3788,6 +4188,7 @@ mod tests {
     #[test]
     fn startup_migration_recovers_scheduler_rows_after_an_interrupted_claim() {
         let conn = fresh_db();
+        save_setting(&conn, "tiktok_open_id", "account-a").unwrap();
         conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
         insert_scheduled_upload(
             &conn,
@@ -3833,6 +4234,147 @@ mod tests {
 
         let not_started = get_scheduled_uploads_for_clip(&conn, "clip-not-started").unwrap();
         assert_eq!(not_started[0].status, "pending");
+    }
+
+    #[test]
+    fn scheduled_destination_is_bound_and_account_switch_requires_new_review() {
+        let conn = fresh_db();
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        save_setting(&conn, "youtube_channel_id", "channel-a").unwrap();
+        let mut row = scheduled_row("account-job", "clip-account", "pending", "2026-09-09T00:00:00Z");
+        row.platform = "youtube".into();
+        insert_scheduled_upload(&conn, &row).unwrap();
+        let saved = get_all_scheduled_uploads(&conn).unwrap().remove(0);
+        let saved_meta: serde_json::Value = serde_json::from_str(saved.upload_meta_json.as_deref().unwrap()).unwrap();
+        assert_eq!(saved_meta["target_account_id"], "channel-a");
+        assert!(validate_upload_destination(&conn, "youtube", Some("channel-a")).is_ok());
+        delete_settings_for_platform(&conn, "youtube").unwrap();
+        assert!(validate_upload_destination(&conn, "youtube", Some("channel-a")).is_err());
+        save_setting(&conn, "youtube_channel_id", "channel-b").unwrap();
+        assert!(validate_upload_destination(&conn, "youtube", Some("channel-a")).is_err());
+        assert!(reschedule_upload(&conn, "account-job", "2026-09-10T00:00:00Z").is_err());
+        assert!(validate_upload_destination(&conn, "youtube", None).is_err(), "legacy jobs need review");
+        row.id = "reviewed-new-job".into();
+        insert_scheduled_upload(&conn, &row).unwrap();
+        let rows = get_all_scheduled_uploads(&conn).unwrap();
+        let new_meta: serde_json::Value = serde_json::from_str(rows.iter().find(|r| r.id == row.id).unwrap()
+            .upload_meta_json.as_deref().unwrap()).unwrap();
+        assert_eq!(new_meta["target_account_id"], "channel-b");
+        row.id = "stale-ui-job".into();
+        row.upload_meta_json = Some(saved_meta.to_string());
+        assert!(insert_scheduled_upload(&conn, &row).is_err(), "stale reviewed account must not be rebound");
+    }
+
+    #[test]
+    fn youtube_formats_keep_separate_duplicate_guards_and_analytics() {
+        let conn = fresh_db();
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        for (format, video) in [("9:16", "short-video"), ("16:9", "wide-video")] {
+            assert_eq!(begin_upload_variant(&conn, "clip-both", "youtube", format, false).unwrap(), UploadClaim::Acquired);
+            let url = format!("https://youtu.be/{video}");
+            mark_upload_variant_complete(&conn, "clip-both", "youtube", format, Some(&url), Some(video), Some(video)).unwrap();
+            let meta = serde_json::json!({"artifact_aspect_ratio":format,"target_account_id":"channel-a"}).to_string();
+            record_direct_upload_variant_for_analytics(&conn, "clip-both", "youtube", "completed",
+                Some(&url), Some(video), Some(video), None, &meta).unwrap();
+            assert_eq!(begin_upload_variant(&conn, "clip-both", "youtube", format, false).unwrap(),
+                UploadClaim::Completed { video_url: Some(url) });
+        }
+        assert_eq!(get_uploads_for_clip(&conn, "clip-both").unwrap().len(), 2);
+        let rows = get_completed_uploads_with_url(&conn).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|row| row.platform_video_id.as_deref() == Some("short-video")));
+        assert!(rows.iter().any(|row| row.platform_video_id.as_deref() == Some("wide-video")));
+        run_migrations(&conn).unwrap();
+        assert_eq!(get_completed_uploads_with_url(&conn).unwrap().len(), 2, "startup must preserve both analytic records");
+    }
+
+    #[test]
+    fn uncertain_youtube_upload_survives_errors_restart_and_force() {
+        let conn = fresh_db();
+        assert_eq!(begin_upload_variant(&conn, "clip-uncertain", "youtube", "9:16", false).unwrap(), UploadClaim::Acquired);
+        mark_upload_variant_uncertain(&conn, "clip-uncertain", "youtube", "9:16").unwrap();
+        mark_upload_variant_failed(&conn, "clip-uncertain", "youtube", "9:16", "response connection lost").unwrap();
+        run_migrations(&conn).unwrap();
+        for force in [false, true] {
+            assert_eq!(begin_upload_variant(&conn, "clip-uncertain", "youtube", "9:16", force).unwrap(), UploadClaim::Uncertain);
+            assert_eq!(begin_upload(&conn, "clip-uncertain", "youtube", force).unwrap(), UploadClaim::Uncertain,
+                "omitting the format must not bypass an uncertain upload");
+        }
+        assert_eq!(get_upload_for_variant(&conn, "clip-uncertain", "youtube", "9:16").unwrap().unwrap().status, "uncertain");
+        // A failure before the first media byte is explicitly retryable.
+        begin_upload_variant(&conn, "clip-preflight", "youtube", "16:9", false).unwrap();
+        mark_upload_variant_failed(&conn, "clip-preflight", "youtube", "16:9", "init rejected").unwrap();
+        assert_eq!(begin_upload_variant(&conn, "clip-preflight", "youtube", "16:9", false).unwrap(), UploadClaim::Acquired);
+    }
+
+    #[test]
+    fn upload_variant_migration_preserves_legacy_history_and_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE upload_history (
+            id TEXT PRIMARY KEY, clip_id TEXT NOT NULL, platform TEXT NOT NULL,
+            video_url TEXT, uploaded_at TEXT, status TEXT, job_id TEXT,
+            platform_video_id TEXT, last_error TEXT, updated_at TEXT, UNIQUE(clip_id, platform));
+            INSERT INTO upload_history (id,clip_id,platform,video_url,status,platform_video_id)
+            VALUES ('legacy','legacy-clip','youtube','https://youtu.be/legacy','completed','legacy');").unwrap();
+        migrate_upload_variants(&conn).unwrap();
+        migrate_upload_variants(&conn).unwrap();
+        assert_eq!(get_uploads_for_clip(&conn, "legacy-clip").unwrap().len(), 1);
+        assert_eq!(begin_upload_variant(&conn, "legacy-clip", "youtube", "9:16", false).unwrap(),
+            UploadClaim::Completed { video_url: Some("https://youtu.be/legacy".into()) });
+    }
+
+    #[test]
+    fn legacy_upload_upgrade_does_not_duplicate_known_remote_videos_in_analytics() {
+        let conn = fresh_db();
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        insert_clip(&conn, &test_clip("legacy-id-clip", "highlight-id", "vod")).unwrap();
+        insert_clip(&conn, &test_clip("legacy-url-clip", "highlight-url", "vod")).unwrap();
+        // Recreate the pre-variant table and already-published scheduled rows as
+        // they appear in an existing installation, without rebinding old metadata.
+        conn.execute_batch("DROP TABLE upload_history;
+            CREATE TABLE upload_history (
+                id TEXT PRIMARY KEY, clip_id TEXT NOT NULL, platform TEXT NOT NULL,
+                video_url TEXT, uploaded_at TEXT, status TEXT, job_id TEXT,
+                platform_video_id TEXT, last_error TEXT, updated_at TEXT,
+                UNIQUE(clip_id, platform));
+            INSERT INTO upload_history (id,clip_id,platform,status,platform_video_id,video_url)
+                VALUES ('old-id','legacy-id-clip','youtube','completed','video-id','https://youtu.be/video-id'),
+                       ('old-url','legacy-url-clip','youtube','completed',NULL,'https://youtu.be/video-url');
+            INSERT INTO scheduled_uploads
+                (id,clip_id,platform,scheduled_time,status,created_at,platform_video_id,video_url,upload_meta_json)
+                VALUES ('scheduled-id','legacy-id-clip','youtube','2026-09-09','completed','2026-09-09',
+                        'video-id','https://www.youtube.com/watch?v=video-id','{\"artifact_aspect_ratio\":\"9:16\"}'),
+                       ('scheduled-url','legacy-url-clip','youtube','2026-09-09','completed','2026-09-09',
+                        NULL,'https://youtu.be/video-url','{\"artifact_aspect_ratio\":\"16:9\"}');").unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+        let analytics = get_completed_uploads_with_url(&conn).unwrap();
+        assert_eq!(analytics.len(), 2, "the existing remote video ID or URL must suppress a legacy backfill duplicate");
+        assert!(analytics.iter().all(|row| row.id.starts_with("scheduled-")));
+        assert_eq!(get_upload_for_clip(&conn, "legacy-id-clip", "youtube").unwrap().unwrap().artifact_aspect_ratio, "");
+    }
+
+    #[test]
+    fn interrupted_youtube_jobs_recover_only_their_own_format() {
+        let conn = fresh_db();
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        save_setting(&conn, "youtube_channel_id", "channel-a").unwrap();
+        for format in ["9:16", "16:9"] {
+            let mut row = scheduled_row(format, "clip-both", "uploading", "2026-09-09T00:00:00Z");
+            row.platform = "youtube".into();
+            row.upload_meta_json = Some(serde_json::json!({"artifact_aspect_ratio":format}).to_string());
+            insert_scheduled_upload(&conn, &row).unwrap();
+            begin_upload_variant(&conn, "clip-both", "youtube", format, false).unwrap();
+        }
+        mark_upload_variant_complete(&conn, "clip-both", "youtube", "9:16", Some("https://youtu.be/short"), Some("short"), Some("short")).unwrap();
+        mark_upload_variant_uncertain(&conn, "clip-both", "youtube", "16:9").unwrap();
+        recover_interrupted_scheduled_uploads(&conn).unwrap();
+        let rows = get_all_scheduled_uploads(&conn).unwrap();
+        assert_eq!(rows.iter().find(|row| row.id == "9:16").unwrap().platform_video_id.as_deref(), Some("short"));
+        let wide = rows.iter().find(|row| row.id == "16:9").unwrap();
+        assert_eq!(wide.status, "failed");
+        assert!(wide.platform_video_id.is_none());
+        assert!(reschedule_upload(&conn, "16:9", "2026-09-10T00:00:00Z").is_err());
     }
 
     #[test]
@@ -4073,7 +4615,8 @@ mod tests {
     fn failed_analysis_replacement_rolls_back_to_previous_results() {
         let mut conn = fresh_db();
         let old_highlight = test_highlight("old-highlight", "v1");
-        let old_clip = test_clip("old-clip", &old_highlight.id, "v1");
+        let mut old_clip = test_clip("old-clip", &old_highlight.id, "v1");
+        old_clip.title = "Highlight".to_string();
         insert_highlight(&conn, &old_highlight).unwrap();
         insert_clip(&conn, &old_clip).unwrap();
 
@@ -4101,6 +4644,101 @@ mod tests {
         let clips = get_all_clips(&conn).unwrap();
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].id, "old-clip");
+    }
+
+    fn generated_analysis_row(clip_id: &str, highlight_id: &str, start: f64) -> AnalysisResultRow {
+        let mut highlight = test_highlight(highlight_id, "v1");
+        highlight.start_seconds = start;
+        highlight.end_seconds = start + 30.0;
+        highlight.description = Some("Generated highlight".to_string());
+        let mut clip = test_clip(clip_id, highlight_id, "v1");
+        clip.title = "Generated highlight".to_string();
+        clip.start_seconds = highlight.start_seconds;
+        clip.end_seconds = highlight.end_seconds;
+        AnalysisResultRow { highlight, clip, auto_captions_path: None }
+    }
+
+    #[test]
+    fn reanalysis_preserves_approved_clip_edits_and_foreign_key_records() {
+        let mut conn = fresh_db();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        let approved = generated_analysis_row("approved", "approved-highlight", 0.0);
+        let disposable = generated_analysis_row("disposable", "disposable-highlight", 90.0);
+        for row in [&approved, &disposable] {
+            insert_highlight(&conn, &row.highlight).unwrap();
+            insert_clip(&conn, &row.clip).unwrap();
+        }
+        set_clip_review(&mut conn, "approved-highlight", Some("good"), None, None).unwrap();
+        conn.execute_batch(
+            "UPDATE clips SET title='My edited title', start_seconds=2.0, end_seconds=28.0,
+                 captions_text='Corrected subtitles', captions_provenance='edited',
+                 facecam_layout='split', publish_description='Saved description',
+                 publish_hashtags='tag1,tag2', cam_region_norm_override='saved region',
+                 cam_fit_mode='fill', render_status='completed', output_path='saved-render.mp4'
+               WHERE id='approved';
+             INSERT INTO scheduled_uploads (id,clip_id,platform,scheduled_time,status,created_at)
+               VALUES ('pending-job','approved','youtube','2099-01-01T00:00:00Z','pending','2026-01-01');
+             INSERT INTO clip_performance (id,clip_id,views) VALUES ('performance','approved',123);
+             INSERT INTO upload_history (id,clip_id,platform,status,video_url)
+               VALUES ('history','approved','youtube','completed','https://youtu.be/example');"
+        ).unwrap();
+        let before = serde_json::to_value(get_clip_by_id(&conn, "approved").unwrap().unwrap()).unwrap();
+        let reviewed = get_reviewed_moments_for_vod(&conn, "v1").unwrap();
+        assert_eq!((reviewed[0].start_seconds, reviewed[0].end_seconds), (2.0, 28.0));
+        let rows = vec![
+            generated_analysis_row("replacement-approved", "approved-highlight", 0.0),
+            generated_analysis_row("overlapping-candidate", "fresh-overlap", 3.0),
+            generated_analysis_row("new-candidate", "new-highlight", 95.0),
+        ];
+        let inserted = replace_analysis_results(&mut conn, "v1", &rows).unwrap();
+        assert_eq!(inserted, vec!["new-candidate"]);
+        assert_eq!(before, serde_json::to_value(get_clip_by_id(&conn, "approved").unwrap().unwrap()).unwrap());
+        assert!(get_clip_by_id(&conn, "disposable").unwrap().is_none());
+        assert_eq!(get_clips_by_vod(&conn, "v1").unwrap().len(), 2);
+        for (table, expected_id) in [
+            ("scheduled_uploads", "pending-job"), ("clip_performance", "performance"), ("upload_history", "history")
+        ] {
+            let id: String = conn.query_row(&format!("SELECT id FROM {table} WHERE clip_id='approved'"), [], |r| r.get(0)).unwrap();
+            assert_eq!(id, expected_id);
+        }
+        assert!(conn.prepare("PRAGMA foreign_key_check").unwrap().query([]).unwrap().next().unwrap().is_none());
+    }
+
+    #[test]
+    fn reanalysis_retains_unrated_legacy_edits_and_explicit_saves() {
+        for modification in [
+            "title='My title'", "start_seconds=0.1", "caption_font_scale=1.2",
+            "facecam_layout='split'", "captions_provenance='edited'", "user_edited=1",
+            "publish_description='My saved copy'", "cam_fit_mode='fill'", "game='Custom game'",
+        ] {
+            let mut conn = fresh_db();
+            let existing = generated_analysis_row("edited", "old-highlight", 0.0);
+            insert_highlight(&conn, &existing.highlight).unwrap();
+            insert_clip(&conn, &existing.clip).unwrap();
+            conn.execute(&format!("UPDATE clips SET {modification} WHERE id='edited'"), []).unwrap();
+            let before = serde_json::to_value(get_clip_by_id(&conn, "edited").unwrap().unwrap()).unwrap();
+            let rows = vec![generated_analysis_row("regenerated", "new-highlight", 0.0)];
+            assert!(replace_analysis_results(&mut conn, "v1", &rows).unwrap().is_empty(), "{modification}");
+            assert_eq!(before, serde_json::to_value(get_clip_by_id(&conn, "edited").unwrap().unwrap()).unwrap(), "{modification}");
+        }
+    }
+
+    #[test]
+    fn metadata_hydration_is_disposable_but_user_changes_and_clears_are_preserved() {
+        let conn = fresh_db();
+        let row = generated_analysis_row("clip", "highlight", 0.0);
+        insert_highlight(&conn, &row.highlight).unwrap();
+        insert_clip(&conn, &row.clip).unwrap();
+        update_clip_publish_meta(&conn, "clip", None, None).unwrap();
+        update_clip_game(&conn, "clip", None).unwrap();
+        assert!(protected_analysis_clips(&conn, "v1").unwrap().is_empty());
+        update_clip_publish_meta(&conn, "clip", Some("Copy"), Some("tag")).unwrap();
+        update_clip_publish_meta(&conn, "clip", None, None).unwrap();
+        assert_eq!(protected_analysis_clips(&conn, "v1").unwrap().len(), 1);
+        conn.execute("UPDATE clips SET user_edited=0 WHERE id='clip'", []).unwrap();
+        update_clip_game(&conn, "clip", Some("Custom game")).unwrap();
+        update_clip_game(&conn, "clip", None).unwrap();
+        assert_eq!(protected_analysis_clips(&conn, "v1").unwrap().len(), 1);
     }
 
     #[test]
@@ -4519,5 +5157,57 @@ mod tests {
             get_learned_transcription_terms(&conn, 10).unwrap(),
             vec!["Stacie".to_string()]
         );
+    }
+
+    #[test]
+    fn copy_feedback_updates_one_choice_and_shapes_future_strategy_order() {
+        let conn = fresh_db();
+        record_copy_feedback(
+            &conn,
+            "feedback-1",
+            "clip-1",
+            "brief-1",
+            "description",
+            "punchy:event_payoff",
+            "The door opened. We escaped.",
+            "The door opened. We escaped.",
+            "accepted",
+        )
+        .unwrap();
+        record_copy_feedback(
+            &conn,
+            "feedback-2",
+            "clip-2",
+            "brief-2",
+            "description",
+            "punchy:event_payoff",
+            "The chase ended at the window.",
+            "The chase ended when we vaulted the window.",
+            "edited",
+        )
+        .unwrap();
+
+        let preferences = get_copy_strategy_preferences(&conn, "description").unwrap();
+        assert_eq!(preferences.get("punchy:event_payoff"), Some(&1.2));
+
+        // The accepted row becomes edited instead of counting as a second event.
+        record_copy_feedback(
+            &conn,
+            "feedback-1",
+            "clip-1",
+            "brief-1",
+            "description",
+            "punchy:event_payoff",
+            "The door opened. We escaped.",
+            "The door opened, and we escaped through the window.",
+            "edited",
+        )
+        .unwrap();
+        let preferences = get_copy_strategy_preferences(&conn, "description").unwrap();
+        assert_eq!(preferences.get("punchy:event_payoff"), Some(&0.4));
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM copy_feedback", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
     }
 }

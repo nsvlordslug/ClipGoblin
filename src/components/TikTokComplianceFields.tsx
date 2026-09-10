@@ -33,6 +33,8 @@ const BRANDED_POLICY_URL = 'https://www.tiktok.com/legal/page/global/bc-policy/e
 // TikTok restricts unaudited Direct Post clients to SELF_ONLY. Flip this after
 // TikTok approves ClipGoblin's Content Posting API audit.
 const DIRECT_POST_AUDIT_PENDING = true
+const SANDBOX_REVIEW_MODE =
+  import.meta.env.DEV && import.meta.env.VITE_TIKTOK_SANDBOX_REVIEW === '1'
 
 // mm:ss formatter for the per-account max-duration hint.
 function fmtDuration(totalSec: number): string {
@@ -112,6 +114,7 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
     ? visibleTikTokPrivacyOptions(
         info.privacy_level_options,
         DIRECT_POST_AUDIT_PENDING,
+        SANDBOX_REVIEW_MODE,
       )
     : []
   const valid = !!info && !error && identity.verified && (isDraft
@@ -240,7 +243,7 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
         </p>
       )}
 
-      {DIRECT_POST_AUDIT_PENDING && (
+      {DIRECT_POST_AUDIT_PENDING && !SANDBOX_REVIEW_MODE && (
         <div className="flex items-start gap-2 rounded border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[10px] leading-relaxed text-amber-200">
           <LockKeyhole className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
           <span>

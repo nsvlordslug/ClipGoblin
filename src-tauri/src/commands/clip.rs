@@ -142,6 +142,51 @@ pub fn pick_context_branding_asset(app: AppHandle) -> Result<Option<String>, Str
     Ok(Some(destination.to_string_lossy().to_string()))
 }
 
+fn validate_trim_range(start: f64, end: f64, source_duration: Option<f64>) -> Result<(), String> {
+    if !start.is_finite() || !end.is_finite() || start < 0.0 || end <= start {
+        return Err(
+            "Clip timing must have a finite, nonnegative start and a later end.".to_string(),
+        );
+    }
+    if let Some(duration) = source_duration {
+        if !duration.is_finite() || duration <= 0.0 || end > duration + 0.001 {
+            return Err(format!(
+                "Clip end exceeds the source video duration ({duration:.3} seconds)."
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn clip_source_path(conn: &rusqlite::Connection, clip: &db::ClipRow) -> Result<String, String> {
+    let vod = db::get_vod_by_id(conn, &clip.vod_id)
+        .map_err(|error| format!("Could not read the source VOD: {error}"))?;
+    crate::commands::export::resolve_media_path(clip, vod.as_ref())
+}
+
+fn required_source_duration(path: &str) -> Result<f64, String> {
+    crate::commands::export::probe_media_duration(std::path::Path::new(path))
+        .ok_or_else(|| "Could not read the source video duration. Restore the source file before changing clip timing.".to_string())
+}
+
+/// Actual local media length, independent of the clip's saved trim endpoint.
+#[tauri::command]
+pub async fn get_clip_source_duration(
+    clip_id: String,
+    db: State<'_, DbConn>,
+) -> Result<f64, String> {
+    let path = {
+        let conn = db.lock().map_err(|error| format!("DB lock: {error}"))?;
+        let clip = db::get_clip_by_id(&conn, &clip_id)
+            .map_err(|error| format!("DB error: {error}"))?
+            .ok_or_else(|| "Clip not found".to_string())?;
+        clip_source_path(&conn, &clip)?
+    };
+    tokio::task::spawn_blocking(move || required_source_duration(&path))
+        .await
+        .map_err(|error| format!("Could not inspect source duration: {error}"))?
+}
+
 #[tauri::command]
 pub fn update_clip_settings(
     clip_id: String,
@@ -172,6 +217,23 @@ pub fn update_clip_settings(
     let before = db::get_clip_by_id(&conn, &clip_id)
         .map_err(|e| format!("DB error: {}", e))?
         .ok_or_else(|| "Clip not found".to_string())?;
+    validate_trim_range(start_seconds, end_seconds, None)?;
+    let boundaries_changed = (before.start_seconds - start_seconds).abs() >= 0.001
+        || (before.end_seconds - end_seconds).abs() >= 0.001;
+    // Community clips play their entire standalone file; stored boundaries are
+    // VOD-relative metadata and cannot be compared with that file's duration.
+    let uses_community_file = before
+        .source_media_path
+        .as_deref()
+        .map_or(true, |path| path.trim().is_empty())
+        && before
+            .community_clip_mp4_path
+            .as_deref()
+            .is_some_and(|path| !path.trim().is_empty());
+    if boundaries_changed && !uses_community_file {
+        let duration = required_source_duration(&clip_source_path(&conn, &before)?)?;
+        validate_trim_range(start_seconds, end_seconds, Some(duration))?;
+    }
     let requested_context_background_mode = match context_background_mode.as_str() {
         "black" => "black",
         "branding" => "branding",
@@ -218,8 +280,6 @@ pub fn update_clip_settings(
     } else {
         Vec::new()
     };
-    let boundaries_changed = (before.start_seconds - start_seconds).abs() >= 0.001
-        || (before.end_seconds - end_seconds).abs() >= 0.001;
     let mut captions_enabled = captions_enabled;
     let mut captions_pipeline_version = before.captions_pipeline_version;
     let mut captions_provenance = captions_provenance
@@ -332,6 +392,7 @@ pub fn get_clip_detail(clip_id: String, db: State<'_, DbConn>) -> Result<db::Cli
 #[tauri::command]
 pub fn save_clip_to_disk(
     clip_id: String,
+    artifact: Option<crate::commands::export::ExportArtifact>,
     app: AppHandle,
     db: State<'_, DbConn>,
 ) -> Result<Option<String>, String> {
@@ -340,13 +401,25 @@ pub fn save_clip_to_disk(
         let clip = db::get_clip_by_id(&conn, &clip_id)
             .map_err(|e| format!("DB error: {}", e))?
             .ok_or("Clip not found")?;
-        if clip.render_status != "completed" {
-            return Err("Clip has not been exported yet — export it first".into());
+        if let Some(artifact) = artifact {
+            // The user may have saved newer edits while this render ran. Save
+            // the exact completed artifact returned to this Download action.
+            let path =
+                crate::commands::export::validated_export_artifact_path(&clip_id, &artifact)?;
+            (
+                path.to_string_lossy().into_owned(),
+                clip.title,
+                artifact.aspect_ratio,
+            )
+        } else {
+            if clip.render_status != "completed" {
+                return Err("Clip has not been exported yet — export it first".into());
+            }
+            let path = clip
+                .output_path
+                .ok_or("No export file found for this clip")?;
+            (path, clip.title, clip.aspect_ratio)
         }
-        let path = clip
-            .output_path
-            .ok_or("No export file found for this clip")?;
-        (path, clip.title, clip.aspect_ratio)
     };
 
     let src = std::path::Path::new(&output_path);
@@ -757,5 +830,34 @@ mod transcription_correction_tests {
         let before = "1\n00:00:00,000 --> 00:00:01,000\nthat worked\n";
         let after = "1\n00:00:00,000 --> 00:00:01,000\nthat really worked\n";
         assert!(repeated_correction_candidates(before, after).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod trim_validation_tests {
+    use super::validate_trim_range;
+
+    #[test]
+    fn invalid_or_out_of_source_trim_ranges_are_rejected() {
+        for (start, end) in [
+            (f64::NAN, 20.0),
+            (0.0, f64::INFINITY),
+            (-1.0, 20.0),
+            (20.0, 20.0),
+            (30.0, 20.0),
+        ] {
+            assert!(validate_trim_range(start, end, Some(60.0)).is_err());
+        }
+        assert!(validate_trim_range(0.0, 61.0, Some(60.0)).is_err());
+        assert!(validate_trim_range(60.0, 61.0, Some(60.0)).is_err());
+        assert!(validate_trim_range(0.0, 30.0, Some(f64::NAN)).is_err());
+    }
+
+    #[test]
+    fn trim_can_expand_to_source_length_beyond_the_previously_saved_end() {
+        assert!(validate_trim_range(10.0, 30.0, Some(120.0)).is_ok());
+        assert!(validate_trim_range(0.0, 120.0, Some(120.0)).is_ok());
+        // Unchanged timing permits other edits while the source is offline.
+        assert!(validate_trim_range(10.0, 30.0, None).is_ok());
     }
 }

@@ -215,7 +215,6 @@ export default function HelpGuide() {
               Known limitations (pre-release)
             </p>
             <ul className="text-[11px] text-slate-500 space-y-1 ml-4 list-disc">
-              <li>Instagram publishing not implemented (Meta app not started yet).</li>
               <li>TikTok view counts are unavailable until the optional video.list scope is approved.</li>
               <li>TikTok may limit posts to private while Direct Post approval is pending. Accepted posts can take several minutes to appear.</li>
               <li>Waveform thumbnails on clip rows are decorative placeholders (not real audio shape yet).</li>
@@ -264,11 +263,11 @@ export default function HelpGuide() {
             % of detected highlights you actually published, vs deleted or left as drafts.
             Lower ship rates usually mean sensitivity is too high.
           </FaqItem>}
-          {matchesSearch('analytics view counts youtube tiktok video list instagram') && <FaqItem q="How do I get real view counts on the Analytics page?">
+          {matchesSearch('analytics view counts youtube tiktok video list') && <FaqItem q="How do I get real view counts on the Analytics page?">
             Open Analytics and click <b>Refresh stats</b>. The app currently polls the
             YouTube Data API using your existing scope. TikTok view counts will become
             available after the optional <code className="text-violet-300">video.list</code>
-            scope is approved. Instagram isn't wired up yet.
+            scope is approved.
           </FaqItem>}
           {matchesSearch('auto ship high confidence schedule') && <FaqItem q='What is "Auto-ship high-confidence"?'>
             When enabled in Settings → Detection, any clip scoring 90%+ confidence

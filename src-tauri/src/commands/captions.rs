@@ -2,6 +2,7 @@
 
 use crate::ai_provider;
 use crate::db;
+use crate::moment_brief::{CopySuggestion, MomentBrief, MomentEvidence, MomentScores};
 use crate::post_captions;
 use crate::DbConn;
 use std::collections::HashMap;
@@ -39,6 +40,120 @@ fn read_title_history(clip_id: &str) -> Vec<String> {
         .lock()
         .map(|map| map.get(clip_id).cloned().unwrap_or_default())
         .unwrap_or_default()
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MomentCopySuggestion {
+    pub text: String,
+    pub strategy: String,
+    pub feedback_id: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MomentCaptionSuggestion {
+    pub mode: String,
+    pub label: String,
+    pub text: String,
+    pub strategy: String,
+    pub feedback_id: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MomentCopyResponse {
+    pub title: MomentCopySuggestion,
+    pub captions: Vec<MomentCaptionSuggestion>,
+    pub hashtags: Vec<String>,
+    pub source: String,
+    pub title_source: String,
+    pub brief: MomentBrief,
+}
+
+fn feedback_suggestion(suggestion: CopySuggestion) -> MomentCopySuggestion {
+    MomentCopySuggestion {
+        text: suggestion.text,
+        strategy: suggestion.strategy,
+        feedback_id: uuid::Uuid::new_v4().to_string(),
+    }
+}
+
+fn caption_mode_label(mode: &str) -> &'static str {
+    match mode {
+        "direct_quote" => "Quote",
+        "blame" => "Blame",
+        "internal_thought" => "Thought",
+        "observation" => "Observe",
+        "punchy" => "Punchy",
+        "clean" => "Clean",
+        "funny" => "Funny",
+        "hype" => "Hype",
+        "search" => "SEO",
+        "minimal" => "Minimal",
+        _ => "Caption",
+    }
+}
+
+fn parse_signal_sources(value: Option<&str>) -> Vec<String> {
+    let Some(raw) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<String>>(raw).unwrap_or_else(|_| {
+        raw.split(',')
+            .map(|source| source.trim().to_lowercase())
+            .filter(|source| !source.is_empty())
+            .collect()
+    })
+}
+
+fn scoring_value(value: Option<&str>, key: &str) -> f64 {
+    value
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|json| json.get(key).and_then(serde_json::Value::as_f64))
+        .unwrap_or(0.0)
+}
+
+fn build_moment_brief(
+    highlight: Option<&db::HighlightRow>,
+    transcript: Option<&str>,
+    detector_title: Option<&str>,
+    game: Option<&str>,
+    stream_style: Option<&str>,
+) -> MomentBrief {
+    let tags = parse_tags(highlight.and_then(|row| row.tags.as_deref()));
+    let signal_sources =
+        parse_signal_sources(highlight.and_then(|row| row.signal_sources.as_deref()));
+    let dimensions = highlight.and_then(|row| row.scoring_dimensions.as_deref());
+    MomentBrief::build(MomentEvidence {
+        transcript: transcript
+            .or_else(|| highlight.and_then(|row| row.transcript_snippet.as_deref())),
+        detector_summary: highlight.and_then(|row| row.event_summary.as_deref()),
+        detector_title: detector_title
+            .or_else(|| highlight.and_then(|row| row.description.as_deref())),
+        payoff_summary: highlight.and_then(|row| row.event_summary.as_deref()),
+        outcome_label: None,
+        tags: &tags,
+        game,
+        stream_style,
+        signal_sources: &signal_sources,
+        scores: MomentScores {
+            hook: highlight.map(|row| row.audio_score).unwrap_or(0.0),
+            emotion: highlight.map(|row| row.visual_score).unwrap_or(0.0),
+            payoff: scoring_value(dimensions, "payoff"),
+            alignment: scoring_value(dimensions, "align"),
+            context: scoring_value(dimensions, "context"),
+            confidence: highlight
+                .and_then(|row| row.confidence_score)
+                .unwrap_or_default(),
+        },
+    })
+}
+
+fn detection_platform(value: Option<&str>) -> crate::detection::Platform {
+    match value.unwrap_or_default().to_lowercase().as_str() {
+        "youtube" | "shorts" => crate::detection::Platform::YouTubeShorts,
+        "instagram" | "reels" => crate::detection::Platform::InstagramReels,
+        "tiktok" => crate::detection::Platform::TikTok,
+        _ => crate::detection::Platform::Generic,
+    }
 }
 
 // ── Clip title generation ──
@@ -791,21 +906,31 @@ pub async fn upgrade_titles_with_llm(
             })
             .unwrap_or_default();
 
-        let event_summary = h.event_summary.clone().unwrap_or_default();
-
         // Use the highlight's stored transcript snippet — it's the relevant
         // excerpt for this clip range, set during signal fusion.
         let transcript_for_clip = h.transcript_snippet.as_deref();
+        let brief = build_moment_brief(
+            Some(h),
+            transcript_for_clip,
+            h.description.as_deref(),
+            vod_game,
+            None,
+        );
+        let event_summary = brief.prompt_context();
+        let money_quote = brief
+            .quote_candidates
+            .first()
+            .map(|quote| quote.text.as_str());
 
-        // No money-quote extraction at analyze time — keeps the cost down to
-        // one API call per clip. Money quote still extracts on regenerate.
+        // The quote comes from the same local brief, so the save path still
+        // makes only one optional BYOK request per clip.
         let mut usage = post_captions::TokenUsage::default();
         match post_captions::generate_llm_titles(
             resolved.provider,
             &resolved.api_key,
             &resolved.model,
             &event_summary,
-            None, // money_quote — skip at analyze
+            money_quote,
             transcript_for_clip,
             &tags,
             vod_game,
@@ -816,7 +941,10 @@ pub async fn upgrade_titles_with_llm(
         .await
         {
             Ok(candidates) => {
-                if let Some(top) = candidates.first() {
+                if let Some(top) = candidates
+                    .iter()
+                    .find(|candidate| brief.validate_title(&candidate.text).is_ok())
+                {
                     log::info!(
                         "Save-path Wave 3 title for highlight {}: \"{}\" (pattern {:?}, score {:.2})",
                         h.id, top.text, top.pattern, top.score,
@@ -834,13 +962,13 @@ pub async fn upgrade_titles_with_llm(
                                 tokens_out: usage.tokens_out,
                                 vod_id: Some(vod_id),
                                 clip_id: Some(&h.id),
-                                context: None,
+                                context: Some(&brief.signature),
                             },
                         );
                     }
                 } else {
                     log::warn!(
-                        "Save-path Wave 3: zero candidates for highlight {} — keeping heuristic",
+                        "Save-path Wave 3: no grounded candidates for highlight {} — keeping local Moment Brief title",
                         h.id
                     );
                 }
@@ -953,6 +1081,371 @@ pub(crate) fn build_highlight_explanation(
             parts.join(", ")
         )
     }
+}
+
+/// Store an accepted or edited generated-copy choice in the local profile.
+#[tauri::command]
+pub fn record_copy_feedback(
+    feedback_id: String,
+    clip_id: String,
+    brief_signature: String,
+    copy_kind: String,
+    strategy: String,
+    generated_text: String,
+    final_text: String,
+    outcome: String,
+    db: State<'_, DbConn>,
+) -> Result<(), String> {
+    if !matches!(copy_kind.as_str(), "title" | "description") {
+        return Err("Copy feedback kind must be title or description".into());
+    }
+    if !matches!(outcome.as_str(), "accepted" | "edited" | "rejected") {
+        return Err("Copy feedback outcome is invalid".into());
+    }
+    if feedback_id.trim().is_empty()
+        || clip_id.trim().is_empty()
+        || brief_signature.trim().is_empty()
+        || strategy.trim().is_empty()
+    {
+        return Err("Copy feedback is missing required context".into());
+    }
+    if generated_text.chars().count() > 5_000 || final_text.chars().count() > 5_000 {
+        return Err("Copy feedback text is too long".into());
+    }
+
+    let conn = db.lock().map_err(|e| format!("DB lock: {e}"))?;
+    db::record_copy_feedback(
+        &conn,
+        &feedback_id,
+        &clip_id,
+        &brief_signature,
+        &copy_kind,
+        &strategy,
+        &generated_text,
+        &final_text,
+        &outcome,
+    )
+    .map_err(|e| format!("Could not save local copy feedback: {e}"))
+}
+
+/// Generate a title and caption variants from one shared factual brief.
+///
+/// Local mode writes directly from the brief. BYOK mode may rewrite the same
+/// brief, but every returned candidate is validated against the brief before it
+/// reaches the editor.
+#[tauri::command]
+pub async fn generate_moment_copy(
+    clip_id: String,
+    seed: Option<u32>,
+    transcript_text: Option<String>,
+    current_title: Option<String>,
+    current_game: Option<String>,
+    current_description: Option<String>,
+    previous_descriptions: Option<Vec<String>>,
+    selected_mode: Option<String>,
+    platform: Option<String>,
+    db: State<'_, DbConn>,
+) -> Result<MomentCopyResponse, String> {
+    let (
+        clip,
+        highlight,
+        vod,
+        transcript,
+        title_provider,
+        caption_provider,
+        title_preferences,
+        caption_preferences,
+    ) = {
+        let conn = db.lock().map_err(|e| format!("DB lock: {e}"))?;
+        let clip = db::get_clip_by_id(&conn, &clip_id)
+            .map_err(|e| format!("DB error: {e}"))?
+            .ok_or("Clip not found")?;
+        let highlight = db::get_highlights_by_vod(&conn, &clip.vod_id)
+            .map_err(|e| format!("DB error: {e}"))?
+            .into_iter()
+            .find(|row| row.id == clip.highlight_id);
+        let vod = db::get_vod_by_id(&conn, &clip.vod_id).map_err(|e| format!("DB error: {e}"))?;
+        let transcript = transcript_text
+            .filter(|text| !text.trim().is_empty())
+            .or_else(|| {
+                highlight
+                    .as_ref()
+                    .and_then(|row| row.transcript_snippet.clone())
+            });
+        (
+            clip,
+            highlight,
+            vod,
+            transcript,
+            ai_provider::resolve(&conn, ai_provider::Scope::Titles),
+            ai_provider::resolve(&conn, ai_provider::Scope::Captions),
+            db::get_copy_strategy_preferences(&conn, "title").unwrap_or_default(),
+            db::get_copy_strategy_preferences(&conn, "description").unwrap_or_default(),
+        )
+    };
+
+    let game_name = current_game
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(clip.game.as_deref())
+        .or_else(|| vod.as_ref().and_then(|row| row.game_name.as_deref()));
+    let stream_style = vod.as_ref().and_then(|row| {
+        row.analyzed_stream_style
+            .as_deref()
+            .or(Some(row.detected_stream_style.as_str()))
+    });
+    let detector_title = current_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(Some(clip.title.as_str()));
+    let brief = build_moment_brief(
+        highlight.as_ref(),
+        transcript.as_deref(),
+        detector_title,
+        game_name,
+        stream_style,
+    );
+    let generation_seed = seed.unwrap_or(0);
+    let tags = brief.tags.clone();
+    let prompt_context = brief.prompt_context();
+    let quote = brief
+        .quote_candidates
+        .first()
+        .map(|item| item.text.as_str());
+
+    let mut title_source = "free".to_string();
+    let local_title = || {
+        brief
+            .title_suggestions(generation_seed, &title_preferences)
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                "The clip does not have enough verified evidence for a specific title".to_string()
+            })
+    };
+    let title_suggestion = if title_provider.is_llm() {
+        let mut usage = post_captions::TokenUsage::default();
+        let history = read_title_history(&clip_id);
+        match post_captions::generate_llm_titles(
+            title_provider.provider,
+            &title_provider.api_key,
+            &title_provider.model,
+            &prompt_context,
+            quote,
+            transcript.as_deref(),
+            &tags,
+            game_name,
+            (!history.is_empty()).then_some(history.as_slice()),
+            Some(detection_platform(platform.as_deref())),
+            Some(&mut usage),
+        )
+        .await
+        {
+            Ok(candidates) => {
+                let grounded = candidates
+                    .into_iter()
+                    .find(|candidate| brief.validate_title(&candidate.text).is_ok());
+                if let Some(candidate) = grounded {
+                    title_source = "llm".to_string();
+                    push_title_history(&clip_id, &candidate.text);
+                    if let Ok(conn) = db.lock() {
+                        crate::ai_usage::log_usage(
+                            &conn,
+                            crate::ai_usage::UsageEntry {
+                                feature: "moment_brief_title",
+                                provider: title_provider.provider,
+                                model: &title_provider.model,
+                                tokens_in: usage.tokens_in,
+                                tokens_out: usage.tokens_out,
+                                vod_id: Some(&clip.vod_id),
+                                clip_id: Some(&clip_id),
+                                context: Some(&brief.signature),
+                            },
+                        );
+                    }
+                    CopySuggestion {
+                        text: candidate.text,
+                        strategy: format!("byok:{:?}", candidate.pattern).to_lowercase(),
+                    }
+                } else if title_provider.fallback_to_free {
+                    local_title()?
+                } else {
+                    return Err("BYOK returned titles that were not grounded in this clip".into());
+                }
+            }
+            Err(error) if title_provider.fallback_to_free => {
+                log::warn!("Moment Brief title rewrite failed, using local copy: {error}");
+                local_title()?
+            }
+            Err(error) => return Err(format!("Title generation failed: {error}")),
+        }
+    } else {
+        local_title()?
+    };
+    let title = feedback_suggestion(title_suggestion);
+
+    let mode = selected_mode.unwrap_or_else(|| "punchy".to_string());
+    let modes: Vec<&str> = if caption_provider.is_llm() {
+        vec![mode.as_str()]
+    } else {
+        vec![
+            "punchy",
+            "clean",
+            "funny",
+            "hype",
+            "search",
+            "minimal",
+            "direct_quote",
+            "blame",
+            "internal_thought",
+            "observation",
+        ]
+    };
+
+    let mut source = "free".to_string();
+    let mut captions = Vec::new();
+    if caption_provider.is_llm() {
+        let mut avoid_captions = Vec::new();
+        for caption in current_description
+            .iter()
+            .chain(previous_descriptions.iter().flatten())
+            .chain(clip.publish_description.iter())
+        {
+            let trimmed = caption.trim();
+            if !trimmed.is_empty()
+                && !avoid_captions
+                    .iter()
+                    .any(|existing: &String| existing.eq_ignore_ascii_case(trimmed))
+            {
+                avoid_captions.push(trimmed.to_string());
+            }
+            if avoid_captions.len() == 6 {
+                break;
+            }
+        }
+
+        let (audio, visual, chat) = highlight
+            .as_ref()
+            .map(|row| (row.audio_score, row.visual_score, row.chat_score))
+            .unwrap_or_default();
+        let tone =
+            post_captions::classify_tone_pub(&tags, transcript.as_deref(), audio, visual, chat);
+        let mut usage = post_captions::TokenUsage::default();
+        match post_captions::generate_llm_caption(
+            caption_provider.provider,
+            &caption_provider.api_key,
+            &caption_provider.model,
+            &mode,
+            Some(detection_platform(platform.as_deref())),
+            &prompt_context,
+            quote,
+            quote,
+            tone.label(),
+            &tags,
+            transcript.as_deref(),
+            &title.text,
+            game_name,
+            &[],
+            &avoid_captions,
+            generation_seed,
+            Some(&mut usage),
+        )
+        .await
+        {
+            Ok(candidates) => {
+                let grounded = candidates.into_iter().find_map(|candidate| {
+                    let variant = post_captions::caption_candidate_to_variant(&candidate, &mode);
+                    brief
+                        .validate_description(&variant.text, &title.text)
+                        .is_ok()
+                        .then_some(variant.text)
+                });
+                if let Some(text) = grounded {
+                    source = "llm".to_string();
+                    captions.push(MomentCaptionSuggestion {
+                        mode: mode.clone(),
+                        label: caption_mode_label(&mode).to_string(),
+                        text,
+                        strategy: format!("byok:{}:{}", mode, generation_seed % 6),
+                        feedback_id: uuid::Uuid::new_v4().to_string(),
+                    });
+                    if let Ok(conn) = db.lock() {
+                        crate::ai_usage::log_usage(
+                            &conn,
+                            crate::ai_usage::UsageEntry {
+                                feature: "moment_brief_caption",
+                                provider: caption_provider.provider,
+                                model: &caption_provider.model,
+                                tokens_in: usage.tokens_in,
+                                tokens_out: usage.tokens_out,
+                                vod_id: Some(&clip.vod_id),
+                                clip_id: Some(&clip_id),
+                                context: Some(&brief.signature),
+                            },
+                        );
+                    }
+                } else if !caption_provider.fallback_to_free {
+                    return Err("BYOK returned captions that were not grounded in this clip".into());
+                }
+            }
+            Err(error) if caption_provider.fallback_to_free => {
+                log::warn!("Moment Brief caption rewrite failed, using local copy: {error}");
+            }
+            Err(error) => return Err(format!("Caption generation failed: {error}")),
+        }
+    }
+
+    if captions.is_empty() {
+        for (index, candidate_mode) in modes.iter().enumerate() {
+            if let Some(suggestion) = brief
+                .caption_suggestions(
+                    candidate_mode,
+                    &title.text,
+                    generation_seed.saturating_add(index as u32),
+                    &caption_preferences,
+                )
+                .into_iter()
+                .next()
+            {
+                captions.push(MomentCaptionSuggestion {
+                    mode: (*candidate_mode).to_string(),
+                    label: caption_mode_label(candidate_mode).to_string(),
+                    text: suggestion.text,
+                    strategy: suggestion.strategy,
+                    feedback_id: uuid::Uuid::new_v4().to_string(),
+                });
+            }
+        }
+    }
+    if captions.is_empty() {
+        return Err(
+            "The clip does not have enough verified evidence for specific post copy".into(),
+        );
+    }
+
+    let (audio, visual, chat) = highlight
+        .as_ref()
+        .map(|row| (row.audio_score, row.visual_score, row.chat_score))
+        .unwrap_or_default();
+    let tone = post_captions::classify_tone_pub(&tags, transcript.as_deref(), audio, visual, chat);
+    let hashtags = post_captions::build_hashtags_v2(
+        &tags,
+        tone,
+        detection_platform(platform.as_deref()),
+        &[],
+        game_name,
+    );
+
+    Ok(MomentCopyResponse {
+        title,
+        captions,
+        hashtags,
+        source,
+        title_source,
+        brief,
+    })
 }
 
 /// Generate TikTok-style post captions on demand from a clip's highlight data.
@@ -1236,7 +1729,7 @@ pub async fn generate_ai_title(
     current_title: Option<String>,
     db: State<'_, DbConn>,
 ) -> Result<String, String> {
-    let (clip, tags, transcript, highlight_scores, resolved) = {
+    let (clip, highlight, vod, tags, transcript, resolved, title_preferences) = {
         let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
 
         let clip = db::get_clip_by_id(&conn, &clip_id)
@@ -1245,44 +1738,55 @@ pub async fn generate_ai_title(
 
         let highlights = db::get_highlights_by_vod(&conn, &clip.vod_id)
             .map_err(|e| format!("DB error: {}", e))?;
-        let highlight = highlights.iter().find(|h| h.id == clip.highlight_id);
+        let highlight = highlights.into_iter().find(|h| h.id == clip.highlight_id);
 
-        let tags: Vec<String> = highlight
-            .and_then(|h| h.tags.as_ref())
-            .map(|t| {
-                t.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let tags = parse_tags(highlight.as_ref().and_then(|row| row.tags.as_deref()));
 
         let transcript = transcript_text
             .filter(|t| !t.trim().is_empty())
-            .or_else(|| highlight.and_then(|h| h.transcript_snippet.clone()));
-        let scores = (
-            highlight.map(|h| h.audio_score).unwrap_or(0.0),
-            highlight.map(|h| h.visual_score).unwrap_or(0.0),
-            highlight.map(|h| h.chat_score).unwrap_or(0.0),
-        );
+            .or_else(|| {
+                highlight
+                    .as_ref()
+                    .and_then(|h| h.transcript_snippet.clone())
+            });
+        let vod = db::get_vod_by_id(&conn, &clip.vod_id).map_err(|e| format!("DB error: {e}"))?;
 
         let resolved = ai_provider::resolve(&conn, ai_provider::Scope::Titles);
+        let title_preferences =
+            db::get_copy_strategy_preferences(&conn, "title").unwrap_or_default();
 
-        (clip, tags, transcript, scores, resolved)
+        (
+            clip,
+            highlight,
+            vod,
+            tags,
+            transcript,
+            resolved,
+            title_preferences,
+        )
     };
 
-    let (audio, visual, chat) = highlight_scores;
+    let game_name = current_game
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(clip.game.as_deref())
+        .or_else(|| vod.as_ref().and_then(|row| row.game_name.as_deref()));
+    let stream_style = vod.as_ref().and_then(|row| {
+        row.analyzed_stream_style
+            .as_deref()
+            .or(Some(row.detected_stream_style.as_str()))
+    });
+    let brief = build_moment_brief(
+        highlight.as_ref(),
+        transcript.as_deref(),
+        current_title.as_deref().or(Some(clip.title.as_str())),
+        game_name,
+        stream_style,
+    );
 
     if resolved.is_llm() {
-        let tone =
-            post_captions::classify_tone_pub(&tags, transcript.as_deref(), audio, visual, chat);
-        let event = post_captions::primary_event_pub(&tags);
-        let event_summary = post_captions::synthesize_event_pub(event, tone, &tags, 0);
-
-        let game_name = current_game
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .or(clip.game.as_deref());
+        let event_summary = brief.prompt_context();
 
         log::info!(
             "AI title generation: using {:?} (model: {})",
@@ -1290,47 +1794,10 @@ pub async fn generate_ai_title(
             resolved.model
         );
 
-        // Wave 3: extract a money-quote first so the titles prompt can inherit it
-        // (enables QuoteTwist pattern). Non-fatal on failure.
-        let mut quote_usage = post_captions::TokenUsage::default();
-        let money_quote: Option<String> =
-            match transcript.as_deref().filter(|t| !t.trim().is_empty()) {
-                Some(ft) => match post_captions::extract_money_quote_llm(
-                    resolved.provider,
-                    &resolved.api_key,
-                    &resolved.model,
-                    &event_summary,
-                    ft,
-                    &tags,
-                    Some(&mut quote_usage),
-                )
-                .await
-                {
-                    Ok(q) => {
-                        if let Ok(conn) = db.lock() {
-                            crate::ai_usage::log_usage(
-                                &conn,
-                                crate::ai_usage::UsageEntry {
-                                    feature: "money_quote_title",
-                                    provider: resolved.provider,
-                                    model: &resolved.model,
-                                    tokens_in: quote_usage.tokens_in,
-                                    tokens_out: quote_usage.tokens_out,
-                                    vod_id: Some(&clip.vod_id),
-                                    clip_id: Some(&clip_id),
-                                    context: None,
-                                },
-                            );
-                        }
-                        q
-                    }
-                    Err(e) => {
-                        log::debug!("Money-quote extraction skipped: {}", e);
-                        None
-                    }
-                },
-                None => None,
-            };
+        let money_quote = brief
+            .quote_candidates
+            .first()
+            .map(|quote| quote.text.as_str());
 
         // Regenerate anti-repeat: build a history of all titles the model has
         // already produced for this clip in this session (REGEN_TITLE_HISTORY),
@@ -1362,7 +1829,7 @@ pub async fn generate_ai_title(
             &resolved.api_key,
             &resolved.model,
             &event_summary,
-            money_quote.as_deref(),
+            money_quote,
             transcript.as_deref(),
             &tags,
             game_name,
@@ -1373,7 +1840,10 @@ pub async fn generate_ai_title(
         .await
         {
             Ok(candidates) => {
-                if let Some(top) = candidates.first() {
+                if let Some(top) = candidates
+                    .iter()
+                    .find(|candidate| brief.validate_title(&candidate.text).is_ok())
+                {
                     log::info!(
                         "Wave 3 title for clip {}: \"{}\" (pattern {:?}, score {:.2}, {} candidates)",
                         clip_id, top.text, top.pattern, top.score, candidates.len(),
@@ -1390,7 +1860,7 @@ pub async fn generate_ai_title(
                                 tokens_out: title_usage.tokens_out,
                                 vod_id: Some(&clip.vod_id),
                                 clip_id: Some(&clip_id),
-                                context: None,
+                                context: Some(&brief.signature),
                             },
                         );
                     }
@@ -1399,7 +1869,7 @@ pub async fn generate_ai_title(
                     push_title_history(&clip_id, &top.text);
                     return Ok(top.text.clone());
                 }
-                log::warn!("LLM returned zero title candidates");
+                log::warn!("LLM returned no title grounded in the Moment Brief");
                 if !resolved.fallback_to_free {
                     return Err("Title generation returned no candidates".into());
                 }
@@ -1413,8 +1883,14 @@ pub async fn generate_ai_title(
         }
     }
 
-    // Fallback: return the existing clip title
-    Ok(clip.title)
+    brief
+        .title_suggestions(0, &title_preferences)
+        .into_iter()
+        .next()
+        .map(|suggestion| suggestion.text)
+        .ok_or_else(|| {
+            "The clip does not have enough verified evidence for a specific title".into()
+        })
 }
 
 /// Test an AI provider connection with a minimal API call.

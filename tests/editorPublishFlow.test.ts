@@ -20,9 +20,9 @@ test('upload and scheduling still request a fresh rendered artifact at action ti
   const scheduleBlock = editor.slice(scheduleStart, editor.indexOf('const handleAddToMontage'))
 
   assert.match(uploadBlock, /const artifact = await onExportForFormat\(aspectRatio\)/)
-  assert.match(uploadBlock, /uploadToPlatform\(platform, forcePlatforms\.has\(platform\), artifact\)/)
+  assert.match(uploadBlock, /uploadToPlatform\(platform, targetAccounts, forcePlatforms\.has\(platform\), artifact\)/)
   assert.match(scheduleBlock, /const artifact = await onExportForFormat\(aspectRatio\)/)
-  assert.match(scheduleBlock, /buildUploadMeta\(platform, false, artifact\)/)
+  assert.match(scheduleBlock, /buildUploadMeta\(platform, targetAccounts\[adapterPlatform\], false, artifact\)/)
 })
 
 test('initial editor loading does not wait for caption alignment', () => {

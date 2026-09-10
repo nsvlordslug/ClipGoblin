@@ -53,8 +53,6 @@ import ExportProgressBar from '../components/ExportProgressBar'
 import { useTemplateStore } from '../stores/templateStore'
 import { useAppStore } from '../stores/appStore'
 import type { ClipTemplate } from '../stores/templateStore'
-import { generateStandaloneTitle } from '../lib/publishCopyGenerator'
-import type { ClipContext } from '../lib/publishCopyGenerator'
 import { errorMessage } from '../lib/errors'
 import { localDateTimeAfter } from '../lib/dateTime'
 import { parseStoredTags } from '../lib/tags'
@@ -63,6 +61,7 @@ import { getNextEditorWorkspace, isEditorWorkspaceId } from '../lib/editorWorksp
 import type { EditorWorkspaceId, EditorWorkspaceNavigationKey } from '../lib/editorWorkspace'
 import { canGenerateTimedCaptions, getCaptionTimelineStart, hasUsableSourceMedia, shouldPrepareCaptionAlignment } from '../lib/editorCaptions'
 import { canPersistEditorState, LatestRequestGate } from '../lib/editorRequestGuard'
+import { canMarkEditorExportComplete, clampEditorTrim, editorTrimError, initialPublishMetadata, runAfterEditorSave, scheduleHydratedEditorTask } from '../lib/editorState'
 import {
   brandingAssetName,
   contextVideoPositionLabel,
@@ -83,6 +82,10 @@ import type { RenderedArtifact } from '../lib/exportArtifacts'
 import XHandoffCard, { ManualShareUnavailableCard } from '../components/XHandoffCard'
 import { canOfferXHandoff } from '../lib/xHandoff'
 import { speechModelLabel } from '../lib/speechModelSelection'
+import { captureUploadTargets, isUncertainUploadError, uploadAdapterPlatform, uploadTargetFields } from '../lib/publishTargets'
+import YouTubeUploadRecovery from '../components/YouTubeUploadRecovery'
+import { recoveredPlatformStates, recoveryAspect, recoveryPlatformKeys } from '../lib/youtubeRecovery'
+import type { UncertainYouTubeUpload, YouTubeRecoveryAspect, YouTubeRecoveryResult } from '../lib/youtubeRecovery'
 
 type CaptionProvenance = 'none' | 'analysis-draft' | 'aligned' | 'edited' | 'legacy'
 type CaptionAudioMode = 'mixed' | 'microphone'
@@ -174,7 +177,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
   /** Callback to update upload history after a new upload */
   onUploadHistoryChange: (platform: string, url: string) => void
 }) {
-  const { connect, isConnected } = usePlatformStore()
+  const { connect } = usePlatformStore()
   const { projects, addClip, createProject } = useMontageStore()
   const navigate = useNavigate()
   const [downloading, setDownloading] = useState(false)
@@ -185,15 +188,49 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
   const [platformStates, setPlatformStates] = useState<Record<string, PlatformUploadState>>({})
   const [platformVisibilities, setPlatformVisibilities] = useState<Record<string, string>>({})
   const [multiUploading, setMultiUploading] = useState(false)
+  const [youtubeUncertainUploads, setYouTubeUncertainUploads] = useState<UncertainYouTubeUpload[]>([])
+  const youtubeUncertainUploadsRef = useRef<UncertainYouTubeUpload[]>([])
+  const uploadHistoryRequestRef = useRef(0)
+  const [youtubeRecoveryNotice, setYouTubeRecoveryNotice] = useState<string | null>(null)
+  const actionClipIdRef = useRef(clipId)
+  actionClipIdRef.current = clipId
+  const updateYouTubeUncertainUploads = (update: UncertainYouTubeUpload[] | ((current: UncertainYouTubeUpload[]) => UncertainYouTubeUpload[])) => {
+    const next = typeof update === 'function' ? update(youtubeUncertainUploadsRef.current) : update
+    youtubeUncertainUploadsRef.current = next
+    setYouTubeUncertainUploads(next)
+  }
 
   useEffect(() => {
+    let cancelled = false
+    const requestGeneration = ++uploadHistoryRequestRef.current
+    updateYouTubeUncertainUploads([])
+    setYouTubeRecoveryNotice(null)
+    setPlatformStates({})
     invoke<Array<{
       platform: string
       status: string
       video_url: string | null
       last_error: string | null
+      artifact_aspect_ratio?: string
     }>>('get_clip_upload_history', { clipId })
       .then(rows => {
+        if (cancelled || requestGeneration !== uploadHistoryRequestRef.current) return
+        const uncertain = rows.filter(row => row.platform === 'youtube' && row.status === 'uncertain')
+        updateYouTubeUncertainUploads(uncertain.map(row => ({
+          aspectRatio: recoveryAspect(row.artifact_aspect_ratio),
+          message: row.last_error || 'YouTube may have received this video. Check the original upload before trying again.',
+        })))
+        if (uncertain.length > 0) setPlatformStates(prev => {
+          const next = { ...prev }
+          for (const row of uncertain) {
+            const keys = recoveryPlatformKeys(recoveryAspect(row.artifact_aspect_ratio))
+            for (const key of keys) next[key] = {
+              status: 'error', progress: 0, retryBlocked: true,
+              error: row.last_error || 'Upload outcome is uncertain. Check YouTube Studio before another upload.',
+            }
+          }
+          return next
+        })
         const tiktok = rows.find(row => row.platform === 'tiktok')
         if (!tiktok) return
         setPlatformStates(prev => {
@@ -225,7 +262,27 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
         })
       })
       .catch(() => {})
+    return () => { cancelled = true }
   }, [clipId])
+
+  const rememberUncertainYouTubeUpload = (platform: string, artifact: RenderedArtifact | undefined, message: string) => {
+    if (uploadAdapterPlatform(platform) !== 'youtube' || actionClipIdRef.current !== clipId) return
+    uploadHistoryRequestRef.current += 1
+    const aspectRatio = recoveryAspect(artifact?.aspectRatio)
+    setYouTubeRecoveryNotice(null)
+    updateYouTubeUncertainUploads(current => [
+      ...current.filter(upload => upload.aspectRatio !== aspectRatio), { aspectRatio, message },
+    ])
+  }
+
+  const finishYouTubeRecovery = (aspectRatio: YouTubeRecoveryAspect, completed: YouTubeRecoveryResult | null) => {
+    if (actionClipIdRef.current !== clipId) return
+    const remaining = youtubeUncertainUploadsRef.current.filter(upload => upload.aspectRatio !== aspectRatio)
+    updateYouTubeUncertainUploads(remaining)
+    setPlatformStates(current => recoveredPlatformStates(current, remaining, aspectRatio, completed))
+    setYouTubeRecoveryNotice(completed?.message || 'Your review was recorded. You can choose Upload when ready; no new upload has started.')
+    if (completed?.video_url) onUploadHistoryChange(aspectRatio === '9:16' ? 'youtube_shorts' : 'youtube', completed.video_url)
+  }
 
   // Schedule state
   const { schedule: scheduleUpload, getForClip: getScheduledForClip } = useScheduleStore()
@@ -310,8 +367,11 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
     && platformStates.tiktok.draftHandoff === true
   const tiktokProcessing = platformStates.tiktok?.status === 'processing'
   const tiktokPreviouslyAccepted = platformStates.tiktok?.status === 'duplicate'
+  const hasUncertainSelection = selectedPlatforms.some(platform => platformStates[platform]?.retryBlocked)
+  const allSelectedBlocked = selectedPlatforms.length > 0
+    && selectedPlatforms.every(platform => platformStates[platform]?.retryBlocked)
   // Build upload metadata — includes title from main field, caption, and hashtags
-  const buildUploadMeta = (platform: string, force = false, artifact?: RenderedArtifact) => {
+  const buildUploadMeta = (platform: string, targetAccountId: string | null, force = false, artifact?: RenderedArtifact) => {
     const baseDesc = publishMeta?.description || ''
     const tags = publishMeta?.hashtags || []
     const hashtagSuffix = tags.length > 0 ? tags.map(t => `#${t}`).join(' ') : ''
@@ -332,6 +392,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
         ? tiktokCompliance.privacyLevel
         : (platformVisibilities[platform] || getDefaultVisibility(platform)),
       force,
+      ...uploadTargetFields(targetAccountId),
       ...(artifact ? artifactUploadFields(artifact) : {}),
       ...(isTikTok ? {
         disable_comment: tiktokCompliance.disableComment,
@@ -347,17 +408,18 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
   // Upload to a single platform
   const uploadToPlatform = async (
     platform: string,
+    targetAccounts: Record<string, string | null>,
     force = false,
     artifact?: RenderedArtifact,
   ): Promise<PlatformUploadState> => {
-    const adapterPlatform = platform === 'youtube_shorts' ? 'youtube' : platform
+    const adapterPlatform = uploadAdapterPlatform(platform)
     try {
-      if (!isConnected(adapterPlatform)) {
-        await connect(adapterPlatform)
+      if (!targetAccounts[adapterPlatform]) {
+        targetAccounts[adapterPlatform] = (await connect(adapterPlatform)).account_id
       }
       const result = await invoke<UploadResult>('upload_to_platform', {
         platform: adapterPlatform,
-        meta: buildUploadMeta(platform, force, artifact),
+        meta: buildUploadMeta(platform, targetAccounts[adapterPlatform], force, artifact),
       })
       if (result.status.status === 'complete') {
         const url = result.status.video_url
@@ -374,7 +436,8 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
           ? { status: 'done', progress: 100, duplicateUrl }
           : { status: 'duplicate', progress: 100 }
       } else if (result.status.status === 'failed') {
-        return { status: 'error', progress: 0, error: result.status.error }
+        if (isUncertainUploadError(result.status.error)) rememberUncertainYouTubeUpload(platform, artifact, result.status.error)
+        return { status: 'error', progress: 0, error: result.status.error, retryBlocked: isUncertainUploadError(result.status.error) }
       } else if (isTikTokInboxDelivered(result.status.status)) {
         return { status: 'done', progress: 100, draftHandoff: true }
       } else if (result.status.status === 'processing') {
@@ -384,7 +447,8 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
       }
       return { status: 'error', progress: 0, error: 'Unexpected upload state' }
     } catch (error: unknown) {
-      return { status: 'error', progress: 0, error: errorMessage(error, 'Upload failed') }
+      if (isUncertainUploadError(error)) rememberUncertainYouTubeUpload(platform, artifact, errorMessage(error, 'Upload outcome is uncertain.'))
+      return { status: 'error', progress: 0, error: errorMessage(error, 'Upload failed'), retryBlocked: isUncertainUploadError(error) }
     }
   }
 
@@ -446,11 +510,13 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
   // Multi-platform upload orchestrator — always saves + exports first, then uploads
   const handleMultiUpload = async (forcePlatforms: Set<string> = new Set()) => {
     if (!clipId || selectedPlatforms.length === 0) return
+    const targetAccounts = captureUploadTargets(selectedPlatforms, usePlatformStore.getState().accounts)
     setMultiUploading(true)
 
-    const platformsForRun = forcePlatforms.size > 0
+    const requestedPlatforms = forcePlatforms.size > 0
       ? selectedPlatforms.filter(platform => forcePlatforms.has(platform))
       : selectedPlatforms
+    const platformsForRun = requestedPlatforms.filter(platform => !platformStates[platform]?.retryBlocked)
 
     // Group platforms by required aspect ratio
     const groups: Record<string, string[]> = {}
@@ -477,7 +543,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
             ...prev,
             [platform]: { status: 'uploading', progress: 0 },
           }))
-          const result = await uploadToPlatform(platform, forcePlatforms.has(platform), artifact)
+          const result = await uploadToPlatform(platform, targetAccounts, forcePlatforms.has(platform), artifact)
           setPlatformStates(prev => ({ ...prev, [platform]: result }))
         }
       } catch (error: unknown) {
@@ -497,11 +563,19 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
   // Schedule upload for later
   const handleScheduleUpload = async () => {
     if (!clipId || selectedPlatforms.length === 0 || !scheduleTime) return
+    const targetAccounts = captureUploadTargets(selectedPlatforms, usePlatformStore.getState().accounts)
     setScheduling(true)
 
     // Export before scheduling (so the file is ready when the schedule fires)
     const groups: Record<string, string[]> = {}
     for (const platform of selectedPlatforms) {
+      if (platformStates[platform]?.retryBlocked) continue
+      if (!targetAccounts[uploadAdapterPlatform(platform)]) {
+        setPlatformStates(prev => ({ ...prev, [platform]: {
+          status: 'error', progress: 0, error: 'Connect the publishing account and try again.',
+        } }))
+        continue
+      }
       const preset = getPresetForPlatform(platform)
       const ar = preset.aspectRatio
       if (!groups[ar]) groups[ar] = []
@@ -513,18 +587,26 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
         const artifact = await onExportForFormat(aspectRatio)
         const isoTime = new Date(scheduleTime).toISOString()
         for (const platform of platforms) {
-          const adapterPlatform = platform === 'youtube_shorts' ? 'youtube' : platform
-          const meta = buildUploadMeta(platform, false, artifact)
-          const metaJson = JSON.stringify(meta)
+          const adapterPlatform = uploadAdapterPlatform(platform)
           try {
+            const meta = buildUploadMeta(platform, targetAccounts[adapterPlatform], false, artifact)
+            const metaJson = JSON.stringify(meta)
             const id = await scheduleUpload(clipId, adapterPlatform, isoTime, metaJson)
             setScheduledUploads(prev => [...prev, { id, platform: adapterPlatform, scheduled_time: isoTime }])
           } catch (error: unknown) {
             console.error(`[Schedule] Failed to schedule ${platform}:`, error)
+            if (isUncertainUploadError(error)) rememberUncertainYouTubeUpload(platform, artifact, errorMessage(error, 'Upload outcome is uncertain.'))
+            setPlatformStates(prev => ({ ...prev, [platform]: {
+              status: 'error', progress: 0, error: errorMessage(error, 'Schedule failed'),
+              retryBlocked: isUncertainUploadError(error),
+            } }))
           }
         }
       } catch (error: unknown) {
         console.error('[Schedule] Export failed:', error)
+        setPlatformStates(prev => ({ ...prev, ...Object.fromEntries(platforms.map(platform => [platform, {
+          status: 'error' as const, progress: 0, error: errorMessage(error, 'Export failed'),
+        }])) }))
         setScheduling(false)
         return
       }
@@ -590,9 +672,9 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
               setDownloading(true)
               setDownloadResult(null)
               try {
-                await onExportForFormat(exportPreset.aspectRatio)
+                const artifact = await onExportForFormat(exportPreset.aspectRatio)
                 // Save to configured folder (or prompt to pick one)
-                const savedPath = await invoke<string | null>('save_clip_to_disk', { clipId })
+                const savedPath = await invoke<string | null>('save_clip_to_disk', { clipId, artifact })
                 if (savedPath) {
                   setDownloadResult(savedPath)
                   setTimeout(() => setDownloadResult(null), 5000)
@@ -710,6 +792,19 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
           </div>
         )}
 
+        {hasUncertainSelection && youtubeUncertainUploads.length === 0 && (
+          <div role="alert" className="border-l-2 border-amber-400 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-200">
+            YouTube may have received this video. Check YouTube Studio; another upload of the affected format is blocked to avoid a duplicate.
+          </div>
+        )}
+
+        <YouTubeUploadRecovery clipId={clipId} uploads={youtubeUncertainUploads}
+          onCompleted={(aspectRatio, result) => finishYouTubeRecovery(aspectRatio, result)}
+          onAllowed={aspectRatio => finishYouTubeRecovery(aspectRatio, null)} />
+        {youtubeRecoveryNotice && (
+          <p role="status" className="border-l-2 border-cyan-400 bg-cyan-500/5 px-3 py-2 text-[11px] text-cyan-100">{youtubeRecoveryNotice}</p>
+        )}
+
         {/* Schedule toggle + Upload/Schedule buttons */}
         {selectedPlatforms.length > 0 && (
           <div className="space-y-1.5">
@@ -742,7 +837,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
             {scheduleMode ? (
               <button
                 onClick={handleScheduleUpload}
-                disabled={scheduling || !scheduleTime || !mediaAvailable || (selectedPlatforms.includes('tiktok') && !tiktokComplianceValid)}
+                disabled={scheduling || allSelectedBlocked || !scheduleTime || !mediaAvailable || (selectedPlatforms.includes('tiktok') && !tiktokComplianceValid)}
                 className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors cursor-pointer border bg-amber-600/80 text-white border-amber-500 hover:bg-amber-500 disabled:opacity-60"
               >
                 {scheduling ? (
@@ -756,7 +851,7 @@ function ActionsBar({ clipId, clip, saving, saved, exporting, exportProgress, ex
             ) : (
               <button
                 onClick={() => void handleMultiUpload(new Set(forcedReuploadPlatforms))}
-                disabled={anyUploading || !mediaAvailable || (allSubmitted && !hasForcedReuploadOption) || (selectedPlatforms.includes('tiktok') && !tiktokComplianceValid)}
+                disabled={anyUploading || allSelectedBlocked || !mediaAvailable || (allSubmitted && !hasForcedReuploadOption) || (selectedPlatforms.includes('tiktok') && !tiktokComplianceValid)}
                 className={`w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors cursor-pointer border ${
                   allSubmitted && !hasForcedReuploadOption
                     ? 'bg-green-600/20 text-green-400 border-green-500/30'
@@ -915,6 +1010,10 @@ export default function Editor() {
   const editorLoadGateRef = useRef<LatestRequestGate | null>(null)
   if (!editorLoadGateRef.current) editorLoadGateRef.current = new LatestRequestGate()
   const loadedClipIdRef = useRef<string | null>(null)
+  const [hydratedEditor, setHydratedEditor] = useState<{ clipId: string; generation: number } | null>(null)
+  const [sourceDuration, setSourceDuration] = useState<number | null>(null)
+  const [sourceDurationError, setSourceDurationError] = useState<string | null>(null)
+  const [sourceDurationAttempt, setSourceDurationAttempt] = useState(0)
   const captionAlignmentGenerationRef = useRef(0)
   const captionAlignmentRequestedClipRef = useRef<string | null>(null)
   const [captionAlignmentPreparing, setCaptionAlignmentPreparing] = useState(false)
@@ -940,6 +1039,8 @@ export default function Editor() {
   const [title, setTitle] = useState('')
   const [startSeconds, setStartSeconds] = useState(0)
   const [endSeconds, setEndSeconds] = useState(0)
+  const trimBoundsRef = useRef({ start: startSeconds, end: endSeconds })
+  trimBoundsRef.current = { start: startSeconds, end: endSeconds }
   const [aspectRatio, setAspectRatio] = useState('9:16')
   const [captionsEnabled, setCaptionsEnabled] = useState(true)
   const [captionsText, setCaptionsText] = useState('')
@@ -1139,26 +1240,31 @@ export default function Editor() {
   }, [])
 
   const handleUndo = useCallback(() => {
+    if (!canPersistEditorState(clipId, hydratedEditor?.clipId ?? null)) return
     const snap = history.undo()
     if (snap) { applySnapshot(snap); setHistoryTick(t => t + 1) }
-  }, [history, applySnapshot])
+  }, [history, applySnapshot, clipId, hydratedEditor])
 
   const handleRedo = useCallback(() => {
+    if (!canPersistEditorState(clipId, hydratedEditor?.clipId ?? null)) return
     const snap = history.redo()
     if (snap) { applySnapshot(snap); setHistoryTick(t => t + 1) }
-  }, [history, applySnapshot])
+  }, [history, applySnapshot, clipId, hydratedEditor])
 
   // Push snapshot on tracked state changes (debounced to batch rapid edits)
   useEffect(() => {
     if (historyRestoringRef.current) return // don't push while restoring
-    const timer = setTimeout(() => {
-      if (!historyRestoringRef.current) {
-        history.push(takeSnapshot())
-        setHistoryTick(t => t + 1)
-      }
-    }, 400)
-    return () => clearTimeout(timer)
-  }, [title, startSeconds, endSeconds, captionsText, captionsPosition, captionStyleId, captionFontScale, captionCardScale, captionYOffset, publishMeta, history, takeSnapshot])
+    return scheduleHydratedEditorTask(
+      canPersistEditorState(clipId, hydratedEditor?.clipId ?? null),
+      () => !!hydratedEditor && editorLoadGateRef.current!.isCurrent(hydratedEditor.generation),
+      () => {
+        if (!historyRestoringRef.current) {
+          history.push(takeSnapshot())
+          setHistoryTick(t => t + 1)
+        }
+      }, 400,
+    )
+  }, [title, startSeconds, endSeconds, captionsText, captionsPosition, captionStyleId, captionFontScale, captionCardScale, captionYOffset, publishMeta, history, takeSnapshot, clipId, hydratedEditor])
 
   // Keyboard shortcuts: Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z
   useEffect(() => {
@@ -1179,20 +1285,22 @@ export default function Editor() {
 
   // ── Auto-save publish metadata (description + hashtags) to DB ──
   useEffect(() => {
-    if (!canPersistEditorState(clipId, loadedClipIdRef.current)) return
+    if (!canPersistEditorState(clipId, hydratedEditor?.clipId ?? null)) return
     const saveClipId = clipId
-    const timer = setTimeout(() => {
-      if (!canPersistEditorState(saveClipId, loadedClipIdRef.current)) return
-      const hashtagStr = publishMeta.hashtags.length > 0 ? publishMeta.hashtags.join(',') : null
-      invoke('set_clip_publish_meta', {
-        clipId: saveClipId,
-        description: publishMeta.description || null,
-        hashtags: hashtagStr,
-      }).then(() => invalidateClips())
-        .catch(err => console.warn('[Editor] Failed to auto-save publish meta:', err))
-    }, 500) // debounce 500ms
-    return () => clearTimeout(timer)
-  }, [clipId, invalidateClips, publishMeta.description, publishMeta.hashtags])
+    return scheduleHydratedEditorTask(true,
+      () => !!hydratedEditor && editorLoadGateRef.current!.isCurrent(hydratedEditor.generation)
+        && canPersistEditorState(saveClipId, loadedClipIdRef.current),
+      () => {
+        const hashtagStr = publishMeta.hashtags.length > 0 ? publishMeta.hashtags.join(',') : null
+        invoke('set_clip_publish_meta', {
+          clipId: saveClipId,
+          description: publishMeta.description || null,
+          hashtags: hashtagStr,
+        }).then(() => invalidateClips())
+          .catch(err => console.warn('[Editor] Failed to auto-save publish meta:', err))
+      }, 500,
+    )
+  }, [clipId, hydratedEditor, invalidateClips, publishMeta.description, publishMeta.hashtags])
 
   // ── Player state (declared before subtitle/marker code that depends on it) ──
   const playerSeekRef = useRef<((time: number) => void) | null>(null)
@@ -1310,14 +1418,33 @@ export default function Editor() {
   }, [])
 
   const handleGenerateCaptions = async () => {
-    if (!clipId || generatingCaptions || speechModelSelectionSaving || captionAlignmentPreparing) return
+    if (!canPersistEditorState(clipId, loadedClipIdRef.current) || generatingCaptions || speechModelSelectionSaving || captionAlignmentPreparing) return
+    const requestGeneration = ++captionAlignmentGenerationRef.current
+    captionAlignmentRequestedClipRef.current = clipId
+    const initialText = captionsTextRef.current
+    const initialEnabled = captionsEnabledRef.current
+    const initialBounds = trimBoundsRef.current
+    const initialAudioMode = captionAudioMode
+    const requestIsCurrent = () => loadedClipIdRef.current === clipId
+      && captionAlignmentGenerationRef.current === requestGeneration
+    const editorIsUnchanged = () => requestIsCurrent()
+      && captionsTextRef.current === initialText
+      && captionsEnabledRef.current === initialEnabled
+      && trimBoundsRef.current.start === initialBounds.start
+      && trimBoundsRef.current.end === initialBounds.end
+      && captionAudioModeRef.current === initialAudioMode
     setGeneratingCaptions(true)
     setCaptionError('')
     try {
-      const result = await invoke<CaptionAlignmentResult>('generate_clip_captions', {
-        clipId,
-        audioMode: captionAudioMode,
-      })
+      const result = await runAfterEditorSave(
+        persistEditorSettings,
+        () => invoke<CaptionAlignmentResult>('generate_clip_captions', { clipId, audioMode: initialAudioMode }),
+        editorIsUnchanged,
+      )
+      if (!result) {
+        if (requestIsCurrent()) setCaptionError('Your newer edits were kept. Generate subtitles again for the current trim.')
+        return
+      }
       applyCaptionAlignment(result)
       if (result.cueCount === 0) {
         setCaptionError(result.message || 'No spoken subtitles were found. Captions remain off.')
@@ -1327,6 +1454,7 @@ export default function Editor() {
 
       // Game detection is manual — no auto-inference after subtitle generation
     } catch (err) {
+      if (!requestIsCurrent()) return
       const raw = String(err)
       console.error('Caption generation error:', raw)
       // The backend now returns specific error messages — display them directly
@@ -1351,7 +1479,7 @@ export default function Editor() {
         setCaptionError(raw.replace('Transcription error: ', '') || 'Subtitle generation failed.')
       }
     } finally {
-      setGeneratingCaptions(false)
+      if (requestIsCurrent()) setGeneratingCaptions(false)
     }
   }
 
@@ -1468,12 +1596,17 @@ export default function Editor() {
     const loadGeneration = loadGate.begin()
     const isCurrentLoad = () => loadGate.isCurrent(loadGeneration)
     loadedClipIdRef.current = null
+    setHydratedEditor(null)
+    setSourceDuration(null)
+    setSourceDurationError(null)
     captionAlignmentGenerationRef.current += 1
     captionAlignmentRequestedClipRef.current = null
     setCaptionAlignmentPreparing(false)
+    setGeneratingCaptions(false)
     saveRequestGenerationRef.current += 1
     setSaving(false)
     setSaved(false)
+    setExporting(false)
     setEditorLoadError(null)
     setClip(null)
     setPreparedArtifacts({})
@@ -1538,12 +1671,8 @@ export default function Editor() {
         setThumbnailPath(c.thumbnail_path)
         setPlaybackTime(c.start_seconds)
         console.log('[Editor] Clip loaded — clip.game:', JSON.stringify(c.game), '| captions_text length:', c.captions_text?.length ?? 0)
-        setPublishMeta(prev => ({
-          ...prev,
-          title: c.title,
-          description: c.publish_description || '',
-          hashtags: c.publish_hashtags ? c.publish_hashtags.split(',').filter(Boolean) : [],
-        }))
+        const initialPublish = initialPublishMetadata(c)
+        setPublishMeta(prev => ({ ...prev, ...initialPublish }))
 
         // Load persisted upload history (View on YouTube/TikTok links)
         invoke<Array<{ platform: string; video_url: string | null }>>('get_clip_upload_history', { clipId })
@@ -1568,10 +1697,11 @@ export default function Editor() {
           captionFontScale: clampCaptionFontScale(c.caption_font_scale ?? 1),
           captionCardScale: clampCaptionCardScale(c.caption_card_scale ?? DEFAULT_CAPTION_CARD_SCALE),
           captionYOffset: Math.max(-20, Math.min(20, c.caption_y_offset ?? 0)),
-          publishTitle: c.title,
-          publishDescription: '',
-          publishHashtags: [],
+          publishTitle: initialPublish.title,
+          publishDescription: initialPublish.description,
+          publishHashtags: initialPublish.hashtags,
         })
+        setHydratedEditor({ clipId, generation: loadGeneration })
         setHistoryTick(0)
 
         if (c.source_media_path) {
@@ -1620,6 +1750,23 @@ export default function Editor() {
     }
   }, [clipId, history, editorLoadAttempt])
 
+  useEffect(() => {
+    if (!canPersistEditorState(clipId, hydratedEditor?.clipId ?? null)) return
+    let cancelled = false
+    setSourceDuration(null)
+    setSourceDurationError(null)
+    invoke<number>('get_clip_source_duration', { clipId })
+      .then(duration => {
+        if (cancelled) return
+        if (!Number.isFinite(duration) || duration <= 0) throw new Error('The source duration is unavailable.')
+        setSourceDuration(duration)
+      })
+      .catch(error => {
+        if (!cancelled) setSourceDurationError(errorMessage(error, 'Could not read the source video duration.'))
+      })
+    return () => { cancelled = true }
+  }, [clipId, hydratedEditor, sourceDurationAttempt])
+
   // ── Sync aspect ratio when export preset changes ──
   useEffect(() => {
     setAspectRatio(exportPreset.aspectRatio)
@@ -1645,6 +1792,8 @@ export default function Editor() {
     if (!canPersistEditorState(clipId, loadedClipIdRef.current)) {
       throw new Error('The clip changed before its settings could be saved')
     }
+    const trimError = editorTrimError(startSeconds, endSeconds, isCommunityClip ? null : sourceDuration)
+    if (trimError) throw new Error(trimError)
     const currentCaptionsText = captionsTextRef.current
     const snapshot = {
       clipId,
@@ -1678,13 +1827,15 @@ export default function Editor() {
     if (!canPersistEditorState(clipId, loadedClipIdRef.current)) return
     const saveClipId = clipId
     const saveGeneration = saveRequestGenerationRef.current + 1
+    const savingSnapshotKey = currentRenderSnapshotKey(aspectRatio)
     saveRequestGenerationRef.current = saveGeneration
     setSaving(true)
     try {
       await persistEditorSettings()
       if (
         saveRequestGenerationRef.current === saveGeneration &&
-        canPersistEditorState(saveClipId, loadedClipIdRef.current)
+        canPersistEditorState(saveClipId, loadedClipIdRef.current) &&
+        currentRenderSnapshotKeyRef.current(aspectRatio) === savingSnapshotKey
       ) {
         setSaved(true)
         setExportDone(false)
@@ -1737,6 +1888,9 @@ export default function Editor() {
     },
   )
 
+  const currentRenderSnapshotKeyRef = useRef(currentRenderSnapshotKey)
+  currentRenderSnapshotKeyRef.current = currentRenderSnapshotKey
+
   /**
    * Export with a specific aspect ratio (for multi-platform auto-re-export).
    * Persists one editor snapshot, then renders that snapshot into an immutable
@@ -1745,18 +1899,26 @@ export default function Editor() {
   const handleExportForFormat = async (targetAspectRatio: string): Promise<RenderedArtifact> => {
     if (!clipId) throw new Error('No clip')
     let snapshotKey = ''
+    const requestedSnapshotKey = currentRenderSnapshotKey(targetAspectRatio)
+    const exportGeneration = hydratedEditor?.generation
+    const editorIsCurrent = () => loadedClipIdRef.current === clipId
+      && exportGeneration !== undefined && editorLoadGateRef.current!.isCurrent(exportGeneration)
 
     return saveThenRender(async () => {
-      await persistEditorSettings()
       let alignedText = captionsTextRef.current
       let alignedEnabled = captionsEnabled && alignedText.trim().length > 0
+      await persistEditorSettings()
       if (alignedEnabled) {
         const alignment = await invoke<CaptionAlignmentResult>('ensure_clip_captions_aligned', { clipId })
+        if (!editorIsCurrent() || currentRenderSnapshotKeyRef.current(targetAspectRatio) !== requestedSnapshotKey) {
+          throw new Error('Clip settings changed while preparing the export. Export again for the current edit.')
+        }
         applyCaptionAlignment(alignment)
-        alignedText = alignment.srt || ''
+        alignedText = normalizedCaptionDocument(alignment.srt || '').text
         alignedEnabled = alignment.captionsEnabled && alignedText.trim().length > 0
         if (alignment.message) setCaptionError(alignment.message)
       }
+      if (!editorIsCurrent()) throw new Error('The editor changed while preparing the export.')
       snapshotKey = currentRenderSnapshotKey(targetAspectRatio, alignedText, alignedEnabled)
     }, () => new Promise<RenderedArtifact>((resolve, reject) => {
       setExporting(true)
@@ -1772,8 +1934,10 @@ export default function Editor() {
       const rejectExport = (error: unknown) => {
         if (settled) return
         settled = true
-        setExporting(false)
-        setExportError(errorMessage(error, 'Export failed'))
+        if (editorIsCurrent()) {
+          setExporting(false)
+          setExportError(errorMessage(error, 'Export failed'))
+        }
         unlistenFn?.()
         reject(error instanceof Error ? error : new Error(errorMessage(error, 'Export failed')))
       }
@@ -1781,7 +1945,7 @@ export default function Editor() {
       listen<{ jobId: string; progress: number; status: string; error?: string }>('job-progress', (event) => {
         if (event.payload.jobId !== jobId) return
         const { progress, status, error } = event.payload
-        setExportProgress(progress)
+        if (editorIsCurrent()) setExportProgress(progress)
 
         if (status === 'completed') {
           const pendingArtifact = artifactPromise
@@ -1792,16 +1956,23 @@ export default function Editor() {
           pendingArtifact.then(async artifact => {
             if (settled) return
             settled = true
-            setExporting(false)
-            setExportDone(true)
+            if (editorIsCurrent()) setExporting(false)
             unlistenFn?.()
-            setPreparedArtifacts(prev => ({
-              ...prev,
-              [targetAspectRatio]: { artifact, snapshotKey },
-            }))
+            if (editorIsCurrent()) {
+              setPreparedArtifacts(prev => ({
+                ...prev,
+                [targetAspectRatio]: { artifact, snapshotKey },
+              }))
+            }
             try {
               const refreshedClip = await invoke<Clip>('get_clip_detail', { clipId })
-              setClip(refreshedClip)
+              if (editorIsCurrent()) {
+                setClip(refreshedClip)
+                setExportDone(canMarkEditorExportComplete(
+                  loadedClipIdRef.current, clipId, currentRenderSnapshotKeyRef.current(targetAspectRatio),
+                  snapshotKey, refreshedClip.render_status,
+                ))
+              }
             } catch { /* the immutable artifact is still valid */ }
             resolve(artifact)
           }).catch(rejectExport)
@@ -2347,49 +2518,22 @@ export default function Editor() {
               <Tooltip text={game ? `Generate new title with ${game} context` : 'Generate new title (set a game for game-specific titles)'} position="left">
                 <button
                   onClick={async () => {
-                    const ctx: ClipContext = {
-                      title: '', // don't seed from current title — generate fresh
-                      eventTags: highlight?.tags ?? [],
-                      emotionTags: [],
-                      transcriptExcerpt: highlight?.transcript_snippet || undefined,
-                      eventSummary: highlight?.event_summary || undefined,
-                      transcript: trimmedTranscriptText,
-                      vodTitle: vod?.title || undefined,
-                      game: game || undefined,
-                      duration: clipDuration,
-                    }
-
-                    let newTitle: string | null = null
-
-                    // Try AI title generation first (uses BYOK provider if configured)
-                    if (clipId) {
-                      try {
-                        const transcriptText = trimmedTranscriptText || null
-                        const aiTitle = await invoke<string>('generate_ai_title', {
-                          clipId,
-                          transcriptText,
-                          currentGame: game || null,
-                          currentTitle: title || null,
-                        })
-                        // If AI returned something different from the current title, use it
-                        if (aiTitle && aiTitle !== title) {
-                          newTitle = aiTitle
-                        }
-                      } catch (err) {
-                        console.warn('[Editor] AI title generation failed, using local patterns:', err)
+                    if (!clipId) return
+                    try {
+                      const newTitle = await invoke<string>('generate_ai_title', {
+                        clipId,
+                        transcriptText: trimmedTranscriptText || null,
+                        currentGame: game || null,
+                        currentTitle: title || null,
+                      })
+                      if (newTitle && newTitle !== title) {
+                        setTitle(newTitle)
+                        invoke('set_clip_title', { clipId, title: newTitle })
+                          .then(() => invalidateClips())
+                          .catch(err => console.warn('[Editor] Failed to save regenerated title:', err))
                       }
-                    }
-
-                    // Fallback to local pattern generator
-                    if (!newTitle) {
-                      newTitle = generateStandaloneTitle(ctx)
-                    }
-
-                    setTitle(newTitle)
-                    if (clipId) {
-                      invoke('set_clip_title', { clipId, title: newTitle })
-                        .then(() => invalidateClips())
-                        .catch(err => console.warn('[Editor] Failed to save regenerated title:', err))
+                    } catch (err) {
+                      console.warn('[Editor] Grounded title generation failed:', err)
                     }
                   }}
                   className="px-2 py-2 bg-surface-900 border border-surface-600 rounded-lg text-slate-400 hover:text-violet-400 hover:border-violet-500/40 transition-colors cursor-pointer"
@@ -2409,6 +2553,16 @@ export default function Editor() {
               <p className="text-xs text-slate-400">
                 This is an imported Twitch clip — it plays as a standalone, already-trimmed file, so there's no VOD trim window to adjust.
               </p>
+            ) : sourceDuration === null ? (
+              <div className="text-xs text-slate-400">
+                {sourceDurationError ? (
+                  <>
+                    <p role="alert">{sourceDurationError}</p>
+                    <button type="button" onClick={() => setSourceDurationAttempt(attempt => attempt + 1)}
+                      className="mt-2 text-violet-300 hover:text-violet-200 cursor-pointer">Retry source duration</button>
+                  </>
+                ) : 'Reading source video duration...'}
+              </div>
             ) : (
               <>
                 <TrimTimeline
@@ -2416,12 +2570,16 @@ export default function Editor() {
                   endTime={endSeconds}
                   originalStart={originalStart}
                   originalEnd={originalEnd}
-                  videoDuration={vod?.duration_seconds || endSeconds + 30}
+                  videoDuration={sourceDuration}
                   currentTime={playbackTime}
                   isPlaying={isPlaying}
                   markers={timelineMarkers}
                   suggestedHookStart={suggestedHookStart}
-                  onChange={(s, e) => { setStartSeconds(s); setEndSeconds(e) }}
+                  onChange={(s, e) => {
+                    const [boundedStart, boundedEnd] = clampEditorTrim(s, e, sourceDuration)
+                    setStartSeconds(boundedStart)
+                    setEndSeconds(boundedEnd)
+                  }}
                   onSeekTo={(t) => playerSeekRef.current?.(t)}
                 />
 
@@ -2432,17 +2590,20 @@ export default function Editor() {
                     <div>
                       <label className="block text-[10px] text-slate-500 mb-0.5">Start</label>
                       <input type="number" value={startSeconds} onChange={e => setStartSeconds(parseFloat(e.target.value) || 0)}
-                        step="0.1" min="0"
+                        step="0.1" min="0" max={Math.max(0, endSeconds - 0.1)}
                         className="w-full px-2 py-1 bg-surface-900 border border-surface-600 rounded text-white text-xs focus:outline-none focus:border-violet-500 font-mono" />
                     </div>
                     <div>
                       <label className="block text-[10px] text-slate-500 mb-0.5">End</label>
                       <input type="number" value={endSeconds} onChange={e => setEndSeconds(parseFloat(e.target.value) || 0)}
-                        step="0.1" min="0"
+                        step="0.1" min={startSeconds + 0.1} max={sourceDuration}
                         className="w-full px-2 py-1 bg-surface-900 border border-surface-600 rounded text-white text-xs focus:outline-none focus:border-violet-500 font-mono" />
                     </div>
                   </div>
                 </details>
+                {editorTrimError(startSeconds, endSeconds, sourceDuration) && (
+                  <p role="alert" className="mt-2 text-xs text-red-400">{editorTrimError(startSeconds, endSeconds, sourceDuration)}</p>
+                )}
               </>
             )}
           </Section>
@@ -3071,7 +3232,6 @@ export default function Editor() {
                     </p>
                   )}
                 </details>
-
                 {/* Position */}
                 <div>
                   <label className="block text-xs text-slate-400 mb-1">Position</label>
@@ -3323,6 +3483,7 @@ export default function Editor() {
 
               {/* Actions: Save / Export / Upload */}
               <ActionsBar
+                key={clipId}
                 clipId={clipId || ''}
                 clip={clip}
                 saving={saving}

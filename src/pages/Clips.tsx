@@ -30,6 +30,7 @@ import {
   countClipsBySource,
 } from '../lib/clipSources'
 import type { ClipSourceTab } from '../lib/clipSources'
+import { filterCompletedClipGroups, retainDisplayedSelection } from '../lib/clipSelection'
 
 // ─── Helpers ───────────────────────────────────────────────────────
 
@@ -1016,13 +1017,6 @@ export default function Clips() {
     setActiveReviewClipId(null)
   }
 
-  const selectAll = () => setSelectedIds(new Set(visibleClips.map(c => c.id)))
-  const deselectAll = () => setSelectedIds(new Set())
-  const selectedClips = useMemo(
-    () => visibleClips.filter(c => selectedIds.has(c.id)),
-    [visibleClips, selectedIds],
-  )
-
   // ── Collapse toggle ──
 
   const toggleCollapse = (vodTitle: string) => {
@@ -1114,15 +1108,19 @@ export default function Clips() {
     })
 
     // Filter out fully completed VOD/source groups if hideDone is true.
-    if (hideDone) {
-      return groups.filter(g => {
-        const allExported = g.clips.every(c => c.render_status === 'completed' && c.output_path)
-        return !allExported
-      })
-    }
-
-    return groups
+    return filterCompletedClipGroups(groups, hideDone)
   }, [visibleClips, vodMap, sortBy, sortDir, hideDone])
+
+  const displayedClips = useMemo(() => groupedClips.flatMap(group => group.clips), [groupedClips])
+  const selectedClips = useMemo(
+    () => displayedClips.filter(clip => selectedIds.has(clip.id)),
+    [displayedClips, selectedIds],
+  )
+  const selectAll = () => setSelectedIds(new Set(displayedClips.map(clip => clip.id)))
+  const deselectAll = () => setSelectedIds(new Set())
+  useEffect(() => {
+    setSelectedIds(current => retainDisplayedSelection(current, displayedClips))
+  }, [displayedClips])
 
   // Dashboard inbox links land on one exact card and can open its review
   // disclosure. Reveal completed/collapsed groups before attempting to scroll.
@@ -1243,26 +1241,26 @@ export default function Clips() {
             {selectMode && (
               <>
                 <button
-                  onClick={selectedIds.size === visibleClips.length ? deselectAll : selectAll}
+                  onClick={selectedClips.length === displayedClips.length ? deselectAll : selectAll}
                   className="px-3 py-1.5 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-surface-700 transition-colors cursor-pointer"
                 >
-                  {selectedIds.size === visibleClips.length ? 'Deselect All' : 'Select All'}
+                  {selectedClips.length === displayedClips.length ? 'Deselect All' : 'Select All'}
                 </button>
-                {selectedIds.size > 0 && (
+                {selectedClips.length > 0 && (
                   <>
                     <button
                       onClick={() => setShowBatchUpload(true)}
                       className="px-3 py-1.5 rounded-lg text-xs font-medium bg-violet-600 hover:bg-violet-500 text-white transition-colors cursor-pointer flex items-center gap-1.5"
                     >
                       <Upload className="w-3.5 h-3.5" />
-                      Upload {selectedIds.size}
+                      Upload {selectedClips.length}
                     </button>
                     <button
-                      onClick={() => requestDelete([...selectedIds])}
+                      onClick={() => requestDelete(selectedClips.map(clip => clip.id))}
                       className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-600 hover:bg-red-500 text-white transition-colors cursor-pointer flex items-center gap-1.5"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
-                      Delete {selectedIds.size}
+                      Delete {selectedClips.length}
                     </button>
                   </>
                 )}
@@ -1412,9 +1410,9 @@ export default function Clips() {
       )}
 
       {/* ── Selection count ── */}
-      {selectMode && selectedIds.size > 0 && (
+      {selectMode && selectedClips.length > 0 && (
         <div className="bg-violet-500/10 border border-violet-500/30 rounded-lg px-3 py-2 text-violet-300 text-sm">
-          {selectedIds.size} clip{selectedIds.size !== 1 ? 's' : ''} selected
+          {selectedClips.length} clip{selectedClips.length !== 1 ? 's' : ''} selected
         </div>
       )}
 

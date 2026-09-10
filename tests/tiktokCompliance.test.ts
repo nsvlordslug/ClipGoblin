@@ -22,17 +22,23 @@ test('pending production review exposes only TikTok private posting', () => {
     visibleTikTokPrivacyOptions(
       ['PUBLIC_TO_EVERYONE', 'MUTUAL_FOLLOW_FRIENDS', 'SELF_ONLY'],
       true,
+      false,
     ),
     ['SELF_ONLY'],
   )
 })
 
+test('local Sandbox review exposes every privacy option returned by TikTok', () => {
+  const options = ['PUBLIC_TO_EVERYONE', 'MUTUAL_FOLLOW_FRIENDS', 'SELF_ONLY']
+  assert.deepEqual(visibleTikTokPrivacyOptions(options, true, true), options)
+})
+
 test('approved production exposes every privacy option returned by TikTok', () => {
   const options = ['PUBLIC_TO_EVERYONE', 'SELF_ONLY']
-  assert.deepEqual(visibleTikTokPrivacyOptions(options, false), options)
+  assert.deepEqual(visibleTikTokPrivacyOptions(options, false, false), options)
 })
 
 test('pending review preserves TikTok options when private posting is unavailable', () => {
   const options = ['PUBLIC_TO_EVERYONE']
-  assert.deepEqual(visibleTikTokPrivacyOptions(options, true), options)
+  assert.deepEqual(visibleTikTokPrivacyOptions(options, true, false), options)
 })

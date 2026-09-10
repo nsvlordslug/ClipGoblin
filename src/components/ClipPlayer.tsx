@@ -6,14 +6,11 @@ import {
   normalizeContextVideoY,
 } from '../lib/contextFit'
 import { normalizeFullFrameScale } from '../lib/fullFrame'
+import { playbackDuration, playbackTimeLabel } from '../lib/playbackDuration'
 
 const PLAYBACK_FAILED_MSG = 'Playback failed'
 
-function fmt(seconds: number) {
-  const m = Math.floor(seconds / 60)
-  const s = Math.floor(seconds % 60)
-  return `${m}:${String(s).padStart(2, '0')}`
-}
+const fmt = playbackTimeLabel
 
 interface Props {
   /** Video source URL (from convertFileSrc) */
@@ -153,7 +150,9 @@ export default function ClipPlayer({
   const effClipStart = fullFile ? 0 : clipStart
   const effClipEnd = fullFile ? (fileDuration > 0 ? fileDuration : Number.MAX_SAFE_INTEGER) : clipEnd
 
-  const clipDuration = Math.max(0, effClipEnd - effClipStart)
+  const knownDuration = playbackDuration(fullFile, clipStart, clipEnd, fileDuration)
+  const clipDuration = knownDuration ?? 0
+  const durationLabel = fmt(knownDuration)
   const elapsed = Math.max(0, currentTime - effClipStart)
   const progress = clipDuration > 0 && clipDuration < Number.MAX_SAFE_INTEGER ? Math.min(1, elapsed / clipDuration) : 0
   const isFull = mode === 'full'
@@ -232,9 +231,15 @@ export default function ClipPlayer({
       console.error(`[ClipPlayer] Video error — code: ${code}, message: ${msg}, src: ${src}`)
       setError('Cannot play video')
     }
+    const onDurationChange = () => {
+      if (fullFileRef.current) {
+        setFileDuration(Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0)
+      }
+    }
     video.addEventListener('loadstart', onReset)
     video.addEventListener('emptied', onReset)
     video.addEventListener('loadedmetadata', onMeta, { once: true })
+    video.addEventListener('durationchange', onDurationChange)
     video.addEventListener('error', onErr, { once: true })
 
     if (src) {
@@ -250,6 +255,7 @@ export default function ClipPlayer({
       video.removeEventListener('loadstart', onReset)
       video.removeEventListener('emptied', onReset)
       video.removeEventListener('loadedmetadata', onMeta)
+      video.removeEventListener('durationchange', onDurationChange)
       video.removeEventListener('error', onErr)
     }
   }, [setPlayingState, src])
@@ -488,7 +494,7 @@ export default function ClipPlayer({
   const seekTo = useCallback((clientX: number) => {
     const bar = seekRef.current
     const video = videoRef.current
-    if (!bar || !video || !loaded) return
+    if (!bar || !video || !loaded || clipDuration <= 0) return
     const rect = bar.getBoundingClientRect()
     const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
     const t = effClipStart + pct * clipDuration
@@ -637,7 +643,7 @@ export default function ClipPlayer({
         {/* Duration badge (compact only) */}
         {showControls && !isFull && !controlsOverlay && (
           <span className="absolute bottom-2 right-2 bg-black/80 text-white text-[10px] px-1.5 py-0.5 rounded font-mono">
-            {fmt(clipDuration)}
+            {durationLabel}
           </span>
         )}
 
@@ -655,7 +661,7 @@ export default function ClipPlayer({
                 <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow opacity-0 group-hover/bar:opacity-100 transition-opacity" />
               </div>
             </div>
-            <span className="text-[10px] text-white/70 font-mono shrink-0 tabular-nums">{loaded ? fmt(elapsed) : '0:00'}/{fmt(clipDuration)}</span>
+            <span className="text-[10px] text-white/70 font-mono shrink-0 tabular-nums">{loaded ? fmt(elapsed) : '0:00'}/{durationLabel}</span>
             <div className="flex w-24 shrink-0 items-center gap-1.5">
               <button onClick={toggleMute} className="shrink-0 p-1 rounded text-white/80 hover:text-white cursor-pointer" title={muted ? 'Unmute' : 'Mute'}>
                 {muted || volume === 0 ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
@@ -695,7 +701,7 @@ export default function ClipPlayer({
               <div className={`absolute right-0 top-1/2 -translate-y-1/2 ${isFull ? 'w-3.5 h-3.5' : 'w-3 h-3'} bg-white rounded-full shadow opacity-0 group-hover/bar:opacity-100 transition-opacity`} />
             </div>
           </div>
-          <span className={`${isFull ? 'text-xs' : 'text-[10px]'} text-slate-500 font-mono shrink-0 tabular-nums`}>{loaded ? fmt(elapsed) : '0:00'}/{fmt(clipDuration)}</span>
+          <span className={`${isFull ? 'text-xs' : 'text-[10px]'} text-slate-500 font-mono shrink-0 tabular-nums`}>{loaded ? fmt(elapsed) : '0:00'}/{durationLabel}</span>
           {isFull ? (
             <div className="flex items-center gap-1.5 shrink-0 relative" onMouseEnter={() => setShowVolume(true)} onMouseLeave={() => { if (!draggingVol) setShowVolume(false) }}>
               <button onClick={toggleMute} className="p-1 rounded text-slate-400 hover:text-white transition-colors cursor-pointer" title={muted ? 'Unmute' : 'Mute'}>

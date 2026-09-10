@@ -1,11 +1,13 @@
 //! Platform publishing adapters.
 //!
 //! Shared trait + dispatcher for YouTube, TikTok, Instagram.
-//! YouTube is fully implemented; TikTok/Instagram are stubs.
+//! Instagram remains an unsupported compatibility stub.
 
 pub mod instagram;
 pub mod tiktok;
 pub mod youtube;
+pub mod youtube_session;
+pub mod youtube_operation_guard;
 
 use crate::error::AppError;
 use rusqlite::Connection;
@@ -42,6 +44,13 @@ pub struct UploadMeta {
     pub visibility: String,
     pub clip_id: String,
     pub force: bool,
+    /// Account reviewed when this upload was requested. Legacy queued jobs must
+    /// be reviewed again; they must never silently adopt a newly connected account.
+    #[serde(default)]
+    pub target_account_id: Option<String>,
+    /// Assigned by the scheduler at execution, never accepted from a direct-upload caller.
+    #[serde(default)]
+    pub scheduled_upload_id: Option<String>,
     /// Exact immutable local render selected for this handoff. New callers
     /// provide all three fields; legacy stored jobs omit all three and fall
     /// back to the clip's last output path.
@@ -71,6 +80,31 @@ pub struct UploadMeta {
     /// creator's TikTok inbox so they can finish editing and publish there.
     #[serde(default)]
     pub tiktok_publish_mode: TikTokPublishMode,
+}
+
+pub fn bind_upload_destination(
+    conn: &Connection, platform: &str, meta: &mut UploadMeta,
+) -> Result<(), AppError> {
+    if meta.target_account_id.is_none() {
+        meta.target_account_id = crate::db::connected_upload_account(conn, platform)?;
+    }
+    crate::db::validate_upload_destination(conn, platform, meta.target_account_id.as_deref())
+        .map_err(AppError::Api)
+}
+
+/// Check the account and exact token together after refreshing. An OAuth account
+/// switch during the refresh must not send this request to a different account.
+pub fn validate_upload_token(
+    db: &crate::DbConn, platform: &str, meta: &UploadMeta, access_token: &str,
+) -> Result<(), AppError> {
+    let conn = db.lock().map_err(|error| AppError::Database(error.to_string()))?;
+    crate::db::validate_upload_destination(&conn, platform, meta.target_account_id.as_deref())
+        .map_err(AppError::Api)?;
+    let stored = crate::db::get_setting(&conn, &format!("{platform}_access_token"))?;
+    if stored.as_deref() != Some(access_token) {
+        return Err(AppError::Api("The destination connection changed during upload preparation. Review and try again.".into()));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -417,6 +451,30 @@ mod tests {
         assert!(meta.artifact_path.is_none());
         assert!(meta.artifact_revision.is_none());
         assert!(meta.artifact_aspect_ratio.is_none());
+        assert!(meta.target_account_id.is_none());
+    }
+
+    #[test]
+    fn upload_token_must_belong_to_the_reviewed_connection() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);").unwrap();
+        crate::db::save_setting(&conn, "youtube_channel_id", "channel-a").unwrap();
+        crate::db::save_setting(&conn, "youtube_access_token", "token-a").unwrap();
+        let mut meta: UploadMeta = serde_json::from_value(serde_json::json!({
+            "title":"title", "description":"", "tags":[], "visibility":"private",
+            "clip_id":"clip", "force":false
+        })).unwrap();
+        bind_upload_destination(&conn, "youtube", &mut meta).unwrap();
+        assert_eq!(meta.target_account_id.as_deref(), Some("channel-a"));
+        let db = std::sync::Mutex::new(conn);
+        assert!(validate_upload_token(&db, "youtube", &meta, "token-a").is_ok());
+        assert!(validate_upload_token(&db, "youtube", &meta, "stale-token").is_err());
+        {
+            let conn = db.lock().unwrap();
+            crate::db::save_setting(&conn, "youtube_channel_id", "channel-b").unwrap();
+            crate::db::save_setting(&conn, "youtube_access_token", "token-b").unwrap();
+        }
+        assert!(validate_upload_token(&db, "youtube", &meta, "token-b").is_err());
     }
 
     #[test]

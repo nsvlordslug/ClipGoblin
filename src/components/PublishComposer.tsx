@@ -22,19 +22,37 @@ const TONE_TOOLTIPS: Record<string, string> = {
   search: 'Optimized for search and discovery',
 }
 
-interface CaptionVariant {
+interface MomentCaptionSuggestion {
   mode: string
   label: string
   text: string
+  strategy: string
+  feedback_id: string
 }
 
-interface BackendCaptions {
-  captions: CaptionVariant[]
+interface MomentCopySuggestion {
+  text: string
+  strategy: string
+  feedback_id: string
+}
+
+interface BackendMomentCopy {
+  title: MomentCopySuggestion
+  captions: MomentCaptionSuggestion[]
   hashtags: string[]
   source: 'free' | 'llm'
-  casual: string
-  funny: string
-  hype: string
+  title_source: 'free' | 'llm'
+  brief: {
+    signature: string
+  }
+}
+
+interface MomentGeneratedCopy extends GeneratedCopy {
+  briefSignature?: string
+  titleStrategy?: string
+  titleFeedbackId?: string
+  descriptionStrategy?: string
+  descriptionFeedbackId?: string
 }
 
 export interface PublishMetadata {
@@ -77,7 +95,7 @@ function captionsMatch(left: string, right: string): boolean {
 
 export default function PublishComposer({ platform, metadata, onChange, clipContext, clipId }: Props) {
   const [tagInput, setTagInput] = useState('')
-  const [variants, setVariants] = useState<GeneratedCopy[] | null>(null)
+  const [variants, setVariants] = useState<MomentGeneratedCopy[] | null>(null)
   const [selectedTone, setSelectedTone] = useState<CopyTone | null>(null)
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [lastApplied, setLastApplied] = useState('')
@@ -89,6 +107,7 @@ export default function PublishComposer({ platform, metadata, onChange, clipCont
     clipId,
     captions: [],
   })
+  const activeFeedbackRef = useRef<MomentGeneratedCopy | null>(null)
   const aiStore = useAiStore()
   const fields = PLATFORM_FIELDS[platform] || PLATFORM_FIELDS.tiktok
   const info = PLATFORM_INFO[platform] || { name: platform, color: '#888' }
@@ -107,6 +126,47 @@ export default function PublishComposer({ platform, metadata, onChange, clipCont
   const hashtags = metadata.hashtags ?? []
 
   const update = (patch: Partial<PublishMetadata>) => onChange({ ...metadata, ...patch })
+
+  const recordActiveCopyFeedback = (
+    finalMetadata: PublishMetadata,
+    unchangedOutcome: 'accepted' | 'rejected' = 'accepted',
+  ) => {
+    const active = activeFeedbackRef.current
+    if (!clipId || !active?.briefSignature) return
+
+    const choices = [
+      {
+        feedbackId: active.titleFeedbackId,
+        copyKind: 'title',
+        strategy: active.titleStrategy,
+        generatedText: active.title,
+        finalText: finalMetadata.title,
+      },
+      {
+        feedbackId: active.descriptionFeedbackId,
+        copyKind: 'description',
+        strategy: active.descriptionStrategy,
+        generatedText: active.description,
+        finalText: finalMetadata.description,
+      },
+    ]
+
+    for (const choice of choices) {
+      if (!choice.feedbackId || !choice.strategy) continue
+      void invoke('record_copy_feedback', {
+        feedbackId: choice.feedbackId,
+        clipId,
+        briefSignature: active.briefSignature,
+        copyKind: choice.copyKind,
+        strategy: choice.strategy,
+        generatedText: choice.generatedText,
+        finalText: choice.finalText,
+        outcome: captionsMatch(choice.generatedText, choice.finalText) ? unchangedOutcome : 'edited',
+      }).catch(error => {
+        console.warn('[PublishComposer] Could not save local copy preference:', error)
+      })
+    }
+  }
 
   const previousCaptionHistory = (): string[] => {
     if (captionHistoryRef.current.clipId !== clipId) {
@@ -204,6 +264,7 @@ export default function PublishComposer({ platform, metadata, onChange, clipCont
                   // prompt directions and deterministic free-mode variants.
                   const seed = nextCount
                   const previousDescriptions = previousCaptionHistory()
+                  recordActiveCopyFeedback(metadata, 'rejected')
 
                   // Read fresh context — clipContext.title comes directly from Editor's
                   // title state (always current), metadata.title may be stale from last generation
@@ -213,19 +274,13 @@ export default function PublishComposer({ platform, metadata, onChange, clipCont
                   }
                   console.log('[PublishComposer] Generating captions — game:', JSON.stringify(freshCtx.game), '| title:', freshCtx.title)
 
-                  // Generate a fresh title for each tone
-                  const freshTitle = generateStandaloneTitle(freshCtx)
-
                   const isByok = aiStore.isByok()
-
-                  // When BYOK is configured, skip free templates entirely — only use AI.
-                  // Free templates are ONLY shown when no API key is set.
-                  let allVariants: GeneratedCopy[] = []
+                  let allVariants: MomentGeneratedCopy[] = []
                   setFallbackNotice(null)
 
                   if (clipId) {
                     try {
-                      const bc = await invoke<BackendCaptions>('generate_post_captions', {
+                      const bc = await invoke<BackendMomentCopy>('generate_moment_copy', {
                         clipId,
                         seed,
                         transcriptText: freshCtx.transcript || null,
@@ -234,76 +289,56 @@ export default function PublishComposer({ platform, metadata, onChange, clipCont
                         currentDescription: metadata.description || null,
                         previousDescriptions,
                         selectedMode: selectedTone || null,
+                        platform,
                       })
-                      const backendVariants: GeneratedCopy[] = bc.captions
+                      const backendVariants: MomentGeneratedCopy[] = bc.captions
                         .filter((caption) => !captionsMatch(caption.text, metadata.description))
-                        .map((c: CaptionVariant) => ({
-                          title: clipContext.title || metadata.title,
+                        .map((c) => ({
+                          title: bc.title.text,
                           description: c.text,
-                          hashtags: [], // captions never carry hashtags
+                          hashtags: [],
                           tone: c.mode as CopyTone,
+                          briefSignature: bc.brief.signature,
+                          titleStrategy: bc.title.strategy,
+                          titleFeedbackId: bc.title.feedback_id,
+                          descriptionStrategy: c.strategy,
+                          descriptionFeedbackId: c.feedback_id,
                         }))
 
-                      if (isByok && bc.source === 'llm') {
-                        // BYOK + AI succeeded: populate ALL tone slots.
-                        // The AI-generated tone gets its real text; others get a
-                        // placeholder so buttons render — clicking them triggers
-                        // an on-demand AI call for that specific tone.
+                      if (isByok) {
                         const allTones: CopyTone[] = [
                           'punchy', 'clean', 'funny', 'hype', 'search', 'minimal',
                           'direct_quote', 'blame', 'internal_thought', 'observation',
                         ]
-                        if (backendVariants.length === 0) {
-                          showFallbackNotice('no-new-caption')
-                          allVariants = allTones.map(tone => ({
-                            title: freshTitle,
-                            description: generateStandaloneCaption(freshCtx, tone, nextCount, metadata.description, previousDescriptions),
-                            hashtags: [],
-                            tone,
-                          }))
-                        } else {
-                          const aiToneMap = new Map(backendVariants.map(v => [v.tone, v]))
-                          allVariants = allTones.map(tone => aiToneMap.get(tone) || {
-                            title: clipContext.title || metadata.title,
-                            description: AI_PENDING_PLACEHOLDER,
-                            hashtags: [],
-                            tone,
-                          })
-                        }
-                      } else if (isByok && bc.source === 'free') {
-                        // BYOK configured but AI failed/unavailable — fall back to templates
-                        showFallbackNotice('provider-returned-free')
-                        allVariants = backendVariants
-                      } else {
-                        // Free mode: combine frontend templates + backend free captions
-                        const frontendTones: CopyTone[] = [
-                          'punchy', 'clean', 'funny', 'hype', 'search', 'minimal',
-                          'direct_quote', 'blame', 'internal_thought', 'observation',
-                        ]
-                        const frontendVariants: GeneratedCopy[] = frontendTones.map(tone => ({
-                          title: freshTitle,
-                          description: generateStandaloneCaption(freshCtx, tone, nextCount, metadata.description, previousDescriptions),
+                        const generatedByTone = new Map(backendVariants.map(variant => [variant.tone, variant]))
+                        allVariants = allTones.map(tone => generatedByTone.get(tone) || {
+                          title: bc.title.text,
+                          description: AI_PENDING_PLACEHOLDER,
                           hashtags: [],
                           tone,
-                        }))
-                        allVariants = [...frontendVariants, ...backendVariants]
+                          briefSignature: bc.brief.signature,
+                          titleStrategy: bc.title.strategy,
+                          titleFeedbackId: bc.title.feedback_id,
+                        })
+                        if (bc.source === 'free') {
+                          showFallbackNotice('provider-returned-free')
+                        }
+                      } else {
+                        allVariants = backendVariants
                       }
-                    } catch {
-                      // Backend call failed entirely — fall back to frontend templates
-                      if (isByok) showFallbackNotice('request-failed')
-                      const frontendTones: CopyTone[] = [
-                        'punchy', 'clean', 'funny', 'hype', 'search', 'minimal',
-                        'direct_quote', 'blame', 'internal_thought', 'observation',
-                      ]
-                      allVariants = frontendTones.map(tone => ({
-                        title: freshTitle,
-                        description: generateStandaloneCaption(freshCtx, tone, nextCount, metadata.description, previousDescriptions),
-                        hashtags: [],
-                        tone,
-                      }))
+                    } catch (error) {
+                      if (isByok) {
+                        showFallbackNotice('request-failed')
+                      } else {
+                        const message = typeof error === 'string' ? error : 'ClipGoblin could not build specific copy from this clip yet.'
+                        setFallbackNotice(message)
+                      }
                     }
                   } else {
-                    // No clipId — can only use frontend templates
+                    // Montages contain several moments, so they keep their
+                    // existing project-level copy generator instead of being
+                    // misrepresented as one Moment Brief.
+                    const freshTitle = generateStandaloneTitle(freshCtx)
                     const frontendTones: CopyTone[] = [
                       'punchy', 'clean', 'funny', 'hype', 'search', 'minimal',
                       'direct_quote', 'blame', 'internal_thought', 'observation',
@@ -335,6 +370,7 @@ export default function PublishComposer({ platform, metadata, onChange, clipCont
                       : null
                     const pick = preferred || realVariants[0] || merged[0]
                     if (pick.description !== AI_PENDING_PLACEHOLDER) {
+                      activeFeedbackRef.current = pick
                       onChange({ ...metadata, title: pick.title, description: pick.description })
                       setSelectedTone(pick.tone)
                       setLastApplied(pick.description)
@@ -373,9 +409,10 @@ export default function PublishComposer({ platform, metadata, onChange, clipCont
                           // On-demand AI generation for this tone
                           setLoadingTone(v.tone)
                           try {
+                            recordActiveCopyFeedback(metadata, 'rejected')
                             const seed = genCount + 1
                             const previousDescriptions = previousCaptionHistory()
-                            const bc = await invoke<BackendCaptions>('generate_post_captions', {
+                            const bc = await invoke<BackendMomentCopy>('generate_moment_copy', {
                               clipId,
                               seed,
                               transcriptText: clipContext.transcript || null,
@@ -384,39 +421,47 @@ export default function PublishComposer({ platform, metadata, onChange, clipCont
                               currentDescription: metadata.description || null,
                               previousDescriptions,
                               selectedMode: v.tone,
+                              platform,
                             })
-                            if (bc.captions.length > 0) {
-                              const generated = bc.captions.find(caption =>
+                            const generated = bc.captions.find(caption =>
                                 !captionsMatch(caption.text, metadata.description)
-                              )?.text
-                              const aiText = generated || generateStandaloneCaption(
-                                clipContext,
-                                v.tone,
-                                seed,
-                                metadata.description,
-                                previousDescriptions,
                               )
+                            if (generated) {
+                              const generatedVariant: MomentGeneratedCopy = {
+                                title: bc.title.text,
+                                description: generated.text,
+                                hashtags: [],
+                                tone: generated.mode as CopyTone,
+                                briefSignature: bc.brief.signature,
+                                titleStrategy: bc.title.strategy,
+                                titleFeedbackId: bc.title.feedback_id,
+                                descriptionStrategy: generated.strategy,
+                                descriptionFeedbackId: generated.feedback_id,
+                              }
                               if (bc.source === 'free') {
                                 showFallbackNotice('provider-returned-free')
-                              } else if (!generated) {
-                                showFallbackNotice('no-new-caption')
                               } else {
                                 setFallbackNotice(null)
                               }
-                              // Update this variant in-place
                               setVariants(prev => prev && prev.map(pv =>
-                                pv.tone === v.tone ? { ...pv, description: aiText } : pv
+                                pv.tone === v.tone ? generatedVariant : pv
                               ))
+                              activeFeedbackRef.current = generatedVariant
                               setSelectedTone(v.tone)
-                              onChange({ ...metadata, title: v.title, description: aiText })
-                              setLastApplied(aiText)
+                              onChange({ ...metadata, title: generatedVariant.title, description: generatedVariant.description })
+                              setLastApplied(generatedVariant.description)
+                            } else {
+                              showFallbackNotice('no-new-caption')
                             }
                           } catch (err) {
                             console.warn(`[PublishComposer] On-demand AI gen failed for ${v.tone}:`, err)
+                            showFallbackNotice('request-failed')
                           } finally {
                             setLoadingTone(null)
                           }
                         } else if (!isPending) {
+                          recordActiveCopyFeedback(metadata, 'rejected')
+                          activeFeedbackRef.current = v
                           setSelectedTone(v.tone)
                           onChange({ ...metadata, title: v.title, description: v.description })
                           setLastApplied(v.description)
@@ -456,6 +501,7 @@ export default function PublishComposer({ platform, metadata, onChange, clipCont
           </span>
         </div>
         <textarea value={metadata.description} onChange={e => update({ description: e.target.value })}
+          onBlur={() => recordActiveCopyFeedback(metadata)}
           placeholder={`Write your ${fields.captionLabel.toLowerCase()}...`}
           rows={3}
           className="w-full px-3 py-2 bg-surface-900 border border-surface-600 rounded-lg text-white text-sm focus:outline-none focus:border-violet-500 placeholder-slate-500 resize-none" />

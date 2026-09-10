@@ -143,7 +143,7 @@ pub(crate) fn process_due_uploads(handle: &tauri::AppHandle) -> Result<(), Strin
         }));
 
         // Parse upload meta from stored JSON
-        let meta: social::UploadMeta = match &upload.upload_meta_json {
+        let mut meta: social::UploadMeta = match &upload.upload_meta_json {
             Some(json) => match serde_json::from_str(json) {
                 Ok(m) => m,
                 Err(e) => {
@@ -174,6 +174,22 @@ pub(crate) fn process_due_uploads(handle: &tauri::AppHandle) -> Result<(), Strin
                 continue;
             }
         };
+
+        // Never let an old queue entry silently follow a switched account.
+        {
+            let conn = db.lock().map_err(|e| format!("DB lock: {e}"))?;
+            if let Err(error) = db::validate_upload_destination(
+                &conn, &upload.platform, meta.target_account_id.as_deref(),
+            ) {
+                db::update_scheduled_upload_status(&conn, &upload.id, "failed", Some(&error), None, None)
+                    .map_err(|e| e.to_string())?;
+                let _ = handle.emit("scheduled-upload-status", serde_json::json!({
+                    "id": upload.id, "status": "failed", "clip_id": upload.clip_id,
+                    "platform": upload.platform, "error": error,
+                }));
+                continue;
+            }
+        }
 
         // Resolve the immutable artifact captured when this job was scheduled.
         // Legacy jobs may still use the clip's last output path; auto-ship jobs
@@ -270,6 +286,9 @@ pub(crate) fn process_due_uploads(handle: &tauri::AppHandle) -> Result<(), Strin
             }
         };
 
+        // Bind the actual claimed job, never a caller-supplied metadata field.
+        meta.scheduled_upload_id = Some(upload.id.clone());
+
         // Perform the upload (synchronous, same pattern as upload_to_platform command)
         let adapter = match social::get_adapter(&upload.platform) {
             Ok(a) => a,
@@ -322,7 +341,8 @@ pub(crate) fn process_due_uploads(handle: &tauri::AppHandle) -> Result<(), Strin
                 }
                 social::UploadResultStatus::Duplicate { existing_url } => {
                     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-                    let history = db::get_upload_for_clip(&conn, &upload.clip_id, &upload.platform)
+                    let history = db::get_upload_for_variant(&conn, &upload.clip_id, &upload.platform,
+                        db::upload_variant(&upload.platform, meta.artifact_aspect_ratio.as_deref()))
                         .ok()
                         .flatten();
                     db::update_scheduled_upload_complete(
@@ -589,7 +609,16 @@ pub(crate) fn handle_scheduled_failure(
         Err(_) => return,
     };
 
-    if upload.retry_count < 1 {
+    let meta = upload.upload_meta_json.as_deref()
+        .and_then(|json| serde_json::from_str::<social::UploadMeta>(json).ok());
+    let variant = db::upload_variant(&upload.platform,
+        meta.as_ref().and_then(|meta| meta.artifact_aspect_ratio.as_deref()));
+    let uncertain = db::get_upload_for_variant(&conn, &upload.clip_id, &upload.platform, variant)
+        .ok().flatten().is_some_and(|history| history.status == "uncertain")
+        || error.contains("Upload outcome is uncertain");
+    let account_changed = db::validate_upload_destination(&conn, &upload.platform,
+        meta.as_ref().and_then(|meta| meta.target_account_id.as_deref())).is_err();
+    if upload.retry_count < 1 && !uncertain && !account_changed {
         log::warn!(
             "[Scheduler] Upload {} failed (will retry): {}",
             upload.id,

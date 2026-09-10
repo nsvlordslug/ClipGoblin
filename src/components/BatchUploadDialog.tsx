@@ -15,6 +15,7 @@ import { artifactUploadFields } from '../lib/exportArtifacts'
 import type { RenderedArtifact } from '../lib/exportArtifacts'
 import XHandoffCard, { ManualShareAvailabilityNote } from './XHandoffCard'
 import { canOfferXHandoff } from '../lib/xHandoff'
+import { captureUploadTargets, isUncertainUploadError, uploadTargetFields } from '../lib/publishTargets'
 
 // ── Types ──
 
@@ -27,6 +28,7 @@ interface ClipUploadStatus {
   duplicateUrl?: string
   acceptedWithoutLink?: boolean
   draftHandoff?: boolean
+  retryBlocked?: boolean
 }
 
 interface BatchUploadDialogProps {
@@ -43,7 +45,7 @@ function getDefaultVisibility(platform: string): string {
   return 'public'
 }
 
-function buildMetaForClip(clip: Clip, platform: string, visibility: string, useSavedCaptions: boolean, force: boolean, artifact: RenderedArtifact, tiktok?: TikTokComplianceValue) {
+function buildMetaForClip(clip: Clip, platform: string, visibility: string, useSavedCaptions: boolean, force: boolean, artifact: RenderedArtifact, targetAccountId: string | null, tiktok?: TikTokComplianceValue) {
   const title = clip.title?.trim() || 'Untitled Clip'
   let description = ''
   let tags: string[] = []
@@ -67,6 +69,7 @@ function buildMetaForClip(clip: Clip, platform: string, visibility: string, useS
     // TikTok privacy comes from the compliance panel (a real creator_info enum).
     visibility: isTikTok && tiktok?.privacyLevel ? tiktok.privacyLevel : visibility,
     force,
+    ...uploadTargetFields(targetAccountId),
     ...artifactUploadFields(artifact),
     ...(isTikTok && tiktok ? {
       disable_comment: tiktok.disableComment,
@@ -182,6 +185,9 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
   const failedJobs = Object.values(clipStatuses).reduce((acc, platformMap) => {
     return acc + Object.values(platformMap).filter(s => s.status === 'error').length
   }, 0)
+  const retryableFailedJobs = Object.values(clipStatuses).reduce((acc, platformMap) => {
+    return acc + Object.values(platformMap).filter(s => s.status === 'error' && !s.retryBlocked).length
+  }, 0)
   const attentionJobs = Object.values(clipStatuses).reduce((acc, platformMap) => {
     return acc + Object.values(platformMap).filter(s =>
       s.status === 'duplicate' || s.acceptedWithoutLink === true || s.draftHandoff === true
@@ -268,6 +274,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
 
   // ── Sequential export-then-upload ──
   const startUpload = useCallback(async (retryOnly = false) => {
+    const targetAccounts = captureUploadTargets(activePlatforms, usePlatformStore.getState().accounts)
     cancelRef.current = false
     setUploading(true)
     setCompleted(false)
@@ -276,7 +283,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
     for (const platform of activePlatforms) {
       if (!isConnected(platform)) {
         try {
-          await connect(platform)
+          targetAccounts[platform] = (await connect(platform)).account_id
         } catch (error: unknown) {
           for (const clip of clips) {
             updateClipStatus(platform, clip.id, {
@@ -305,6 +312,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
         if (cancelRef.current) break
 
         const existing = clipStatuses[platform]?.[clip.id]
+        if (existing?.retryBlocked) continue
         if (retryOnly && existing?.status === 'done') continue
         if (!retryOnly && existing?.status === 'done') continue
         if (!retryOnly && existing?.status === 'error') continue
@@ -330,7 +338,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
         updateClipStatus(platform, clip.id, { status: 'uploading', error: undefined })
 
         try {
-          const meta = buildMetaForClip(clip, platform, visibility[platform] || getDefaultVisibility(platform), useSavedCaptions, false, artifact, tiktokCompliance)
+          const meta = buildMetaForClip(clip, platform, visibility[platform] || getDefaultVisibility(platform), useSavedCaptions, false, artifact, targetAccounts[platform], tiktokCompliance)
           const result = await invoke<UploadResult>('upload_to_platform', { platform, meta })
 
           if (result.status.status === 'complete') {
@@ -345,7 +353,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
               ? { status: 'done', duplicateUrl }
               : { status: 'duplicate' })
           } else if (result.status.status === 'failed') {
-            updateClipStatus(platform, clip.id, { status: 'error', error: result.status.error })
+            updateClipStatus(platform, clip.id, { status: 'error', error: result.status.error, retryBlocked: isUncertainUploadError(result.status.error) })
           } else if (isTikTokInboxDelivered(result.status.status)) {
             updateClipStatus(platform, clip.id, { status: 'done', draftHandoff: true })
           } else if (result.status.status === 'processing') {
@@ -354,7 +362,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
             updateClipStatus(platform, clip.id, { status: 'uploading' })
           }
         } catch (error: unknown) {
-          updateClipStatus(platform, clip.id, { status: 'error', error: errorMessage(error, 'Upload failed') })
+          updateClipStatus(platform, clip.id, { status: 'error', error: errorMessage(error, 'Upload failed'), retryBlocked: isUncertainUploadError(error) })
         }
       }
     }
@@ -369,7 +377,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
       for (const platform of Object.keys(updated)) {
         const platformMap = { ...updated[platform] }
         for (const clipId of Object.keys(platformMap)) {
-          if (platformMap[clipId].status === 'error') {
+          if (platformMap[clipId].status === 'error' && !platformMap[clipId].retryBlocked) {
             platformMap[clipId] = { ...platformMap[clipId], status: 'pending', error: undefined }
           }
         }
@@ -382,6 +390,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
 
   const startSchedule = useCallback(async () => {
     if (!scheduleTime || activePlatforms.length === 0) return
+    const targetAccounts = captureUploadTargets(activePlatforms, usePlatformStore.getState().accounts)
     cancelRef.current = false
     setUploading(true)
     const isoTime = new Date(scheduleTime).toISOString()
@@ -411,11 +420,11 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
         }
         updateClipStatus(platform, clip.id, { status: 'uploading' })
         try {
-          const meta = buildMetaForClip(clip, platform, visibility[platform] || getDefaultVisibility(platform), useSavedCaptions, false, artifact, tiktokCompliance)
+          const meta = buildMetaForClip(clip, platform, visibility[platform] || getDefaultVisibility(platform), useSavedCaptions, false, artifact, targetAccounts[platform], tiktokCompliance)
           await scheduleUpload(clip.id, platform, isoTime, JSON.stringify(meta))
           updateClipStatus(platform, clip.id, { status: 'done' })
         } catch (error: unknown) {
-          updateClipStatus(platform, clip.id, { status: 'error', error: errorMessage(error, 'Schedule failed') })
+          updateClipStatus(platform, clip.id, { status: 'error', error: errorMessage(error, 'Schedule failed'), retryBlocked: isUncertainUploadError(error) })
         }
       }
     }
@@ -733,13 +742,18 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
           )}
           {completed && (
             <>
-              {failedJobs > 0 && (
+              {failedJobs > retryableFailedJobs && (
+                <p className="max-w-xs text-[11px] text-amber-200">
+                  Open the affected clip in the editor to check and resume its YouTube upload. Uncertain uploads cannot use Retry Failed.
+                </p>
+              )}
+              {retryableFailedJobs > 0 && (
                 <button
                   onClick={retryFailed}
                   className="px-4 py-2 rounded-lg text-sm font-medium border border-amber-500/30 text-amber-300 hover:bg-amber-500/10 transition-colors cursor-pointer flex items-center gap-2"
                 >
                   <RotateCcw className="w-4 h-4" />
-                  Retry {failedJobs} Failed
+                  Retry {retryableFailedJobs} Failed
                 </button>
               )}
               <button

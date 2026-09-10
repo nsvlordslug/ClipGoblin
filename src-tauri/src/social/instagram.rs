@@ -1,4 +1,4 @@
-// TODO(v2): Instagram adapter — pending Meta developer app review
+// Unsupported legacy adapter retained for compatibility. No Meta integration is planned.
 
 use crate::error::AppError;
 use crate::social::{ConnectedAccount, PlatformAdapter, UploadMeta, UploadResult};
@@ -18,7 +18,7 @@ impl PlatformAdapter for InstagramAdapter {
 
     async fn start_auth(&self) -> Result<String, AppError> {
         Err(AppError::NotSupported(
-            "Instagram publishing coming soon".into(),
+            "Instagram publishing is not supported".into(),
         ))
     }
 
@@ -28,13 +28,13 @@ impl PlatformAdapter for InstagramAdapter {
         _code: &str,
     ) -> Result<ConnectedAccount, AppError> {
         Err(AppError::NotSupported(
-            "Instagram publishing coming soon".into(),
+            "Instagram publishing is not supported".into(),
         ))
     }
 
     async fn refresh_token(&self, _db: &crate::DbConn) -> Result<(), AppError> {
         Err(AppError::NotSupported(
-            "Instagram publishing coming soon".into(),
+            "Instagram publishing is not supported".into(),
         ))
     }
 
@@ -45,7 +45,7 @@ impl PlatformAdapter for InstagramAdapter {
         _meta: &UploadMeta,
     ) -> Result<UploadResult, AppError> {
         Err(AppError::NotSupported(
-            "Instagram publishing coming soon".into(),
+            "Instagram publishing is not supported".into(),
         ))
     }
 

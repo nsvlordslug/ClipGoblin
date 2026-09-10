@@ -234,20 +234,34 @@ test('Undead Legion ships a complete original reusable image-glyph pack', () => 
   for (const character of required) {
     const entry = metadata.glyphs[character]
     assert.ok(Array.isArray(entry?.atlas), `missing atlas metadata for ${character}`)
+    const file = new URL(
+      `../public/caption-glyphs/undead-legion/glyphs/${character.codePointAt(0)?.toString(16).toUpperCase().padStart(4, '0')}.png`,
+      import.meta.url,
+    )
+    assert.equal(existsSync(file), true, `missing reusable glyph file for ${character}`)
   }
 
   for (const character of 'abcdefghijklmnopqrstuvwxyz') {
     assert.ok(Array.isArray(metadata.glyphs[character]?.atlas), `missing physical lowercase glyph for ${character}`)
     assert.equal(metadata.glyphs[character]?.alias, undefined)
+    const file = new URL(
+      `../public/caption-glyphs/undead-legion/glyphs/${character.codePointAt(0)?.toString(16).toUpperCase().padStart(4, '0')}.png`,
+      import.meta.url,
+    )
+    assert.equal(existsSync(file), true, `missing reusable lowercase glyph file for ${character}`)
     assert.equal(metadata.glyphs[character]?.sourceKind, 'primary-sheet-cleaned')
   }
 
   assert.equal(metadata.glyphs.A.sourceKind, 'primary-sheet-cleaned')
   assert.equal(metadata.glyphs['&'].sourceKind, 'authored-symbol-fallback')
 
-  const renderer = readFileSync(new URL('../src-tauri/src/undead_legion.rs', import.meta.url), 'utf8')
-  assert.match(renderer, /include_bytes!\("\.\.\/\.\.\/public\/caption-glyphs\/undead-legion\/atlas\.png"\)/)
-  assert.match(renderer, /include_str!\("\.\.\/\.\.\/public\/caption-glyphs\/undead-legion\/metadata\.json"\)/)
+  const generator = readFileSync(new URL('../tools/generate_undead_legion_glyph_pack.py', import.meta.url), 'utf8')
+  assert.match(generator, /pink paint inside the lower lime face/i)
+  assert.match(generator, /SOURCE_LAYOUT/)
+  assert.match(generator, /render_reference_glyph/)
+  assert.match(generator, /BRUSH_GLYPHS/)
+  assert.doesNotMatch(generator, /font\.getlength|render_base_mask\(font/)
+  assert.doesNotMatch(generator, /Gemini_Generated_Image/)
 })
 
 test('Hellfire uses its cleaned image-glyph atlas in place of a generic font skeleton', () => {
@@ -272,6 +286,12 @@ test('Hellfire uses its cleaned image-glyph atlas in place of a generic font ske
   const required = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'
   for (const character of required) {
     assert.ok(Array.isArray(metadata.glyphs[character]?.atlas), `missing Hellfire atlas entry for ${character}`)
+    const filename = character.codePointAt(0)?.toString(16).toUpperCase().padStart(4, '0')
+    assert.equal(
+      existsSync(new URL(`${root}/glyphs/${filename}.png`, import.meta.url)),
+      true,
+      `missing Hellfire glyph file for ${character}`,
+    )
   }
 
   assert.equal(metadata.glyphs.A.sourceKind, 'primary-sheet-cleaned')
@@ -329,6 +349,12 @@ test('Scary assembles cleaned red brush glyphs and renders captions in source up
   const required = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'
   for (const character of required) {
     assert.ok(Array.isArray(metadata.glyphs[character]?.atlas), `missing Scary atlas entry for ${character}`)
+    const filename = character.codePointAt(0)?.toString(16).toUpperCase().padStart(4, '0')
+    assert.equal(
+      existsSync(new URL(`${root}/glyphs/${filename}.png`, import.meta.url)),
+      true,
+      `missing Scary glyph file for ${character}`,
+    )
   }
 
   const provenance = Object.values(metadata.glyphs as Record<string, { sourceKind: string }>).reduce<Record<string, number>>((counts, entry) => {

@@ -70,7 +70,7 @@ enum CaptionAlignmentAction {
     Align,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportArtifact {
     pub path: String,
@@ -252,6 +252,48 @@ fn artifact_file_is_ready(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) fn validated_export_artifact_path(
+    clip_id: &str,
+    artifact: &ExportArtifact,
+) -> Result<std::path::PathBuf, String> {
+    validate_artifact_in_root(&export_root(), clip_id, artifact)
+}
+
+fn validate_artifact_in_root(
+    root: &std::path::Path,
+    clip_id: &str,
+    artifact: &ExportArtifact,
+) -> Result<std::path::PathBuf, String> {
+    if clip_id.is_empty()
+        || matches!(clip_id, "." | "..")
+        || safe_path_component(clip_id) != clip_id
+        || artifact.revision.len() != 64
+        || !artifact
+            .revision
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("Invalid export artifact identity".to_string());
+    }
+    let filename = artifact_filename(&artifact.aspect_ratio, &artifact.revision)?;
+    let canonical_root = std::fs::canonicalize(root)
+        .map_err(|error| format!("Could not find the export folder: {error}"))?;
+    let clip_dir = std::fs::canonicalize(root.join(clip_id))
+        .map_err(|error| format!("Could not find this clip's exports: {error}"))?;
+    let expected = clip_dir.join(filename);
+    let supplied = std::fs::canonicalize(&artifact.path)
+        .map_err(|error| format!("Export file is missing: {error}"))?;
+    if clip_dir.parent() != Some(canonical_root.as_path())
+        || supplied != expected
+        || !artifact_file_is_ready(&supplied)
+    {
+        return Err(
+            "The export artifact does not belong to this clip or is incomplete".to_string(),
+        );
+    }
+    Ok(supplied)
+}
+
 fn finalize_artifact(
     temp_path: &std::path::Path,
     output_path: &std::path::Path,
@@ -267,12 +309,61 @@ fn finalize_artifact(
         .map_err(|error| format!("Failed to finalize rendered video: {error}"))
 }
 
+/// Check and update under a write transaction: an editor save or cam-region
+/// change must not be overwritten by a renderer holding an older snapshot.
+fn persist_export_status(
+    conn: &rusqlite::Connection,
+    clip_id: &str,
+    expected_saved_revision: &str,
+    status: &str,
+    output_path: Option<&str>,
+) -> Result<bool, String> {
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| format!("Could not save export state: {error}"))?;
+    let current = db::get_clip_by_id(&tx, clip_id)
+        .map_err(|error| format!("Could not read current clip: {error}"))?;
+    let Some(current) = current else {
+        return Ok(false);
+    };
+    let vod = db::get_vod_by_id(&tx, &current.vod_id)
+        .map_err(|error| format!("Could not read current VOD: {error}"))?;
+    let allow_override = db::get_setting(&tx, "allow_per_clip_cam_region_override")
+        .map_err(|error| format!("Could not read current export settings: {error}"))?
+        .as_deref()
+        == Some("true");
+    let is_current = resolve_media_path(&current, vod.as_ref())
+        .and_then(|media| export_revision(&current, vod.as_ref(), &media, allow_override))
+        .is_ok_and(|revision| revision == expected_saved_revision);
+    if is_current {
+        db::update_clip_render_status(&tx, clip_id, status, output_path)
+            .map_err(|error| format!("Could not save export state: {error}"))?;
+    } else {
+        // Cam-region/global changes may leave the old job's rendering flag set.
+        // Keep any newer output pointer and require a fresh render of the edits.
+        tx.execute(
+            "UPDATE clips SET render_status = 'pending' WHERE id = ?1 AND render_status = 'rendering'",
+            [clip_id],
+        )
+        .map_err(|error| format!("Could not clear stale export state: {error}"))?;
+    }
+    tx.commit()
+        .map_err(|error| format!("Could not commit export state: {error}"))?;
+    Ok(is_current)
+}
+
 fn persist_export_success(
     conn: &rusqlite::Connection,
     clip: &db::ClipRow,
     artifact: &ExportArtifact,
-) {
-    db::update_clip_render_status(conn, &clip.id, "completed", Some(&artifact.path)).ok();
+    expected_saved_revision: &str,
+) -> Result<(), String> {
+    persist_export_status(
+        conn,
+        &clip.id,
+        expected_saved_revision,
+        "completed",
+        Some(&artifact.path),
+    )?;
     let metadata = serde_json::json!({
         "aspectRatio": &artifact.aspect_ratio,
         "artifactRevision": &artifact.revision,
@@ -295,6 +386,7 @@ fn persist_export_success(
         Some(&metadata),
         &dedupe_key,
     );
+    Ok(())
 }
 
 fn caption_alignment_action(
@@ -474,6 +566,11 @@ async fn ensure_clip_captions_aligned_impl(
         let clip = db::get_clip_by_id(&conn, clip_id)
             .map_err(|error| format!("DB error: {error}"))?
             .ok_or_else(|| "Clip not found".to_string())?;
+        // Automatic export alignment must respect the user's off switch.
+        // Explicit Generate captions uses force=true and may enable new cues.
+        if !force && clip.captions_enabled != 1 {
+            return Ok(caption_result(&clip, false, None));
+        }
         let saved_aligned_text = db::get_setting(&conn, &format!("clip_{}_captions", clip_id))
             .map_err(|error| format!("DB error: {error}"))?;
         let auto_path: Option<String> = conn
@@ -785,8 +882,11 @@ pub fn set_clip_thumbnail(
 
     let path_str = thumb_path.to_string_lossy().to_string();
     let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
-    db::update_clip_thumbnail(&conn, &clip_id, Some(&path_str))
-        .map_err(|e| format!("DB error: {}", e))?;
+    conn.execute(
+        "UPDATE clips SET thumbnail_path = ?1, user_edited = 1 WHERE id = ?2",
+        rusqlite::params![path_str, clip_id],
+    )
+    .map_err(|e| format!("DB error: {}", e))?;
 
     Ok(path_str)
 }
@@ -820,6 +920,7 @@ pub async fn export_clip(
         );
         (clip, vod, path, allow)
     };
+    let saved_revision = export_revision(&clip, vod.as_ref(), &media_path, allow_override)?;
     if let Some(target_aspect_ratio) = aspect_ratio {
         aspect_file_tag(&target_aspect_ratio)?;
         clip.aspect_ratio = target_aspect_ratio;
@@ -842,9 +943,10 @@ pub async fn export_clip(
                 let db_path = db::db_path().map_err(|e| format!("DB path error: {e}"))?;
                 let conn =
                     rusqlite::Connection::open(db_path).map_err(|e| format!("DB error: {e}"))?;
-                db::update_clip_render_status(
+                persist_export_status(
                     &conn,
                     &clip_id_bg,
+                    &saved_revision,
                     "rendering",
                     previous_output_path.as_deref(),
                 )
@@ -857,7 +959,7 @@ pub async fn export_clip(
                 let db_path = db::db_path().map_err(|e| format!("DB path error: {e}"))?;
                 let conn =
                     rusqlite::Connection::open(db_path).map_err(|e| format!("DB error: {e}"))?;
-                persist_export_success(&conn, &clip, &artifact);
+                persist_export_success(&conn, &clip, &artifact, &saved_revision)?;
                 handle.set_progress(100);
                 return Ok(());
             }
@@ -896,23 +998,25 @@ pub async fn export_clip(
 
             if result.success {
                 if let Err(error) = finalize_artifact(&temp_path, &output_path) {
-                    db::update_clip_render_status(
+                    persist_export_status(
                         &conn,
                         &clip_id_ref,
+                        &saved_revision,
                         "failed",
                         previous_output_path.as_deref(),
                     )
                     .ok();
                     return Err(error);
                 }
-                persist_export_success(&conn, &clip, &artifact);
+                persist_export_success(&conn, &clip, &artifact, &saved_revision)?;
                 handle.set_progress(100);
                 Ok(())
             } else {
                 let _ = std::fs::remove_file(&temp_path);
-                db::update_clip_render_status(
+                persist_export_status(
                     &conn,
                     &clip_id_ref,
+                    &saved_revision,
                     "failed",
                     previous_output_path.as_deref(),
                 )
@@ -968,6 +1072,7 @@ pub(crate) async fn render_clip_by_id_for_aspect(
         );
         (clip, vod, path, allow)
     };
+    let saved_revision = export_revision(&clip, vod.as_ref(), &media_path, allow_override)?;
     if let Some(target_aspect_ratio) = aspect_ratio {
         aspect_file_tag(target_aspect_ratio)?;
         clip.aspect_ratio = target_aspect_ratio.to_string();
@@ -981,14 +1086,20 @@ pub(crate) async fn render_clip_by_id_for_aspect(
     {
         let db_path = db::db_path().map_err(|e| format!("DB path: {}", e))?;
         let conn = rusqlite::Connection::open(&db_path).map_err(|e| format!("DB open: {}", e))?;
-        db::update_clip_render_status(&conn, clip_id, "rendering", previous_output_path.as_deref())
-            .map_err(|e| format!("DB error: {}", e))?;
+        persist_export_status(
+            &conn,
+            clip_id,
+            &saved_revision,
+            "rendering",
+            previous_output_path.as_deref(),
+        )
+        .map_err(|e| format!("DB error: {}", e))?;
     }
 
     if artifact_file_is_ready(&output_path) {
         let db_path = db::db_path().map_err(|e| format!("DB path: {}", e))?;
         let conn = rusqlite::Connection::open(&db_path).map_err(|e| format!("DB open: {}", e))?;
-        persist_export_success(&conn, &clip, &artifact);
+        persist_export_success(&conn, &clip, &artifact, &saved_revision)?;
         return Ok(artifact);
     }
     if temp_path.exists() {
@@ -1016,22 +1127,24 @@ pub(crate) async fn render_clip_by_id_for_aspect(
 
     if result.success {
         if let Err(error) = finalize_artifact(&temp_path, &output_path) {
-            db::update_clip_render_status(
+            persist_export_status(
                 &conn,
                 &clip_id_owned,
+                &saved_revision,
                 "failed",
                 previous_output_path.as_deref(),
             )
             .ok();
             return Err(error);
         }
-        persist_export_success(&conn, &clip, &artifact);
+        persist_export_success(&conn, &clip, &artifact, &saved_revision)?;
         Ok(artifact)
     } else {
         let _ = std::fs::remove_file(&temp_path);
-        db::update_clip_render_status(
+        persist_export_status(
             &conn,
             &clip_id_owned,
+            &saved_revision,
             "failed",
             previous_output_path.as_deref(),
         )
@@ -1078,7 +1191,10 @@ pub(crate) fn probe_media_duration(path: &std::path::Path) -> Option<f64> {
     }
 }
 
-fn resolve_media_path(clip: &db::ClipRow, vod: Option<&db::VodRow>) -> Result<String, String> {
+pub(crate) fn resolve_media_path(
+    clip: &db::ClipRow,
+    vod: Option<&db::VodRow>,
+) -> Result<String, String> {
     if let Some(path) = clip
         .source_media_path
         .as_deref()
@@ -1983,6 +2099,226 @@ mod export_artifact_tests {
             source_fingerprint: Some("source-fingerprint".into()),
             source_recorded_at: None,
         }
+    }
+
+    struct AuditFixture {
+        dir: std::path::PathBuf,
+        db_path: std::path::PathBuf,
+        conn: Option<rusqlite::Connection>,
+        clip: ClipRow,
+    }
+
+    impl AuditFixture {
+        fn new() -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("clipgoblin-export-audit-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let source = dir.join("source.mp4");
+            std::fs::write(&source, b"revision identity fixture").unwrap();
+            let db_path = dir.join("test.db");
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            crate::db::run_migrations(&conn).unwrap();
+            let mut clip = test_clip();
+            clip.source_media_path = Some(source.to_string_lossy().into_owned());
+            crate::db::insert_clip(&conn, &clip).unwrap();
+            Self {
+                dir,
+                db_path,
+                conn: Some(conn),
+                clip,
+            }
+        }
+
+        fn conn(&self) -> &rusqlite::Connection {
+            self.conn.as_ref().unwrap()
+        }
+
+        fn revision(&self) -> String {
+            export_revision(
+                &self.clip,
+                None,
+                self.clip.source_media_path.as_deref().unwrap(),
+                false,
+            )
+            .unwrap()
+        }
+    }
+
+    impl Drop for AuditFixture {
+        fn drop(&mut self) {
+            self.conn.take();
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn saving_an_immutable_artifact_requires_its_exact_clip_and_revision_path() {
+        let fixture = AuditFixture::new();
+        let root = fixture.dir.join("exports");
+        let clip_dir = root.join(&fixture.clip.id);
+        std::fs::create_dir_all(&clip_dir).unwrap();
+        let revision = "a".repeat(64);
+        let video = clip_dir.join(artifact_filename("16:9", &revision).unwrap());
+        std::fs::write(&video, b"completed export fixture").unwrap();
+        let artifact = super::ExportArtifact {
+            path: video.to_string_lossy().into_owned(),
+            revision,
+            aspect_ratio: "16:9".to_string(),
+            width: 1920,
+            height: 1080,
+        };
+        let validated =
+            super::validate_artifact_in_root(&root, &fixture.clip.id, &artifact).unwrap();
+        assert_eq!(validated, std::fs::canonicalize(&video).unwrap());
+        let mut wrong = artifact.clone();
+        wrong.revision = "b".repeat(64);
+        assert!(super::validate_artifact_in_root(&root, &fixture.clip.id, &wrong).is_err());
+        wrong = artifact.clone();
+        wrong.aspect_ratio = "9:16".to_string();
+        assert!(super::validate_artifact_in_root(&root, &fixture.clip.id, &wrong).is_err());
+        wrong = artifact.clone();
+        wrong.path = fixture.clip.source_media_path.clone().unwrap();
+        assert!(super::validate_artifact_in_root(&root, &fixture.clip.id, &wrong).is_err());
+        assert!(super::validate_artifact_in_root(&root, "..", &artifact).is_err());
+        std::fs::write(&video, b"").unwrap();
+        assert!(super::validate_artifact_in_root(&root, &fixture.clip.id, &artifact).is_err());
+    }
+
+    #[tokio::test]
+    async fn automatic_alignment_keeps_disabled_drafts_and_stale_captions_off() {
+        let fixture = AuditFixture::new();
+        for provenance in ["analysis-draft", "aligned", "edited", "none", "legacy"] {
+            fixture.conn().execute(
+                "UPDATE clips SET captions_enabled = 0, captions_provenance = ?1, captions_recognition_signature = 'stale-recipe', source_media_path = 'missing-source.mp4'",
+                [provenance],
+            ).unwrap();
+            let result = super::ensure_clip_captions_aligned_impl(
+                fixture.db_path.clone(),
+                &fixture.clip.id,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(
+                !result.captions_enabled,
+                "{provenance} must remain disabled"
+            );
+            assert!(!result.changed);
+            assert_eq!(result.srt, fixture.clip.captions_text);
+            let saved = crate::db::get_clip_by_id(fixture.conn(), &fixture.clip.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.captions_enabled, 0);
+        }
+        // Explicit generation still reaches source validation instead of the
+        // automatic off-switch return; no recognizer or network is needed.
+        let explicit = super::ensure_clip_captions_aligned_impl(
+            fixture.db_path.clone(),
+            &fixture.clip.id,
+            true,
+            None,
+        )
+        .await;
+        assert!(explicit.unwrap_err().contains("source video is missing"));
+    }
+
+    #[test]
+    fn export_completion_does_not_replace_newer_saved_settings_or_output() {
+        for change in [
+            "captions_text = 'corrected caption'",
+            "start_seconds = 13",
+            "full_frame_scale = 0.85",
+            "facecam_settings = '{\"split_ratio\":0.4}'",
+            "cam_region_norm_override = '{\"x\":0.1}'",
+            "cam_fit_mode = 'fill'",
+            "context_background_mode = 'black'",
+            "caption_card_scale = 0.9",
+            "aspect_ratio = '1:1'",
+        ] {
+            let fixture = AuditFixture::new();
+            let expected = fixture.revision();
+            assert!(super::persist_export_status(
+                fixture.conn(),
+                &fixture.clip.id,
+                &expected,
+                "rendering",
+                None
+            )
+            .unwrap());
+            fixture.conn().execute(&format!("UPDATE clips SET {change}, render_status = 'pending', output_path = 'newer-export.mp4'"), []).unwrap();
+            assert!(
+                !super::persist_export_status(
+                    fixture.conn(),
+                    &fixture.clip.id,
+                    &expected,
+                    "completed",
+                    Some("old-export.mp4")
+                )
+                .unwrap(),
+                "stale change: {change}"
+            );
+            assert!(!super::persist_export_status(
+                fixture.conn(),
+                &fixture.clip.id,
+                &expected,
+                "failed",
+                None
+            )
+            .unwrap());
+            let saved = crate::db::get_clip_by_id(fixture.conn(), &fixture.clip.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.render_status, "pending");
+            assert_eq!(saved.output_path.as_deref(), Some("newer-export.mp4"));
+        }
+    }
+
+    #[test]
+    fn export_completion_checks_source_and_global_settings_but_accepts_current_snapshot() {
+        let fixture = AuditFixture::new();
+        let expected = fixture.revision();
+        assert!(super::persist_export_status(
+            fixture.conn(),
+            &fixture.clip.id,
+            &expected,
+            "completed",
+            Some("current-export.mp4")
+        )
+        .unwrap());
+        crate::db::save_setting(fixture.conn(), "allow_per_clip_cam_region_override", "true")
+            .unwrap();
+        assert!(!super::persist_export_status(
+            fixture.conn(),
+            &fixture.clip.id,
+            &expected,
+            "completed",
+            Some("old-export.mp4")
+        )
+        .unwrap());
+        crate::db::save_setting(
+            fixture.conn(),
+            "allow_per_clip_cam_region_override",
+            "false",
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.clip.source_media_path.as_ref().unwrap(),
+            b"replacement source with different length",
+        )
+        .unwrap();
+        assert!(!super::persist_export_status(
+            fixture.conn(),
+            &fixture.clip.id,
+            &expected,
+            "completed",
+            Some("old-export.mp4")
+        )
+        .unwrap());
+        let saved = crate::db::get_clip_by_id(fixture.conn(), &fixture.clip.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.output_path.as_deref(), Some("current-export.mp4"));
     }
 
     #[test]

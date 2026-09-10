@@ -9,6 +9,7 @@
 //! Database guards are kept out of network awaits so OAuth and uploads do not
 //! block unrelated app state reads.
 
+pub use super::youtube_session::RecoveryResult;
 use crate::auth_proxy::AuthProxy;
 use crate::db;
 use crate::error::AppError;
@@ -23,7 +24,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
 
 // ═══════════════════════════════════════════════════════════════════
 //  Constants
@@ -31,7 +31,6 @@ use tokio::io::AsyncReadExt;
 
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const YOUTUBE_API_URL: &str = "https://www.googleapis.com/youtube/v3";
-const YOUTUBE_UPLOAD_URL: &str = "https://www.googleapis.com/upload/youtube/v3/videos";
 
 const CALLBACK_PORT: u16 = 17386;
 const REDIRECT_URI: &str = "http://localhost:17386";
@@ -39,9 +38,6 @@ const SCOPES: &str =
     "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly";
 
 const AUTH_TIMEOUT_SECS: u64 = 120;
-
-/// 5 MB per chunk for resumable uploads.
-const UPLOAD_CHUNK_SIZE: usize = 5 * 1024 * 1024;
 
 static YOUTUBE_REFRESH_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -232,6 +228,34 @@ pub fn wait_for_auth_code(listener: TcpListener) -> Result<String, AppError> {
 
 pub struct YouTubeAdapter;
 
+pub async fn recover_upload(
+    db: &crate::DbConn,
+    clip_id: &str,
+    aspect_ratio: &str,
+) -> Result<RecoveryResult, AppError> {
+    let _operation = super::youtube_operation_guard::acquire(db, clip_id)?;
+    super::youtube_session::recover(db, clip_id, aspect_ratio).await
+}
+
+pub fn review_upload_absent(
+    db: &crate::DbConn,
+    clip_id: &str,
+    aspect_ratio: &str,
+    review_id: &str,
+    target_account_id: &str,
+    confirmed_absent: bool,
+) -> Result<(), AppError> {
+    let _operation = super::youtube_operation_guard::acquire(db, clip_id)?;
+    super::youtube_session::review_absent(
+        db,
+        clip_id,
+        aspect_ratio,
+        review_id,
+        target_account_id,
+        confirmed_absent,
+    )
+}
+
 #[async_trait::async_trait(?Send)]
 impl PlatformAdapter for YouTubeAdapter {
     fn platform_id(&self) -> &'static str {
@@ -285,6 +309,13 @@ impl PlatformAdapter for YouTubeAdapter {
         if let Some(ref rt) = tokens.refresh_token {
             db::save_setting(&conn, "youtube_refresh_token", rt)
                 .map_err(|e| AppError::Database(e.to_string()))?;
+        } else if db::connected_upload_account(&conn, "youtube")?.as_deref()
+            != Some(channel.id.as_str())
+        {
+            conn.execute(
+                "DELETE FROM settings WHERE key = 'youtube_refresh_token'",
+                [],
+            )?;
         }
         db::save_setting(&conn, "youtube_token_expiry", &expiry.to_string())
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -314,13 +345,17 @@ impl PlatformAdapter for YouTubeAdapter {
         file_path: &str,
         meta: &UploadMeta,
     ) -> Result<UploadResult, AppError> {
+        let _operation = super::youtube_operation_guard::acquire(db, &meta.clip_id)?;
         validate_export_file(Some(file_path))?;
+        let variant = db::upload_variant("youtube", meta.artifact_aspect_ratio.as_deref());
 
         let claim = {
             let conn = db
                 .lock()
                 .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
-            db::begin_upload(&conn, &meta.clip_id, "youtube", meta.force)
+            db::validate_upload_destination(&conn, "youtube", meta.target_account_id.as_deref())
+                .map_err(AppError::Api)?;
+            db::begin_upload_variant(&conn, &meta.clip_id, "youtube", variant, meta.force)
                 .map_err(|e| AppError::Database(e.to_string()))?
         };
         match claim {
@@ -345,56 +380,44 @@ impl PlatformAdapter for YouTubeAdapter {
                 });
             }
             db::UploadClaim::Acquired => {}
+            db::UploadClaim::Uncertain => return Err(AppError::Api(
+                "Upload outcome is uncertain. Check YouTube Studio; automatic and forced retries are blocked to avoid duplicate posts.".into(),
+            )),
         }
-
-        let title = meta.title.clone();
-        let description = meta.description.clone();
-        let tags = meta.tags.clone();
-        let visibility = match meta.visibility.as_str() {
-            "public" | "private" | "unlisted" => meta.visibility.clone(),
-            _ => "private".to_string(),
-        };
 
         let upload_result = async {
             let access_token = ensure_fresh_access_token(db).await?;
-            do_upload_net(
-                &access_token,
-                &title,
-                &description,
-                &tags,
-                &visibility,
-                file_path,
-            )
-            .await
+            super::validate_upload_token(db, "youtube", meta, &access_token)?;
+            super::youtube_session::start_upload(db, file_path, meta, &access_token).await
         }
         .await;
 
         match upload_result {
-            Ok((video_id, video_url)) => {
-                let conn = db
-                    .lock()
-                    .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
-                db::mark_upload_complete(
-                    &conn,
-                    &meta.clip_id,
-                    "youtube",
-                    Some(&video_url),
-                    Some(&video_id),
-                    Some(&video_id),
-                )
-                .map_err(|e| AppError::Database(e.to_string()))?;
-                Ok(UploadResult {
-                    status: UploadResultStatus::Complete {
-                        video_url: Some(video_url),
-                        platform_video_id: Some(video_id.clone()),
-                    },
-                    job_id: video_id,
-                })
-            }
+            Ok((video_id, video_url)) => Ok(UploadResult {
+                status: UploadResultStatus::Complete {
+                    video_url: Some(video_url),
+                    platform_video_id: Some(video_id.clone()),
+                },
+                job_id: video_id,
+            }),
             Err(error) => {
                 if let Ok(conn) = db.lock() {
-                    let _ =
-                        db::mark_upload_failed(&conn, &meta.clip_id, "youtube", &error.to_string());
+                    let _ = db::mark_upload_variant_failed(
+                        &conn,
+                        &meta.clip_id,
+                        "youtube",
+                        variant,
+                        &error.to_string(),
+                    );
+                    if db::get_upload_for_variant(&conn, &meta.clip_id, "youtube", variant)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|history| history.status == "uncertain")
+                    {
+                        return Err(AppError::Api(format!(
+                            "Upload outcome is uncertain. Check YouTube Studio; retries are blocked to avoid duplicate posts. {error}"
+                        )));
+                    }
                 }
                 Err(error)
             }
@@ -487,7 +510,14 @@ async fn youtube_refresh_or_clear(
                 "[YouTube] refresh token rejected (invalid_grant); clearing stale connection"
             );
             if let Ok(conn) = db.lock() {
-                let _ = db::delete_settings_for_platform(&conn, "youtube");
+                if db::get_setting(&conn, "youtube_refresh_token")
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    == Some(refresh_tok)
+                {
+                    let _ = db::delete_settings_for_platform(&conn, "youtube");
+                }
             }
             Err(AppError::AuthExpired(msg))
         }
@@ -495,133 +525,6 @@ async fn youtube_refresh_or_clear(
     }
 }
 
-/// Initiate a resumable upload and stream the file in bounded chunks.
-/// Returns `(video_id, video_url)`.
-async fn do_upload_net(
-    access_token: &str,
-    title: &str,
-    description: &str,
-    tags: &[String],
-    visibility: &str,
-    file_path: &str,
-) -> Result<(String, String), AppError> {
-    let snippet = serde_json::json!({
-        "snippet": {
-            "title": title,
-            "description": description,
-            "tags": tags,
-            "categoryId": "20"
-        },
-        "status": {
-            "privacyStatus": visibility,
-            "selfDeclaredMadeForKids": false
-        }
-    });
-
-    let client = reqwest::Client::new();
-
-    // Initiate resumable upload
-    let init_resp = client
-        .post(format!(
-            "{}?uploadType=resumable&part=snippet,status",
-            YOUTUBE_UPLOAD_URL
-        ))
-        .header("Authorization", format!("Bearer {}", access_token))
-        .header("Content-Type", "application/json; charset=UTF-8")
-        .header("X-Upload-Content-Type", "video/*")
-        .json(&snippet)
-        .send()
-        .await?;
-
-    if !init_resp.status().is_success() {
-        let status = init_resp.status();
-        let body = init_resp.text().await.unwrap_or_default();
-        return Err(AppError::Api(format!(
-            "YouTube upload init failed ({}): {}",
-            status, body
-        )));
-    }
-
-    let upload_url = init_resp
-        .headers()
-        .get("location")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .ok_or_else(|| AppError::Api("YouTube did not return a resumable upload URL.".into()))?;
-
-    let mut file = tokio::fs::File::open(file_path)
-        .await
-        .map_err(|e| AppError::Unknown(format!("Failed to open export file: {}", e)))?;
-    let total = file
-        .metadata()
-        .await
-        .map_err(|e| AppError::Unknown(format!("Failed to inspect export file: {}", e)))?
-        .len();
-    if total == 0 {
-        return Err(AppError::NotFound(
-            "Export file is empty; re-export the clip".into(),
-        ));
-    }
-
-    let mut offset: u64 = 0;
-    let mut video_id = String::new();
-
-    while offset < total {
-        let chunk_len = std::cmp::min(UPLOAD_CHUNK_SIZE as u64, total - offset) as usize;
-        let mut chunk = vec![0_u8; chunk_len];
-        file.read_exact(&mut chunk)
-            .await
-            .map_err(|e| AppError::Unknown(format!("Failed to read export file: {}", e)))?;
-        let end = offset + chunk_len as u64;
-
-        let content_range = format!("bytes {}-{}/{}", offset, end - 1, total);
-
-        let chunk_resp = client
-            .put(&upload_url)
-            .header("Content-Range", &content_range)
-            .header("Content-Length", chunk_len.to_string())
-            .body(chunk)
-            .send()
-            .await?;
-
-        let status = chunk_resp.status().as_u16();
-
-        if status == 308 {
-            // Chunk accepted, continue
-            offset = end;
-            continue;
-        }
-
-        if status == 200 || status == 201 {
-            // Upload complete — extract video ID
-            let body: serde_json::Value = chunk_resp.json().await?;
-            video_id = body["id"].as_str().unwrap_or("").to_string();
-            break;
-        }
-
-        // Unexpected status
-        let body = chunk_resp.text().await.unwrap_or_default();
-        return Err(AppError::Api(format!(
-            "YouTube chunk upload failed ({}): {}",
-            status, body
-        )));
-    }
-
-    if video_id.is_empty() {
-        return Err(AppError::Api(
-            "YouTube upload completed but no video ID was returned.".into(),
-        ));
-    }
-
-    let video_url = format!("https://youtu.be/{}", video_id);
-    Ok((video_id, video_url))
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  Private helpers
-// ═══════════════════════════════════════════════════════════════════
-
-/// Exchange an authorization code for access + refresh tokens via auth proxy.
 async fn exchange_code(code: &str) -> Result<TokenResponse, AppError> {
     log::info!("[YouTube Token] Exchanging code via auth proxy");
 
@@ -830,6 +733,9 @@ async fn refresh_access_token(db_conn: &crate::DbConn, force: bool) -> Result<St
     let conn = db_conn
         .lock()
         .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+    if db::get_setting(&conn, "youtube_refresh_token")?.as_deref() != Some(refresh_tok.as_str()) {
+        return Err(AppError::Api("YouTube connection changed during token refresh. Review the destination and try again.".into()));
+    }
     db::save_setting(&conn, "youtube_access_token", &new_tokens.access_token)
         .map_err(|e| AppError::Database(e.to_string()))?;
     db::save_setting(&conn, "youtube_token_expiry", &new_expiry.to_string())

@@ -450,6 +450,8 @@ impl PlatformAdapter for TikTokAdapter {
             let conn = db
                 .lock()
                 .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+            db::validate_upload_destination(&conn, "tiktok", meta.target_account_id.as_deref())
+                .map_err(AppError::Api)?;
             db::begin_upload(&conn, &meta.clip_id, "tiktok", meta.force)
                 .map_err(|e| AppError::Database(e.to_string()))?
         };
@@ -475,6 +477,9 @@ impl PlatformAdapter for TikTokAdapter {
                 });
             }
             db::UploadClaim::Acquired => {}
+            db::UploadClaim::Uncertain => return Err(AppError::Api(
+                "Upload outcome is uncertain. Check the platform before trying again.".into(),
+            )),
         }
 
         let title = meta.title.clone();
@@ -484,6 +489,7 @@ impl PlatformAdapter for TikTokAdapter {
 
         let upload_result = async {
             let access_token = ensure_fresh_access_token(db).await?;
+            super::validate_upload_token(db, "tiktok", meta, &access_token)?;
             do_upload_net(
                 &access_token,
                 &title,
@@ -1808,7 +1814,9 @@ async fn refresh_access_token(db_conn: &crate::DbConn, force: bool) -> Result<St
     let new_tokens = match do_refresh_token_net(&refresh_tok).await {
         Err(AppError::AuthExpired(message)) => {
             if let Ok(conn) = db_conn.lock() {
-                let _ = db::delete_settings_for_platform(&conn, "tiktok");
+                if db::get_setting(&conn, "tiktok_refresh_token").ok().flatten().as_deref() == Some(refresh_tok.as_str()) {
+                    let _ = db::delete_settings_for_platform(&conn, "tiktok");
+                }
             }
             return Err(AppError::AuthExpired(message));
         }
@@ -1819,6 +1827,9 @@ async fn refresh_access_token(db_conn: &crate::DbConn, force: bool) -> Result<St
     let conn = db_conn
         .lock()
         .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+    if db::get_setting(&conn, "tiktok_refresh_token")?.as_deref() != Some(refresh_tok.as_str()) {
+        return Err(AppError::Api("TikTok connection changed during token refresh. Review the destination and try again.".into()));
+    }
     db::save_setting(&conn, "tiktok_access_token", &new_tokens.access_token)
         .map_err(|e| AppError::Database(e.to_string()))?;
     db::save_setting(&conn, "tiktok_token_expiry", &new_expiry.to_string())

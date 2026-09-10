@@ -249,8 +249,62 @@ pub async fn analyze_vod(
     let ranked: Vec<RankedClip> = ranked
         .into_iter()
         .map(|mut r| {
+            let signal_sources: Vec<String> = r
+                .clip
+                .signal_sources
+                .iter()
+                .map(|source| source.label().to_lowercase())
+                .collect();
+            let (hook, emotion, payoff, alignment, context, confidence) = r
+                .clip
+                .score_report
+                .as_ref()
+                .map(|report| {
+                    (
+                        report.dimensions.hook_strength,
+                        report.dimensions.emotional_intensity,
+                        report.dimensions.context_clarity,
+                        report.dimensions.speech_punch,
+                        report.dimensions.context_clarity,
+                        report.confidence,
+                    )
+                })
+                .unwrap_or((
+                    r.clip.score_breakdown.audio_score,
+                    r.clip.score_breakdown.speech_score,
+                    r.clip.score_breakdown.speech_score,
+                    r.clip.score_breakdown.speech_score,
+                    r.clip.score_breakdown.scene_score,
+                    r.clip.confidence_score,
+                ));
+            let brief =
+                crate::moment_brief::MomentBrief::build(crate::moment_brief::MomentEvidence {
+                    transcript: r.clip.transcript_excerpt.as_deref(),
+                    detector_summary: r.clip.summary.as_deref(),
+                    detector_title: r.clip.title.as_deref(),
+                    payoff_summary: r.clip.summary.as_deref(),
+                    outcome_label: None,
+                    tags: &r.clip.tags,
+                    game: None,
+                    stream_style: Some("mixed"),
+                    signal_sources: &signal_sources,
+                    scores: crate::moment_brief::MomentScores {
+                        hook,
+                        emotion,
+                        payoff,
+                        alignment,
+                        context,
+                        confidence,
+                    },
+                });
+            r.clip.title = brief
+                .title_suggestions(r.clip.start_time.max(0.0) as u32, &Default::default())
+                .into_iter()
+                .next()
+                .map(|suggestion| suggestion.text)
+                .or_else(|| Some(brief.core_event.clone()));
+            r.clip.event_summary = Some(brief.core_event);
             clip_labeler::label_clip(&mut r.clip);
-            r.clip.event_summary = Some(crate::post_captions::generate_event_summary(&r.clip));
             r.clip.post_captions = Some(crate::post_captions::generate(&r.clip));
             r
         })

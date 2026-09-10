@@ -103,4 +103,5 @@ export interface PlatformUploadState {
   duplicateUrl?: string
   acceptedWithoutLink?: boolean
   draftHandoff?: boolean
+  retryBlocked?: boolean
 }

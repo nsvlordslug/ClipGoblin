@@ -26,6 +26,7 @@ mod image_glyph_caption;
 mod integration_test;
 mod job_queue;
 mod log_scrubber;
+mod moment_brief;
 mod personalization;
 mod pipeline;
 mod post_captions;
@@ -75,9 +76,12 @@ use commands::cam_region::{
     set_allow_per_clip_override, set_clip_cam_region_override, set_clip_fit_mode,
     set_vod_cam_region,
 };
-use commands::captions::{generate_ai_title, generate_post_captions, test_ai_connection};
+use commands::captions::{
+    generate_ai_title, generate_moment_copy, generate_post_captions, record_copy_feedback,
+    test_ai_connection,
+};
 use commands::clip::{
-    export_personalization_history, export_review_data_for_vod, get_clip_detail,
+    export_personalization_history, export_review_data_for_vod, get_clip_detail, get_clip_source_duration,
     get_personalization_status, pick_context_branding_asset, record_clip_opened,
     reset_personalization_history, save_clip_review, save_clip_to_disk, update_clip_settings,
 };
@@ -100,7 +104,7 @@ use commands::settings::{
 use commands::social::{
     connect_platform, disconnect_platform, get_all_connected_accounts, get_clip_upload_history,
     get_connected_account, get_upload_status, refresh_upload_stats, restore_deleted_vods,
-    tiktok_get_creator_info, upload_to_platform,
+    tiktok_get_creator_info, upload_to_platform, recover_youtube_upload, review_youtube_upload_absent,
 };
 use commands::sources::{
     create_stream_marker, get_external_source_configs, get_recorder_connection_settings,
@@ -135,6 +139,17 @@ fn init_steam() -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = dotenvy::dotenv();
+
+    #[cfg(debug_assertions)]
+    let offline_test_mode = std::env::var_os(db::OFFLINE_TEST_DATA_DIR_ENV).is_some();
+    #[cfg(not(debug_assertions))]
+    let offline_test_mode = false;
+
+    #[cfg(debug_assertions)]
+    let background_network_disabled =
+        offline_test_mode || std::env::var_os("CLIPGOBLIN_DISABLE_BACKGROUND_NETWORK").is_some();
+    #[cfg(not(debug_assertions))]
+    let background_network_disabled = false;
 
     // Dev-only: WebView2 caches compiled JS and serves it stale across restarts
     // (gotcha #14), silently breaking frontend edits — a fresh `cargo tauri dev`
@@ -204,7 +219,9 @@ pub fn run() {
 
     #[cfg(feature = "standalone")]
     {
-        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+        if !background_network_disabled {
+            builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+        }
     }
 
     builder
@@ -249,9 +266,12 @@ pub fn run() {
             update_clip_settings,
             pick_context_branding_asset,
             get_clip_detail,
+            get_clip_source_duration,
             get_all_highlights,
+            generate_moment_copy,
             generate_post_captions,
             generate_ai_title,
+            record_copy_feedback,
             test_ai_connection,
             save_clip_performance,
             get_clip_performance,
@@ -263,6 +283,8 @@ pub fn run() {
             get_connected_account,
             get_all_connected_accounts,
             upload_to_platform,
+            recover_youtube_upload,
+            review_youtube_upload_absent,
             get_upload_status,
             tiktok_get_creator_info,
             get_clip_upload_history,
@@ -325,7 +347,7 @@ pub fn run() {
             create_stream_marker,
             list_recent_stream_markers,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let _ = APP_HANDLE.set(app.handle().clone());
 
             let db_state: State<'_, DbConn> = app.state();
@@ -340,11 +362,15 @@ pub fn run() {
                 let _ = handle.emit("job-progress", &event);
             });
 
-            // Start background upload scheduler
-            start_upload_scheduler(app.handle().clone());
+            if !background_network_disabled {
+                // Start background upload scheduler
+                start_upload_scheduler(app.handle().clone());
 
-            // Watch configured Medal/OBS/Meld folders without delaying startup.
-            external_sources::start_source_monitor(app.handle().clone());
+                // Watch configured Medal/OBS/Meld folders without delaying startup.
+                external_sources::start_source_monitor(app.handle().clone());
+            } else {
+                log::info!("[local-test] background scheduler and source monitors disabled");
+            }
 
             // Background: keep the bundled yt-dlp fresh so Twitch-extractor
             // breakage self-heals. Non-blocking; gated on a bundled binary
@@ -352,6 +378,10 @@ pub fn run() {
             // See bin_manager::refresh_ytdlp_if_stale.
             let ytdlp_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                if background_network_disabled {
+                    log::info!("[local-test] skipping yt-dlp maintenance refresh");
+                    return;
+                }
                 // Read the stored timestamp under a short-lived lock, then
                 // release it BEFORE the (network, ~20MB) download. The lock
                 // result is bound to a named local declared AFTER `state`

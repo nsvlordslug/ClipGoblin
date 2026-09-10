@@ -96,14 +96,17 @@ pub fn get_all_connected_accounts(db: State<'_, DbConn>) -> Result<Vec<Connected
 #[tauri::command]
 pub async fn upload_to_platform(
     platform: String,
-    meta: UploadMeta,
+    mut meta: UploadMeta,
     db: State<'_, DbConn>,
 ) -> Result<UploadResult, String> {
+    // Only the scheduler may bind a completion to an existing scheduled job.
+    meta.scheduled_upload_id = None;
     let adapter = social::get_adapter(&platform).map_err(|e| e.to_string())?;
 
     // Read clip output_path from DB (sync), validate, then drop the lock
     let output_path = {
         let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
+        social::bind_upload_destination(&conn, &platform, &mut meta).map_err(|e| e.to_string())?;
         let clip = db::get_clip_by_id(&conn, &meta.clip_id)
             .map_err(|e| format!("DB error: {}", e))?
             .ok_or_else(|| format!("Clip '{}' not found", meta.clip_id))?;
@@ -128,7 +131,9 @@ pub async fn upload_to_platform(
     // appears in Analytics + the ScheduledUploads "Completed" section and gets
     // view-count refreshes. The scheduler creates its own row, so this only fires
     // for direct "Upload now" uploads — no duplicate rows. (Re-acquire the lock.)
-    let analytics_state = match &result.status {
+    // YouTube records its original account/artifact and analytics atomically
+    // with the durable session result. Do not overwrite another ledger row here.
+    let analytics_state = if platform == "youtube" { None } else { match &result.status {
         social::UploadResultStatus::Complete {
             video_url,
             platform_video_id,
@@ -147,10 +152,10 @@ pub async fn upload_to_platform(
             Some(("failed", None, None, Some(error.as_str())))
         }
         _ => None,
-    };
+    } };
     if let Some((status, video_url, platform_video_id, error)) = analytics_state {
         let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
-        if let Err(e) = db::record_direct_upload_state_for_analytics(
+        if let Err(e) = db::record_direct_upload_variant_for_analytics(
             &conn,
             &meta.clip_id,
             &platform,
@@ -159,6 +164,7 @@ pub async fn upload_to_platform(
             (!result.job_id.is_empty()).then_some(result.job_id.as_str()),
             platform_video_id,
             error,
+            &serde_json::to_string(&meta).map_err(|e| e.to_string())?,
         ) {
             log::warn!(
                 "[Upload] failed to record analytics row for {}: {}",
@@ -169,6 +175,45 @@ pub async fn upload_to_platform(
     }
 
     Ok(result)
+}
+
+fn validate_youtube_recovery_key(clip_id: &str, aspect_ratio: &str) -> Result<(), String> {
+    if clip_id.trim().is_empty() || !matches!(aspect_ratio, "" | "9:16" | "16:9") {
+        return Err("Select the interrupted YouTube upload to recover.".into());
+    }
+    Ok(())
+}
+
+/// Reconcile and, when safe, resume the original upload without creating a new session.
+#[tauri::command]
+pub async fn recover_youtube_upload(
+    clip_id: String,
+    aspect_ratio: String,
+    db: State<'_, DbConn>,
+) -> Result<social::youtube::RecoveryResult, String> {
+    validate_youtube_recovery_key(&clip_id, &aspect_ratio)?;
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current()
+            .block_on(social::youtube::recover_upload(&db, &clip_id, &aspect_ratio))
+    })
+    .map_err(|error| error.to_string())
+}
+
+/// Records the user's explicit absence review; this command never uploads media.
+#[tauri::command]
+pub fn review_youtube_upload_absent(
+    clip_id: String,
+    aspect_ratio: String,
+    review_id: String,
+    target_account_id: String,
+    confirmed_absent: bool,
+    db: State<'_, DbConn>,
+) -> Result<(), String> {
+    validate_youtube_recovery_key(&clip_id, &aspect_ratio)?;
+    social::youtube::review_upload_absent(
+        &db, &clip_id, &aspect_ratio, &review_id, &target_account_id, confirmed_absent,
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// Fetch TikTok creator info for the publish UI: allowed privacy levels,
@@ -201,7 +246,11 @@ pub fn get_upload_status(
     db: State<'_, DbConn>,
 ) -> Result<Option<db::UploadHistoryRow>, String> {
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
-    db::get_upload_for_clip(&conn, &clip_id, &platform).map_err(|e| format!("DB error: {}", e))
+    let mut rows = db::get_uploads_for_clip(&conn, &clip_id).map_err(|e| format!("DB error: {}", e))?;
+    rows.retain(|row| row.platform == platform);
+    rows.sort_by(|left, right| (right.status == "uncertain").cmp(&(left.status == "uncertain"))
+        .then_with(|| right.updated_at.cmp(&left.updated_at)));
+    Ok(rows.into_iter().next())
 }
 
 /// Get ALL upload history entries for a clip (all platforms).

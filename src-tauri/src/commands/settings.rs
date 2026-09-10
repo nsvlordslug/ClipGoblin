@@ -71,7 +71,8 @@ fn is_plain_local_absolute(path: &Path) -> bool {
         use std::path::Prefix;
         return matches!(
             path.components().next(),
-            Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_))
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
         );
     }
     #[cfg(not(windows))]
@@ -513,9 +514,29 @@ mod tests {
         assert!(!is_plain_local_absolute(Path::new(
             r"\\server\share\ClipGoblin"
         )));
-        assert!(!is_plain_local_absolute(Path::new(
+        assert!(is_plain_local_absolute(Path::new(
             r"\\?\C:\Users\tester\Videos"
         )));
+        assert!(!is_plain_local_absolute(Path::new(r"\\?\UNC\server\share\Videos")));
+        assert!(!is_plain_local_absolute(Path::new(r"\\.\PhysicalDrive0")));
+        assert!(!is_plain_local_absolute(Path::new(r"\\?\C:\Videos\..\Windows")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn selected_directory_survives_canonical_storage_and_reload() {
+        let root = std::env::temp_dir()
+            .join(format!("clipviral-download-roundtrip-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("downloads")).unwrap();
+        let canonical = root.join("downloads").canonicalize().unwrap();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::run_migrations(&conn).unwrap();
+        db::save_setting(&conn, "download_dir", &canonical.to_string_lossy()).unwrap();
+        let reloaded = PathBuf::from(db::get_setting(&conn, "download_dir").unwrap().unwrap());
+        assert!(is_plain_local_absolute(&reloaded) && reloaded.is_dir());
+        assert!(is_within_root(&reloaded.join("nested"), &reloaded));
+        assert!(!is_within_root(&root.join("outside"), &reloaded));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

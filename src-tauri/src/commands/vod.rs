@@ -2471,7 +2471,7 @@ pub async fn analyze_vod(
 
                 auto_ship_candidates
                     .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                let candidate_ids: Vec<String> = auto_ship_candidates
+                let mut candidate_ids: Vec<String> = auto_ship_candidates
                     .iter()
                     .map(|(id, _)| id.clone())
                     .collect();
@@ -2479,7 +2479,11 @@ pub async fn analyze_vod(
                 let persistence_result: Result<Option<AutoShipReport>, String> = match db.lock() {
                     Ok(mut conn) => {
                         match db::replace_analysis_results(&mut conn, &vod_id_bg, &analysis_rows) {
-                            Ok(()) => {
+                            Ok(inserted_ids) => {
+                                let inserted: std::collections::HashSet<&str> =
+                                    inserted_ids.iter().map(String::as_str).collect();
+                                candidate_ids.retain(|id| inserted.contains(id.as_str()));
+                                clip_thumb_info.retain(|(id, _)| inserted.contains(id.as_str()));
                                 db::update_vod_analysis_progress(&conn, &vod_id_bg, 88).ok();
                                 let report = match run_auto_ship_for_vod(
                                     &conn,
@@ -2760,6 +2764,8 @@ fn run_auto_ship_for_vod(
                 visibility: "public".to_string(),
                 clip_id: (*clip_id).clone(),
                 force: false,
+                target_account_id: None,
+                scheduled_upload_id: None,
                 artifact_path: None,
                 artifact_revision: None,
                 artifact_aspect_ratio: Some(
@@ -3531,14 +3537,6 @@ fn run_analysis_signals(
     let mut highlights: Vec<db::HighlightRow> = Vec::new();
     let total_candidates = selected.len();
 
-    // Per-batch title-variant usage tracker. Threaded through every per-clip
-    // title call below so multiple clips sharing the same dominant tag pick
-    // different template variants instead of all colliding on the same line
-    // (the bug that made 4 clips share "had no warning whatsoever" on the
-    // 7h validation VOD). Fresh map per analysis run — stays scoped to a
-    // single VOD's batch, so analysis on a different VOD starts clean.
-    let mut title_usage: crate::commands::captions::TitleUsage = Default::default();
-
     for (i, c) in selected.iter().enumerate() {
         let all_tags: Vec<String> = [&c.event_tags[..], &c.emotion_tags[..]].concat();
         let tag_str = if all_tags.is_empty() {
@@ -3546,15 +3544,6 @@ fn run_analysis_signals(
         } else {
             all_tags.join(",")
         };
-
-        let title = crate::commands::captions::save_path_heuristic_title(
-            c.transcript_excerpt.as_deref(),
-            Some(&tag_str),
-            vod.game_name.as_deref(),
-            c.start_time,
-            &mut title_usage,
-            &game_config.titles,
-        );
 
         let kw_boost = if let Some(ref t) = transcript {
             keyword_boost_for_range(t, c.start_time, c.end_time)
@@ -3595,21 +3584,53 @@ fn run_analysis_signals(
         let has_transcript = c.transcript_excerpt.is_some();
         let sig_count = count_active_signals(audio, visual, chat, has_transcript);
 
-        let event_summary = crate::post_captions::generate_event_summary_from_parts(
-            &all_tags,
-            c.transcript_excerpt.as_deref(),
-            audio,
-            visual,
-            0.0,
-            c.start_time,
-        );
-
         // Use full transcript for the clip range if available; fall back to
         // the single-sentence excerpt from signal fusion.
         let full_range_transcript = transcript
             .as_ref()
             .and_then(|t| extract_transcript_for_range(t, c.start_time, c.end_time))
             .or_else(|| c.transcript_excerpt.clone());
+
+        let signal_sources: Vec<String> = c
+            .signal_sources
+            .iter()
+            .map(|source| match source {
+                clip_selector::SignalSource::Audio => "audio",
+                clip_selector::SignalSource::Transcript => "transcript",
+                clip_selector::SignalSource::Chat => "chat",
+                clip_selector::SignalSource::Community => "community",
+                clip_selector::SignalSource::EmoteBurst => "emote",
+                clip_selector::SignalSource::Semantic => "semantic",
+            })
+            .map(str::to_string)
+            .collect();
+        let confidence = compute_confidence(raw_score, sig_count);
+        let brief = crate::moment_brief::MomentBrief::build(crate::moment_brief::MomentEvidence {
+            transcript: full_range_transcript.as_deref(),
+            detector_summary: c.payoff_summary.as_deref(),
+            detector_title: None,
+            payoff_summary: c.payoff_summary.as_deref(),
+            outcome_label: c.outcome_label.as_deref(),
+            tags: &all_tags,
+            game: vod.game_name.as_deref(),
+            stream_style: Some(effective_stream_style.as_str()),
+            signal_sources: &signal_sources,
+            scores: crate::moment_brief::MomentScores {
+                hook: c.hook_strength,
+                emotion: c.emotional_spike,
+                payoff: c.payoff_clarity,
+                alignment: c.event_reaction_alignment,
+                context: c.context_simplicity,
+                confidence,
+            },
+        });
+        let title = brief
+            .title_suggestions(c.start_time.max(0.0) as u32, &Default::default())
+            .into_iter()
+            .next()
+            .map(|suggestion| suggestion.text)
+            .unwrap_or_else(|| brief.core_event.clone());
+        let event_summary = brief.core_event;
 
         // Community (viewer-clipped) candidates carry the Twitch clip URL. Download
         // the ACTUAL clip MP4 via yt-dlp and use that file as the clip's video
@@ -3657,7 +3678,7 @@ fn run_analysis_signals(
             tags: Some(tag_str),
             thumbnail_path: None,
             created_at: now.clone(),
-            confidence_score: Some(compute_confidence(raw_score, sig_count)),
+            confidence_score: Some(confidence),
             explanation: Some(build_highlight_explanation(
                 audio,
                 visual,

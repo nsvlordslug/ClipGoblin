@@ -2,6 +2,30 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const PROXY_BASE: &str = "https://clipgoblin-auth-proxy.lordslug.workers.dev";
 
+#[cfg(debug_assertions)]
+const SANDBOX_PROXY_ENV: &str = "CLIPGOBLIN_AUTH_PROXY_BASE";
+#[cfg(debug_assertions)]
+const SANDBOX_PROXY_BASE: &str = "http://127.0.0.1:8788";
+
+#[cfg(debug_assertions)]
+fn sandbox_proxy_override<'a>(path: &str, candidate: &'a str) -> Option<&'a str> {
+    (path.starts_with("/auth/tiktok/") && candidate == SANDBOX_PROXY_BASE).then_some(candidate)
+}
+
+fn proxy_base(_path: &str) -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(candidate) = std::env::var(SANDBOX_PROXY_ENV) {
+        if let Some(proxy) = sandbox_proxy_override(_path, &candidate) {
+            return proxy.to_string();
+        }
+        if _path.starts_with("/auth/tiktok/") {
+            log::warn!("Ignoring invalid local auth proxy override");
+        }
+    }
+
+    PROXY_BASE.to_string()
+}
+
 /// Generic token response returned by the auth proxy for all providers.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TokenResponse {
@@ -122,7 +146,7 @@ impl AuthProxy {
     // ── Internal ────────────────────────────────────────────
 
     async fn post(&self, path: &str, body: serde_json::Value) -> Result<TokenResponse, String> {
-        let url = format!("{}{}", PROXY_BASE, path);
+        let url = format!("{}{}", proxy_base(path), path);
         let body_str =
             serde_json::to_string(&body).map_err(|e| format!("Failed to serialize body: {e}"))?;
 
@@ -160,5 +184,48 @@ mod tests {
             PROXY_BASE,
             "https://clipgoblin-auth-proxy.lordslug.workers.dev"
         );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn sandbox_proxy_is_exact_loopback_only_for_tiktok() {
+        assert_eq!(
+            sandbox_proxy_override("/auth/tiktok/token", "http://127.0.0.1:8788"),
+            Some("http://127.0.0.1:8788")
+        );
+        assert_eq!(
+            sandbox_proxy_override("/auth/tiktok/refresh", "http://127.0.0.1:8788"),
+            Some("http://127.0.0.1:8788")
+        );
+        assert_eq!(
+            sandbox_proxy_override("/auth/tiktok/token", "http://localhost:8788"),
+            None
+        );
+        assert_eq!(
+            sandbox_proxy_override("/auth/tiktok/token", "http://127.0.0.1:8788/"),
+            None
+        );
+        assert_eq!(
+            sandbox_proxy_override("/auth/tiktok/token", "https://127.0.0.1:8788"),
+            None
+        );
+        assert_eq!(
+            sandbox_proxy_override("/auth/tiktok/token", "https://example.com"),
+            None
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn non_tiktok_routes_never_use_the_sandbox_proxy() {
+        for path in [
+            "/auth/twitch/token",
+            "/auth/twitch/refresh",
+            "/auth/youtube/token",
+            "/auth/youtube/refresh",
+            "/reports/bug",
+        ] {
+            assert_eq!(sandbox_proxy_override(path, SANDBOX_PROXY_BASE), None);
+        }
     }
 }
