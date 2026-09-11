@@ -2695,13 +2695,8 @@ fn run_auto_ship_for_vod(
     {
         platforms.push("youtube");
     }
-    if db::get_setting(conn, "tiktok_access_token")
-        .ok()
-        .flatten()
-        .map_or(false, |s| !s.is_empty())
-    {
-        platforms.push("tiktok");
-    }
+    // TikTok requires creator-reviewed per-post settings and consent. Never
+    // enroll TikTok in background Auto-Ship merely because it is connected.
     if platforms.is_empty() {
         log::info!(
             "[auto-ship] enabled but no platforms connected for VOD {}",
@@ -5190,6 +5185,18 @@ pub async fn get_stream_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_ship_does_not_enroll_a_connected_tiktok_account() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO settings VALUES ('ui_settings', '{\"autoShipHighConfidence\":true}');
+            INSERT INTO settings VALUES ('tiktok_access_token', 'synthetic-test-connection');").unwrap();
+        let report = run_auto_ship_for_vod(&conn, "synthetic-vod", &["synthetic-clip".into()]).unwrap();
+        assert!(report.platforms.is_empty());
+        assert_eq!(report.clips_queued, 0);
+        assert!(report.next_publish_at.is_none());
+    }
 
     #[test]
     fn final_caption_prompt_omits_creator_but_keeps_game_and_user_vocabulary() {

@@ -933,24 +933,39 @@ async fn fetch_creator_info_with_avatar_mode(
     })
 }
 
-/// Map frontend visibility value to TikTok Content Posting API privacy_level.
-///   "public"  → PUBLIC_TO_EVERYONE
-///   "friends" → MUTUAL_FOLLOW_FRIENDS
-///   "private" → SELF_ONLY (draft — only you can see it)
-fn map_visibility_to_privacy(visibility: &str) -> &'static str {
-    match visibility {
+/// Accept only an explicit audience selected from TikTok's API-backed controls.
+fn map_visibility_to_privacy(visibility: &str) -> Result<&'static str, AppError> {
+    Ok(match visibility {
         // TikTok Content Posting API enums — sent directly by the compliance
         // panel (its dropdown is populated from creator_info.privacy_level_options).
         "PUBLIC_TO_EVERYONE" => "PUBLIC_TO_EVERYONE",
         "MUTUAL_FOLLOW_FRIENDS" => "MUTUAL_FOLLOW_FRIENDS",
         "FOLLOWER_OF_CREATOR" => "FOLLOWER_OF_CREATOR",
         "SELF_ONLY" => "SELF_ONLY",
-        // Legacy / lowercase frontend values (batch dialog + older callers).
-        "public" | "public_to_everyone" => "PUBLIC_TO_EVERYONE",
-        "friends" | "mutual_follow_friends" => "MUTUAL_FOLLOW_FRIENDS",
-        "follower_of_creator" => "FOLLOWER_OF_CREATOR",
-        _ => "SELF_ONLY",
+        _ => return Err(AppError::Api(
+            "Review this TikTok post and explicitly select its audience before uploading. Old automatic or legacy schedules must be recreated.".into(),
+        )),
+    })
+}
+
+fn validate_direct_post_choice<'a>(
+    requested: &'a str,
+    info: &TikTokCreatorInfo,
+    duration: f64,
+    branded_content: bool,
+) -> Result<&'a str, AppError> {
+    if !info.privacy_level_options.iter().any(|option| option == requested) {
+        return Err(AppError::Api("TikTok's available audiences changed or posting is unavailable. Reopen Publish and review the audience; nothing was uploaded.".into()));
     }
+    if branded_content && requested == "SELF_ONLY" {
+        return Err(AppError::Api("Branded content visibility cannot be set to private.".into()));
+    }
+    if !duration.is_finite() || duration <= 0.0 || info.max_video_post_duration_sec == 0
+        || duration > info.max_video_post_duration_sec as f64
+    {
+        return Err(AppError::Api("The rendered video duration could not be verified within TikTok's current limit. Review or trim the clip before posting.".into()));
+    }
+    Ok(requested)
 }
 
 /// Upload video via TikTok Content Posting API.
@@ -1058,26 +1073,11 @@ where
     let (init_url, init_body) = match publish_mode {
         TikTokPublishMode::Direct => {
             // TikTok requires creator_info to drive the Direct Post controls.
-            let privacy_options = query_creator_info(access_token).await;
-            let requested = map_visibility_to_privacy(visibility);
-            let privacy_level = if privacy_options.contains(&requested.to_string()) {
-                requested
-            } else if privacy_options.contains(&"SELF_ONLY".to_string()) {
-                log::warn!(
-                    "TikTok: requested privacy '{}' not available, falling back to SELF_ONLY. Available: {:?}",
-                    requested, privacy_options
-                );
-                "SELF_ONLY"
-            } else if let Some(first) = privacy_options.first() {
-                log::warn!(
-                    "TikTok: requested privacy '{}' not available, using first available: {}",
-                    requested,
-                    first
-                );
-                first.as_str()
-            } else {
-                "SELF_ONLY"
-            };
+            let requested = map_visibility_to_privacy(visibility)?;
+            let creator_info = fetch_creator_info(access_token).await?;
+            let duration = crate::commands::export::probe_media_duration(std::path::Path::new(file_path))
+                .ok_or_else(|| AppError::Api("Cannot verify the rendered video's duration; nothing was uploaded.".into()))?;
+            let privacy_level = validate_direct_post_choice(requested, &creator_info, duration, branded_content)?;
             let caption = if description.trim().is_empty() {
                 title
             } else {
@@ -1088,7 +1088,7 @@ where
                 "TikTok direct post: file_size={}, privacy_level={}, available_options={:?}",
                 total_size,
                 privacy_level,
-                privacy_options
+                creator_info.privacy_level_options
             );
             (
                 TIKTOK_PUBLISH_INIT_URL,
@@ -1096,9 +1096,9 @@ where
                     "post_info": {
                         "title": caption,
                         "privacy_level": privacy_level,
-                        "disable_duet": disable_duet,
-                        "disable_comment": disable_comment,
-                        "disable_stitch": disable_stitch,
+                        "disable_duet": disable_duet || creator_info.duet_disabled,
+                        "disable_comment": disable_comment || creator_info.comment_disabled,
+                        "disable_stitch": disable_stitch || creator_info.stitch_disabled,
                         "brand_content_toggle": branded_content,
                         "brand_organic_toggle": brand_organic,
                     },
@@ -1400,6 +1400,32 @@ async fn poll_publish_status(
 #[cfg(test)]
 mod error_message_tests {
     use super::*;
+
+    #[test]
+    fn direct_post_never_substitutes_an_unavailable_audience() {
+        let info = TikTokCreatorInfo {
+            creator_nickname: "Creator".into(), creator_username: "creator".into(),
+            creator_avatar_url: String::new(), privacy_level_options: vec!["SELF_ONLY".into()],
+            comment_disabled: true, duet_disabled: true, stitch_disabled: true,
+            max_video_post_duration_sec: 60,
+        };
+        assert!(validate_direct_post_choice("PUBLIC_TO_EVERYONE", &info, 12.0, false).is_err());
+        assert_eq!(validate_direct_post_choice("SELF_ONLY", &info, 12.0, false).unwrap(), "SELF_ONLY");
+        assert!(validate_direct_post_choice("SELF_ONLY", &info, 12.0, true).is_err());
+        assert!(validate_direct_post_choice("SELF_ONLY", &info, 61.0, false).is_err());
+        assert!(validate_direct_post_choice("SELF_ONLY", &info, f64::NAN, false).is_err());
+        let unavailable = TikTokCreatorInfo { privacy_level_options: vec![], ..info };
+        assert!(validate_direct_post_choice("SELF_ONLY", &unavailable, 12.0, false).is_err());
+    }
+
+    #[test]
+    fn direct_post_requires_an_explicit_api_audience_instead_of_legacy_defaults() {
+        assert!(map_visibility_to_privacy("").is_err());
+        assert!(map_visibility_to_privacy("public").is_err());
+        assert!(map_visibility_to_privacy("private").is_err());
+        assert_eq!(map_visibility_to_privacy("SELF_ONLY").unwrap(), "SELF_ONLY");
+        assert_eq!(map_visibility_to_privacy("PUBLIC_TO_EVERYONE").unwrap(), "PUBLIC_TO_EVERYONE");
+    }
 
     #[test]
     fn oauth_scopes_match_the_approved_live_app() {

@@ -26,9 +26,8 @@ export const EMPTY_TIKTOK_COMPLIANCE: TikTokComplianceValue = {
 
 export function visibleTikTokPrivacyOptions(
   options: string[],
-  auditPending: boolean,
-  sandboxReviewMode: boolean,
+  _auditPending: boolean,
+  _sandboxReviewMode: boolean,
 ): string[] {
-  if (!auditPending || sandboxReviewMode) return [...options]
-  return options.includes('SELF_ONLY') ? ['SELF_ONLY'] : [...options]
+  return [...options]
 }

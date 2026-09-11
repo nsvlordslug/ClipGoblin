@@ -17,14 +17,14 @@ test('TikTok publishing requires explicit privacy and interaction choices', () =
   assert.equal(EMPTY_TIKTOK_COMPLIANCE.disableStitch, true)
 })
 
-test('pending production review exposes only TikTok private posting', () => {
+test('pending production review preserves all TikTok-returned audience choices', () => {
   assert.deepEqual(
     visibleTikTokPrivacyOptions(
       ['PUBLIC_TO_EVERYONE', 'MUTUAL_FOLLOW_FRIENDS', 'SELF_ONLY'],
       true,
       false,
     ),
-    ['SELF_ONLY'],
+    ['PUBLIC_TO_EVERYONE', 'MUTUAL_FOLLOW_FRIENDS', 'SELF_ONLY'],
   )
 })
 

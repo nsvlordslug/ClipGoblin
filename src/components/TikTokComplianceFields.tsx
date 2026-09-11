@@ -104,6 +104,8 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
   // branded content is incompatible with an "Only me" audience; the clip must
   // not exceed the account's max post duration.
   const isDraft = value.publishMode === 'draft'
+  const audienceUnavailable = DIRECT_POST_AUDIT_PENDING && !SANDBOX_REVIEW_MODE
+    && value.privacyLevel != null && value.privacyLevel !== 'SELF_ONLY'
   const brandedOnPrivate = value.brandedContent && value.privacyLevel === 'SELF_ONLY'
   const discloseMissing = value.discloseContent && !value.yourBrand && !value.brandedContent
   const maxDurationSec = info?.max_video_post_duration_sec ?? 0
@@ -121,7 +123,7 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
     ? !draftDurationExceeded
     : value.privacyLevel != null
       && privacyOptions.includes(value.privacyLevel)
-      && !discloseMissing && !brandedOnPrivate && !directDurationExceeded)
+      && !audienceUnavailable && !discloseMissing && !brandedOnPrivate && !directDurationExceeded)
   useEffect(() => {
     onValidityChange?.(valid)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -263,16 +265,24 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
           value={value.privacyLevel ?? ''}
           onChange={e => {
             const lvl = e.target.value || null
-            // Branded content can't be private — drop it if user picks Only me.
-            set({ privacyLevel: lvl, brandedContent: lvl === 'SELF_ONLY' ? false : value.brandedContent })
+            set({ privacyLevel: lvl })
           }}
           className="w-full px-3 py-1.5 bg-surface-800 border border-surface-600 rounded text-sm text-white focus:outline-none focus:border-violet-500"
         >
           <option value="" disabled>Select…</option>
           {privacyOptions.map(lvl => (
-            <option key={lvl} value={lvl}>{PRIVACY_LABELS[lvl] || lvl}</option>
+            <option key={lvl} value={lvl}
+              disabled={lvl === 'SELF_ONLY' && value.brandedContent}
+              title={lvl === 'SELF_ONLY' && value.brandedContent ? 'Branded content visibility cannot be set to private.' : undefined}
+            >{PRIVACY_LABELS[lvl] || lvl}</option>
           ))}
         </select>
+        {audienceUnavailable && (
+          <p className="mt-1 text-[10px] text-amber-400">
+            TikTok returned this audience, but ClipGoblin cannot publish to it before approval.
+            Choose Only me for a private post, or Send to drafts to finish in TikTok.
+          </p>
+        )}
       </div>
 
       {/* Interaction toggles — greyed + forced off where the account restricts them */}
