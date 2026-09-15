@@ -2054,12 +2054,18 @@ Respond with ONLY the caption. No quotes, no labels, nothing else."#,
         }]
     });
 
-    log::debug!("Transcript being sent: \"{}\"", transcript_section.trim());
+    log::debug!(
+        "Transcript prepared: {} characters",
+        transcript_section.trim().chars().count()
+    );
     log::debug!("Caption API Request:");
     log::debug!("Model: {}", model);
     log::debug!("Mode: {}", selected_mode);
-    log::debug!("System: {}", LLM_SYSTEM_PROMPT);
-    log::debug!("User message:\n{}", prompt);
+    log::debug!(
+        "System prompt configured: {} characters",
+        LLM_SYSTEM_PROMPT.chars().count()
+    );
+    log::debug!("User message prepared: {} characters", prompt.chars().count());
     log::debug!("--- END Caption API Request ---");
 
     let resp = client
@@ -2252,8 +2258,11 @@ Respond with ONLY the title. No quotes, no explanation — just the title text."
         avoid_word
     );
     log::debug!("Model: {}", model);
-    log::debug!("System: {}", LLM_SYSTEM_PROMPT);
-    log::debug!("User message:\n{}", prompt);
+    log::debug!(
+        "System prompt configured: {} characters",
+        LLM_SYSTEM_PROMPT.chars().count()
+    );
+    log::debug!("User message prepared: {} characters", prompt.chars().count());
     log::debug!("--- END Title API Request ---");
 
     let resp = client

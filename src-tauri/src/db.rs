@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, Result as SqliteResult};
+use rusqlite::{params, Connection, OptionalExtension, Result as SqliteResult};
 use std::path::PathBuf;
 
 use crate::crypto;
@@ -1517,7 +1517,8 @@ pub fn purge_expired_vods(
 ) -> SqliteResult<usize> {
     let mut stmt = conn.prepare(
         "SELECT id, twitch_video_id FROM vods \
-         WHERE channel_id = ?1 AND download_status NOT IN ('downloaded', 'downloading')",
+         WHERE channel_id = ?1 AND download_status NOT IN ('downloaded', 'downloading') \
+           AND NOT EXISTS (SELECT 1 FROM clips WHERE clips.vod_id = vods.id)",
     )?;
     let candidates: Vec<(String, String)> = stmt
         .query_map(params![channel_id], |r| {
@@ -2253,12 +2254,82 @@ pub fn delete_clips_for_vod(conn: &Connection, vod_id: &str) -> SqliteResult<()>
 }
 
 pub fn delete_clip(conn: &Connection, clip_id: &str) -> SqliteResult<()> {
-    // Delete the associated highlight too
+    let tx = rusqlite::Transaction::new_unchecked(
+        conn,
+        rusqlite::TransactionBehavior::Immediate,
+    )?;
+    delete_clip_in_transaction(&tx, clip_id)?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn delete_clip_with_behavior(
+    conn: &Connection,
+    clip_id: &str,
+    metadata_json: Option<&str>,
+) -> SqliteResult<()> {
+    let tx = rusqlite::Transaction::new_unchecked(
+        conn,
+        rusqlite::TransactionBehavior::Immediate,
+    )?;
+    record_clip_behavior(
+        &tx,
+        clip_id,
+        "delete",
+        Some(0.10),
+        0.35,
+        None,
+        None,
+        None,
+        None,
+        metadata_json,
+        &format!("delete:{clip_id}"),
+    )?;
+    delete_clip_in_transaction(&tx, clip_id)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn delete_clip_in_transaction(conn: &Connection, clip_id: &str) -> SqliteResult<()> {
+    let highlight_id: Option<String> = conn
+        .query_row(
+            "SELECT highlight_id FROM clips WHERE id = ?1",
+            params![clip_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    // Remove operational records that cannot be used after the clip is gone.
+    // Behavioral/detection feedback intentionally survives as local learning
+    // history; its schema documents that retention separately.
+    for table in [
+        "scheduled_uploads",
+        "upload_history",
+        "youtube_upload_sessions",
+        "copy_feedback",
+        "clip_performance",
+    ] {
+        conn.execute(
+            &format!("DELETE FROM {table} WHERE clip_id = ?1"),
+            params![clip_id],
+        )?;
+    }
     conn.execute(
-        "DELETE FROM highlights WHERE id IN (SELECT highlight_id FROM clips WHERE id = ?1)",
+        "UPDATE ai_usage_log SET clip_id = NULL WHERE clip_id = ?1",
         params![clip_id],
     )?;
+    conn.execute(
+        "DELETE FROM settings WHERE key = ?1",
+        params![format!("clip_{clip_id}_captions")],
+    )?;
     conn.execute("DELETE FROM clips WHERE id = ?1", params![clip_id])?;
+    if let Some(highlight_id) = highlight_id {
+        conn.execute(
+            "DELETE FROM highlights WHERE id = ?1
+             AND NOT EXISTS (SELECT 1 FROM clips WHERE highlight_id = ?1)",
+            params![highlight_id],
+        )?;
+    }
     Ok(())
 }
 
@@ -5039,6 +5110,70 @@ mod tests {
 
         reset_personalization_history(&mut conn).unwrap();
         assert!(get_clip_behavior_events(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleting_clip_removes_operational_records_but_keeps_learning_history() {
+        let conn = fresh_db();
+        conn.execute("INSERT INTO highlights (id, vod_id) VALUES ('delete-highlight', 'delete-vod')", []).unwrap();
+        conn.execute("INSERT INTO clips (id, highlight_id, vod_id, title) VALUES ('delete-clip', 'delete-highlight', 'delete-vod', 'Private title')", []).unwrap();
+        conn.execute("INSERT INTO scheduled_uploads (id, clip_id, platform, scheduled_time, created_at) VALUES ('schedule', 'delete-clip', 'youtube', '2026-09-14T00:00:00Z', '2026-09-14T00:00:00Z')", []).unwrap();
+        conn.execute("INSERT INTO upload_history (id, clip_id, platform) VALUES ('upload', 'delete-clip', 'youtube')", []).unwrap();
+        conn.execute("INSERT INTO copy_feedback (id, clip_id, brief_signature, copy_kind, strategy, generated_text, final_text, outcome, created_at, updated_at) VALUES ('copy', 'delete-clip', 'sig', 'caption', 'plain', 'generated', 'final', 'accepted', 'now', 'now')", []).unwrap();
+        conn.execute("INSERT INTO clip_performance (id, clip_id) VALUES ('performance', 'delete-clip')", []).unwrap();
+        conn.execute("INSERT INTO ai_usage_log (id, timestamp, feature, provider, model, tokens_in, tokens_out, cost_usd, clip_id) VALUES ('usage', 'now', 'caption', 'test', 'test', 1, 1, 0, 'delete-clip')", []).unwrap();
+        conn.execute("INSERT INTO youtube_upload_sessions (attempt_id, clip_id, aspect_ratio, account_id, artifact_path, artifact_revision, size, sha256, meta_json, state, history_id, created_at, updated_at) VALUES ('attempt', 'delete-clip', '9:16', 'account', 'artifact.mp4', 'revision', 1, 'hash', '{}', 'ready', 'history', 'now', 'now')", []).unwrap();
+        save_setting(&conn, "clip_delete-clip_captions", "private captions").unwrap();
+        record_clip_behavior(&conn, "delete-clip", "delete", Some(0.1), 0.35, None, None, None, None, None, "delete:delete-clip").unwrap();
+
+        delete_clip(&conn, "delete-clip").unwrap();
+
+        for table in [
+            "clips",
+            "highlights",
+            "scheduled_uploads",
+            "upload_history",
+            "copy_feedback",
+            "clip_performance",
+            "youtube_upload_sessions",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table} retained clip data");
+        }
+        let usage_clip: Option<String> = conn
+            .query_row(
+                "SELECT clip_id FROM ai_usage_log WHERE id = 'usage'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(usage_clip.is_none());
+        assert!(get_setting(&conn, "clip_delete-clip_captions")
+            .unwrap()
+            .is_none());
+        assert_eq!(get_clip_behavior_events(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn expired_vod_purge_preserves_parent_rows_for_retained_clips() {
+        let conn = fresh_db();
+        conn.execute("INSERT INTO vods (id, channel_id, twitch_video_id, title, duration_seconds, stream_date, thumbnail_url, vod_url, download_status, analysis_status, created_at) VALUES ('kept-vod', 'channel', 'remote-id', 'Kept VOD', 60, 'now', '', '', 'pending', 'completed', 'now')", []).unwrap();
+        conn.execute("INSERT INTO clips (id, highlight_id, vod_id, title, start_seconds, end_seconds, created_at) VALUES ('kept-clip', 'kept-highlight', 'kept-vod', 'Keep me', 0, 10, 'now')", []).unwrap();
+
+        let deleted = purge_expired_vods(
+            &conn,
+            "channel",
+            &std::collections::HashSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(deleted, 0);
+        assert!(get_vod_by_id(&conn, "kept-vod").unwrap().is_some());
+        assert!(get_clip_by_id(&conn, "kept-clip").unwrap().is_some());
     }
 
     #[test]

@@ -15,6 +15,16 @@ export function captureUploadTargets(
   }))
 }
 
+export function missingUploadTargets(
+  platforms: string[],
+  accounts: Record<string, PublishAccount | null>,
+): string[] {
+  return platforms.filter(platform => {
+    const adapter = uploadAdapterPlatform(platform)
+    return !accounts[adapter]?.account_id
+  })
+}
+
 export function uploadTargetFields(accountId: string | null | undefined) {
   if (!accountId) throw new Error('Connect the publishing account and try again.')
   return { target_account_id: accountId }

@@ -5,6 +5,30 @@ use crate::social;
 use crate::DbConn;
 use tauri::State;
 
+fn validate_schedule_request(
+    conn: &rusqlite::Connection,
+    clip_id: &str,
+    platform: &str,
+    scheduled_time: &str,
+    meta_json: &str,
+) -> Result<(), String> {
+    social::get_adapter(platform).map_err(|error| error.to_string())?;
+    if db::get_clip_by_id(conn, clip_id)
+        .map_err(|error| format!("DB error: {error}"))?
+        .is_none()
+    {
+        return Err("Clip not found".into());
+    }
+    chrono::DateTime::parse_from_rfc3339(scheduled_time)
+        .map_err(|_| "Choose a valid scheduled date and time.".to_string())?;
+    let meta: social::UploadMeta = serde_json::from_str(meta_json)
+        .map_err(|_| "Review the upload settings before scheduling.".to_string())?;
+    if meta.clip_id != clip_id {
+        return Err("The scheduled upload does not match the selected clip.".into());
+    }
+    db::validate_upload_destination(conn, platform, meta.target_account_id.as_deref())
+}
+
 #[tauri::command]
 pub fn schedule_upload(
     clip_id: String,
@@ -14,6 +38,7 @@ pub fn schedule_upload(
     db: State<'_, DbConn>,
 ) -> Result<String, String> {
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
+    validate_schedule_request(&conn, &clip_id, &platform, &scheduled_time, &meta_json)?;
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let row = db::ScheduledUploadRow {
@@ -36,6 +61,28 @@ pub fn schedule_upload(
     };
     db::insert_scheduled_upload(&conn, &row).map_err(|e| format!("DB error: {}", e))?;
     Ok(id)
+}
+
+#[cfg(test)]
+mod schedule_request_tests {
+    use super::*;
+
+    #[test]
+    fn schedule_creation_requires_the_reviewed_connected_destination() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::run_migrations(&conn).unwrap();
+        conn.execute("INSERT INTO clips (id, highlight_id, vod_id, title, start_seconds, end_seconds, created_at) VALUES ('clip-a', 'highlight-a', 'vod-a', 'Clip', 0, 10, 'now')", []).unwrap();
+        conn.execute("INSERT INTO settings (key, value) VALUES ('youtube_channel_id', 'channel-a')", []).unwrap();
+        let meta = serde_json::json!({
+            "title": "Clip", "description": "", "tags": [], "visibility": "unlisted",
+            "clip_id": "clip-a", "force": false, "target_account_id": "channel-a"
+        }).to_string();
+
+        assert!(validate_schedule_request(&conn, "clip-a", "youtube", "2026-09-15T12:00:00Z", &meta).is_ok());
+        conn.execute("DELETE FROM settings WHERE key = 'youtube_channel_id'", []).unwrap();
+        assert!(validate_schedule_request(&conn, "clip-a", "youtube", "2026-09-15T12:00:00Z", &meta).is_err());
+        assert!(validate_schedule_request(&conn, "clip-a", "youtube", "not-a-time", &meta).is_err());
+    }
 }
 
 #[tauri::command]

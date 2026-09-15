@@ -15,7 +15,7 @@ import { artifactUploadFields } from '../lib/exportArtifacts'
 import type { RenderedArtifact } from '../lib/exportArtifacts'
 import XHandoffCard, { ManualShareAvailabilityNote } from './XHandoffCard'
 import { canOfferXHandoff } from '../lib/xHandoff'
-import { captureUploadTargets, isUncertainUploadError, uploadTargetFields } from '../lib/publishTargets'
+import { captureUploadTargets, isUncertainUploadError, missingUploadTargets, uploadTargetFields } from '../lib/publishTargets'
 
 // ── Types ──
 
@@ -132,7 +132,7 @@ function exportClip(
 // ── Component ──
 
 export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchUploadDialogProps) {
-  const { isConnected, connect } = usePlatformStore()
+  const { accounts, isConnected, connect } = usePlatformStore()
   const { schedule: scheduleUpload } = useScheduleStore()
 
   // Platform selection
@@ -142,7 +142,6 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
     for (const [key, info] of availablePlatforms) {
       init[key] = info.available && isConnected(key)
     }
-    if (!Object.values(init).some(Boolean)) init['youtube'] = true
     return init
   })
   const [visibility, setVisibility] = useState<Record<string, string>>(() => {
@@ -175,6 +174,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
   )
 
   const activePlatforms = Object.entries(selectedPlatforms).filter(([, selected]) => selected).map(([key]) => key)
+  const disconnectedPlatforms = missingUploadTargets(activePlatforms, accounts)
   const missingTitleClips = clips.filter(c => !c.title?.trim())
 
   // ALL clips participate (not just exported ones)
@@ -278,6 +278,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
     cancelRef.current = false
     setUploading(true)
     setCompleted(false)
+    const failedPlatforms = new Set<string>()
 
     // Ensure all selected platforms are connected
     for (const platform of activePlatforms) {
@@ -285,6 +286,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
         try {
           targetAccounts[platform] = (await connect(platform)).account_id
         } catch (error: unknown) {
+          failedPlatforms.add(platform)
           for (const clip of clips) {
             updateClipStatus(platform, clip.id, {
               status: 'error',
@@ -310,6 +312,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
       const artifactsByAspect = new Map<string, RenderedArtifact>()
       for (const platform of activePlatforms) {
         if (cancelRef.current) break
+        if (failedPlatforms.has(platform)) continue
 
         const existing = clipStatuses[platform]?.[clip.id]
         if (existing?.retryBlocked) continue
@@ -390,7 +393,20 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
 
   const startSchedule = useCallback(async () => {
     if (!scheduleTime || activePlatforms.length === 0) return
-    const targetAccounts = captureUploadTargets(activePlatforms, usePlatformStore.getState().accounts)
+    const currentAccounts = usePlatformStore.getState().accounts
+    const disconnected = missingUploadTargets(activePlatforms, currentAccounts)
+    if (disconnected.length > 0) {
+      for (const platform of disconnected) {
+        for (const clip of clips) {
+          updateClipStatus(platform, clip.id, {
+            status: 'error',
+            error: `Connect ${PLATFORM_INFO[platform]?.name || platform} before scheduling. No clips were exported or scheduled.`,
+          })
+        }
+      }
+      return
+    }
+    const targetAccounts = captureUploadTargets(activePlatforms, currentAccounts)
     cancelRef.current = false
     setUploading(true)
     const isoTime = new Date(scheduleTime).toISOString()
@@ -457,6 +473,11 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
         {/* Body */}
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
           {/* Warnings */}
+          {scheduleMode && disconnectedPlatforms.length > 0 && !uploading && !completed && (
+            <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 text-amber-300 text-sm">
+              Connect {disconnectedPlatforms.map(platform => PLATFORM_INFO[platform]?.name || platform).join(' and ')} before scheduling.
+            </div>
+          )}
           {missingTitleClips.length > 0 && !uploading && !completed && (
             <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 text-amber-300 text-sm">
               <strong>{missingTitleClips.length}</strong> clip{missingTitleClips.length !== 1 ? 's have' : ' has'} no title and will upload as "Untitled Clip".
@@ -710,7 +731,7 @@ export default function BatchUploadDialog({ clips, onClose, onComplete }: BatchU
               {scheduleMode ? (
                 <button
                   onClick={startSchedule}
-                  disabled={activePlatforms.length === 0 || clips.length === 0 || !scheduleTime || (activePlatforms.includes('tiktok') && !tiktokComplianceValid)}
+                  disabled={activePlatforms.length === 0 || clips.length === 0 || !scheduleTime || disconnectedPlatforms.length > 0 || (activePlatforms.includes('tiktok') && !tiktokComplianceValid)}
                   className="px-4 py-2 rounded-lg text-sm font-medium bg-violet-600 hover:bg-violet-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer flex items-center gap-2"
                 >
                   <Clock className="w-4 h-4" />

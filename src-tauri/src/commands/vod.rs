@@ -4263,38 +4263,249 @@ pub fn get_clips(db: State<'_, DbConn>) -> Result<Vec<db::ClipRow>, String> {
     db::get_all_clips(&conn).map_err(|e| format!("DB error: {}", e))
 }
 
+#[derive(Debug)]
+struct StagedClipArtifact {
+    original: std::path::PathBuf,
+    staged: std::path::PathBuf,
+    directory: bool,
+}
+
+fn stage_managed_artifact(
+    candidate: &std::path::Path,
+    managed_root: &std::path::Path,
+    token: &str,
+    index: usize,
+) -> Result<Option<StagedClipArtifact>, String> {
+    if !candidate.exists() || !managed_root.exists() {
+        return Ok(None);
+    }
+    let root = std::fs::canonicalize(managed_root)
+        .map_err(|error| format!("Could not verify ClipGoblin's managed folder: {error}"))?;
+    let original = std::fs::canonicalize(candidate)
+        .map_err(|error| format!("Could not verify a ClipGoblin artifact: {error}"))?;
+    if original == root || !original.starts_with(&root) {
+        return Ok(None);
+    }
+    let parent = original
+        .parent()
+        .ok_or_else(|| "Could not stage a ClipGoblin artifact safely".to_string())?;
+    let staged = parent.join(format!(".clipgoblin-delete-{token}-{index}"));
+    if staged.exists() {
+        return Err("Could not reserve a temporary cleanup path. Try deleting the clip again.".into());
+    }
+    let directory = original.is_dir();
+    std::fs::rename(&original, &staged)
+        .map_err(|error| format!("Could not stage a ClipGoblin artifact for deletion: {error}"))?;
+    Ok(Some(StagedClipArtifact {
+        original,
+        staged,
+        directory,
+    }))
+}
+
+fn stage_clip_artifacts(
+    conn: &rusqlite::Connection,
+    clip: &db::ClipRow,
+    auto_captions_path: Option<&str>,
+    data_root: &std::path::Path,
+) -> Result<Vec<StagedClipArtifact>, String> {
+    let token = uuid::Uuid::new_v4().to_string();
+    let mut staged = Vec::new();
+    let mut protected_paths = [
+        clip.source_media_path.as_deref(),
+        clip.community_clip_mp4_path.as_deref(),
+        clip.context_background_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|path| std::fs::canonicalize(path).ok())
+    .collect::<Vec<_>>();
+    let mut stmt = conn
+        .prepare(
+            "SELECT output_path, thumbnail_path, community_clip_mp4_path,
+                    source_media_path, context_background_path, auto_captions_path
+               FROM clips WHERE id <> ?1",
+        )
+        .map_err(|error| format!("Could not check shared clip artifacts: {error}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![clip.id], |row| {
+            Ok((0..6)
+                .filter_map(|index| row.get::<_, Option<String>>(index).ok().flatten())
+                .collect::<Vec<_>>())
+        })
+        .map_err(|error| format!("Could not check shared clip artifacts: {error}"))?;
+    for paths in rows {
+        for path in
+            paths.map_err(|error| format!("Could not check shared clip artifacts: {error}"))?
+        {
+            if let Ok(path) = std::fs::canonicalize(path) {
+                protected_paths.push(path);
+            }
+        }
+    }
+    drop(stmt);
+
+    let is_protected = |candidate: &std::path::Path, directory: bool| {
+        std::fs::canonicalize(candidate)
+            .ok()
+            .is_some_and(|candidate| {
+                protected_paths.iter().any(|reference| {
+                    if directory {
+                        reference.starts_with(&candidate)
+                    } else {
+                        reference == &candidate
+                    }
+                })
+            })
+    };
+    let result = (|| {
+        let exports_root = data_root.join("exports");
+        let safe_clip_id: String = clip
+            .id
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let export_directory = exports_root.join(&safe_clip_id);
+        if safe_clip_id == clip.id && !is_protected(&export_directory, true) {
+            if let Some(item) = stage_managed_artifact(
+                &export_directory,
+                &exports_root,
+                &token,
+                staged.len(),
+            )? {
+                staged.push(item);
+            }
+        }
+        if staged.is_empty() {
+            if let Some(path) = clip
+                .output_path
+                .as_deref()
+                .filter(|path| !path.trim().is_empty())
+            {
+                if !is_protected(std::path::Path::new(path), false) {
+                    if let Some(item) = stage_managed_artifact(
+                        std::path::Path::new(path),
+                        &exports_root,
+                        &token,
+                        staged.len(),
+                    )? {
+                        staged.push(item);
+                    }
+                }
+            }
+        }
+        if let Some(path) = clip
+            .thumbnail_path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+        {
+            if !is_protected(std::path::Path::new(path), false) {
+                if let Some(item) = stage_managed_artifact(
+                    std::path::Path::new(path),
+                    &data_root.join("thumbnails"),
+                    &token,
+                    staged.len(),
+                )? {
+                    staged.push(item);
+                }
+            }
+        }
+        if let Some(path) = auto_captions_path.filter(|path| !path.trim().is_empty()) {
+            if !is_protected(std::path::Path::new(path), false) {
+                if let Some(item) = stage_managed_artifact(
+                    std::path::Path::new(path),
+                    &data_root.join("captions"),
+                    &token,
+                    staged.len(),
+                )? {
+                    staged.push(item);
+                }
+            }
+        }
+        Ok::<(), String>(())
+    })();
+    if let Err(error) = result {
+        restore_staged_artifacts(&staged);
+        return Err(error);
+    }
+    Ok(staged)
+}
+
+fn restore_staged_artifacts(staged: &[StagedClipArtifact]) {
+    for item in staged.iter().rev() {
+        if let Err(error) = std::fs::rename(&item.staged, &item.original) {
+            log::error!("Could not restore staged clip artifact after database failure: {error}");
+        }
+    }
+}
+
+fn discard_staged_artifacts(staged: &[StagedClipArtifact]) {
+    for item in staged {
+        let result = if item.directory {
+            std::fs::remove_dir_all(&item.staged)
+        } else {
+            std::fs::remove_file(&item.staged)
+        };
+        if let Err(error) = result {
+            log::warn!("Clip was deleted, but a temporary app-owned artifact could not be removed. Close ClipGoblin before removing it manually: {error}");
+        }
+    }
+}
+
+fn delete_clip_record_and_artifacts(
+    conn: &rusqlite::Connection,
+    clip: &db::ClipRow,
+    auto_captions_path: Option<&str>,
+    data_root: &std::path::Path,
+    behavior_metadata: Option<&str>,
+) -> Result<(), String> {
+    let staged = stage_clip_artifacts(conn, clip, auto_captions_path, data_root)?;
+    if let Err(error) = db::delete_clip_with_behavior(conn, &clip.id, behavior_metadata) {
+        restore_staged_artifacts(&staged);
+        return Err(format!("DB error: {error}"));
+    }
+    discard_staged_artifacts(&staged);
+    Ok(())
+}
+
 #[tauri::command]
 pub fn delete_clip(clip_id: String, db: State<'_, DbConn>) -> Result<(), String> {
     let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
 
-    // Get the vod_id before deleting so we can check remaining clips
-    let clip_source: Option<(String, String)> = conn
+    let clip = db::get_clip_by_id(&conn, &clip_id)
+        .map_err(|e| format!("DB error: {e}"))?
+        .ok_or_else(|| "Clip not found".to_string())?;
+    let auto_captions_path = conn
         .query_row(
-            "SELECT vod_id, source_kind FROM clips WHERE id = ?1",
+            "SELECT auto_captions_path FROM clips WHERE id = ?1",
             rusqlite::params![clip_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get::<_, Option<String>>(0),
         )
-        .ok();
+        .map_err(|e| format!("DB error: {e}"))?;
+    let data_root = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("clipviral");
+
+    // Get the vod_id before deleting so we can check remaining clips
+    let clip_source = Some((clip.vod_id.clone(), clip.source_kind.clone()));
 
     let metadata = serde_json::json!({
         "sourceKind": clip_source.as_ref().map(|(_, source)| source.as_str()).unwrap_or("unknown")
     })
     .to_string();
-    let _ = db::record_clip_behavior(
+    delete_clip_record_and_artifacts(
         &conn,
-        &clip_id,
-        "delete",
-        Some(0.10),
-        0.35,
-        None,
-        None,
-        None,
-        None,
+        &clip,
+        auto_captions_path.as_deref(),
+        &data_root,
         Some(&metadata),
-        &format!("delete:{clip_id}"),
-    );
-
-    db::delete_clip(&conn, &clip_id).map_err(|e| format!("DB error: {}", e))?;
+    )?;
 
     // If no clips remain for this VOD, reset analysis_status so user can re-analyze
     if let Some((vid, _)) =
@@ -4309,12 +4520,17 @@ pub fn delete_clip(clip_id: String, db: State<'_, DbConn>) -> Result<(), String>
             .unwrap_or(0);
 
         if remaining == 0 {
-            db::update_vod_analysis_status(&conn, &vid, "pending")
-                .map_err(|e| format!("DB error: {}", e))?;
-            log::info!(
-                "All clips deleted for VOD {} â€” reset analysis_status to pending",
-                vid
-            );
+            match db::update_vod_analysis_status(&conn, &vid, "pending") {
+                Ok(()) => log::info!(
+                    "All clips deleted for VOD {} — reset analysis_status to pending",
+                    vid
+                ),
+                Err(error) => log::warn!(
+                    "Clip was deleted, but VOD {} could not be reset for re-analysis: {}",
+                    vid,
+                    error
+                ),
+            }
         }
     }
 
@@ -5196,6 +5412,110 @@ mod tests {
         assert!(report.platforms.is_empty());
         assert_eq!(report.clips_queued, 0);
         assert!(report.next_publish_at.is_none());
+    }
+
+    #[test]
+    fn clip_cleanup_stages_only_files_inside_the_managed_root() {
+        let root =
+            std::env::temp_dir().join(format!("clipviral-delete-test-{}", uuid::Uuid::new_v4()));
+        let managed = root.join("managed");
+        let outside = root.join("creator-export.mp4");
+        std::fs::create_dir_all(&managed).unwrap();
+        let owned = managed.join("clip.mp4");
+        std::fs::write(&owned, b"owned").unwrap();
+        std::fs::write(&outside, b"creator-owned").unwrap();
+
+        let staged = stage_managed_artifact(&owned, &managed, "test", 0)
+            .unwrap()
+            .unwrap();
+        assert!(!owned.exists());
+        assert!(staged.staged.exists());
+        restore_staged_artifacts(&[staged]);
+        assert!(owned.exists());
+
+        assert!(stage_managed_artifact(&outside, &managed, "test", 1)
+            .unwrap()
+            .is_none());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"creator-owned");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clip_cleanup_preserves_shared_and_original_media() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::run_migrations(&conn).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "clipviral-shared-delete-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let shared_dir = root.join("exports").join("shared-owner");
+        let original_dir = root.join("exports").join("original-owner");
+        std::fs::create_dir_all(&shared_dir).unwrap();
+        std::fs::create_dir_all(&original_dir).unwrap();
+        let shared = shared_dir.join("shared.mp4");
+        let original = original_dir.join("original.mp4");
+        let external = root
+            .parent()
+            .unwrap()
+            .join(format!("creator-export-{}.mp4", uuid::Uuid::new_v4()));
+        std::fs::write(&shared, b"shared").unwrap();
+        std::fs::write(&original, b"original").unwrap();
+        std::fs::write(&external, b"external").unwrap();
+        conn.execute("INSERT INTO clips (id, highlight_id, vod_id, title, start_seconds, end_seconds, created_at, output_path) VALUES ('shared-owner', 'h1', 'v1', 'Shared', 0, 10, 'now', ?1)", [shared.to_string_lossy().as_ref()]).unwrap();
+        conn.execute("INSERT INTO clips (id, highlight_id, vod_id, title, start_seconds, end_seconds, created_at, source_media_path) VALUES ('retained-user', 'h2', 'v2', 'Reuse', 0, 10, 'now', ?1)", [shared.to_string_lossy().as_ref()]).unwrap();
+        conn.execute("INSERT INTO clips (id, highlight_id, vod_id, title, start_seconds, end_seconds, created_at, output_path, source_media_path) VALUES ('original-owner', 'h3', 'v3', 'Original', 0, 10, 'now', ?1, ?1)", [original.to_string_lossy().as_ref()]).unwrap();
+        conn.execute("INSERT INTO clips (id, highlight_id, vod_id, title, start_seconds, end_seconds, created_at, output_path) VALUES ('external-owner', 'h4', 'v4', 'External', 0, 10, 'now', ?1)", [external.to_string_lossy().as_ref()]).unwrap();
+
+        for id in ["shared-owner", "original-owner", "external-owner"] {
+            let clip = db::get_clip_by_id(&conn, id).unwrap().unwrap();
+            assert!(stage_clip_artifacts(&conn, &clip, None, &root)
+                .unwrap()
+                .is_empty());
+        }
+        assert_eq!(std::fs::read(&shared).unwrap(), b"shared");
+        assert_eq!(std::fs::read(&original).unwrap(), b"original");
+        assert_eq!(std::fs::read(&external).unwrap(), b"external");
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_file(external).unwrap();
+    }
+
+    #[test]
+    fn database_delete_failure_restores_staged_artifacts() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::run_migrations(&conn).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "clipviral-rollback-delete-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let export_dir = root.join("exports").join("rollback-clip");
+        std::fs::create_dir_all(&export_dir).unwrap();
+        let output = export_dir.join("render.mp4");
+        std::fs::write(&output, b"render").unwrap();
+        conn.execute(
+            "INSERT INTO highlights (id) VALUES ('rollback-highlight')",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO clips (id, highlight_id, vod_id, title, start_seconds, end_seconds, created_at, output_path) VALUES ('rollback-clip', 'rollback-highlight', 'rollback-vod', 'Rollback', 0, 10, 'now', ?1)", [output.to_string_lossy().as_ref()]).unwrap();
+        conn.execute_batch("CREATE TRIGGER block_clip_delete BEFORE DELETE ON clips BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END;").unwrap();
+        let clip = db::get_clip_by_id(&conn, "rollback-clip")
+            .unwrap()
+            .unwrap();
+
+        assert!(delete_clip_record_and_artifacts(&conn, &clip, None, &root, None).is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), b"render");
+        assert!(db::get_clip_by_id(&conn, "rollback-clip")
+            .unwrap()
+            .is_some());
+        let behavior_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM clip_behavior_events WHERE clip_id = 'rollback-clip'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(behavior_count, 0);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

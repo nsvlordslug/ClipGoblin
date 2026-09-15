@@ -120,7 +120,7 @@ pub async fn submit_bug_report(
     db: State<'_, DbConn>,
 ) -> Result<BugReportResult, String> {
     // 1. Get user info from DB
-    let (user_id, username) = {
+    let (user_id, username, twitch_access_token) = {
         let conn = db.lock().map_err(|e| format!("DB lock: {}", e))?;
         let uid = db::get_setting(&conn, "twitch_user_id")
             .map_err(|e| format!("DB: {}", e))?
@@ -128,7 +128,18 @@ pub async fn submit_bug_report(
         let uname = db::get_setting(&conn, "twitch_username")
             .map_err(|e| format!("DB: {}", e))?
             .unwrap_or_else(|| "unknown".to_string());
-        (uid, uname)
+        let token = db::get_setting(&conn, "twitch_user_access_token")
+            .map_err(|e| format!("DB: {}", e))?;
+        (uid, uname, token)
+    };
+    let Some(twitch_access_token) =
+        twitch_access_token.filter(|token| !token.trim().is_empty())
+    else {
+        return Ok(BugReportResult {
+            success: false,
+            issue_url: None,
+            error: Some("Connect Twitch before submitting a tester bug report.".into()),
+        });
     };
 
     // 2. Rate limit: 5 per user per day
@@ -184,6 +195,7 @@ pub async fn submit_bug_report(
     let url = format!("{}/reports/bug", crate::auth_proxy::PROXY_BASE);
     let resp = client
         .post(url)
+        .bearer_auth(&twitch_access_token)
         .json(&payload)
         .send()
         .await

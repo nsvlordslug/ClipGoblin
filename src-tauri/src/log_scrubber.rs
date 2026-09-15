@@ -26,11 +26,38 @@ pub fn scrub_logs(input: &str) -> String {
         .replace_all(&output, "[REDACTED_ENCRYPTED]")
         .to_string();
 
-    // Windows user paths
-    let user_path_re = Regex::new(r"C:\\Users\\[^\\]+").unwrap();
-    output = user_path_re
-        .replace_all(&output, r"C:\Users\[USER]")
+    // Absolute Windows paths on every drive, plus UNC shares. Redact the rest
+    // of the line as well because creator folder and media names can contain
+    // spaces and arbitrary private text.
+    let windows_path_re = Regex::new(r#"(?i)(?:[A-Z]:\\|\\\\[^\\\r\n]+\\)[^"\r\n]*"#).unwrap();
+    output = windows_path_re
+        .replace_all(&output, "[REDACTED_PATH]")
         .to_string();
+
+    // Common absolute Unix/macOS data locations. Preserve the delimiter so
+    // surrounding diagnostic text remains readable.
+    let unix_path_re =
+        Regex::new(r#"(?m)(^|[\s=:'"(])/(?:Users|home|mnt|media|var|tmp)/[^"\r\n]*"#).unwrap();
+    output = unix_path_re
+        .replace_all(&output, "${1}[REDACTED_PATH]")
+        .to_string();
+
+    // Relative media filenames still identify private content even when no
+    // absolute path was logged. Drop that full line rather than attempting to
+    // guess where a filename with spaces begins.
+    let media_line_re =
+        Regex::new(r"(?i)\.(?:mp4|mkv|mov|avi|webm|mp3|wav|m4a|flac|srt|vtt)(?:\b|$)").unwrap();
+    output = output
+        .lines()
+        .map(|line| {
+            if media_line_re.is_match(line) {
+                "[REDACTED_MEDIA_PATH_LINE]"
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
     // Named secrets (PROXY_API_KEY, client_secret, api_key)
     let b64_secret_re = Regex::new(
@@ -64,9 +91,28 @@ mod tests {
     }
 
     #[test]
-    fn test_preserves_normal_text() {
-        let input = "Downloaded VOD to E:\\ClipGoblin\\vod123.mp4";
+    fn test_scrubs_custom_drive_and_unc_paths() {
+        let input = "Downloaded VOD to E:\\Private Clips\\stream title.mp4\nOpened \\\\studio-nas\\captures\\secret.mov";
         let output = scrub_logs(input);
-        assert_eq!(input, output);
+        assert!(!output.contains("Private Clips"));
+        assert!(!output.contains("stream title"));
+        assert!(!output.contains("studio-nas"));
+        assert!(!output.contains("secret.mov"));
+        assert!(output.contains("[REDACTED_PATH]"));
+    }
+
+    #[test]
+    fn test_scrubs_unix_paths_and_relative_media_names() {
+        let input = "Opened /home/creator/My Clips/private.mkv\nRendered secret-stream.mp4 successfully\nNormal retry message";
+        let output = scrub_logs(input);
+        assert!(!output.contains("creator"));
+        assert!(!output.contains("secret-stream"));
+        assert!(output.contains("Normal retry message"));
+    }
+
+    #[test]
+    fn test_preserves_normal_diagnostic_text() {
+        let input = "Upload retry 2 failed with status 503";
+        assert_eq!(scrub_logs(input), input);
     }
 }

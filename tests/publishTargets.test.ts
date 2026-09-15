@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { captureUploadTargets, isUncertainUploadError, uploadAdapterPlatform, uploadTargetFields } from '../src/lib/publishTargets.ts'
+import { captureUploadTargets, isUncertainUploadError, missingUploadTargets, uploadAdapterPlatform, uploadTargetFields } from '../src/lib/publishTargets.ts'
 import { artifactUploadFields } from '../src/lib/exportArtifacts.ts'
 
 test('Both formats keep distinct artifacts and the account confirmed before export', () => {
@@ -22,6 +22,14 @@ test('missing accounts cannot silently bind an upload or schedule to a later con
   const targets = captureUploadTargets(['youtube', 'tiktok'], { tiktok: { account_id: 'tiktok-a' } })
   assert.throws(() => uploadTargetFields(targets.youtube), /Connect/)
   assert.deepEqual(uploadTargetFields(targets.tiktok), { target_account_id: 'tiktok-a' })
+})
+
+test('missing upload targets are detected before batch export or scheduling', () => {
+  assert.deepEqual(
+    missingUploadTargets(['youtube', 'tiktok'], { youtube: { account_id: 'channel-a' }, tiktok: null }),
+    ['tiktok'],
+  )
+  assert.deepEqual(missingUploadTargets(['youtube'], { youtube: { account_id: 'channel-a' } }), [])
 })
 
 test('uncertain outcomes require account inspection rather than the batch retry action', () => {

@@ -33,12 +33,19 @@ function env(overrides = {}) {
   };
 }
 
+function bugRequest(body, init = {}) {
+  return request("/reports/bug", body, {
+    ...init,
+    headers: { Authorization: `Bearer ${"t".repeat(24)}`, ...(init.headers || {}) },
+  });
+}
+
 function request(path, body, init = {}) {
   return new Request(`https://proxy.example${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...(init.headers || {}) },
     body: JSON.stringify(body),
     ...init,
+    headers: { "Content-Type": "application/json", ...(init.headers || {}) },
   });
 }
 
@@ -115,6 +122,13 @@ test("creates bug reports with Worker-held credentials and fixed labels", async 
   globalThis.fetch = async (url, init) => {
     const upstreamRequest = { url: String(url), init };
     upstreamRequests.push(upstreamRequest);
+    if (upstreamRequest.url === "https://id.twitch.tv/oauth2/validate") {
+      return new Response(JSON.stringify({
+        client_id: "twitch-client",
+        user_id: "1234",
+        login: "verified-tester",
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
     if (upstreamRequest.url.endsWith("/app/installations/789012/access_tokens")) {
       return new Response(JSON.stringify({
         token: "github-installation-token",
@@ -133,15 +147,15 @@ test("creates bug reports with Worker-held credentials and fixed labels", async 
   };
 
   const response = await worker.fetch(
-    request("/reports/bug", {
+    bugRequest({
       title: "Playback breaks @everyone",
       description: "The preview stays blank.",
       steps: "Open a clip.",
       expected: "The preview plays.",
       page: "Editor",
       severity: "Broken Feature",
-      reporterUsername: "tester",
-      reporterUserId: "1234",
+      reporterUsername: "spoofed-name",
+      reporterUserId: "spoofed-id",
       appVersion: "1.6.9",
       os: "windows",
       arch: "x86_64",
@@ -158,8 +172,10 @@ test("creates bug reports with Worker-held credentials and fixed labels", async 
     error: null,
   });
 
-  assert.equal(upstreamRequests.length, 2);
-  const [tokenRequest, issueRequest] = upstreamRequests;
+  assert.equal(upstreamRequests.length, 3);
+  const [identityRequest, tokenRequest, issueRequest] = upstreamRequests;
+  assert.equal(identityRequest.url, "https://id.twitch.tv/oauth2/validate");
+  assert.equal(identityRequest.init.headers.Authorization, `OAuth ${"t".repeat(24)}`);
   assert.equal(
     tokenRequest.url,
     "https://api.github.com/app/installations/789012/access_tokens",
@@ -201,20 +217,95 @@ test("creates bug reports with Worker-held credentials and fixed labels", async 
   assert.deepEqual(payload.labels, ["bug", "auto-reported", "severity:high"]);
   assert.equal(payload.title.includes("@everyone"), false);
   assert.equal(payload.body.includes("@everyone"), false);
+  assert.equal(payload.body.includes("verified-tester"), true);
+  assert.equal(payload.body.includes("spoofed-name"), false);
+});
+
+test("bug reports accept any valid Twitch identity bound to the ClipGoblin client", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    client_id: "twitch-client", user_id: "9999", login: "other-user",
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+  const body = {
+    title: "Playback issue", description: "Description", steps: "Steps",
+    expected: "Expected", page: "Editor", severity: "Broken Feature",
+    appVersion: "1.7.5", os: "windows", arch: "x86_64", logs: "logs",
+  };
+
+  const missing = await worker.fetch(request("/reports/bug", body), env());
+  assert.equal(missing.status, 401);
+  assert.deepEqual(await missing.json(), { error: "report_auth_required" });
+
+  const acceptedIdentity = await worker.fetch(
+    bugRequest({ ...body, page: "Admin" }),
+    env(),
+  );
+  assert.equal(acceptedIdentity.status, 400);
+  assert.deepEqual(await acceptedIdentity.json(), { error: "invalid_page" });
+
+  const wrongClient = await worker.fetch(
+    bugRequest(body),
+    env({ TWITCH_CLIENT_ID: "different-client" }),
+  );
+  assert.equal(wrongClient.status, 401);
+  assert.deepEqual(await wrongClient.json(), { error: "report_auth_invalid" });
+});
+
+test("bug reports retain IP, global, and authenticated-user rate limits", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    client_id: "twitch-client", user_id: "9999", login: "other-user",
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  const clientKeys = [];
+  const globalKeys = [];
+  const response = await worker.fetch(
+    bugRequest({
+      title: "Playback issue", description: "Description", steps: "Steps",
+      expected: "Expected", page: "Editor", severity: "Broken Feature",
+      appVersion: "1.7.5", os: "windows", arch: "x86_64", logs: "logs",
+    }),
+    env({
+      BUG_REPORT_RATE_LIMITER: {
+        limit: async ({ key }) => {
+          clientKeys.push(key);
+          return { success: !key.startsWith("twitch-user:") };
+        },
+      },
+      BUG_REPORT_GLOBAL_RATE_LIMITER: {
+        limit: async ({ key }) => {
+          globalKeys.push(key);
+          return { success: true };
+        },
+      },
+    }),
+  );
+
+  assert.equal(response.status, 429);
+  assert.equal(response.headers.get("retry-after"), "60");
+  assert.deepEqual(clientKeys, ["/reports/bug:unknown", "twitch-user:9999"]);
+  assert.deepEqual(globalKeys, ["/reports/bug"]);
 });
 
 test("rejects malformed GitHub App identifiers before contacting GitHub", async (t) => {
   const originalFetch = globalThis.fetch;
   t.after(() => { globalThis.fetch = originalFetch; });
 
-  let called = false;
-  globalThis.fetch = async () => {
-    called = true;
-    throw new Error("must not be called");
+  let calls = 0;
+  globalThis.fetch = async (url) => {
+    calls += 1;
+    if (String(url) === "https://id.twitch.tv/oauth2/validate") {
+      return new Response(JSON.stringify({ client_id: "twitch-client", user_id: "1234", login: "tester" }), {
+        status: 200, headers: { "Content-Type": "application/json" },
+      });
+    }
+    throw new Error("must not contact GitHub");
   };
 
   const response = await worker.fetch(
-    request("/reports/bug", {
+    bugRequest({
       title: "Playback issue",
       description: "The preview stays blank.",
       steps: "Open a clip.",
@@ -233,21 +324,26 @@ test("rejects malformed GitHub App identifiers before contacting GitHub", async 
 
   assert.equal(response.status, 502);
   assert.deepEqual(await response.json(), { error: "report_unavailable" });
-  assert.equal(called, false);
+  assert.equal(calls, 1);
 });
 
 test("rejects invalid bug-report fields before calling GitHub", async (t) => {
   const originalFetch = globalThis.fetch;
   t.after(() => { globalThis.fetch = originalFetch; });
 
-  let called = false;
-  globalThis.fetch = async () => {
-    called = true;
+  let calls = 0;
+  globalThis.fetch = async (url) => {
+    calls += 1;
+    if (String(url) === "https://id.twitch.tv/oauth2/validate") {
+      return new Response(JSON.stringify({ client_id: "twitch-client", user_id: "1234", login: "tester" }), {
+        status: 200, headers: { "Content-Type": "application/json" },
+      });
+    }
     throw new Error("must not be called");
   };
 
   const response = await worker.fetch(
-    request("/reports/bug", {
+    bugRequest({
       title: "Bad report",
       description: "Description",
       steps: "Steps",
@@ -266,7 +362,7 @@ test("rejects invalid bug-report fields before calling GitHub", async (t) => {
 
   assert.equal(response.status, 400);
   assert.deepEqual(await response.json(), { error: "invalid_page" });
-  assert.equal(called, false);
+  assert.equal(calls, 1);
 });
 
 test("release builds do not receive bug-report or proxy credentials", () => {
@@ -279,6 +375,10 @@ test("release builds do not receive bug-report or proxy credentials", () => {
     "utf8",
   );
   const workerSource = readFileSync(new URL("./index.js", import.meta.url), "utf8");
+
+  assert.match(desktopReporter, /\.bearer_auth\(&twitch_access_token\)/);
+  assert.match(desktopReporter, /reporter_username:\s*&username/);
+  assert.match(desktopReporter, /reporter_user_id:\s*&user_id/);
 
   for (const secretName of [
     "GITHUB_BUG_TOKEN",

@@ -66,9 +66,18 @@ export default {
     if (limited) return limited;
 
     try {
+      let reporterIdentity = null;
+      if (isBugReport) {
+        reporterIdentity = await authenticateBugReporter(request, env);
+        const userLimited = await enforceClientRateLimit(
+          env.BUG_REPORT_RATE_LIMITER,
+          `twitch-user:${reporterIdentity.userId}`,
+        );
+        if (userLimited) return userLimited;
+      }
       const body = await readJsonBody(request, maxBodyBytes);
       if (isBugReport) {
-        const fields = validateBugReport(body);
+        const fields = validateBugReport(body, reporterIdentity);
         const response = await createBugReport(fields, env, ctx);
         return jsonResponse(response, 201);
       }
@@ -111,6 +120,44 @@ async function enforceRateLimits(env, prefix, clientKey, globalKey) {
     return jsonResponse({ error: "rate_limited" }, 429, { "Retry-After": "60" });
   }
   return null;
+}
+
+async function enforceClientRateLimit(limiter, key) {
+  if (!limiter) {
+    console.error("BUG_REPORT rate-limit binding is missing");
+    return jsonResponse({ error: "service_unavailable" }, 503);
+  }
+  const result = await limiter.limit({ key });
+  return result.success ? null : jsonResponse(
+    { error: "rate_limited" },
+    429,
+    { "Retry-After": "60" },
+  );
+}
+
+async function authenticateBugReporter(request, env) {
+  const authorization = request.headers.get("authorization") || "";
+  const match = /^Bearer ([A-Za-z0-9._~-]{20,8192})$/.exec(authorization);
+  if (!match) throw new ClientError("report_auth_required", 401);
+
+  let response;
+  try {
+    response = await fetch("https://id.twitch.tv/oauth2/validate", {
+      headers: { Authorization: `OAuth ${match[1]}` },
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    });
+  } catch {
+    throw new ClientError("report_identity_unavailable", 502);
+  }
+  if (!response.ok) throw new ClientError("report_auth_invalid", 401);
+  const identity = await response.json().catch(() => null);
+  if (!identity
+    || typeof identity.user_id !== "string"
+    || typeof identity.login !== "string"
+    || identity.client_id !== env.TWITCH_CLIENT_ID) {
+    throw new ClientError("report_auth_invalid", 401);
+  }
+  return { userId: identity.user_id, username: identity.login };
 }
 
 async function readJsonBody(request, maxBodyBytes) {
@@ -190,7 +237,7 @@ function optionalString(body, key, maxLength) {
   return value;
 }
 
-function validateBugReport(body) {
+function validateBugReport(body, reporterIdentity) {
   const page = requiredString(body, "page", 32);
   if (!REPORT_PAGES.has(page)) throw new ClientError("invalid_page");
 
@@ -206,8 +253,8 @@ function validateBugReport(body) {
     page,
     severity,
     severityLabel,
-    reporterUsername: requiredString(body, "reporterUsername", 100),
-    reporterUserId: requiredString(body, "reporterUserId", 128),
+    reporterUsername: reporterIdentity.username,
+    reporterUserId: reporterIdentity.userId,
     appVersion: requiredString(body, "appVersion", 32),
     os: requiredString(body, "os", 32),
     arch: requiredString(body, "arch", 32),
