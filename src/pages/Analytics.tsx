@@ -169,7 +169,7 @@ export default function Analytics() {
             onClick={refreshStats}
             disabled={refreshing || completed.length === 0}
             className="v4-btn primary"
-            title={completed.length === 0 ? 'Ship at least one clip first' : 'Pull available view counts from YouTube'}
+            title={completed.length === 0 ? 'Ship at least one clip first' : 'Pull available view and like counts from YouTube and TikTok'}
           >
             <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
             {refreshing ? 'Refreshing...' : 'Refresh stats'}
@@ -179,7 +179,7 @@ export default function Analytics() {
 
       {totalViews == null && (
         <div className="v4-tip">
-          Click <b>Refresh stats</b> to pull YouTube view counts. TikTok analytics will be enabled after scope approval.
+          Click <b>Refresh stats</b> to pull available view and like counts from YouTube and TikTok.
         </div>
       )}
 

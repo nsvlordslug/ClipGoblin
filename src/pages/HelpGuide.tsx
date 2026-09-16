@@ -215,7 +215,7 @@ export default function HelpGuide() {
               Known limitations (pre-release)
             </p>
             <ul className="text-[11px] text-slate-500 space-y-1 ml-4 list-disc">
-              <li>TikTok view counts are unavailable until the optional video.list scope is approved.</li>
+              <li>TikTok analytics require reconnecting TikTok once to grant read-only access to public video metrics.</li>
               <li>TikTok Direct Post is approved. Available audiences still depend on the connected account, and accepted posts can take several minutes to appear.</li>
               <li>Waveform thumbnails on clip rows are decorative placeholders (not real audio shape yet).</li>
               <li>Not code-signed yet — Windows SmartScreen will show "Unknown publisher". Click <b>More info → Run anyway</b> once.</li>
@@ -264,10 +264,10 @@ export default function HelpGuide() {
             Lower ship rates usually mean sensitivity is too high.
           </FaqItem>}
           {matchesSearch('analytics view counts youtube tiktok video list') && <FaqItem q="How do I get real view counts on the Analytics page?">
-            Open Analytics and click <b>Refresh stats</b>. The app currently polls the
-            YouTube Data API using your existing scope. TikTok view counts will become
-            available after the optional <code className="text-violet-300">video.list</code>
-            scope is approved.
+            Open Analytics and click <b>Refresh stats</b>. ClipGoblin polls YouTube and
+            TikTok for available view and like counts. If TikTok stats are skipped,
+            reconnect TikTok once to grant the read-only <code className="text-violet-300">video.list</code>
+            permission.
           </FaqItem>}
           {matchesSearch('auto ship high confidence schedule') && <FaqItem q='What is "Auto-ship high-confidence"?'>
             When enabled in Settings → Detection, any clip scoring 90%+ confidence

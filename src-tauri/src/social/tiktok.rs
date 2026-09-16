@@ -41,9 +41,9 @@ const TIKTOK_PUBLISH_STATUS_URL: &str = "https://open.tiktokapis.com/v2/post/pub
 const CALLBACK_PORT: u16 = 17387;
 const REDIRECT_URI: &str = "https://nsvlordslug.github.io/ClipGoblin/callback/";
 
-// Match the scopes approved for the production TikTok app. `video.list` is
-// intentionally omitted until TikTok approves it in a future app revision.
-const SCOPES: &str = "user.info.basic,video.publish,video.upload";
+// Review candidate for TikTok Display API analytics. Do not ship this build
+// until TikTok approves `video.list` for the production app.
+const SCOPES: &str = "user.info.basic,video.publish,video.upload,video.list";
 
 pub(crate) fn video_stats_enabled() -> bool {
     SCOPES.split(',').any(|scope| scope == "video.list")
@@ -1011,7 +1011,7 @@ fn friendly_tiktok_error(code: &str, message: &str) -> String {
         "access_token_invalid" | "access_token_expired" =>
             "Your TikTok session has expired. Reconnect TikTok in Settings and try again.",
         "scope_not_authorized" | "scope_permission_missed" =>
-            "ClipGoblin doesn't have permission to post. Reconnect TikTok and approve all the requested permissions.",
+            "ClipGoblin doesn't have the TikTok permission needed for this action. Reconnect TikTok and approve all the requested permissions.",
         "spam_risk_too_many_posts" =>
             "TikTok is limiting this account for posting too often. Wait a while and try again.",
         "spam_risk_user_banned_from_posting" =>
@@ -1459,9 +1459,49 @@ mod error_message_tests {
     }
 
     #[test]
-    fn oauth_scopes_match_the_approved_live_app() {
-        assert_eq!(SCOPES, "user.info.basic,video.publish,video.upload");
-        assert!(!video_stats_enabled());
+    fn oauth_scopes_include_the_display_api_review_candidate() {
+        assert_eq!(
+            SCOPES,
+            "user.info.basic,video.publish,video.upload,video.list"
+        );
+        assert!(video_stats_enabled());
+    }
+
+    #[test]
+    fn display_api_stats_are_read_from_the_requested_video() {
+        let response = serde_json::json!({
+            "data": {
+                "videos": [{
+                    "id": "video-2",
+                    "view_count": 4321,
+                    "like_count": 210,
+                    "share_url": "https://www.tiktok.com/@creator/video/video-2"
+                }]
+            },
+            "error": { "code": "ok", "message": "" }
+        });
+
+        let stats = parse_video_stats_response(&response, "video-2").unwrap();
+        assert_eq!(stats.view_count, Some(4321));
+        assert_eq!(stats.like_count, Some(210));
+        assert_eq!(
+            stats.share_url.as_deref(),
+            Some("https://www.tiktok.com/@creator/video/video-2")
+        );
+    }
+
+    #[test]
+    fn display_api_errors_are_not_reported_as_empty_stats() {
+        let response = serde_json::json!({
+            "data": {},
+            "error": {
+                "code": "scope_not_authorized",
+                "message": "The user has not granted video.list"
+            }
+        });
+
+        let error = parse_video_stats_response(&response, "video-2").unwrap_err();
+        assert!(error.to_string().contains("permission needed for this action"));
     }
 
     #[test]
@@ -1846,6 +1886,38 @@ pub struct VideoStats {
     pub share_url: Option<String>,
 }
 
+fn parse_video_stats_response(
+    json: &serde_json::Value,
+    video_id: &str,
+) -> Result<VideoStats, AppError> {
+    let error_code = json["error"]["code"].as_str().unwrap_or("ok");
+    if error_code != "ok" {
+        let message = json["error"]["message"].as_str().unwrap_or("");
+        return Err(AppError::Api(friendly_tiktok_error(error_code, message)));
+    }
+
+    let video = json["data"]["videos"].as_array().and_then(|videos| {
+        videos
+            .iter()
+            .find(|video| video["id"].as_str() == Some(video_id))
+    });
+    match video {
+        None => Ok(VideoStats {
+            view_count: None,
+            like_count: None,
+            share_url: None,
+        }),
+        Some(v) => Ok(VideoStats {
+            view_count: v.get("view_count").and_then(|x| x.as_i64()),
+            like_count: v.get("like_count").and_then(|x| x.as_i64()),
+            share_url: v
+                .get("share_url")
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
+        }),
+    }
+}
+
 /// Extract a TikTok video ID from the final `video_url` we stored.
 /// Handles both canonical formats:
 ///   https://www.tiktok.com/@user/video/7296847283472837373
@@ -1969,24 +2041,5 @@ pub async fn fetch_video_stats(access_token: &str, video_id: &str) -> Result<Vid
         .json()
         .await
         .map_err(|e| AppError::Api(format!("TikTok stats parse: {}", e)))?;
-    let video = json["data"]["videos"].as_array().and_then(|videos| {
-        videos
-            .iter()
-            .find(|video| video["id"].as_str() == Some(video_id))
-    });
-    match video {
-        None => Ok(VideoStats {
-            view_count: None,
-            like_count: None,
-            share_url: None,
-        }),
-        Some(v) => Ok(VideoStats {
-            view_count: v.get("view_count").and_then(|x| x.as_i64()),
-            like_count: v.get("like_count").and_then(|x| x.as_i64()),
-            share_url: v
-                .get("share_url")
-                .and_then(|x| x.as_str())
-                .map(str::to_string),
-        }),
-    }
+    parse_video_stats_response(&json, video_id)
 }

@@ -42,22 +42,22 @@
   <header><a href="index.html">&larr; Back to ClipGoblin</a></header>
   <main>
     <h1>Privacy Policy</h1>
-    <p class="updated">Last updated: March 2025</p>
+    <p class="updated">Last updated: September 16, 2026</p>
 
     <h2>1. Data Collection</h2>
-    <p>ClipGoblin runs entirely on your local machine. We do not collect, store, or transmit any personal data to our servers. There are no analytics, tracking pixels, or telemetry of any kind.</p>
+    <p>ClipGoblin processes videos and stores app data on your local machine. We do not collect product-usage analytics, use tracking pixels, or run behavioral telemetry.</p>
 
     <h2>2. Third-Party API Calls</h2>
     <p>When you use AI-powered features (caption and title generation), your clip transcript data is sent directly to the AI provider you configured (e.g., Anthropic Claude) using your own API key. ClipGoblin does not proxy, log, or intercept these requests.</p>
 
     <h2>3. Platform Authentication</h2>
-    <p>When you connect social accounts (YouTube, TikTok, Instagram), ClipGoblin uses OAuth to obtain access tokens. These tokens are stored locally on your machine in an encrypted database and are only used to upload content on your behalf. Tokens are never sent to ClipGoblin servers.</p>
+    <p>When you connect social accounts such as Twitch, YouTube, or TikTok, ClipGoblin uses OAuth to obtain access tokens. Tokens are stored locally on your machine in an encrypted database and are used only for actions you request. OAuth authorization codes and refresh tokens pass through ClipGoblin's rate-limited authentication proxy only to exchange them with the selected platform; the proxy does not store or log those credentials. Requested actions include reading account information, fetching Twitch content, uploading videos, and, when you click Refresh stats, reading available public view and like counts for your own connected account's videos.</p>
 
     <h2>4. Local Storage</h2>
-    <p>All app data (clips, settings, API keys, OAuth tokens) is stored in a local SQLite database on your computer. This data never leaves your machine except when explicitly uploading to platforms you have connected.</p>
+    <p>All app data (clips, settings, API keys, OAuth tokens, and retrieved video metrics) is stored in a local SQLite database on your computer. Data leaves your machine only when you request a feature that calls a connected platform or configured provider.</p>
 
     <h2>5. Twitch Data</h2>
-    <p>ClipGoblin downloads Twitch VODs using publicly available URLs. Chat replay data and stream metadata are fetched from Twitch's public APIs. No Twitch login is required and no Twitch credentials are stored.</p>
+    <p>ClipGoblin uses the connected Twitch account to list eligible VODs and retrieve the stream information needed for local clip creation. Downloaded media, chat replay data, and derived analysis stay on your machine unless you explicitly send an export to another connected platform.</p>
 
     <h2>6. Children's Privacy</h2>
     <p>ClipGoblin is not directed at children under 13. We do not knowingly collect any information from children.</p>
@@ -68,6 +68,6 @@
     <h2>8. Contact</h2>
     <p>For privacy questions, open an issue on our <a href="https://github.com/nsvlordslug/ClipGoblin">GitHub repository</a>.</p>
   </main>
-  <footer>&copy; 2025 ClipGoblin</footer>
+  <footer>&copy; 2026 ClipGoblin</footer>
 </body>
 </html>
