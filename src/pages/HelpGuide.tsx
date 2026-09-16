@@ -216,7 +216,7 @@ export default function HelpGuide() {
             </p>
             <ul className="text-[11px] text-slate-500 space-y-1 ml-4 list-disc">
               <li>TikTok view counts are unavailable until the optional video.list scope is approved.</li>
-              <li>TikTok may limit posts to private while Direct Post approval is pending. Accepted posts can take several minutes to appear.</li>
+              <li>TikTok Direct Post is approved. Available audiences still depend on the connected account, and accepted posts can take several minutes to appear.</li>
               <li>Waveform thumbnails on clip rows are decorative placeholders (not real audio shape yet).</li>
               <li>Not code-signed yet — Windows SmartScreen will show "Unknown publisher". Click <b>More info → Run anyway</b> once.</li>
             </ul>

@@ -17,28 +17,13 @@ test('TikTok publishing requires explicit privacy and interaction choices', () =
   assert.equal(EMPTY_TIKTOK_COMPLIANCE.disableStitch, true)
 })
 
-test('pending production review preserves all TikTok-returned audience choices', () => {
+test('approved Direct Post preserves all TikTok-returned audience choices', () => {
   assert.deepEqual(
-    visibleTikTokPrivacyOptions(
-      ['PUBLIC_TO_EVERYONE', 'MUTUAL_FOLLOW_FRIENDS', 'SELF_ONLY'],
-      true,
-      false,
-    ),
+    visibleTikTokPrivacyOptions(['PUBLIC_TO_EVERYONE', 'MUTUAL_FOLLOW_FRIENDS', 'SELF_ONLY']),
     ['PUBLIC_TO_EVERYONE', 'MUTUAL_FOLLOW_FRIENDS', 'SELF_ONLY'],
   )
 })
 
-test('local Sandbox review exposes every privacy option returned by TikTok', () => {
-  const options = ['PUBLIC_TO_EVERYONE', 'MUTUAL_FOLLOW_FRIENDS', 'SELF_ONLY']
-  assert.deepEqual(visibleTikTokPrivacyOptions(options, true, true), options)
-})
-
-test('approved production exposes every privacy option returned by TikTok', () => {
-  const options = ['PUBLIC_TO_EVERYONE', 'SELF_ONLY']
-  assert.deepEqual(visibleTikTokPrivacyOptions(options, false, false), options)
-})
-
-test('pending review preserves TikTok options when private posting is unavailable', () => {
-  const options = ['PUBLIC_TO_EVERYONE']
-  assert.deepEqual(visibleTikTokPrivacyOptions(options, true, false), options)
+test('approved Direct Post does not invent an audience when TikTok returns none', () => {
+  assert.deepEqual(visibleTikTokPrivacyOptions([]), [])
 })

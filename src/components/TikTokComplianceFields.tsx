@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { LockKeyhole, Send, Smartphone, UserRound } from 'lucide-react'
+import { Send, Smartphone, UserRound } from 'lucide-react'
 import {
   visibleTikTokPrivacyOptions,
   type TikTokComplianceValue,
@@ -29,12 +29,6 @@ const PRIVACY_LABELS: Record<string, string> = {
 // TikTok-required consent links (Content Sharing Guidelines).
 const MUSIC_URL = 'https://www.tiktok.com/legal/page/global/music-usage-confirmation/en'
 const BRANDED_POLICY_URL = 'https://www.tiktok.com/legal/page/global/bc-policy/en'
-
-// TikTok restricts unaudited Direct Post clients to SELF_ONLY. Flip this after
-// TikTok approves ClipGoblin's Content Posting API audit.
-const DIRECT_POST_AUDIT_PENDING = true
-const SANDBOX_REVIEW_MODE =
-  import.meta.env.DEV && import.meta.env.VITE_TIKTOK_SANDBOX_REVIEW === '1'
 
 // mm:ss formatter for the per-account max-duration hint.
 function fmtDuration(totalSec: number): string {
@@ -104,8 +98,6 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
   // branded content is incompatible with an "Only me" audience; the clip must
   // not exceed the account's max post duration.
   const isDraft = value.publishMode === 'draft'
-  const audienceUnavailable = DIRECT_POST_AUDIT_PENDING && !SANDBOX_REVIEW_MODE
-    && value.privacyLevel != null && value.privacyLevel !== 'SELF_ONLY'
   const brandedOnPrivate = value.brandedContent && value.privacyLevel === 'SELF_ONLY'
   const discloseMissing = value.discloseContent && !value.yourBrand && !value.brandedContent
   const maxDurationSec = info?.max_video_post_duration_sec ?? 0
@@ -113,17 +105,13 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
   const draftDurationExceeded = clipDurationSec != null && clipDurationSec > 600
   const identity = describeTikTokIdentity(info?.creator_username, info?.creator_nickname)
   const privacyOptions = info
-    ? visibleTikTokPrivacyOptions(
-        info.privacy_level_options,
-        DIRECT_POST_AUDIT_PENDING,
-        SANDBOX_REVIEW_MODE,
-      )
+    ? visibleTikTokPrivacyOptions(info.privacy_level_options)
     : []
   const valid = !!info && !error && identity.verified && (isDraft
     ? !draftDurationExceeded
     : value.privacyLevel != null
       && privacyOptions.includes(value.privacyLevel)
-      && !audienceUnavailable && !discloseMissing && !brandedOnPrivate && !directDurationExceeded)
+      && !discloseMissing && !brandedOnPrivate && !directDurationExceeded)
   useEffect(() => {
     onValidityChange?.(valid)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -245,17 +233,6 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
         </p>
       )}
 
-      {DIRECT_POST_AUDIT_PENDING && !SANDBOX_REVIEW_MODE && (
-        <div className="flex items-start gap-2 rounded border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[10px] leading-relaxed text-amber-200">
-          <LockKeyhole className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-          <span>
-            TikTok approval is pending. TikTok only permits <strong>Only me (private)</strong>
-            {' '}posts while ClipGoblin's Direct Post integration is under review. Wider audiences
-            will unlock after TikTok approves the app.
-          </span>
-        </div>
-      )}
-
       {/* Privacy level — options come straight from creator_info */}
       <div>
         <label className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold block mb-1">
@@ -277,12 +254,6 @@ export default function TikTokComplianceFields({ value, onChange, onValidityChan
             >{PRIVACY_LABELS[lvl] || lvl}</option>
           ))}
         </select>
-        {audienceUnavailable && (
-          <p className="mt-1 text-[10px] text-amber-400">
-            TikTok returned this audience, but ClipGoblin cannot publish to it before approval.
-            Choose Only me for a private post, or Send to drafts to finish in TikTok.
-          </p>
-        )}
       </div>
 
       {/* Interaction toggles — greyed + forced off where the account restricts them */}

@@ -24,10 +24,6 @@ export const EMPTY_TIKTOK_COMPLIANCE: TikTokComplianceValue = {
   brandedContent: false,
 }
 
-export function visibleTikTokPrivacyOptions(
-  options: string[],
-  _auditPending: boolean,
-  _sandboxReviewMode: boolean,
-): string[] {
+export function visibleTikTokPrivacyOptions(options: string[]): string[] {
   return [...options]
 }
