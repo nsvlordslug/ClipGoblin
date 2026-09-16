@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
+import { withStartupRetry } from '../lib/startupRetry'
 import type { TwitchChannel, Vod, Highlight, Clip } from '../types'
 import { parseStoredTags } from '../lib/tags'
 import {
@@ -115,7 +116,9 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     const task = (async () => {
       try {
-        const user = await invoke<TwitchChannel | null>('get_logged_in_user')
+        const user = await withStartupRetry(() =>
+          invoke<TwitchChannel | null>('get_logged_in_user'),
+        )
         const nextUser = user || null
         const previousAccountId = currentAccountId(get())
         const nextAccountId = nextUser?.id ?? null
@@ -142,7 +145,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
       } catch (err) {
         console.error('Failed to check login:', err)
-        set({ loginChecked: true })
       }
     })()
 

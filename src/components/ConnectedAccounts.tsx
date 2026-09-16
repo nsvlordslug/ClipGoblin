@@ -6,7 +6,7 @@ import Tooltip from './Tooltip'
 import { describeTikTokIdentity } from '../lib/tiktokIdentity'
 
 export default function ConnectedAccounts() {
-  const { accounts, loading, load, connect, disconnect } = usePlatformStore()
+  const { accounts, loading, loaded, load, connect, disconnect } = usePlatformStore()
   const [tiktokHandle, setTiktokHandle] = useState('')
   const [handleSaved, setHandleSaved] = useState(false)
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -58,8 +58,10 @@ export default function ConnectedAccounts() {
               <div className="min-w-0">
                 <div className="v4-setting-name">{info.name}</div>
                 <div className="v4-setting-desc">
-                  {isLoading
-                    ? 'Connecting...'
+                  {!loaded
+                    ? 'Loading saved account...'
+                    : isLoading
+                    ? account ? 'Verifying account...' : 'Connecting...'
                     : account
                       ? key === 'tiktok'
                         ? tiktokIdentity?.primary
@@ -100,7 +102,7 @@ export default function ConnectedAccounts() {
               </div>
             </div>
 
-            {isLoading ? (
+            {!loaded || isLoading ? (
               <Loader2 className="w-4 h-4 text-slate-400 animate-spin" />
             ) : account ? (
               <div className="flex items-center gap-2">

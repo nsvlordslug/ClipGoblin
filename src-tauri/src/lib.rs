@@ -104,7 +104,8 @@ use commands::settings::{
 use commands::social::{
     connect_platform, disconnect_platform, get_all_connected_accounts, get_clip_upload_history,
     get_connected_account, get_upload_status, refresh_upload_stats, restore_deleted_vods,
-    tiktok_get_creator_info, upload_to_platform, recover_youtube_upload, review_youtube_upload_absent,
+    repair_tiktok_account_identity, tiktok_get_creator_info, upload_to_platform,
+    recover_youtube_upload, review_youtube_upload_absent,
 };
 use commands::sources::{
     create_stream_marker, get_external_source_configs, get_recorder_connection_settings,
@@ -287,6 +288,7 @@ pub fn run() {
             review_youtube_upload_absent,
             get_upload_status,
             tiktok_get_creator_info,
+            repair_tiktok_account_identity,
             get_clip_upload_history,
             restore_deleted_vods,
             refresh_upload_stats,

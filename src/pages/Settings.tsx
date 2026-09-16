@@ -675,10 +675,10 @@ export default function SettingsPage() {
           </div>
           <span
             className={`v4-connected-pill ${
-              ai.isMisconfigured() ? 'offline' : ai.effectiveMode() === 'free' ? 'idle' : ''
+              !ai.loaded ? 'idle' : ai.isMisconfigured() ? 'offline' : ai.effectiveMode() === 'free' ? 'idle' : ''
             }`}
           >
-            ● {ai.isMisconfigured() ? 'MISCONFIGURED' : ai.effectiveMode() === 'free' ? 'IDLE' : 'ACTIVE'}
+            ● {!ai.loaded ? 'LOADING' : ai.isMisconfigured() ? 'MISCONFIGURED' : ai.effectiveMode() === 'free' ? 'IDLE' : 'ACTIVE'}
           </span>
         </div>
 

@@ -237,6 +237,33 @@ pub async fn tiktok_get_creator_info(
     })
 }
 
+/// Repairs the verified TikTok handle for connections created before the
+/// creator-info identity was saved. This never starts OAuth or uploads media.
+#[tauri::command]
+pub async fn repair_tiktok_account_identity(
+    db: State<'_, DbConn>,
+) -> Result<ConnectedAccount, String> {
+    let rt = tokio::runtime::Handle::current();
+    let info = tokio::task::block_in_place(|| {
+        rt.block_on(async {
+            let token = social::tiktok::ensure_fresh_access_token(&*db)
+                .await
+                .map_err(|e| e.to_string())?;
+            social::tiktok::fetch_creator_info_for_connection(&token)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    })?;
+
+    social::tiktok::persist_creator_identity(&*db, &info).map_err(|e| e.to_string())?;
+    let adapter = social::get_adapter("tiktok").map_err(|e| e.to_string())?;
+    let conn = db.lock().map_err(|e| format!("DB lock error: {}", e))?;
+    adapter
+        .get_account(&conn)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "TikTok account is not connected".to_string())
+}
+
 /// Check if a clip has already been uploaded to a platform.
 /// Returns the upload history row if found, None otherwise.
 #[tauri::command]

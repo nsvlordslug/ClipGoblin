@@ -763,6 +763,37 @@ pub struct TikTokCreatorInfo {
     pub max_video_post_duration_sec: u64,
 }
 
+pub fn persist_creator_identity(
+    db_conn: &crate::DbConn,
+    info: &TikTokCreatorInfo,
+) -> Result<(), AppError> {
+    let handle = verified_creator_username(&info.creator_username).ok_or_else(|| {
+        AppError::Api("TikTok did not return a verifiable account handle".into())
+    })?;
+    let nickname = info.creator_nickname.trim();
+    let conn = db_conn
+        .lock()
+        .map_err(|e| AppError::Database(format!("DB lock: {}", e)))?;
+    let connected = db::get_setting(&conn, "tiktok_open_id")
+        .map_err(|e| AppError::Database(e.to_string()))?
+        .is_some_and(|open_id| !open_id.trim().is_empty());
+    if !connected {
+        return Err(AppError::AuthExpired(
+            "Connect TikTok before verifying the account handle".into(),
+        ));
+    }
+
+    db::save_setting(&conn, "tiktok_creator_username", &handle)
+        .map_err(|e| AppError::Database(e.to_string()))?;
+    db::save_setting(&conn, "tiktok_handle", &handle)
+        .map_err(|e| AppError::Database(e.to_string()))?;
+    if !nickname.is_empty() {
+        db::save_setting(&conn, "tiktok_display_name", nickname)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+    }
+    Ok(())
+}
+
 fn is_trusted_creator_avatar_url(raw_url: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(raw_url) else {
         return false;
@@ -851,7 +882,7 @@ async fn resolve_creator_avatar_url(remote_avatar_url: String, mode: CreatorAvat
         .unwrap_or(remote_avatar_url)
 }
 
-async fn fetch_creator_info_for_connection(
+pub(crate) async fn fetch_creator_info_for_connection(
     access_token: &str,
 ) -> Result<TikTokCreatorInfo, AppError> {
     fetch_creator_info_with_avatar_mode(access_token, CreatorAvatarMode::Deferred).await
@@ -1441,6 +1472,42 @@ mod error_message_tests {
         );
         assert_eq!(verified_creator_username("   "), None);
         assert_eq!(verified_creator_username("@@  "), None);
+    }
+
+    #[test]
+    fn creator_identity_repair_saves_only_api_verified_identity() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO settings (key, value) VALUES ('tiktok_open_id', 'connected-account');",
+        )
+        .unwrap();
+        let db_conn = std::sync::Mutex::new(conn);
+        let info = TikTokCreatorInfo {
+            creator_nickname: "Lord Slug".into(),
+            creator_username: " @lord_slug ".into(),
+            creator_avatar_url: String::new(),
+            privacy_level_options: vec!["PUBLIC_TO_EVERYONE".into()],
+            comment_disabled: false,
+            duet_disabled: false,
+            stitch_disabled: false,
+            max_video_post_duration_sec: 60,
+        };
+
+        persist_creator_identity(&db_conn, &info).unwrap();
+        let conn = db_conn.lock().unwrap();
+        assert_eq!(
+            db::get_setting(&conn, "tiktok_creator_username")
+                .unwrap()
+                .as_deref(),
+            Some("lord_slug")
+        );
+        assert_eq!(
+            db::get_setting(&conn, "tiktok_display_name")
+                .unwrap()
+                .as_deref(),
+            Some("Lord Slug")
+        );
     }
 
     #[test]

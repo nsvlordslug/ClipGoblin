@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
+import { withStartupRetry } from '../lib/startupRetry'
 
 // ── Types (match Rust social::ConnectedAccount) ──
 
@@ -36,6 +37,7 @@ export const PLATFORM_INFO: Record<string, { name: string; color: string; icon: 
 interface PlatformState {
   accounts: Record<string, ConnectedAccount | null>
   loading: Record<string, boolean>
+  loaded: boolean
   load: () => Promise<void>
   connect: (platform: string) => Promise<ConnectedAccount>
   disconnect: (platform: string) => Promise<void>
@@ -43,20 +45,54 @@ interface PlatformState {
   getAccount: (platform: string) => ConnectedAccount | null
 }
 
+let loadInFlight: Promise<void> | null = null
+
 export const usePlatformStore = create<PlatformState>((set, get) => ({
   accounts: {},
   loading: {},
+  loaded: false,
 
   load: async () => {
-    try {
-      const accounts = await invoke<ConnectedAccount[]>('get_all_connected_accounts')
-      const map: Record<string, ConnectedAccount | null> = {}
-      for (const acct of accounts) {
-        map[acct.platform] = acct
+    if (loadInFlight) return loadInFlight
+
+    const task = (async () => {
+      try {
+        const accounts = await withStartupRetry(() =>
+          invoke<ConnectedAccount[]>('get_all_connected_accounts'),
+        )
+        const map: Record<string, ConnectedAccount | null> = {}
+        for (const acct of accounts) {
+          map[acct.platform] = acct
+        }
+        set({ accounts: map, loaded: true })
+
+        const tiktok = map.tiktok
+        if (tiktok && !tiktok.account_handle?.trim()) {
+          set(s => ({ loading: { ...s.loading, tiktok: true } }))
+          try {
+            const repaired = await withStartupRetry(
+              () => invoke<ConnectedAccount>('repair_tiktok_account_identity'),
+              [0, 250, 750],
+            )
+            set(s => ({
+              accounts: { ...s.accounts, tiktok: repaired },
+              loading: { ...s.loading, tiktok: false },
+            }))
+          } catch (error) {
+            console.warn('TikTok account identity could not be refreshed:', error)
+            set(s => ({ loading: { ...s.loading, tiktok: false } }))
+          }
+        }
+      } catch (e) {
+        console.error('Failed to load connected accounts:', e)
       }
-      set({ accounts: map })
-    } catch (e) {
-      console.error('Failed to load connected accounts:', e)
+    })()
+
+    loadInFlight = task
+    try {
+      await task
+    } finally {
+      if (loadInFlight === task) loadInFlight = null
     }
   },
 

@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
+import { withStartupRetry } from '../lib/startupRetry'
 
 // ── Types ──
 
@@ -120,13 +121,17 @@ export const useAiStore = create<AiStore>((set, get) => ({
 
   load: async () => {
     try {
-      const raw = await invoke<string | null>('get_setting', { key: SETTINGS_KEY })
+      const raw = await withStartupRetry(() =>
+        invoke<string | null>('get_setting', { key: SETTINGS_KEY }),
+      )
       if (raw) {
         const parsed = JSON.parse(raw) as Partial<AiSettings>
         set({ settings: { ...AI_DEFAULTS, ...parsed }, loaded: true })
       } else {
         // Migrate legacy claude_api_key if it exists
-        const legacyKey = await invoke<string | null>('get_setting', { key: 'claude_api_key' }).catch(() => null)
+        const legacyKey = await withStartupRetry(() =>
+          invoke<string | null>('get_setting', { key: 'claude_api_key' }),
+        ).catch(() => null)
         if (legacyKey) {
           const migrated = { ...AI_DEFAULTS, provider: 'claude' as AiProvider, claudeApiKey: legacyKey }
           set({ settings: migrated, loaded: true })
@@ -136,8 +141,8 @@ export const useAiStore = create<AiStore>((set, get) => ({
           set({ loaded: true })
         }
       }
-    } catch {
-      set({ loaded: true })
+    } catch (error) {
+      console.error('Failed to load saved AI settings:', error)
     }
   },
 
@@ -193,6 +198,7 @@ export const useAiStore = create<AiStore>((set, get) => ({
   },
 
   statusText: () => {
+    if (!get().loaded) return 'Loading saved AI settings...'
     const s = get().settings
     if (s.provider === 'free') return 'Current mode: Free (no cost)'
     const name = PROVIDER_META[s.provider].name
@@ -204,6 +210,6 @@ export const useAiStore = create<AiStore>((set, get) => ({
 
   isMisconfigured: () => {
     const s = get().settings
-    return s.provider !== 'free' && !get().activeKey()
+    return get().loaded && s.provider !== 'free' && !get().activeKey()
   },
 }))
