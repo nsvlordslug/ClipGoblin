@@ -9,6 +9,8 @@ import { PLATFORM_INFO } from '../stores/platformStore'
 import ImportVodDialog from '../components/ImportVodDialog'
 import TesterChecklist from '../components/TesterChecklist'
 import heroGoblinImg from '../assets/hero-goblin-v2.png'
+import heroZombieGoblinImg from '../assets/hero-goblin-zombie.png'
+import { useUiStore } from '../stores/uiStore'
 import {
   buildDashboardInbox,
   getDashboardConfidence,
@@ -38,6 +40,7 @@ function fmtCountdown(targetISO: string): string {
 }
 
 export default function Dashboard() {
+  const theme = useUiStore(s => s.settings.theme)
   const { channels, vods, highlights, clips, checkLogin, ensureVods, fetchHighlights, fetchClips, fetchVods, loggedInUser } =
     useAppStore()
   const { uploads: scheduledUploads, load: loadSchedules } = useScheduleStore()
@@ -280,7 +283,7 @@ export default function Dashboard() {
       {/* ═════ HERO BANNER ═════ */}
       <section className="v4-hero-banner">
         <div className="v4-hero-goblin">
-          <img src={heroGoblinImg} alt="ClipGoblin" />
+          <img src={theme === 'zombie' ? heroZombieGoblinImg : heroGoblinImg} alt="ClipGoblin" />
         </div>
         <div className="v4-hero-content">
           <span className="v4-hero-eyebrow">

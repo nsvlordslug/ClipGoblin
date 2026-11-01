@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 
 // ── Types ──
 
-export type ThemeMode = 'dark' | 'light'
+export type ThemeMode = 'dark' | 'light' | 'zombie'
 
 export interface UiSettings {
   /** Show hover tooltips throughout the app. Default: true. */
@@ -88,9 +88,9 @@ export function tryAdvanceTapCounter(
 /** Sync the theme class on <html> so CSS variables switch globally. */
 function applyThemeToDOM(theme: ThemeMode) {
   const root = document.documentElement
-  root.classList.remove('theme-dark', 'theme-light')
+  root.classList.remove('theme-dark', 'theme-light', 'theme-zombie')
   root.classList.add(`theme-${theme}`)
-  root.style.colorScheme = theme
+  root.style.colorScheme = theme === 'light' ? 'light' : 'dark'
 }
 
 // ── Store ──

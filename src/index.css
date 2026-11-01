@@ -2369,3 +2369,203 @@ textarea.v4-input { resize: vertical; min-height: 120px; }
 /* Wave bars & gradients on thumbs stay bright — nothing to change */
 
 /* Toggle knob color flip not required — white circle works both modes */
+
+/* ──────────────────────────────────────────────────────────────
+   Appearance theme picker
+   ────────────────────────────────────────────────────────────── */
+.v4-theme-options {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--color-surface-700);
+  border-radius: 12px;
+  background: var(--color-surface-900);
+}
+
+.v4-theme-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--color-slate-400);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: color 0.18s ease, background 0.18s ease, border-color 0.18s ease;
+}
+
+.v4-theme-option:hover {
+  color: var(--color-slate-100);
+  background: var(--color-surface-800);
+}
+
+.v4-theme-option.active {
+  color: var(--color-slate-50);
+  border-color: var(--color-violet-500);
+  background: color-mix(in oklab, var(--color-violet-500) 18%, transparent);
+}
+
+/* ──────────────────────────────────────────────────────────────
+   Zombie theme — neon makeup palette from the approved mockup
+   ────────────────────────────────────────────────────────────── */
+.theme-zombie {
+  color-scheme: dark;
+
+  --color-surface-50: oklch(0.98 0.01 330);
+  --color-surface-100: oklch(0.94 0.02 330);
+  --color-surface-200: oklch(0.86 0.03 320);
+  --color-surface-300: oklch(0.74 0.04 315);
+  --color-surface-400: oklch(0.62 0.05 312);
+  --color-surface-500: oklch(0.50 0.07 308);
+  --color-surface-600: oklch(0.39 0.10 305);
+  --color-surface-700: oklch(0.29 0.10 304);
+  --color-surface-800: oklch(0.19 0.06 302);
+  --color-surface-850: oklch(0.145 0.045 302);
+  --color-surface-900: oklch(0.105 0.032 300);
+  --color-surface-950: oklch(0.065 0.018 300);
+
+  --color-violet-400: oklch(0.75 0.25 330);
+  --color-violet-500: oklch(0.68 0.30 335);
+  --color-violet-600: oklch(0.59 0.29 338);
+  --color-brand-400: oklch(0.75 0.25 330);
+  --color-brand-500: oklch(0.68 0.30 335);
+  --color-brand-600: oklch(0.59 0.29 338);
+  --color-pink-400: oklch(0.76 0.27 345);
+  --color-pink-500: oklch(0.69 0.30 345);
+  --color-pink-600: oklch(0.60 0.29 345);
+  --color-green-400: oklch(0.91 0.27 128);
+  --color-green-500: oklch(0.84 0.29 128);
+  --color-green-600: oklch(0.72 0.25 128);
+}
+
+.theme-zombie body {
+  background-color: #07060b;
+  background-image:
+    radial-gradient(circle at 8% 12%, rgba(190, 255, 24, 0.12), transparent 24%),
+    radial-gradient(circle at 88% 18%, rgba(255, 28, 190, 0.16), transparent 28%),
+    radial-gradient(circle at 72% 88%, rgba(126, 34, 206, 0.14), transparent 30%),
+    repeating-linear-gradient(132deg, transparent 0 74px, rgba(255, 34, 190, 0.018) 75px 77px, transparent 78px 132px);
+}
+
+.theme-zombie aside {
+  border-right-color: rgba(255, 35, 194, 0.78) !important;
+  background-color: #09070f !important;
+  background-image:
+    linear-gradient(160deg, rgba(255, 30, 190, 0.08), transparent 24%),
+    linear-gradient(22deg, transparent 68%, rgba(177, 255, 20, 0.08) 69%, transparent 72%);
+  box-shadow: 8px 0 28px rgba(255, 30, 190, 0.08);
+}
+
+.theme-zombie main {
+  background-color: #07060b !important;
+  background-image:
+    radial-gradient(circle at 100% 0%, rgba(255, 25, 185, 0.08), transparent 34%),
+    radial-gradient(circle at 0% 100%, rgba(181, 255, 22, 0.05), transparent 32%);
+}
+
+.theme-zombie .v4-sidebar-brand {
+  border-bottom-color: rgba(255, 40, 196, 0.58);
+  box-shadow: 0 10px 28px rgba(255, 26, 190, 0.07);
+}
+
+.theme-zombie .v4-sidebar-logo {
+  border-color: #ff2bc2;
+  background: #0b0712;
+  box-shadow:
+    0 0 0 1px rgba(184, 255, 28, 0.65),
+    0 0 16px rgba(255, 35, 194, 0.38),
+    0 0 30px rgba(178, 255, 22, 0.12);
+}
+
+.theme-zombie .v4-sidebar-logo img {
+  transform: scale(1.07);
+}
+
+.theme-zombie .text-clip {
+  color: #f7efff;
+  text-shadow: 0 0 12px rgba(255, 50, 205, 0.48);
+}
+
+.theme-zombie .text-goblin {
+  color: #b9ff20;
+  text-shadow: 0 0 12px rgba(185, 255, 32, 0.42);
+}
+
+.theme-zombie .v4-sidebar-sub,
+.theme-zombie .sidebar-subtitle {
+  color: rgba(222, 191, 255, 0.68);
+}
+
+.theme-zombie .v4-hero-banner {
+  border: 2px solid #ff2ac3;
+  background:
+    linear-gradient(112deg, rgba(181, 255, 21, 0.09), transparent 25%),
+    linear-gradient(290deg, rgba(255, 34, 192, 0.10), transparent 34%),
+    #09070f;
+  box-shadow:
+    inset 0 0 0 1px rgba(185, 255, 28, 0.30),
+    0 0 24px rgba(255, 28, 189, 0.12);
+}
+
+.theme-zombie .v4-hero-banner::before {
+  top: -65px;
+  left: -15px;
+  width: 300px;
+  height: 300px;
+  background:
+    radial-gradient(circle, rgba(255, 30, 194, 0.25) 0%, transparent 58%),
+    conic-gradient(from 225deg, transparent, rgba(184, 255, 24, 0.12), transparent 28%);
+}
+
+.theme-zombie .v4-hero-goblin img {
+  transform: scale(1.10);
+  filter:
+    drop-shadow(0 10px 24px rgba(255, 31, 191, 0.36))
+    drop-shadow(0 0 16px rgba(184, 255, 25, 0.18));
+}
+
+.theme-zombie .v4-hero-eyebrow {
+  color: #b9ff20;
+  border-color: rgba(185, 255, 32, 0.62);
+  background: rgba(148, 210, 20, 0.10);
+  box-shadow: 0 0 14px rgba(185, 255, 32, 0.10);
+}
+
+.theme-zombie .v4-pipeline,
+.theme-zombie .v4-panel,
+.theme-zombie .v4-section,
+.theme-zombie .v4-inbox-panel,
+.theme-zombie .v4-vod-card,
+.theme-zombie .v4-lib-item,
+.theme-zombie .v4-sched-slot,
+.theme-zombie .v4-big-chart-card,
+.theme-zombie .v4-insight {
+  border-color: rgba(255, 41, 194, 0.52);
+  box-shadow:
+    inset 0 0 0 1px rgba(176, 255, 24, 0.045),
+    0 8px 28px rgba(0, 0, 0, 0.20);
+}
+
+.theme-zombie .v4-pipe-step:nth-child(even),
+.theme-zombie .v4-kpi:nth-child(even) {
+  border-color: rgba(185, 255, 32, 0.55);
+}
+
+.theme-zombie .v4-theme-options {
+  border-color: rgba(255, 40, 196, 0.50);
+  box-shadow: inset 0 0 0 1px rgba(185, 255, 32, 0.08);
+}
+
+.theme-zombie .v4-theme-option.active {
+  color: #fdf5ff;
+  border-color: #b9ff20;
+  background: linear-gradient(135deg, rgba(255, 36, 192, 0.26), rgba(185, 255, 32, 0.10));
+  box-shadow: 0 0 12px rgba(255, 32, 192, 0.14);
+}
+
+.theme-zombie ::-webkit-scrollbar-thumb {
+  background: linear-gradient(#ff2bc2, #b9ff20);
+}

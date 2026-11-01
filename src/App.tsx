@@ -3,15 +3,16 @@ import { Routes, Route, NavLink, Navigate } from 'react-router-dom'
 import { listen } from '@tauri-apps/api/event'
 import { usePlatformStore } from './stores/platformStore'
 import { useAiStore } from './stores/aiStore'
-import { useUiStore } from './stores/uiStore'
+import { useUiStore, type ThemeMode } from './stores/uiStore'
 import { useTemplateStore } from './stores/templateStore'
-import { AlertTriangle, FileCheck2, Sun, Moon, X } from 'lucide-react'
+import { AlertTriangle, FileCheck2, Sun, Moon, Skull, X } from 'lucide-react'
 import Tooltip from './components/Tooltip'
 import FirstRunSetup from './components/FirstRunSetup'
 import BinariesSetup from './components/BinariesSetup'
 import UpdateChecker from './components/UpdateChecker'
 import { useStreamStatus, formatViewerCount } from './hooks/useStreamStatus'
 import logoImg from './assets/logo.png'
+import zombieLogoImg from './assets/logo-zombie.png'
 import { version } from '../package.json'
 import Dashboard from './pages/Dashboard'
 import Vods from './pages/Vods'
@@ -42,6 +43,18 @@ const accountNavItems = [
   { to: '/bug-report', label: 'Report Bug', icon: '🐛', badgeKind: 'none' as const },
   { to: '/help', label: 'Help', icon: '?', badgeKind: 'none' as const },
 ]
+
+const NEXT_THEME: Record<ThemeMode, ThemeMode> = {
+  dark: 'light',
+  light: 'zombie',
+  zombie: 'dark',
+}
+
+const THEME_LABEL: Record<ThemeMode, string> = {
+  dark: 'Dark',
+  light: 'White',
+  zombie: 'Zombie',
+}
 
 interface VodAnalysisWarning {
   vodId: string
@@ -205,7 +218,8 @@ export default function App() {
     }
   }, [fetchClips, fetchHighlights])
 
-  const toggleTheme = () => updateUi({ theme: theme === 'dark' ? 'light' : 'dark' })
+  const nextTheme = NEXT_THEME[theme]
+  const toggleTheme = () => updateUi({ theme: nextTheme })
 
   return (
     <BinariesSetup>
@@ -216,7 +230,7 @@ export default function App() {
         {/* ── Branding block (v4 compact) ── */}
         <div className="v4-sidebar-brand">
           <div className="v4-sidebar-logo">
-            <img src={logoImg} alt="ClipGoblin" />
+            <img src={theme === 'zombie' ? zombieLogoImg : logoImg} alt="ClipGoblin" />
           </div>
           <div>
             <div className="v4-sidebar-name">
@@ -326,16 +340,15 @@ export default function App() {
       {/* Main content */}
       <main className="flex-1 overflow-y-auto bg-surface-950 relative">
         {/* Quick theme toggle */}
-        <Tooltip text={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} position="left">
+        <Tooltip text={`Switch to ${THEME_LABEL[nextTheme]} theme`} position="left">
           <button
             onClick={toggleTheme}
             className="fixed top-4 right-4 z-50 p-2.5 rounded-xl bg-surface-800 border border-surface-700 text-slate-400 hover:text-white hover:border-surface-500 shadow-lg transition-all duration-200 cursor-pointer"
-            aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+            aria-label={`Switch to ${THEME_LABEL[nextTheme]} theme`}
           >
-            {theme === 'dark'
-              ? <Sun className="w-[18px] h-[18px]" />
-              : <Moon className="w-[18px] h-[18px]" />
-            }
+            {nextTheme === 'light' && <Sun className="w-[18px] h-[18px]" />}
+            {nextTheme === 'zombie' && <Skull className="w-[18px] h-[18px]" />}
+            {nextTheme === 'dark' && <Moon className="w-[18px] h-[18px]" />}
           </button>
         </Tooltip>
         <ErrorBoundary>

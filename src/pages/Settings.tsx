@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, type KeyboardEvent } from 'react'
-import { Save, FolderOpen, FolderInput, Info, Brain, Check, Loader2, X, Zap, Sun, Moon, Bookmark, Pencil, Trash2, HardDrive, ExternalLink, Gauge, Tv, LogOut, Download, Mic, Cpu, AlertTriangle, ClipboardCopy, RotateCcw } from 'lucide-react'
+import { Save, FolderOpen, FolderInput, Info, Brain, Check, Loader2, X, Zap, Sun, Moon, Skull, Bookmark, Pencil, Trash2, HardDrive, ExternalLink, Gauge, Tv, LogOut, Download, Mic, Cpu, AlertTriangle, ClipboardCopy, RotateCcw } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useLocation } from 'react-router-dom'
@@ -1473,25 +1473,37 @@ export default function SettingsPage() {
         </div>
         <div className="v4-setting-row">
           <div className="v4-setting-info flex items-center gap-3">
-            {ui.settings.theme === 'dark'
-              ? <Moon className="w-4 h-4 text-violet-400 shrink-0" />
-              : <Sun className="w-4 h-4 text-amber-400 shrink-0" />}
+            {ui.settings.theme === 'dark' && <Moon className="w-4 h-4 text-violet-400 shrink-0" />}
+            {ui.settings.theme === 'light' && <Sun className="w-4 h-4 text-amber-400 shrink-0" />}
+            {ui.settings.theme === 'zombie' && <Skull className="w-4 h-4 text-pink-400 shrink-0" />}
             <div>
               <div className="v4-setting-name">Theme</div>
-              <div className="v4-setting-desc">Switch between dark and light color schemes</div>
+              <div className="v4-setting-desc">Choose Dark, White, or the neon Zombie color scheme</div>
             </div>
           </div>
-          <Tooltip text={`Switch to ${ui.settings.theme === 'dark' ? 'light' : 'dark'} mode`} position="left">
+          <div className="v4-theme-options" role="group" aria-label="Color theme">
             <button
-              onClick={() => ui.update({ theme: ui.settings.theme === 'dark' ? 'light' : 'dark' })}
-              className="v4-btn"
-              style={{padding: '6px 12px', fontSize: 12}}
+              onClick={() => ui.update({ theme: 'dark' })}
+              className={`v4-theme-option ${ui.settings.theme === 'dark' ? 'active' : ''}`}
+              aria-pressed={ui.settings.theme === 'dark'}
             >
-              {ui.settings.theme === 'dark'
-                ? <><Sun className="w-3 h-3" /> Light</>
-                : <><Moon className="w-3 h-3" /> Dark</>}
+              <Moon className="w-3 h-3" /> Dark
             </button>
-          </Tooltip>
+            <button
+              onClick={() => ui.update({ theme: 'light' })}
+              className={`v4-theme-option ${ui.settings.theme === 'light' ? 'active' : ''}`}
+              aria-pressed={ui.settings.theme === 'light'}
+            >
+              <Sun className="w-3 h-3" /> White
+            </button>
+            <button
+              onClick={() => ui.update({ theme: 'zombie' })}
+              className={`v4-theme-option ${ui.settings.theme === 'zombie' ? 'active' : ''}`}
+              aria-pressed={ui.settings.theme === 'zombie'}
+            >
+              <Skull className="w-3 h-3" /> Zombie
+            </button>
+          </div>
         </div>
       </section>
 
