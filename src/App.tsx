@@ -224,9 +224,9 @@ export default function App() {
   return (
     <BinariesSetup>
     <FirstRunSetup>
-    <div className="flex h-screen overflow-hidden">
+    <div className="v4-app-shell flex h-screen overflow-hidden">
       {/* Sidebar */}
-      <aside className="w-60 shrink-0 bg-surface-900 border-r border-surface-700 flex flex-col">
+      <aside className="v4-sidebar w-60 shrink-0 bg-surface-900 border-r border-surface-700 flex flex-col">
         {/* ── Branding block (v4 compact) ── */}
         <div className="v4-sidebar-brand">
           <div className="v4-sidebar-logo">
@@ -338,12 +338,12 @@ export default function App() {
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 overflow-y-auto bg-surface-950 relative">
+      <main className="v4-main flex-1 overflow-y-auto bg-surface-950 relative">
         {/* Quick theme toggle */}
         <Tooltip text={`Switch to ${THEME_LABEL[nextTheme]} theme`} position="left">
           <button
             onClick={toggleTheme}
-            className="fixed top-4 right-4 z-50 p-2.5 rounded-xl bg-surface-800 border border-surface-700 text-slate-400 hover:text-white hover:border-surface-500 shadow-lg transition-all duration-200 cursor-pointer"
+            className="v4-quick-theme fixed top-4 right-4 z-50 p-2.5 rounded-xl bg-surface-800 border border-surface-700 text-slate-400 hover:text-white hover:border-surface-500 shadow-lg transition-all duration-200 cursor-pointer"
             aria-label={`Switch to ${THEME_LABEL[nextTheme]} theme`}
           >
             {nextTheme === 'light' && <Sun className="w-[18px] h-[18px]" />}
@@ -352,7 +352,7 @@ export default function App() {
           </button>
         </Tooltip>
         <ErrorBoundary>
-          <div className="py-6 px-8">
+          <div className="v4-page-frame py-6 px-8">
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/vods" element={<Vods />} />
