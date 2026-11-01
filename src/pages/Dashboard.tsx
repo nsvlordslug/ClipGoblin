@@ -250,7 +250,7 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="v4-dashboard-root space-y-4">
       {/* Tester checklist — auto-hides once everything's done or dismissed. */}
       <TesterChecklist />
 
@@ -412,11 +412,15 @@ export default function Dashboard() {
                 <Sparkles className="w-4 h-4" aria-hidden="true" />
               </span>
               <div>
-                <div className="text-[15px] font-bold text-white">Priority Inbox</div>
+                <div className="text-[15px] font-bold text-white">
+                  {theme === 'zombie' ? 'Clip Workbench' : 'Priority Inbox'}
+                </div>
                 <div className="text-xs text-slate-500 mt-0.5">
-                  {inbox.total === 0
-                    ? 'Nothing needs your attention'
-                    : `${inbox.total} item${inbox.total === 1 ? '' : 's'} need your attention`}
+                  {theme === 'zombie'
+                    ? 'Review, edit, schedule, and ship in one place'
+                    : inbox.total === 0
+                      ? 'Nothing needs your attention'
+                      : `${inbox.total} item${inbox.total === 1 ? '' : 's'} need your attention`}
                 </div>
               </div>
             </div>
@@ -430,10 +434,22 @@ export default function Dashboard() {
             </button>
           </div>
 
-          <div className="v4-inbox-summary" aria-label="Priority inbox totals">
-            <span className={inbox.counts.failed > 0 ? 'failed' : ''}><i />{inbox.counts.failed} failed</span>
-            <span className="review"><i />{inbox.counts.review} to review</span>
-            <span className="ready"><i />{inbox.counts.ready} ready</span>
+          <div className="v4-inbox-summary" aria-label={theme === 'zombie' ? 'Clip workbench totals' : 'Priority inbox totals'}>
+            {theme === 'zombie' ? (
+              <>
+                <span className="review"><i />Needs review {inbox.counts.review}</span>
+                <span className="ready"><i />Ready {inbox.counts.ready}</span>
+                <span><i />Scheduled {pendingScheduled.length}</span>
+                <span><i />Published {completedScheduled.length}</span>
+                <span className={inbox.counts.failed > 0 ? 'failed' : ''}><i />Failed {inbox.counts.failed}</span>
+              </>
+            ) : (
+              <>
+                <span className={inbox.counts.failed > 0 ? 'failed' : ''}><i />{inbox.counts.failed} failed</span>
+                <span className="review"><i />{inbox.counts.review} to review</span>
+                <span className="ready"><i />{inbox.counts.ready} ready</span>
+              </>
+            )}
           </div>
 
           {inbox.items.length === 0 ? (
@@ -529,7 +545,7 @@ export default function Dashboard() {
         </div>
 
         {/* ─── Right rail ─── */}
-        <div className="space-y-3.5">
+        <div className="v4-dashboard-rail space-y-3.5">
           <div className="v4-panel" style={{padding: '16px'}}>
             <div className="flex items-center justify-between gap-3">
               <div>

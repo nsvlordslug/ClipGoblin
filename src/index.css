@@ -2595,6 +2595,8 @@ textarea.v4-input { resize: vertical; min-height: 120px; }
 }
 
 .theme-zombie .v4-sidebar {
+  width: 300px !important;
+  flex-basis: 300px;
   position: relative;
   overflow: hidden;
   background-color: #08070d !important;
@@ -2644,29 +2646,46 @@ textarea.v4-input { resize: vertical; min-height: 120px; }
 }
 
 .theme-zombie .v4-sidebar-brand {
-  padding: 15px 14px 17px;
+  gap: 15px;
+  padding: 17px 18px 19px;
   border-bottom: 2px solid #ff2bc2;
   background: linear-gradient(100deg, rgba(255, 39, 190, 0.10), transparent 62%);
   box-shadow: 0 6px 0 rgba(185, 255, 32, 0.12), 0 14px 28px rgba(255, 26, 190, 0.09);
 }
 
 .theme-zombie .v4-sidebar-logo {
-  width: 52px;
-  height: 52px;
+  width: 62px;
+  height: 62px;
   border: 2px solid #ff2bc2;
   border-radius: 13px;
 }
 
 .theme-zombie .v4-sidebar-name {
-  font-size: 20px;
-  letter-spacing: -0.7px;
+  font-size: 28px;
+  letter-spacing: -1.1px;
   text-shadow: 0 0 14px rgba(255, 37, 191, 0.24);
+}
+
+.theme-zombie .v4-sidebar-sub {
+  margin-top: 4px;
+  font-size: 11px;
+  letter-spacing: 1.7px;
+}
+
+.theme-zombie .v4-nav-icon {
+  width: 22px;
+  font-size: 19px;
 }
 
 .theme-zombie .v4-sidebar nav a {
   position: relative;
+  min-height: 50px;
+  gap: 14px;
+  padding: 12px 17px;
+  border-radius: 14px;
   border: 1px solid transparent;
   overflow: hidden;
+  font-size: 17px;
 }
 
 .theme-zombie .v4-sidebar nav a:hover {
@@ -2700,33 +2719,75 @@ textarea.v4-input { resize: vertical; min-height: 120px; }
 }
 
 .theme-zombie .v4-sidebar nav > div {
+  font-size: 12px;
   color: #baff20 !important;
   text-shadow: 0 0 10px rgba(185, 255, 32, 0.32);
 }
 
 .theme-zombie .v4-sidebar-channel {
+  margin: 12px;
+  padding: 14px;
   border: 2px solid #ff2bc2;
   background: linear-gradient(120deg, rgba(255, 37, 190, 0.12), rgba(8, 7, 13, 0.96) 45%);
   box-shadow: inset 0 0 0 1px rgba(185, 255, 32, 0.15), 0 0 18px rgba(255, 35, 190, 0.10);
 }
 
 .theme-zombie .v4-sidebar-channel .avatar {
+  width: 40px;
+  height: 40px;
   border: 1px solid #baff20;
   box-shadow: 0 0 11px rgba(185, 255, 32, 0.28);
+}
+
+.theme-zombie .v4-sidebar-channel > div:last-child > div:first-child {
+  font-size: 15px !important;
 }
 
 .theme-zombie .v4-main {
   background-color: #06050a !important;
   background-image:
     radial-gradient(circle at 95% 8%, rgba(255, 31, 189, 0.09), transparent 25%),
-    radial-gradient(circle at 13% 84%, rgba(185, 255, 32, 0.055), transparent 27%),
-    radial-gradient(circle, rgba(255, 38, 190, 0.13) 0 1px, transparent 1.6px) !important;
-  background-size: auto, auto, 18px 18px !important;
+    radial-gradient(circle at 13% 84%, rgba(185, 255, 32, 0.055), transparent 27%) !important;
+  background-size: auto, auto !important;
+}
+
+.theme-zombie .v4-main::before {
+  content: '';
+  position: absolute;
+  z-index: 0;
+  top: 10px;
+  right: 36px;
+  width: 420px;
+  height: 72px;
+  transform: rotate(-3deg);
+  background:
+    linear-gradient(162deg, transparent 0 16%, #ff2bc2 17% 23%, transparent 24% 34%, #b9ff20 35% 41%, transparent 42%),
+    radial-gradient(circle, rgba(255, 43, 194, 0.56) 0 1px, transparent 1.7px);
+  background-size: auto, 13px 13px;
+  clip-path: polygon(0 35%, 100% 0, 82% 39%, 100% 47%, 69% 56%, 82% 100%, 45% 68%, 12% 92%, 26% 54%);
+  opacity: 0.76;
+  pointer-events: none;
 }
 
 .theme-zombie .v4-page-frame {
   position: relative;
   z-index: 1;
+  padding: 24px 28px;
+}
+
+.theme-zombie .v4-dashboard-root {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.theme-zombie .v4-dashboard-root > :not([hidden]) ~ :not([hidden]) {
+  margin-top: 0 !important;
+  margin-block-start: 0 !important;
+}
+
+.theme-zombie .v4-tester-checklist {
+  order: 90;
 }
 
 .theme-zombie .v4-quick-theme {
@@ -2737,10 +2798,10 @@ textarea.v4-input { resize: vertical; min-height: 120px; }
 }
 
 .theme-zombie .v4-hero-banner {
-  grid-template-columns: minmax(280px, 34%) 1fr;
-  min-height: 275px;
-  gap: 20px;
-  padding: 18px 28px;
+  grid-template-columns: 325px 1fr;
+  min-height: 286px;
+  gap: 18px;
+  padding: 16px 34px 16px 24px;
   border: 3px solid #ff2bc2;
   border-radius: 24px 12px 24px 12px;
   background:
@@ -2786,14 +2847,14 @@ textarea.v4-input { resize: vertical; min-height: 120px; }
 .theme-zombie .v4-hero-goblin {
   z-index: 1;
   width: 100%;
-  height: 245px;
+  height: 260px;
 }
 
 .theme-zombie .v4-hero-goblin img {
-  width: 118%;
-  height: 118%;
+  width: 120%;
+  height: 120%;
   max-width: none;
-  transform: translate(-2%, 4%) scale(1.04);
+  transform: translate(-3%, 4%) scale(1.04);
   filter:
     drop-shadow(0 12px 22px rgba(0, 0, 0, 0.62))
     drop-shadow(0 0 18px rgba(255, 31, 191, 0.40))
@@ -2809,7 +2870,26 @@ textarea.v4-input { resize: vertical; min-height: 120px; }
   text-shadow: 0 3px 0 #120817, 0 0 16px rgba(255, 255, 255, 0.10);
 }
 
+.theme-zombie .v4-hero-eyebrow {
+  padding: 7px 14px;
+  font-size: 12px;
+  letter-spacing: 1.15px;
+  margin-bottom: 13px;
+}
+
+.theme-zombie .v4-hero-content > p {
+  font-size: 16px;
+  margin-bottom: 18px;
+}
+
+.theme-zombie .v4-hero-content > div button {
+  min-height: 52px;
+  padding: 12px 20px;
+  font-size: 16px;
+}
+
 .theme-zombie .v4-hero-content > div button:first-of-type {
+  min-width: 276px;
   border: 1px solid #ff8cde;
   background: linear-gradient(145deg, #ff27ba, #ef2cb9 65%, #ff61d3);
   box-shadow:
@@ -2819,6 +2899,7 @@ textarea.v4-input { resize: vertical; min-height: 120px; }
 }
 
 .theme-zombie .v4-hero-content > div button:not(:first-of-type) {
+  min-width: 190px;
   border: 2px solid #ca45f6;
   background: rgba(10, 8, 16, 0.88);
   box-shadow: inset 0 0 0 1px rgba(255, 43, 194, 0.12);
@@ -2827,8 +2908,11 @@ textarea.v4-input { resize: vertical; min-height: 120px; }
 .theme-zombie .v4-pipeline {
   position: relative;
   overflow: hidden;
-  padding: 22px 24px;
-  border: 3px solid #b9ff20;
+  padding: 8px 28px 22px;
+  border-top: 3px solid #ff2bc2;
+  border-right: 3px solid #ff2bc2;
+  border-bottom: 3px solid #b9ff20;
+  border-left: 3px solid #b9ff20;
   border-radius: 12px 24px 12px 24px;
   background:
     linear-gradient(158deg, rgba(185, 255, 32, 0.06), transparent 22%),
@@ -2838,6 +2922,10 @@ textarea.v4-input { resize: vertical; min-height: 120px; }
     inset -4px 0 0 #ff2bc2,
     inset 0 4px 0 #ff2bc2,
     0 0 24px rgba(185, 255, 32, 0.08);
+}
+
+.theme-zombie .v4-pipeline-head {
+  margin-bottom: 8px;
 }
 
 .theme-zombie .v4-pipeline::before,
@@ -2876,7 +2964,7 @@ textarea.v4-input { resize: vertical; min-height: 120px; }
 .theme-zombie .v4-pipeline-title {
   color: #b9ff20;
   font-family: 'Segoe Print', 'Comic Sans MS', cursive;
-  font-size: 22px;
+  font-size: 28px;
   font-style: italic;
   font-weight: 900;
   letter-spacing: -0.8px;
@@ -2888,7 +2976,8 @@ textarea.v4-input { resize: vertical; min-height: 120px; }
 .theme-zombie .v4-pipe-step {
   position: relative;
   overflow: hidden;
-  min-height: 128px;
+  min-height: 160px;
+  padding: 18px 18px;
   border-width: 2px;
   border-color: rgba(255, 42, 194, 0.82);
   background: linear-gradient(145deg, rgba(255, 39, 190, 0.035), rgba(11, 9, 17, 0.98) 52%);
@@ -2921,8 +3010,27 @@ textarea.v4-input { resize: vertical; min-height: 120px; }
 }
 
 .theme-zombie .v4-pipe-icon {
+  width: 36px;
+  height: 36px;
+  margin-bottom: 12px;
+  font-size: 17px;
   border: 1px solid rgba(255, 69, 201, 0.68);
   box-shadow: 0 0 11px rgba(255, 37, 190, 0.18);
+}
+
+.theme-zombie .v4-pipe-label {
+  font-size: 12px;
+  letter-spacing: 0.7px;
+}
+
+.theme-zombie .v4-pipe-count {
+  margin-top: 7px;
+  font-size: 30px;
+}
+
+.theme-zombie .v4-pipe-sub {
+  margin-top: 7px;
+  font-size: 13px;
 }
 
 .theme-zombie .v4-vod-scrubber {
@@ -2977,6 +3085,53 @@ textarea.v4-input { resize: vertical; min-height: 120px; }
 
 .theme-zombie .v4-inbox-header {
   background: linear-gradient(100deg, rgba(255, 37, 190, 0.13), rgba(126, 34, 206, 0.05) 56%, transparent 82%);
+}
+
+.theme-zombie .v4-inbox-heading > div > div:first-child {
+  font-family: system-ui, sans-serif;
+  font-size: 24px !important;
+  letter-spacing: 0.2px;
+}
+
+.theme-zombie .v4-inbox-summary {
+  gap: 6px;
+  padding: 10px 14px;
+  background: #0b0811;
+}
+
+.theme-zombie .v4-inbox-summary span {
+  flex: 1 1 auto;
+  justify-content: center;
+  min-height: 36px;
+  padding: 7px 11px;
+  border: 1px solid rgba(126, 68, 177, 0.45);
+  border-radius: 8px;
+  background: rgba(41, 24, 61, 0.50);
+  color: #d7c5e8;
+  white-space: nowrap;
+}
+
+.theme-zombie .v4-inbox-summary span.review {
+  border-color: #ff2bc2;
+  background: linear-gradient(135deg, rgba(255, 43, 194, 0.85), rgba(210, 35, 174, 0.78));
+  color: #160918;
+}
+
+.theme-zombie .v4-inbox-summary span + span::before {
+  display: none;
+}
+
+.theme-zombie .v4-dashboard-main-grid {
+  grid-template-columns: minmax(0, 2.05fr) minmax(310px, 1fr);
+}
+
+.theme-zombie .v4-dashboard-rail {
+  display: flex;
+  flex-direction: column;
+}
+
+.theme-zombie .v4-dashboard-rail .v4-insight {
+  order: -1;
 }
 
 .theme-zombie .v4-inbox-heading-icon,

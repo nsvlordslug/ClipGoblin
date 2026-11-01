@@ -91,7 +91,7 @@ export default function TesterChecklist() {
 
   return (
     <section
-      className="v4-panel relative"
+      className="v4-tester-checklist v4-panel relative"
       style={{padding: 16, background: 'linear-gradient(135deg, rgba(167,139,250,0.08), rgba(244,114,182,0.04))'}}
     >
       <button
