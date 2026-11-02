@@ -532,6 +532,35 @@ body.theme-light {
   align-items: center;
   gap: 10px;
 }
+
+/* Dedicated updater overlay. Keep this separate from .v4-panel: themed panel
+   rules intentionally change positioning and clipping for dashboard cards. */
+.v4-update-card {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 100;
+  width: min(360px, calc(100vw - 32px));
+  padding: 16px;
+  overflow: visible;
+  border: 1px solid var(--color-surface-700);
+  border-radius: 14px;
+  background: var(--color-surface-850);
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.48);
+  pointer-events: auto;
+}
+
+.theme-zombie .v4-update-card {
+  border: 2px solid #ff2bc2;
+  border-radius: 13px 9px 15px 11px;
+  background:
+    url('./assets/zombie-organic-overlay.png') right top / 420px auto no-repeat,
+    #0a0810;
+  box-shadow:
+    0 0 0 1px rgba(185, 255, 32, 0.34),
+    0 18px 46px rgba(0, 0, 0, 0.56),
+    0 0 22px rgba(255, 43, 194, 0.18);
+}
 .v4-hero-content { position: relative; z-index: 2; }
 .v4-hero-eyebrow {
   display: inline-block;

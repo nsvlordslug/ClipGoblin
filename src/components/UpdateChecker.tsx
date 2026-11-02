@@ -77,10 +77,7 @@ export default function UpdateChecker() {
   if (phase === 'idle' || phase === 'checking' || phase === 'dismissed') return null
 
   return (
-    <div
-      className="fixed bottom-4 right-4 z-50 v4-panel max-w-sm animate-slide-up"
-      style={{padding: 16}}
-    >
+    <div className="v4-update-card animate-slide-up">
       <div className="flex items-start justify-between mb-2">
         <div>
           <div className="text-sm font-bold text-white">
@@ -131,6 +128,7 @@ export default function UpdateChecker() {
 
       {phase === 'available' && (
         <button
+          type="button"
           onClick={handleInstall}
           className="v4-btn primary"
           style={{width: '100%', justifyContent: 'center', padding: '8px 12px', fontSize: 13}}
