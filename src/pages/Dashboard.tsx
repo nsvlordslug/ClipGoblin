@@ -283,7 +283,21 @@ export default function Dashboard() {
       {/* ═════ HERO BANNER ═════ */}
       <section className="v4-hero-banner">
         <div className="v4-hero-goblin">
-          <img src={theme === 'zombie' ? heroZombieGoblinImg : heroGoblinImg} alt="ClipGoblin" />
+          <img
+            src={heroGoblinImg}
+            alt="ClipGoblin"
+            className={`theme-swap-image ${theme === 'zombie' ? '' : 'is-visible'}`}
+            loading="eager"
+            decoding="async"
+          />
+          <img
+            src={heroZombieGoblinImg}
+            alt=""
+            aria-hidden="true"
+            className={`theme-swap-image ${theme === 'zombie' ? 'is-visible' : ''}`}
+            loading="eager"
+            decoding="async"
+          />
         </div>
         <div className="v4-hero-content">
           <span className="v4-hero-eyebrow">
@@ -308,7 +322,7 @@ export default function Dashboard() {
             )}
             {highlights.length === 0 && 'Connect Twitch and import a VOD to start finding clips.'}
           </p>
-          <div className="flex gap-2.5 flex-wrap items-center">
+          <div className="v4-hero-actions">
             <button
               onClick={runAutoHunt}
               disabled={hunting}

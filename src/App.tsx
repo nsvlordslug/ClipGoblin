@@ -13,6 +13,8 @@ import UpdateChecker from './components/UpdateChecker'
 import { useStreamStatus, formatViewerCount } from './hooks/useStreamStatus'
 import logoImg from './assets/logo.png'
 import zombieLogoImg from './assets/logo-zombie.png'
+import heroGoblinImg from './assets/hero-goblin-v2.png'
+import heroZombieGoblinImg from './assets/hero-goblin-zombie.png'
 import { version } from '../package.json'
 import Dashboard from './pages/Dashboard'
 import Vods from './pages/Vods'
@@ -55,6 +57,8 @@ const THEME_LABEL: Record<ThemeMode, string> = {
   light: 'White',
   zombie: 'Zombie',
 }
+
+const THEME_IMAGE_URLS = [logoImg, zombieLogoImg, heroGoblinImg, heroZombieGoblinImg]
 
 interface VodAnalysisWarning {
   vodId: string
@@ -157,6 +161,18 @@ export default function App() {
     return null
   }
   useEffect(() => {
+    const images = THEME_IMAGE_URLS.map(src => {
+      const image = new Image()
+      image.src = src
+      void image.decode().catch(() => {})
+      return image
+    })
+    return () => {
+      images.forEach(image => { image.src = '' })
+    }
+  }, [])
+
+  useEffect(() => {
     loadPlatforms(); loadAi(); loadUi(); loadTemplates(); loadSchedules()
     const unlisten = startScheduleListening()
     return unlisten
@@ -230,7 +246,21 @@ export default function App() {
         {/* ── Branding block (v4 compact) ── */}
         <div className="v4-sidebar-brand">
           <div className="v4-sidebar-logo">
-            <img src={theme === 'zombie' ? zombieLogoImg : logoImg} alt="ClipGoblin" />
+            <img
+              src={logoImg}
+              alt="ClipGoblin"
+              className={`theme-swap-image ${theme === 'zombie' ? '' : 'is-visible'}`}
+              loading="eager"
+              decoding="async"
+            />
+            <img
+              src={zombieLogoImg}
+              alt=""
+              aria-hidden="true"
+              className={`theme-swap-image ${theme === 'zombie' ? 'is-visible' : ''}`}
+              loading="eager"
+              decoding="async"
+            />
           </div>
           <div>
             <div className="v4-sidebar-name">
