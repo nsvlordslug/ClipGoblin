@@ -322,7 +322,7 @@ export default function Dashboard() {
             )}
             {highlights.length === 0 && 'Connect Twitch and import a VOD to start finding clips.'}
           </p>
-          <div className="v4-hero-actions">
+          <div className={`v4-hero-actions ${import.meta.env.DEV ? 'has-import' : 'no-import'}`}>
             <button
               onClick={runAutoHunt}
               disabled={hunting}

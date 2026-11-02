@@ -2915,6 +2915,11 @@ textarea.v4-input { resize: vertical; min-height: 120px; }
   max-width: 620px;
 }
 
+.theme-zombie .v4-hero-actions.no-import {
+  grid-template-columns: minmax(220px, 1.55fr) minmax(170px, 1fr);
+  max-width: 500px;
+}
+
 .theme-zombie .v4-hero-actions button {
   width: 100%;
   min-width: 0 !important;
