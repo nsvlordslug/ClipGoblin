@@ -10,6 +10,7 @@ import Tooltip from './components/Tooltip'
 import FirstRunSetup from './components/FirstRunSetup'
 import BinariesSetup from './components/BinariesSetup'
 import UpdateChecker from './components/UpdateChecker'
+import WhatsNewModal from './components/WhatsNewModal'
 import { useStreamStatus, formatViewerCount } from './hooks/useStreamStatus'
 import logoImg from './assets/logo.png'
 import zombieLogoImg from './assets/logo-zombie.png'
@@ -453,6 +454,7 @@ export default function App() {
           </div>
         </div>
       )}
+      <WhatsNewModal />
       <UpdateChecker />
     </div>
     </FirstRunSetup>

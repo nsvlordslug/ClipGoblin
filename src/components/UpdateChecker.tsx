@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { check, Update } from '@tauri-apps/plugin-updater'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { Download, X, Loader2 } from 'lucide-react'
+import { rememberPendingUpdate } from '../data/releaseNotes'
 
 type Phase = 'idle' | 'checking' | 'available' | 'downloading' | 'installing' | 'done' | 'error' | 'dismissed'
 
@@ -46,6 +47,7 @@ export default function UpdateChecker() {
     setPhase('downloading')
     setProgress(0)
     try {
+      rememberPendingUpdate(update.currentVersion, update.version)
       let contentLength = 0
       let downloaded = 0
       await update.downloadAndInstall((event) => {
