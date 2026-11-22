@@ -17,6 +17,45 @@ export const PENDING_UPDATE_KEY = 'clipgoblin.update.pending-version'
 
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: '1.7.18',
+    date: '2026-11-22',
+    summary: 'A reliable What’s New window after every update.',
+    changes: [
+      {
+        kind: 'fixed',
+        items: [
+          'The post-update What’s New window now opens after upgrading from 1.7.17 instead of silently skipping a release with no matching note.',
+        ],
+      },
+      {
+        kind: 'under-the-hood',
+        items: [
+          'Release checks now catch a version bump that does not include matching release notes before it can ship.',
+        ],
+      },
+    ],
+  },
+  {
+    version: '1.7.17',
+    date: '2026-11-22',
+    summary: 'Your Twitch colors, brought into ClipGoblin.',
+    changes: [
+      {
+        kind: 'new',
+        items: [
+          'Added an optional Twitch theme generated from the connected channel’s profile colors.',
+          'The saved Twitch palette can be selected alongside Dark, White, and Zombie themes.',
+        ],
+      },
+      {
+        kind: 'improved',
+        items: [
+          'Theme generation stays on the device and preserves readable ClipGoblin surfaces, text, and controls.',
+        ],
+      },
+    ],
+  },
+  {
     version: '1.7.16',
     date: '2026-11-04',
     summary: 'A clearer finish to every ClipGoblin update.',
@@ -148,9 +187,12 @@ export function getReleaseNotesPresentation(currentVersion: string): ReleaseNote
   if (seenVersion && compareVersions(seenVersion, currentVersion) >= 0) return null
 
   const pendingUpdate = readPendingUpdate()
-  const previousVersion = pendingUpdate?.toVersion === currentVersion
+  const pendingFromVersion = pendingUpdate?.toVersion === currentVersion
     ? pendingUpdate.fromVersion
-    : seenVersion
+    : null
+  const previousVersion = seenVersion && pendingFromVersion
+    ? compareVersions(seenVersion, pendingFromVersion) <= 0 ? seenVersion : pendingFromVersion
+    : seenVersion ?? pendingFromVersion
 
   const entries = RELEASE_NOTES
     .filter(note => compareVersions(note.version, currentVersion) <= 0)

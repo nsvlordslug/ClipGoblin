@@ -42,6 +42,18 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Verify release notes match version
+        shell: pwsh
+        run: |
+          $appVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $firstVersion = [regex]::Match(
+            (Get-Content src/data/releaseNotes.ts -Raw),
+            "version:\s*'([^']+)'"
+          ).Groups[1].Value
+          if ($firstVersion -ne $appVersion) {
+            throw "Newest release note '$firstVersion' does not match app version '$appVersion'."
+          }
+
       - name: Build Tauri app
         # v0.6 = Node 24 runtime (required from 2026-06-16); same inputs as v0.5,
         # verified drop-in for tagName/releaseName/releaseBody/releaseDraft/
