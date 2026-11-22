@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, type KeyboardEvent } from 'react'
-import { Save, FolderOpen, FolderInput, Info, Brain, Check, Loader2, X, Zap, Sun, Moon, Skull, Bookmark, Pencil, Trash2, HardDrive, ExternalLink, Gauge, Tv, LogOut, Download, Mic, Cpu, AlertTriangle, ClipboardCopy, RotateCcw } from 'lucide-react'
+import { Save, FolderOpen, FolderInput, Info, Brain, Check, Loader2, X, Zap, Sun, Moon, Skull, Palette, Bookmark, Pencil, Trash2, HardDrive, ExternalLink, Gauge, Tv, LogOut, Download, Mic, Cpu, AlertTriangle, ClipboardCopy, RotateCcw } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useLocation } from 'react-router-dom'
@@ -14,6 +14,7 @@ import { CAPTION_STYLES, EXPORT_PRESETS } from '../lib/editTypes'
 import { requiresHighDetectionCostConsent, type DetectionSensitivity } from '../lib/detectionCostConsent'
 import { persistSpeechModelSelection, type SpeechModel } from '../lib/speechModelSelection'
 import { normalizeTranscriptionGlossary } from '../lib/transcriptionGlossary'
+import { paletteFromImage } from '../lib/twitchTheme'
 import {
   getNextSettingsSection,
   resolveSettingsSection,
@@ -222,6 +223,8 @@ export default function SettingsPage() {
 
   // Phase 6.0 — AI usage cost summary (populated on mount + after every analyze/regen)
   const [costSummary, setCostSummary] = useState<{ avgPerAnalyzeUsd: number; total30dUsd: number; vodCount: number } | null>(null)
+  const [twitchThemeGenerating, setTwitchThemeGenerating] = useState(false)
+  const [twitchThemeError, setTwitchThemeError] = useState<string | null>(null)
 
   const ai = useAiStore()
   const ui = useUiStore()
@@ -279,6 +282,23 @@ export default function SettingsPage() {
   const isByok = ai.isByok()
   const meta = PROVIDER_META[s.provider]
   const models = MODEL_OPTIONS[s.provider]
+
+  const generateTwitchTheme = async () => {
+    if (!loggedInUser?.profile_image_url) return
+    setTwitchThemeGenerating(true)
+    setTwitchThemeError(null)
+    try {
+      const dataUrl = await invoke<string>('fetch_twitch_theme_image', {
+        imageUrl: loggedInUser.profile_image_url,
+      })
+      const palette = await paletteFromImage(dataUrl, loggedInUser.profile_image_url)
+      ui.update({ twitchThemePalette: palette, theme: 'twitch' })
+    } catch (error) {
+      setTwitchThemeError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setTwitchThemeGenerating(false)
+    }
+  }
 
   // Active provider's key + model field names
   const keyField = `${s.provider}ApiKey` as keyof typeof s
@@ -1476,9 +1496,10 @@ export default function SettingsPage() {
             {ui.settings.theme === 'dark' && <Moon className="w-4 h-4 text-violet-400 shrink-0" />}
             {ui.settings.theme === 'light' && <Sun className="w-4 h-4 text-amber-400 shrink-0" />}
             {ui.settings.theme === 'zombie' && <Skull className="w-4 h-4 text-pink-400 shrink-0" />}
+            {ui.settings.theme === 'twitch' && <Palette className="w-4 h-4 text-violet-400 shrink-0" />}
             <div>
               <div className="v4-setting-name">Theme</div>
-              <div className="v4-setting-desc">Choose Dark, White, or the neon Zombie color scheme</div>
+              <div className="v4-setting-desc">Choose a built-in look or generate one from your connected Twitch profile</div>
             </div>
           </div>
           <div className="v4-theme-options" role="group" aria-label="Color theme">
@@ -1502,6 +1523,48 @@ export default function SettingsPage() {
               aria-pressed={ui.settings.theme === 'zombie'}
             >
               <Skull className="w-3 h-3" /> Zombie
+            </button>
+            <button
+              onClick={() => ui.settings.twitchThemePalette && ui.update({ theme: 'twitch' })}
+              className={`v4-theme-option ${ui.settings.theme === 'twitch' ? 'active' : ''}`}
+              aria-pressed={ui.settings.theme === 'twitch'}
+              disabled={!ui.settings.twitchThemePalette}
+              title={ui.settings.twitchThemePalette ? 'Use your saved Twitch palette' : 'Generate a Twitch palette first'}
+            >
+              <Palette className="w-3 h-3" /> Twitch
+            </button>
+          </div>
+        </div>
+        <div className="v4-setting-row v4-twitch-theme-row">
+          <div className="v4-setting-info">
+            <div className="v4-setting-name">Twitch palette</div>
+            <div className="v4-setting-desc">
+              {loggedInUser
+                ? `Build a readable ClipGoblin theme from @${loggedInUser.twitch_login}'s profile colors. Processing stays on this device.`
+                : 'Connect Twitch first to generate a personalized palette.'}
+            </div>
+            {twitchThemeError && <div className="v4-theme-error">{twitchThemeError}</div>}
+          </div>
+          <div className="v4-twitch-theme-controls">
+            {ui.settings.twitchThemePalette && (
+              <div className="v4-theme-swatches" aria-label="Saved Twitch palette">
+                {[
+                  ui.settings.twitchThemePalette.primary,
+                  ui.settings.twitchThemePalette.secondary,
+                  ui.settings.twitchThemePalette.accent,
+                  ui.settings.twitchThemePalette.surface,
+                ].map(color => <span key={color} style={{ background: color }} title={color} />)}
+              </div>
+            )}
+            <button
+              type="button"
+              className="v4-btn"
+              onClick={() => void generateTwitchTheme()}
+              disabled={!loggedInUser?.profile_image_url || twitchThemeGenerating}
+            >
+              {twitchThemeGenerating
+                ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Analyzing</>
+                : <><Palette className="w-3.5 h-3.5" /> {ui.settings.twitchThemePalette ? 'Regenerate' : 'Generate theme'}</>}
             </button>
           </div>
         </div>

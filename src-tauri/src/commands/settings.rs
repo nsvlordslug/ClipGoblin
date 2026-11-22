@@ -1,5 +1,7 @@
 //! Settings, utility, and system info commands.
 
+use base64::Engine;
+use futures_util::StreamExt;
 use std::path::{Component, Path, PathBuf};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -43,6 +45,68 @@ const ALLOWED_SETTING_KEYS: &[&str] = &[
     "use_twitch_community_clips",
     "ai_clip_detection_enabled",
 ];
+
+fn parse_twitch_image_url(image_url: &str) -> Result<reqwest::Url, String> {
+    let parsed = reqwest::Url::parse(image_url).map_err(|_| "Invalid Twitch image URL")?;
+    if parsed.scheme() != "https" || parsed.host_str() != Some("static-cdn.jtvnw.net") {
+        return Err("Only Twitch-hosted profile artwork can be used".to_string());
+    }
+    Ok(parsed)
+}
+
+/// Download Twitch-hosted profile artwork for local palette analysis.
+/// The strict CDN allowlist prevents this helper from becoming an SSRF proxy.
+#[tauri::command]
+pub async fn fetch_twitch_theme_image(image_url: String) -> Result<String, String> {
+    const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+    let parsed = parse_twitch_image_url(&image_url)?;
+
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("Unable to prepare image request: {e}"))?
+        .get(parsed)
+        .send()
+        .await
+        .map_err(|e| format!("Unable to download Twitch artwork: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Twitch artwork returned HTTP {}",
+            response.status()
+        ));
+    }
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_IMAGE_BYTES as u64)
+    {
+        return Err("Twitch artwork is too large to analyze".to_string());
+    }
+    let mime = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .filter(|value| value.starts_with("image/"))
+        .ok_or_else(|| "Twitch returned a non-image response".to_string())?
+        .to_string();
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Unable to read Twitch artwork: {e}"))?;
+        if bytes.len() + chunk.len() > MAX_IMAGE_BYTES {
+            return Err("Twitch artwork is too large to analyze".to_string());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.is_empty() {
+        return Err("Twitch returned an empty profile image".to_string());
+    }
+    Ok(format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
 
 pub(crate) fn app_data_root() -> PathBuf {
     dirs::data_dir()
@@ -490,6 +554,18 @@ pub fn get_detection_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn twitch_theme_image_url_is_strictly_limited_to_https_cdn() {
+        assert!(parse_twitch_image_url(
+            "https://static-cdn.jtvnw.net/jtv_user_pictures/example-profile_image-300x300.png"
+        )
+        .is_ok());
+        assert!(parse_twitch_image_url("http://static-cdn.jtvnw.net/image.png").is_err());
+        assert!(parse_twitch_image_url("https://static-cdn.jtvnw.net.evil.test/image.png").is_err());
+        assert!(parse_twitch_image_url("https://example.test/image.png").is_err());
+        assert!(parse_twitch_image_url("file:///C:/Windows/win.ini").is_err());
+    }
 
     #[test]
     fn asset_roots_include_legacy_and_tauri_app_data_directories() {

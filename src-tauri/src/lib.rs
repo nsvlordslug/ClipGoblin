@@ -96,8 +96,8 @@ use commands::scheduled::{
     reschedule_upload, schedule_upload, start_upload_scheduler,
 };
 use commands::settings::{
-    estimate_analyze_cost, get_ai_cost_summary, get_analysis_cost, get_app_info,
-    get_detection_stats, get_download_dir, get_hardware_info, get_job, get_setting,
+    estimate_analyze_cost, fetch_twitch_theme_image, get_ai_cost_summary, get_analysis_cost,
+    get_app_info, get_detection_stats, get_download_dir, get_hardware_info, get_job, get_setting,
     get_storage_paths, list_jobs, open_folder, open_url, pick_download_folder, remove_job,
     save_setting,
 };
@@ -240,6 +240,7 @@ pub fn run() {
             delete_clip,
             save_setting,
             get_setting,
+            fetch_twitch_theme_image,
             get_app_info,
             get_hardware_info,
             get_ai_cost_summary,

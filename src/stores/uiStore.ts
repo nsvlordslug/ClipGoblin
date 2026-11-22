@@ -3,13 +3,24 @@ import { invoke } from '@tauri-apps/api/core'
 
 // ── Types ──
 
-export type ThemeMode = 'dark' | 'light' | 'zombie'
+export type ThemeMode = 'dark' | 'light' | 'zombie' | 'twitch'
+
+export interface TwitchThemePalette {
+  primary: string
+  secondary: string
+  accent: string
+  surface: string
+  sourceImageUrl: string
+  generatedAt: string
+}
 
 export interface UiSettings {
   /** Show hover tooltips throughout the app. Default: true. */
   showTooltips: boolean
   /** Color theme. Default: 'dark'. */
   theme: ThemeMode
+  /** Locally generated colors derived from the connected Twitch profile image. */
+  twitchThemePalette: TwitchThemePalette | null
   /** Auto-publish clips that score >= 0.9 confidence without review. Default: false. */
   autoShipHighConfidence: boolean
   /** Use GPU (CUDA) for transcription. Default: true (falls back to CPU if unavailable). */
@@ -28,6 +39,7 @@ export interface UiSettings {
 export const UI_DEFAULTS: UiSettings = {
   showTooltips: true,
   theme: 'dark',
+  twitchThemePalette: null,
   autoShipHighConfidence: false,
   useGpu: true,
   showReviewTools: false,
@@ -86,11 +98,18 @@ export function tryAdvanceTapCounter(
 }
 
 /** Sync the theme class on <html> so CSS variables switch globally. */
-function applyThemeToDOM(theme: ThemeMode) {
+function applyThemeToDOM(theme: ThemeMode, palette: TwitchThemePalette | null) {
   const root = document.documentElement
-  root.classList.remove('theme-dark', 'theme-light', 'theme-zombie')
-  root.classList.add(`theme-${theme}`)
-  root.style.colorScheme = theme === 'light' ? 'light' : 'dark'
+  root.classList.remove('theme-dark', 'theme-light', 'theme-zombie', 'theme-twitch')
+  const appliedTheme = theme === 'twitch' && !palette ? 'dark' : theme
+  root.classList.add(`theme-${appliedTheme}`)
+  root.style.colorScheme = appliedTheme === 'light' ? 'light' : 'dark'
+  if (palette) {
+    root.style.setProperty('--twitch-primary', palette.primary)
+    root.style.setProperty('--twitch-secondary', palette.secondary)
+    root.style.setProperty('--twitch-accent', palette.accent)
+    root.style.setProperty('--twitch-surface', palette.surface)
+  }
 }
 
 // ── Store ──
@@ -113,14 +132,14 @@ export const useUiStore = create<UiStore>((set, get) => ({
       if (raw) {
         const parsed = JSON.parse(raw) as Partial<UiSettings>
         const merged = { ...UI_DEFAULTS, ...parsed }
-        applyThemeToDOM(merged.theme)
+        applyThemeToDOM(merged.theme, merged.twitchThemePalette)
         set({ settings: merged, loaded: true })
       } else {
-        applyThemeToDOM(UI_DEFAULTS.theme)
+        applyThemeToDOM(UI_DEFAULTS.theme, UI_DEFAULTS.twitchThemePalette)
         set({ loaded: true })
       }
     } catch {
-      applyThemeToDOM(UI_DEFAULTS.theme)
+      applyThemeToDOM(UI_DEFAULTS.theme, UI_DEFAULTS.twitchThemePalette)
       set({ loaded: true })
     }
   },
@@ -132,7 +151,9 @@ export const useUiStore = create<UiStore>((set, get) => ({
 
   update: (patch) => {
     const next = { ...get().settings, ...patch }
-    if (patch.theme) applyThemeToDOM(patch.theme)
+    if (patch.theme || patch.twitchThemePalette !== undefined) {
+      applyThemeToDOM(next.theme, next.twitchThemePalette)
+    }
     set({ settings: next })
     // Auto-save on every change for UI preferences
     setTimeout(() => get().save().catch(() => {}), 0)

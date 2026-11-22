@@ -5,7 +5,7 @@ import { usePlatformStore } from './stores/platformStore'
 import { useAiStore } from './stores/aiStore'
 import { useUiStore, type ThemeMode } from './stores/uiStore'
 import { useTemplateStore } from './stores/templateStore'
-import { AlertTriangle, FileCheck2, Sun, Moon, Skull, X } from 'lucide-react'
+import { AlertTriangle, FileCheck2, Sun, Moon, Skull, Palette, X } from 'lucide-react'
 import Tooltip from './components/Tooltip'
 import FirstRunSetup from './components/FirstRunSetup'
 import BinariesSetup from './components/BinariesSetup'
@@ -50,13 +50,15 @@ const accountNavItems = [
 const NEXT_THEME: Record<ThemeMode, ThemeMode> = {
   dark: 'light',
   light: 'zombie',
-  zombie: 'dark',
+  zombie: 'twitch',
+  twitch: 'dark',
 }
 
 const THEME_LABEL: Record<ThemeMode, string> = {
   dark: 'Dark',
   light: 'White',
   zombie: 'Zombie',
+  twitch: 'Twitch',
 }
 
 const THEME_IMAGE_URLS = [logoImg, zombieLogoImg, heroGoblinImg, heroZombieGoblinImg]
@@ -141,6 +143,7 @@ export default function App() {
   const loadSchedules = useScheduleStore(s => s.load)
   const startScheduleListening = useScheduleStore(s => s.startListening)
   const theme = useUiStore(s => s.settings.theme)
+  const twitchThemePalette = useUiStore(s => s.settings.twitchThemePalette)
   const updateUi = useUiStore(s => s.update)
   const vods = useAppStore(s => s.vods)
   const highlights = useAppStore(s => s.highlights)
@@ -235,7 +238,8 @@ export default function App() {
     }
   }, [fetchClips, fetchHighlights])
 
-  const nextTheme = NEXT_THEME[theme]
+  const proposedNextTheme = NEXT_THEME[theme]
+  const nextTheme = proposedNextTheme === 'twitch' && !twitchThemePalette ? 'dark' : proposedNextTheme
   const toggleTheme = () => updateUi({ theme: nextTheme })
 
   return (
@@ -379,6 +383,7 @@ export default function App() {
           >
             {nextTheme === 'light' && <Sun className="w-[18px] h-[18px]" />}
             {nextTheme === 'zombie' && <Skull className="w-[18px] h-[18px]" />}
+            {nextTheme === 'twitch' && <Palette className="w-[18px] h-[18px]" />}
             {nextTheme === 'dark' && <Moon className="w-[18px] h-[18px]" />}
           </button>
         </Tooltip>
