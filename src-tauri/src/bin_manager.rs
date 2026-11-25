@@ -18,11 +18,11 @@ use crate::error::AppError;
 
 // ── Download URLs ──
 
-/// Pinned upstream artifacts. Updating either URL requires updating its digest
-/// from the corresponding release's official checksum manifest.
+/// Pinned upstream artifacts. Use versioned releases rather than daily builds
+/// that expire. Update each URL together with its upstream SHA-256.
 const FFMPEG_ZIP_URL: &str =
-    "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-11-13-13/ffmpeg-N-125519-g300cac3078-win64-gpl.zip";
-const FFMPEG_ZIP_SHA256: &str = "d8e51551c89fa6b509bf8d627ab08c53beae3d25479d075bf88feeb8eb5e67dd";
+    "https://github.com/GyanD/codexffmpeg/releases/download/9.1/ffmpeg-9.1-essentials_build.zip";
+const FFMPEG_ZIP_SHA256: &str = "b9bbbb3acece000cbeec994f856649354e52c773807841e78908374b24d658fd";
 
 const YTDLP_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/download/2026.06.09/yt-dlp.exe";
 const YTDLP_SHA256: &str = "3a48cb955d55c8821b60ccbdbbc6f61bc958f2f3d3b7ad5eaf3d83a543293a27";
@@ -269,7 +269,10 @@ fn installed_ytdlp_version(dir: &std::path::Path) -> Option<String> {
 }
 
 pub async fn download_ytdlp(progress: &ProgressCb) -> Result<(), AppError> {
-    let dir = bin_dir()?;
+    download_ytdlp_into(&bin_dir()?, progress).await
+}
+
+async fn download_ytdlp_into(dir: &std::path::Path, progress: &ProgressCb) -> Result<(), AppError> {
     let final_path = dir.join("yt-dlp.exe");
     let tmp_path = dir.join("yt-dlp.exe.tmp");
 
@@ -322,7 +325,7 @@ pub async fn download_ytdlp(progress: &ProgressCb) -> Result<(), AppError> {
     }
 
     replace_file_atomically(&tmp_path, &final_path)?;
-    write_version_marker(&dir)?;
+    write_version_marker(dir)?;
 
     log::info!("[bin_manager] yt-dlp installed to {}", final_path.display());
     Ok(())
@@ -389,10 +392,12 @@ pub async fn refresh_ytdlp_if_stale(_last_refresh_rfc3339: Option<String>) -> bo
 /// Download the FFmpeg zip to a temp file, then extract `ffmpeg.exe` and
 /// `ffprobe.exe` into `bin_dir()`.
 ///
-/// Progress is reported during the *download* phase only (not extraction);
-/// the zip is tiny to extract compared to downloading ~130 MB.
+/// Progress is reported during the download phase only.
 pub async fn download_ffmpeg(progress: &ProgressCb) -> Result<(), AppError> {
-    let dir = bin_dir()?;
+    download_ffmpeg_into(&bin_dir()?, progress).await
+}
+
+async fn download_ffmpeg_into(dir: &std::path::Path, progress: &ProgressCb) -> Result<(), AppError> {
     let zip_path = dir.join("ffmpeg-download.zip.tmp");
 
     log::info!("[bin_manager] downloading ffmpeg from {}", FFMPEG_ZIP_URL);
@@ -456,7 +461,7 @@ pub async fn download_ffmpeg(progress: &ProgressCb) -> Result<(), AppError> {
     }
 
     let zip_path_extract = zip_path.clone();
-    let dir_extract = dir.clone();
+    let dir_extract = dir.to_path_buf();
     let extract_result = tokio::task::spawn_blocking(move || -> Result<(), AppError> {
         extract_ffmpeg_bins(&zip_path_extract, &dir_extract)
     })
@@ -588,19 +593,17 @@ mod tests {
         assert!(validate_checksum("yt-dlp", &format!("0{}", &expected[1..]), expected).is_err());
     }
 
-    /// Real network + filesystem test. Downloads ~150 MB to
-    /// `%APPDATA%\clipviral\bin\`. Run explicitly:
+    /// Real network + filesystem test using an empty temporary directory.
+    /// Run explicitly:
     ///   cargo test --lib bin_manager::tests::download_real -- --ignored --nocapture
     #[tokio::test]
     #[ignore]
     async fn download_real() {
-        let dir = bin_dir().expect("bin_dir");
+        let temp = tempfile::tempdir().expect("create isolated setup directory");
+        let dir = temp.path();
         let yt = dir.join("yt-dlp.exe");
         let ff = dir.join("ffmpeg.exe");
         let fp = dir.join("ffprobe.exe");
-        let _ = std::fs::remove_file(&yt);
-        let _ = std::fs::remove_file(&ff);
-        let _ = std::fs::remove_file(&fp);
 
         let cb: ProgressCb = Box::new(|d, t| {
             if t > 0 && d % (5 * 1024 * 1024) < 64 * 1024 {
@@ -614,7 +617,7 @@ mod tests {
         });
 
         eprintln!("-- downloading yt-dlp --");
-        download_ytdlp(&cb).await.expect("yt-dlp download failed");
+        download_ytdlp_into(dir, &cb).await.expect("yt-dlp download failed");
         assert!(yt.exists(), "yt-dlp.exe missing after download");
         let yt_size = std::fs::metadata(&yt).unwrap().len();
         eprintln!("  yt-dlp.exe {} MB", yt_size / 1_000_000);
@@ -624,7 +627,7 @@ mod tests {
         );
 
         eprintln!("-- downloading ffmpeg --");
-        download_ffmpeg(&cb).await.expect("ffmpeg download failed");
+        download_ffmpeg_into(dir, &cb).await.expect("ffmpeg download failed");
         assert!(ff.exists(), "ffmpeg.exe missing after extract");
         assert!(fp.exists(), "ffprobe.exe missing after extract");
         let ff_size = std::fs::metadata(&ff).unwrap().len();
@@ -633,5 +636,7 @@ mod tests {
         eprintln!("  ffprobe.exe {} MB", fp_size / 1_000_000);
         assert!(ff_size > 10_000_000);
         assert!(fp_size > 10_000_000);
+        assert!(in_path(ff.to_str().expect("FFmpeg path"), "-version"));
+        assert!(in_path(fp.to_str().expect("FFprobe path"), "-version"));
     }
 }

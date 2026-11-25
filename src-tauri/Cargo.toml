@@ -1,6 +1,6 @@
 [package]
 name = "clipviral"
-version = "1.7.18"
+version = "1.7.19"
 description = "AI-powered Twitch stream clip generator"
 authors = ["ClipViral"]
 license = "MIT"
@@ -50,6 +50,9 @@ steamworks = { version = "0.11", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_Security_Cryptography", "Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [features]
 default = ["asset-protocol", "standalone", "cuda"]

@@ -17,6 +17,20 @@ export const PENDING_UPDATE_KEY = 'clipgoblin.update.pending-version'
 
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: '1.7.19',
+    date: '2026-11-25',
+    summary: 'Fresh installs can finish one-time setup again.',
+    changes: [
+      {
+        kind: 'fixed',
+        items: [
+          'First-run setup downloads FFmpeg and FFprobe from a versioned release with a verified checksum.',
+          'Setup explains when a download is missing from the server and points you to the next step.',
+        ],
+      },
+    ],
+  },
+  {
     version: '1.7.18',
     date: '2026-11-22',
     summary: 'A reliable What’s New window after every update.',

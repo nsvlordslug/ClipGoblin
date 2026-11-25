@@ -21,7 +21,7 @@ interface ProgressEvent {
   phase: 'downloading' | 'extracting' | 'done'
 }
 
-const FFMPEG_APPROX_MB = 220
+const FFMPEG_APPROX_MB = 120
 const YTDLP_APPROX_MB = 20
 
 export default function BinariesSetup({ children }: { children: ReactNode }) {
@@ -175,7 +175,9 @@ export default function BinariesSetup({ children }: { children: ReactNode }) {
               {errorMsg}
             </p>
             <p className="text-[11px] text-slate-500 mb-6">
-              If antivirus blocked the download, allow it and retry.
+              {errorMsg.includes('HTTP 404')
+                ? 'The download server no longer has this file. Check for a newer ClipGoblin installer or contact support.'
+                : 'Check your internet connection and retry. If setup keeps failing, share the error above with support.'}
             </p>
             <div className="flex gap-3 justify-center">
               <button
